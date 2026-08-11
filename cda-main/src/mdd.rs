@@ -337,10 +337,12 @@ pub async fn seed_storage_if_empty_from_database_path(storage_dir: &str, databas
         }
     };
 
+    let force_seed = false;
     if let Some(count) = cda_storage::storage_seed::seed_storage_collection_if_empty(
         &storage,
         &CollectionName::DiagnosticDatabase,
         entries,
+        force_seed,
     )
     .await
     {

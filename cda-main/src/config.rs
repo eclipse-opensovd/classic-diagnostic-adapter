@@ -27,6 +27,7 @@ pub mod generate;
 
 pub(super) async fn load_config_from_file_or_storage(
     config_file: Option<&Path>,
+    force_seed_config: bool,
 ) -> Result<configfile::Configuration, AppError> {
     let config_file = match config_file {
         Some(config_file) => {
@@ -47,13 +48,18 @@ pub(super) async fn load_config_from_file_or_storage(
     };
 
     let storage_dir_override = None; //only needed for tests
-    load_config_from_file_or_storage_with_storage_dir_override(config_file, storage_dir_override)
-        .await
+    load_config_from_file_or_storage_with_storage_dir_override(
+        config_file,
+        storage_dir_override,
+        force_seed_config,
+    )
+    .await
 }
 
 async fn load_config_from_file_or_storage_with_storage_dir_override(
     config_file: &Path,
     storage_override: Option<LocalStorage>,
+    force_seed_config: bool,
 ) -> Result<configfile::Configuration, AppError> {
     let (figment_config, loaded_via_figment) = match load_config(config_file) {
         Ok(c) => (c, true),
@@ -85,7 +91,7 @@ async fn load_config_from_file_or_storage_with_storage_dir_override(
             .runtime_update_config
             .init_storage_from_config_file
         {
-            seed_storage_if_empty_from_config_file(&storage, config_file).await?;
+            seed_storage_if_empty_from_config_file(&storage, config_file, force_seed_config).await?;
         }
 
         figment_config
@@ -146,6 +152,7 @@ pub fn require_config_source() -> Result<(), AppError> {
 pub async fn seed_storage_if_empty_from_config_file(
     storage: &LocalStorage,
     config_file: &Path,
+    force_seed_config: bool,
 ) -> Result<(), AppError> {
     let data = tokio::fs::read(config_file).await.map_err(|source| {
         crate::AppError::ConfigurationError {
@@ -173,6 +180,7 @@ pub async fn seed_storage_if_empty_from_config_file(
         storage,
         &cda_interfaces::storage_api::CollectionName::Configuration,
         std::iter::once((key.clone(), data)),
+        force_seed_config,
     )
     .await;
 
@@ -284,6 +292,7 @@ mod tests {
     #[tokio::test]
     async fn should_load_config_from_file_when_storage_is_empty() {
         let fixture = StorageFixture::new();
+        let force_seed_config = false;
 
         let mut config = default_config();
         config.database.seed_dir = "configured_dir/".to_string();
@@ -292,6 +301,7 @@ mod tests {
         let result = load_config_from_file_or_storage_with_storage_dir_override(
             &fixture.config_file,
             Some(fixture.storage),
+            force_seed_config,
         )
         .await
         .unwrap();
@@ -302,15 +312,20 @@ mod tests {
     #[tokio::test]
     async fn should_load_config_from_storage_when_storage_has_been_seeded() {
         let fixture = StorageFixture::new();
+        let force_seed_config = false;
 
         {
             let mut config = default_config();
             config.database.seed_dir = "stored_dir/".to_string();
             fixture.write_config(&config);
 
-            seed_storage_if_empty_from_config_file(&fixture.storage, &fixture.config_file)
-                .await
-                .unwrap();
+            seed_storage_if_empty_from_config_file(
+                &fixture.storage,
+                &fixture.config_file,
+                force_seed_config,
+            )
+            .await
+            .unwrap();
         }
 
         {
@@ -322,6 +337,7 @@ mod tests {
         let result = load_config_from_file_or_storage_with_storage_dir_override(
             &fixture.config_file,
             Some(fixture.storage),
+            force_seed_config,
         )
         .await
         .unwrap();
@@ -332,12 +348,16 @@ mod tests {
     #[tokio::test]
     async fn seed_copies_config_file_into_empty_storage() {
         let fixture = StorageFixture::new();
-
         std::fs::write(&fixture.config_file, b"[database]\npath = \".\"").expect("write config");
 
-        seed_storage_if_empty_from_config_file(&fixture.storage, &fixture.config_file)
-            .await
-            .unwrap();
+        let force_seed_config = false;
+        seed_storage_if_empty_from_config_file(
+            &fixture.storage,
+            &fixture.config_file,
+            force_seed_config,
+        )
+        .await
+        .unwrap();
 
         let collection = fixture
             .storage
@@ -368,9 +388,14 @@ mod tests {
             .unwrap();
         tx.commit().await.unwrap();
 
-        seed_storage_if_empty_from_config_file(&fixture.storage, &fixture.config_file)
-            .await
-            .unwrap();
+        let force_seed_config = false;
+        seed_storage_if_empty_from_config_file(
+            &fixture.storage,
+            &fixture.config_file,
+            force_seed_config,
+        )
+        .await
+        .unwrap();
 
         // Verify collection was NOT modified.
         let collection = fixture
@@ -386,9 +411,11 @@ mod tests {
     async fn seed_errors_on_nonexistent_config_file() {
         let fixture = StorageFixture::new();
 
+        let force_seed_config = false;
         let result = seed_storage_if_empty_from_config_file(
             &fixture.storage,
             Path::new("/tmp/nonexistent_cda_config_test_12345.toml"),
+            force_seed_config,
         )
         .await;
 
@@ -399,26 +426,70 @@ mod tests {
     async fn seed_preserves_config_content_through_storage_roundtrip() {
         let fixture = StorageFixture::new();
 
-        let original_data = b"[database]\npath = \"/app/database\"\n";
+        let original_data = "[database]\npath = \"/app/database\"\n";
         std::fs::write(&fixture.config_file, original_data).expect("write config");
 
-        seed_storage_if_empty_from_config_file(&fixture.storage, &fixture.config_file)
+        let force_seed_config = false;
+        seed_storage_if_empty_from_config_file(
+            &fixture.storage,
+            &fixture.config_file,
+            force_seed_config,
+        )
+        .await
+        .unwrap();
+
+        let result = fixture.read_config_from_storage().await;
+        assert_eq!(
+            result, original_data,
+            "Storage must preserve config content byte-for-byte"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_seed_already_populated_collection_when_forced() {
+        let fixture = StorageFixture::new();
+
+        {
+            // seed with data to later overwrite
+            let old_config = "[database]\npath = \"old\"";
+            std::fs::write(&fixture.config_file, old_config).expect("write config");
+
+            let force_seed_config = false;
+            seed_storage_if_empty_from_config_file(
+                &fixture.storage,
+                &fixture.config_file,
+                force_seed_config,
+            )
             .await
             .unwrap();
 
-        let collection = fixture
-            .storage
-            .get_or_create_collection(&CollectionName::Configuration)
+            let result = fixture.read_config_from_storage().await;
+            assert_eq!(
+                result, old_config,
+                "Pre-seeding data into storage should work."
+            );
+        }
+
+        {
+            // force seed
+            let new_config = "[database]\npath = \"new\"";
+            std::fs::write(&fixture.config_file, new_config).expect("write config");
+
+            let force_seed_config = true;
+            seed_storage_if_empty_from_config_file(
+                &fixture.storage,
+                &fixture.config_file,
+                force_seed_config,
+            )
             .await
             .unwrap();
-        let data_handle = collection.read("opensovd-cda.toml").await.unwrap();
-        let size = data_handle.data_size().unwrap();
-        let mut buf = vec![0u8; usize::try_from(size).expect("size fits in usize")];
-        data_handle.read_at(0, &mut buf).unwrap();
-        assert_eq!(
-            buf, original_data,
-            "Storage must preserve config content byte-for-byte"
-        );
+
+            let result = fixture.read_config_from_storage().await;
+            assert_eq!(
+                result, new_config,
+                "Pre-seeding data into storage should work."
+            );
+        }
     }
 
     #[tokio::test]
@@ -452,10 +523,24 @@ mod tests {
                 _temp_dir: temp_dir,
             }
         }
+
         fn write_config(&self, config: &configfile::Configuration) {
             let config = toml::to_string(&config).unwrap();
 
             std::fs::write(&self.config_file, config).expect("write config");
+        }
+
+        async fn read_config_from_storage(&self) -> String {
+            let collection = self
+                .storage
+                .get_or_create_collection(&CollectionName::Configuration)
+                .await
+                .unwrap();
+            let data_handle = collection.read("opensovd-cda.toml").await.unwrap();
+            let size = data_handle.data_size().unwrap();
+            let mut buf = vec![0u8; usize::try_from(size).expect("size fits in usize")];
+            data_handle.read_at(0, &mut buf).unwrap();
+            String::from_utf8(buf).unwrap()
         }
     }
 }

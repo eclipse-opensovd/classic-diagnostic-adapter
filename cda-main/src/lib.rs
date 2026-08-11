@@ -79,6 +79,11 @@ pub struct AppArgs {
     #[arg(short = 'c', long, env = "CDA_CONFIG_FILE")]
     pub seed_config: Option<PathBuf>,
 
+    /// Force overwrite storage config with config file content even if storage already has config
+    /// Force loading configuration file into storage, even if a config has been loaded into it previously.
+    #[arg(long)]
+    pub force_seed_config: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 
@@ -267,7 +272,11 @@ where
         return generate_config_cmd(output.as_ref());
     }
 
-    let mut config = config::load_config_from_file_or_storage(args.seed_config.as_deref()).await?;
+    let mut config = config::load_config_from_file_or_storage(
+        args.seed_config.as_deref(),
+        args.force_seed_config,
+    )
+    .await?;
 
     // Command line arguments always take precedence over loaded configuration
     args.update_config(&mut config);

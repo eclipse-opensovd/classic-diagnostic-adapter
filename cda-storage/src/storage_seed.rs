@@ -21,6 +21,7 @@ pub async fn seed_storage_collection_if_empty(
     storage: &impl Storage,
     collection_name: &CollectionName,
     entries: impl IntoIterator<Item = (String, Vec<u8>)>,
+    force_seed: bool,
 ) -> Option<usize> {
     let collection = match storage.get_or_create_collection(collection_name).await {
         Ok(c) => c,
@@ -34,19 +35,23 @@ pub async fn seed_storage_collection_if_empty(
         }
     };
 
-    match collection.is_empty().await {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::debug!(collection = %collection_name, "Collection already populated, skipping seed");
-            return None;
-        }
-        Err(e) => {
-            tracing::warn!(
-                collection = %collection_name,
-                error = %e,
-                "Failed to check collection, skipping seed"
-            );
-            return None;
+    if force_seed {
+        tracing::debug!(collection = %collection_name, "Seeding is forced. Will update collection unconditionally.");
+    } else {
+        match collection.is_empty().await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::debug!(collection = %collection_name, "Collection already populated, skipping seed");
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    collection = %collection_name,
+                    error = %e,
+                    "Failed to check collection, skipping seed"
+                );
+                return None;
+            }
         }
     }
 
