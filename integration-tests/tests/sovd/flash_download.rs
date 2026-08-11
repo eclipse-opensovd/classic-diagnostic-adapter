@@ -124,6 +124,7 @@ async fn test_flash_download_transfer_sequence() {
             value: "Level_7_RequestSeed".to_owned(),
             mode_expiration: None,
             key: None,
+            parameters: None,
         },
         StatusCode::OK,
     )
@@ -154,6 +155,7 @@ async fn test_flash_download_transfer_sequence() {
                     send_key: key,
                 },
             ),
+            parameters: None,
         },
         StatusCode::OK,
     )
@@ -503,6 +505,7 @@ async fn test_flash_transfer_zero_length_rejected() {
             value: "Level_5_RequestSeed".to_owned(),
             mode_expiration: None,
             key: None,
+            parameters: None,
         },
         StatusCode::OK,
     )
@@ -533,6 +536,7 @@ async fn test_flash_transfer_zero_length_rejected() {
                     send_key: key,
                 },
             ),
+            parameters: None,
         },
         StatusCode::OK,
     )
@@ -753,6 +757,7 @@ async fn test_security_access_supplier_level() {
             value: "Supplier_RequestSeed".to_owned(),
             mode_expiration: None,
             key: None,
+            parameters: None,
         },
         StatusCode::OK,
     )
@@ -782,6 +787,7 @@ async fn test_security_access_supplier_level() {
                     send_key: key,
                 },
             ),
+            parameters: None,
         },
         StatusCode::OK,
     )

@@ -64,6 +64,9 @@ pub mod security_and_session {
 
             #[serde(rename = "Key", alias = "SendKey")]
             pub key: Option<ModeKey>,
+
+            /// Optional parameters forwarded as payload to the `RequestSeed` service.
+            pub parameters: Option<std::collections::HashMap<String, serde_json::Value>>,
         }
 
         pub type Response<T> = crate::common::modes::put::Response<T>;
