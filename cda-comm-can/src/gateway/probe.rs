@@ -270,8 +270,15 @@ impl CanDiagGateway {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    #[cfg(feature = "can-socketcand")]
+    use cda_interfaces::CanId;
+
     use super::*;
     use crate::config::CanProbeConfig;
+    #[cfg(feature = "can-socketcand")]
+    use crate::gateway::connection::CanEcuConnection;
 
     #[test]
     fn default_probe_sequence_starts_with_tester_present() {
@@ -310,5 +317,59 @@ mod tests {
         };
         // An empty probe sequence would make discovery a silent no-op.
         assert!(CanDiagGateway::build_probe_sequence(&config).is_err());
+    }
+
+    /// Each address has no responder, so all probes must time out together
+    /// rather than one after another.
+    #[cfg(feature = "can-socketcand")]
+    #[tokio::test]
+    async fn discovery_probes_unresponsive_ecus_concurrently() {
+        const INTERFACE: &str = "socketcand:127.0.0.1:29536:vcan0";
+        const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+
+        let mut gateway = CanDiagGateway::test_instance(
+            vec![
+                (
+                    "missing-1",
+                    CanEcuConnection::new(
+                        "missing-1".to_owned(),
+                        INTERFACE.to_owned(),
+                        CanId::try_from(0x600).unwrap(),
+                        CanId::try_from(0x608).unwrap(),
+                    ),
+                ),
+                (
+                    "missing-2",
+                    CanEcuConnection::new(
+                        "missing-2".to_owned(),
+                        INTERFACE.to_owned(),
+                        CanId::try_from(0x610).unwrap(),
+                        CanId::try_from(0x618).unwrap(),
+                    ),
+                ),
+                (
+                    "missing-3",
+                    CanEcuConnection::new(
+                        "missing-3".to_owned(),
+                        INTERFACE.to_owned(),
+                        CanId::try_from(0x620).unwrap(),
+                        CanId::try_from(0x628).unwrap(),
+                    ),
+                ),
+            ],
+            vec![],
+        );
+        gateway.probe_timeout = PROBE_TIMEOUT;
+
+        let start = std::time::Instant::now();
+        assert_eq!(
+            gateway.discover_ecus().await,
+            [] as [std::string::String; 0]
+        );
+        assert!(
+            start.elapsed() < PROBE_TIMEOUT * 2,
+            "three probes should complete near one timeout, not three: {:?}",
+            start.elapsed()
+        );
     }
 }
