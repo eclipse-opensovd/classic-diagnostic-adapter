@@ -877,7 +877,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod send_tests {
+pub(crate) mod send_tests {
     use std::{
         sync::{Arc, atomic::AtomicBool},
         time::{Duration, Instant},
@@ -900,7 +900,7 @@ mod send_tests {
         /// Test-only constructor that creates a `UdsManager` without spawning
         /// background tasks (variant detection, etc.), so `T` only needs the
         /// narrower trait bounds required by `send_with_raw_payload`.
-        fn new_for_raw_payload_tests(
+        pub(crate) fn new_for_raw_payload_tests(
             gateway: S,
             ecus: Arc<HashMap<String, RwLock<T>>>,
             fault_config: FaultConfig,
@@ -930,11 +930,11 @@ mod send_tests {
 
     /// A test gateway whose `send` behavior is configurable via a closure.
     #[derive(Clone)]
-    struct TestGateway {
-        send_fn: Arc<TestGatewaySendFn>,
+    pub(crate) struct TestGateway {
+        pub(crate) send_fn: Arc<TestGatewaySendFn>,
     }
 
-    type TestGatewaySendFn = dyn Fn(
+    pub(crate) type TestGatewaySendFn = dyn Fn(
             mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
             bool,
         ) -> Result<(), DiagServiceError>
