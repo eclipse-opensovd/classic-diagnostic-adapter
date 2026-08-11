@@ -88,7 +88,14 @@ where
 /// Clamped to at least 1ms so a very small (or zero) `WatchdogSec` can never
 /// produce a zero-length interval, which `tokio::time::interval` panics on.
 fn watchdog_notify_interval() -> Option<Duration> {
-    sd_notify::watchdog_enabled().map(|timeout| (timeout / 2).max(Duration::from_millis(1)))
+    sd_notify::watchdog_enabled().map(|timeout| {
+        // `checked_div` instead of `/` to satisfy clippy::arithmetic_side_effects;
+        // the divisor is a non-zero literal, so the fallback can never be taken.
+        timeout
+            .checked_div(2)
+            .unwrap_or(timeout)
+            .max(Duration::from_millis(1))
+    })
 }
 
 async fn trigger_watchdog(
