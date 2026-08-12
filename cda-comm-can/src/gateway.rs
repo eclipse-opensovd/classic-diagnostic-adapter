@@ -499,7 +499,7 @@ impl EcuGateway for CanDiagGateway {
         message: ServicePayload,
         response_sender: mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
         expect_uds_reply: bool,
-    ) -> Result<(), DiagServiceError> {
+    ) -> Result<tokio::task::JoinHandle<()>, DiagServiceError> {
         let ecu_name = transmission_params.ecu_name.to_lowercase();
         let conn = self
             .get_connection(&ecu_name)
@@ -527,7 +527,7 @@ impl EcuGateway for CanDiagGateway {
         let target_address = message.target_address;
         let request_data = message.data;
 
-        cda_interfaces::spawn_named!(&format!("can-send-{ecu_name}"), {
+        let handle = cda_interfaces::spawn_named!(&format!("can-send-{ecu_name}"), {
             async move {
                 // Open socket and send request, keeping the socket alive for the
                 // entire exchange so response-pending follow-ups arrive on the
@@ -668,7 +668,7 @@ impl EcuGateway for CanDiagGateway {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     #[tracing::instrument(skip(self, _ecu_db), fields(dlt_context = dlt_ctx!("CAN")))]

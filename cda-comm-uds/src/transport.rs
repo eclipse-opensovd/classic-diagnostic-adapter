@@ -28,6 +28,20 @@ use tokio::sync::{RwLock, Semaphore, mpsc};
 
 use crate::{UdsEcuDb, UdsManager, types::UdsParameters};
 
+/// Upper bound on how long `send_with_raw_payload` waits for a *previous*
+/// attempt's per-request gateway task to actually finish (per its returned
+/// `JoinHandle`) before issuing the next application-layer retry attempt.
+///
+/// Dropping the previous attempt's response channel only *signals* that task
+/// to stop; it does not guarantee the task has released whatever per-ECU
+/// resource it holds (e.g. a `DoIP` connection mutex, or - critically for CAN,
+/// which has no equivalent per-connection lock - an ISO-TP socket bound to
+/// the same CAN ID pair the next attempt is about to open). Awaiting the
+/// handle closes that gap. This wait is bounded so a gateway task that never
+/// finishes cannot stall retries indefinitely; if the grace period elapses,
+/// the next attempt proceeds anyway and a warning is logged.
+const RETRY_TEARDOWN_GRACE: Duration = Duration::from_millis(500);
+
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     #[tracing::instrument(
         skip(self, service, payload),
@@ -237,6 +251,11 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
         // separate time-bounded retry policy).
         let mut app_retry_count: u32 = 0;
 
+        // Handle of the previous attempt's per-request gateway task, if any.
+        // Awaited (bounded by `RETRY_TEARDOWN_GRACE`) at the top of the next
+        // loop iteration before that attempt is sent, see below.
+        let mut previous_task_handle: Option<tokio::task::JoinHandle<()>> = None;
+
         // outer loop to retry sending frames, resend frames must deal with (N)ACK again
         let (response, sent_after) = 'send: loop {
             // Create a fresh response channel for every attempt. Each
@@ -244,8 +263,7 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
             // NRC 0x21/0x94 busy-repeat) drops the previous attempt's
             // `response_rx` together with its sole `response_tx`, which in turn
             // fires `response_sender.closed()` in the gateway's per-request
-            // task. That releases the (shared) ECU lock and tears the stale
-            // task down *before* the next attempt is sent.
+            // task, signaling it to tear itself down.
             //
             // Reusing a single channel across attempts (as done previously)
             // kept every prior gateway task alive and subscribed to the same
@@ -254,7 +272,20 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
             // causing a retry to fire immediately instead of only after this
             // attempt's `rx_timeout` had elapsed.
             let (response_tx, mut response_rx) = mpsc::channel(2);
-            if let Err(e) = self
+
+            // Dropping the previous attempt's channel only *signals* its
+            // gateway task to stop; it does not guarantee that task has
+            // actually finished releasing whatever per-ECU resource it holds
+            // (e.g. a DoIP connection mutex, or an ISO-TP socket for CAN,
+            // which has no equivalent lock). Await its handle - bounded by
+            // `RETRY_TEARDOWN_GRACE` - before sending the next attempt, so
+            // the two per-request tasks don't run concurrently against the
+            // same resource.
+            if let Some(handle) = previous_task_handle.take() {
+                await_stale_gateway_task(handle, ecu_name).await;
+            }
+
+            match self
                 .gateway
                 .send(
                     transmission_params.clone(),
@@ -264,19 +295,22 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                 )
                 .await
             {
-                if app_retry_count < uds_params.repeat_req_count_app {
-                    app_retry_count = app_retry_count.saturating_add(1);
-                    tracing::debug!(
-                        ecu_name,
-                        attempt = app_retry_count,
-                        max_attempts = uds_params.repeat_req_count_app,
-                        error = %e,
-                        "Transmission error, repeating request (CP_RepeatReqCountApp)"
-                    );
-                    rx_timeout_next = None;
-                    continue 'send;
+                Ok(handle) => previous_task_handle = Some(handle),
+                Err(e) => {
+                    if app_retry_count < uds_params.repeat_req_count_app {
+                        app_retry_count = app_retry_count.saturating_add(1);
+                        tracing::debug!(
+                            ecu_name,
+                            attempt = app_retry_count,
+                            max_attempts = uds_params.repeat_req_count_app,
+                            error = %e,
+                            "Transmission error, repeating request (CP_RepeatReqCountApp)"
+                        );
+                        rx_timeout_next = None;
+                        continue 'send;
+                    }
+                    return Err(e);
                 }
-                return Err(e);
             }
             let sent_after = start.elapsed();
 
@@ -642,6 +676,37 @@ pub(crate) fn needs_variant_detection(status: &EcuState) -> bool {
             ))
 }
 
+/// Waits, bounded by [`RETRY_TEARDOWN_GRACE`], for a previous attempt's
+/// per-request gateway task to finish before the caller proceeds with the
+/// next application-layer retry attempt.
+///
+/// Dropping the previous attempt's response channel only signals that task to
+/// stop; this actually confirms it has finished (and released whatever
+/// per-ECU resource it was holding), closing the race between a stale task
+/// and the next attempt's fresh one. If the grace period elapses first, a
+/// warning is logged and the caller proceeds anyway, so a misbehaving gateway
+/// task cannot stall retries indefinitely.
+async fn await_stale_gateway_task(handle: tokio::task::JoinHandle<()>, ecu_name: &str) {
+    match tokio::time::timeout(RETRY_TEARDOWN_GRACE, handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(join_err)) => {
+            tracing::debug!(
+                ecu_name,
+                error = %join_err,
+                "Previous attempt's gateway task ended abnormally while tearing down"
+            );
+        }
+        Err(_elapsed) => {
+            tracing::warn!(
+                ecu_name,
+                grace_period = ?RETRY_TEARDOWN_GRACE,
+                "Previous attempt's gateway task did not finish within the teardown grace \
+                 period before starting the next retry"
+            );
+        }
+    }
+}
+
 #[tracing::instrument(skip_all,
     fields(dlt_context = dlt_ctx!("UDS"))
 )]
@@ -812,7 +877,7 @@ mod tests {
 mod send_tests {
     use std::{
         sync::{Arc, atomic::AtomicBool},
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use cda_interfaces::{
@@ -822,6 +887,7 @@ mod send_tests {
     };
     use tokio::sync::{RwLock, mpsc};
 
+    use super::RETRY_TEARDOWN_GRACE;
     use crate::{
         UdsEcuDb, UdsManager, state_coordinator::EcuStateCoordinator, test_helpers::TestEcuDb,
     };
@@ -905,7 +971,8 @@ mod send_tests {
             _message: ServicePayload,
             response_sender: mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
             expect_uds_reply: bool,
-        ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
+        ) -> impl Future<Output = Result<tokio::task::JoinHandle<()>, DiagServiceError>> + Send
+        {
             // The closure receives `response_sender` by value and fully owns its
             // lifetime, mirroring how the real gateways manage their per-request
             // task's sender:
@@ -918,7 +985,89 @@ mod send_tests {
             //     suppressing ECU), the closure must keep the sender alive
             //     itself (store a clone), so the caller's `rx_timeout` fires.
             let result = (self.send_fn)(response_sender, expect_uds_reply);
-            async move { result }
+            async move {
+                result?;
+                // This test double's "task" is already fully done by the time
+                // `send` returns (the closure above ran synchronously), so the
+                // returned handle resolves essentially instantly. Tests that
+                // need to exercise the retry-teardown synchronization itself
+                // use `SlowTeardownGateway` instead.
+                Ok(tokio::task::spawn(std::future::ready(())))
+            }
+        }
+
+        fn ecu_online<T: EcuAddresses>(
+            &self,
+            _ecu_name: &str,
+            _ecu_db: &RwLock<T>,
+        ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
+            std::future::ready(Ok(()))
+        }
+
+        fn send_functional(
+            &self,
+            _transmission_params: TransmissionParameters,
+            _message: ServicePayload,
+            _expected_ecu_logical_addrs: HashMap<u16, String>,
+            _timeout: Duration,
+            _expect_positive_response: bool,
+        ) -> impl Future<
+            Output = Result<
+                HashMap<String, Result<UdsResponse, DiagServiceError>>,
+                DiagServiceError,
+            >,
+        > + Send {
+            std::future::ready(Ok(HashMap::new()))
+        }
+    }
+
+    /// Test gateway dedicated to exercising the retry-teardown synchronization
+    /// in `send_with_raw_payload`: every `send` call immediately closes its
+    /// response channel (as a stale gateway task would once it has forwarded
+    /// its last usable message and moved to shutting down), but the *returned
+    /// task handle* only resolves after `task_delay`, modelling a per-request
+    /// task that is slow to actually finish (e.g. still releasing a
+    /// connection lock or socket).
+    ///
+    /// Every invocation's timestamp is recorded in `send_times`, so tests can
+    /// assert on the gap between successive attempts to verify the caller
+    /// waited for the previous attempt's handle before issuing the next one.
+    #[derive(Clone)]
+    struct SlowTeardownGateway {
+        task_delay: Duration,
+        send_times: Arc<std::sync::Mutex<Vec<Instant>>>,
+    }
+
+    impl EcuGateway for SlowTeardownGateway {
+        async fn shutdown(&mut self) {}
+
+        fn get_gateway_network_address(
+            &self,
+            _logical_address: u16,
+        ) -> impl Future<Output = Option<String>> + Send {
+            std::future::ready(None)
+        }
+
+        fn send(
+            &self,
+            _transmission_params: TransmissionParameters,
+            _message: ServicePayload,
+            response_sender: mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
+            _expect_uds_reply: bool,
+        ) -> impl Future<Output = Result<tokio::task::JoinHandle<()>, DiagServiceError>> + Send
+        {
+            self.send_times.lock().unwrap().push(Instant::now());
+            let delay = self.task_delay;
+            async move {
+                // Simulate the stale task's response-forwarding phase already
+                // being over: drop the sender right away so the caller's
+                // `recv()` observes the channel closing immediately, well
+                // before `delay` elapses.
+                drop(response_sender);
+                Ok(tokio::task::spawn(async move {
+                    cda_interfaces::util::tokio_ext::sleep_for(delay).await;
+                }))
+            }
         }
 
         fn ecu_online<T: EcuAddresses>(
@@ -1841,6 +1990,122 @@ mod send_tests {
                 0x90,
                 0xBB
             ]
+        );
+    }
+
+    fn make_manager_with_slow_teardown_gateway(
+        gateway: SlowTeardownGateway,
+        timeout_default: Duration,
+        repeat_req_count_app: u32,
+    ) -> UdsManager<SlowTeardownGateway, TestEcuDb> {
+        let ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_string(),
+            RwLock::new(TestEcuDb::with_timeout_default_and_repeat_req_count_app(
+                timeout_default,
+                repeat_req_count_app,
+            )),
+        )]));
+        UdsManager::new_for_raw_payload_tests(
+            gateway,
+            ecus,
+            FaultConfig::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    /// Regression test for the retry-teardown synchronization fix: the
+    /// caller must await a previous attempt's gateway-task handle before
+    /// issuing the next attempt, not just drop the response channel and hope
+    /// the stale task has already finished.
+    ///
+    /// `SlowTeardownGateway` closes its response channel immediately (so the
+    /// caller's read loop sees a fast "no response" and retries right away),
+    /// but its returned task handle only resolves after `task_delay`. If the
+    /// caller waited for the handle as designed, the gap between successive
+    /// `send()` invocations must be at least `task_delay`; pre-fix, the next
+    /// `send()` would fire almost immediately after the channel closed.
+    #[tokio::test]
+    async fn test_send_with_raw_payload_awaits_previous_task_before_next_retry() {
+        let task_delay = Duration::from_millis(100);
+        let gateway = SlowTeardownGateway {
+            task_delay,
+            send_times: Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+        let send_times = Arc::clone(&gateway.send_times);
+        // rx_timeout is intentionally larger than task_delay: without the
+        // fix, retries fire right after the channel closes (near-instantly),
+        // not after task_delay.
+        let manager = make_manager_with_slow_teardown_gateway(gateway, Duration::from_secs(5), 2);
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
+
+        let result = manager
+            .send_with_raw_payload("TestECU", payload, None, true)
+            .await;
+
+        assert!(
+            matches!(result, Err(DiagServiceError::Timeout)),
+            "Expected Timeout error, got {result:?}"
+        );
+
+        let times = send_times.lock().unwrap();
+        assert_eq!(times.len(), 3, "Expected 1 original send + 2 retries");
+        for pair in times.windows(2) {
+            let (Some(a), Some(b)) = (pair.first(), pair.get(1)) else {
+                panic!("windows(2) must yield exactly 2 elements");
+            };
+            let gap = b.duration_since(*a);
+            assert!(
+                gap >= task_delay,
+                "Expected consecutive attempts to be at least task_delay ({task_delay:?}) apart, \
+                 got {gap:?}"
+            );
+        }
+    }
+
+    /// Regression test for the bounded-wait safety net: if a stale gateway
+    /// task never finishes at all, `send_with_raw_payload` must not stall
+    /// retries indefinitely - it should proceed once `RETRY_TEARDOWN_GRACE`
+    /// elapses.
+    #[tokio::test]
+    async fn test_send_with_raw_payload_proceeds_after_teardown_grace_when_task_never_finishes() {
+        // Far longer than RETRY_TEARDOWN_GRACE (500ms): the task handle will
+        // never resolve within the scope of this test.
+        let task_delay = Duration::from_secs(600);
+        let gateway = SlowTeardownGateway {
+            task_delay,
+            send_times: Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+        let send_times = Arc::clone(&gateway.send_times);
+        let manager =
+            make_manager_with_slow_teardown_gateway(gateway, Duration::from_millis(50), 1);
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
+
+        let start = Instant::now();
+        let result = manager
+            .send_with_raw_payload("TestECU", payload, None, true)
+            .await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(result, Err(DiagServiceError::Timeout)),
+            "Expected Timeout error, got {result:?}"
+        );
+        let times = send_times.lock().unwrap();
+        assert_eq!(times.len(), 2, "Expected 1 original send + 1 retry");
+        let gap = times
+            .get(1)
+            .expect("2 elements")
+            .duration_since(*times.first().expect("2 elements"));
+        assert!(
+            gap >= RETRY_TEARDOWN_GRACE,
+            "Expected the retry to wait at least the teardown grace period \
+             ({RETRY_TEARDOWN_GRACE:?}), got {gap:?}"
+        );
+        // Sanity bound: the whole call must finish quickly, well under
+        // task_delay, proving the never-finishing task did not stall it.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "Expected the call to proceed despite the stale task never finishing, took {elapsed:?}"
         );
     }
 }

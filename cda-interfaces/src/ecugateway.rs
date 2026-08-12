@@ -62,6 +62,16 @@ pub trait EcuGateway: Clone + Send + Sync + 'static {
     /// UDS responses are sent back to the `response_sender` channel.
     /// Multiple responses can be sent, e.g. for a request that requires multiple responses,
     /// i.e. response pending NRCs 0x78.
+    ///
+    /// On success, returns a [`tokio::task::JoinHandle`] for the (typically spawned)
+    /// per-request background task that drives the exchange and forwards responses to
+    /// `response_sender`. That task reacts to `response_sender` being dropped/closed by
+    /// tearing itself down and releasing any per-ECU resources it holds (e.g. a
+    /// connection mutex or a transport-specific socket). Callers that retry a request by
+    /// dropping the previous attempt's `response_sender`/receiver and calling `send`
+    /// again should await the previous attempt's handle (ideally bounded by a short
+    /// grace period) before issuing the next attempt, to avoid two concurrent
+    /// per-request tasks contending for the same underlying resource.
     /// # Errors
     /// * `DiagServiceError::EcuOffline` if the ECU cannot be reached, is not found, or is offline.
     /// * `DiagServiceError::Nack` when the ECU responds with a NACK, that cannot be
@@ -80,7 +90,7 @@ pub trait EcuGateway: Clone + Send + Sync + 'static {
         message: ServicePayload,
         response_sender: mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
         expect_uds_reply: bool,
-    ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
+    ) -> impl Future<Output = Result<tokio::task::JoinHandle<()>, DiagServiceError>> + Send;
 
     /// Checks if an ECU is online.
     /// Returns an error if the ECU is not online or if the ECU cannot be reached.

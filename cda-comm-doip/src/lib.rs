@@ -504,7 +504,7 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
         message: ServicePayload,
         response_sender: mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
         expect_uds_reply: bool,
-    ) -> Result<(), DiagServiceError> {
+    ) -> Result<tokio::task::JoinHandle<()>, DiagServiceError> {
         let start = Instant::now();
 
         let doip_conn = self
@@ -520,7 +520,7 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
             message: message.data,
         };
 
-        cda_interfaces::spawn_named!(
+        let handle = cda_interfaces::spawn_named!(
             &format!("ecu-data-receive-{}", transmission_params.ecu_name),
             {
                 async move {
@@ -605,7 +605,7 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
             }
         );
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn ecu_online<E: EcuAddresses>(
@@ -1361,7 +1361,7 @@ mod tests {
         mpsc::channel(1)
     }
 
-    type SendResult = Result<(), cda_interfaces::DiagServiceError>;
+    type SendResult = Result<tokio::task::JoinHandle<()>, cda_interfaces::DiagServiceError>;
     type ResponseItem = Result<Option<UdsResponse>, cda_interfaces::DiagServiceError>;
 
     /// Shared test harness.
