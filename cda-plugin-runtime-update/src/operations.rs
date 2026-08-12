@@ -56,27 +56,6 @@ pub(crate) async fn delete_collection_ignore_missing<S: Storage>(
     }
 }
 
-pub(crate) async fn reload_configuration_if_present<
-    S: Storage,
-    R: RuntimeReloaderPlugin + ?Sized,
->(
-    storage: &S,
-    reload_handler: &R,
-) -> Result<(), RuntimeUpdateError> {
-    let config_col = storage
-        .get_or_create_collection(&CollectionName::Configuration)
-        .await?;
-    let config_keys = config_col.list().await?;
-    if let Some(first_key) = config_keys.first() {
-        let path = config_col.file_path(first_key)?;
-        reload_handler
-            .reload_configuration(path)
-            .await
-            .map_err(|e| RuntimeUpdateError::ReloadFailed(e.to_string()))?;
-    }
-    Ok(())
-}
-
 pub(crate) async fn reload_database_if_present<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
     storage: &S,
     reload_handler: &R,
@@ -132,10 +111,7 @@ pub(crate) async fn reload_database_if_present<S: Storage, R: RuntimeReloaderPlu
 mod tests {
     use cda_interfaces::storage_api::{CollectionName, Storage as _, StorageError};
 
-    use super::{
-        delete_collection_ignore_missing, reload_configuration_if_present,
-        reload_database_if_present, try_get_collection,
-    };
+    use super::{delete_collection_ignore_missing, reload_database_if_present, try_get_collection};
     use crate::test_utils::{
         RecordingReloadHandler, init_collection, make_storage, write_test_file,
     };
@@ -204,55 +180,6 @@ mod tests {
         tx.commit().await.unwrap();
 
         assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn reload_configuration_calls_handler_when_config_file_present() {
-        let (storage, _dir) = make_storage();
-        write_test_file(
-            &storage,
-            &CollectionName::Configuration,
-            "opensovd-cda.toml",
-            b"[server]\nport = 8080\n",
-        )
-        .await;
-
-        let handler = RecordingReloadHandler::new();
-        reload_configuration_if_present(&storage, &handler)
-            .await
-            .unwrap();
-
-        let calls = handler.config_calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn reload_configuration_does_not_call_handler_when_collection_empty() {
-        let (storage, _dir) = make_storage();
-        storage
-            .get_or_create_collection(&CollectionName::Configuration)
-            .await
-            .unwrap();
-
-        let handler = RecordingReloadHandler::new();
-        reload_configuration_if_present(&storage, &handler)
-            .await
-            .unwrap();
-
-        let calls = handler.config_calls.lock().unwrap();
-        assert!(calls.is_empty());
-    }
-
-    #[tokio::test]
-    async fn reload_configuration_creates_collection_and_is_ok_when_absent() {
-        let (storage, _dir) = make_storage();
-
-        let handler = RecordingReloadHandler::new();
-        let result = reload_configuration_if_present(&storage, &handler).await;
-
-        assert!(result.is_ok());
-        let calls = handler.config_calls.lock().unwrap();
-        assert!(calls.is_empty());
     }
 
     #[tokio::test]

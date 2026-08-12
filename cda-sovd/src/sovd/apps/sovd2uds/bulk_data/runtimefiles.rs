@@ -118,7 +118,6 @@ impl IntoResponse for DbUpdateErrorResponse {
                 None,
             ),
             RuntimeUpdateError::InvalidMddFile(_)
-            | RuntimeUpdateError::InvalidConfig(_)
             | RuntimeUpdateError::InvalidFileType(_)
             | RuntimeUpdateError::ValidationFailed(_) => build_api_error_response(
                 StatusCode::BAD_REQUEST,

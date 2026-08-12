@@ -180,7 +180,7 @@ where
     }
 }
 
-/// Default reload handler for runtime database and configuration updates.
+/// Default reload handler for runtime database updates.
 ///
 /// Implements [`RuntimeReloaderPlugin`] by:
 /// - Shutting down existing UDS and `DoIP` components
@@ -346,10 +346,6 @@ where
 
         result
     }
-
-    async fn reload_configuration(&self, config_path: PathBuf) -> Result<(), ReloadError> {
-        reload_configuration_from_path(&self.config, config_path).await
-    }
 }
 
 impl<Uds, Gateway, Config, SecurityLoader, VehicleFactory, S>
@@ -436,155 +432,5 @@ where
         self.route_state
             .install_routes::<_, SecurityLoader>(components)
             .await
-    }
-
-    async fn reload_configuration(&self, config_path: PathBuf) -> Result<(), ReloadError> {
-        reload_configuration_from_path(&self.config, config_path).await
-    }
-}
-
-/// Reads, parses, and applies a TOML configuration from `config_path` into `config`.
-///
-/// Extracted as a free function so that it can be unit-tested without constructing
-/// the full [`DefaultRuntimeReloaderPlugin`].
-pub(crate) async fn reload_configuration_from_path<C>(
-    config: &Arc<RwLock<C>>,
-    config_path: PathBuf,
-) -> Result<(), ReloadError>
-where
-    C: serde::de::DeserializeOwned + Send + Sync + 'static,
-{
-    let content = tokio::fs::read_to_string(&config_path)
-        .await
-        .map_err(|e| ReloadError(format!("Failed to read config: {e}")))?;
-    let parsed = toml::from_str(&content)
-        .map_err(|e| ReloadError(format!("Failed to parse config: {e}")))?;
-    *config.write().await = parsed;
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{path::PathBuf, sync::Arc};
-
-    use serde::{Deserialize, Serialize};
-    use tokio::sync::RwLock;
-
-    use super::reload_configuration_from_path;
-
-    /// Minimal config stub for testing `reload_configuration_from_path`.
-    #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-    struct StubConfig {
-        marker: Option<String>,
-    }
-
-    fn default_config() -> Arc<RwLock<StubConfig>> {
-        Arc::new(RwLock::new(StubConfig::default()))
-    }
-
-    #[tokio::test]
-    async fn reload_configuration_fails_when_file_does_not_exist() {
-        let config = default_config();
-        let result =
-            reload_configuration_from_path(&config, PathBuf::from("/nonexistent/path/config.toml"))
-                .await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.0.contains("Failed to read config"),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn reload_configuration_fails_on_invalid_toml() {
-        let config = default_config();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bad.toml");
-        std::fs::write(&path, "this is {{ not valid toml").unwrap();
-
-        let result = reload_configuration_from_path(&config, path).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.0.contains("Failed to parse config"),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn reload_configuration_fails_on_valid_toml_with_wrong_schema() {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Strict {
-            #[allow(dead_code, reason = "field used only in deserialization")]
-            known: String,
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wrong_schema.toml");
-        // StubConfig only has `marker: Option<String>` - deny_unknown_fields would
-        // reject this, but our stub doesn't use it; use a strict type to force failure.
-        let strict_config: Arc<RwLock<Strict>> = Arc::new(RwLock::new(Strict {
-            known: String::new(),
-        }));
-        std::fs::write(&path, "[unknown_section]\nfoo = 42\n").unwrap();
-
-        let result = reload_configuration_from_path(&strict_config, path).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.0.contains("Failed to parse config"),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn reload_configuration_updates_config_on_valid_file() {
-        let config = default_config();
-        let new_cfg = StubConfig {
-            marker: Some("hello".to_string()),
-        };
-        let toml_str = toml::to_string(&new_cfg).expect("StubConfig must serialize");
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("valid.toml");
-        std::fs::write(&path, &toml_str).unwrap();
-
-        let result = reload_configuration_from_path(&config, path).await;
-        assert!(result.is_ok(), "expected Ok, got {result:?}");
-        assert_eq!(config.read().await.marker, Some("hello".to_string()));
-    }
-
-    #[tokio::test]
-    async fn reload_configuration_does_not_mutate_config_on_read_error() {
-        let config = default_config();
-        let original = config.read().await.clone();
-
-        let _ = reload_configuration_from_path(&config, PathBuf::from("/nonexistent/config.toml"))
-            .await;
-
-        assert_eq!(
-            *config.read().await,
-            original,
-            "config must not be mutated when file read fails"
-        );
-    }
-
-    #[tokio::test]
-    async fn reload_configuration_does_not_mutate_config_on_parse_error() {
-        let config = default_config();
-        let original = config.read().await.clone();
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bad.toml");
-        std::fs::write(&path, "not = {{{ toml").unwrap();
-
-        let _ = reload_configuration_from_path(&config, path).await;
-
-        assert_eq!(
-            *config.read().await,
-            original,
-            "config must not be mutated when TOML parsing fails"
-        );
     }
 }

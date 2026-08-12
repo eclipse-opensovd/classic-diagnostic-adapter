@@ -34,8 +34,8 @@ pub(crate) mod test_utils {
     use bytes::Bytes;
     use cda_interfaces::{
         runtime_update_api::{
-            LockStateProvider, ReloadError, RuntimeReloaderPlugin, RuntimeUpdateError,
-            UpdateFileType, UploadFile, VerificationError,
+            LockStateProvider, ReloadError, RuntimeReloaderPlugin, RuntimeUpdateError, UploadFile,
+            VerificationError,
         },
         storage_api::{
             Collection, CollectionName, DirectFileAccess, ReadableStream, Storage, Transaction,
@@ -101,7 +101,6 @@ pub(crate) mod test_utils {
 
         async fn check_file_integrity(
             &self,
-            _type: UpdateFileType<'_>,
             _path: &std::path::Path,
         ) -> Result<(), VerificationError> {
             Ok(())
@@ -183,14 +182,12 @@ pub(crate) mod test_utils {
 
     pub struct RecordingReloadHandler {
         pub reload_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
-        pub config_calls: Arc<Mutex<Vec<PathBuf>>>,
     }
 
     impl RecordingReloadHandler {
         pub fn new() -> Self {
             Self {
                 reload_calls: Arc::new(Mutex::new(Vec::new())),
-                config_calls: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
@@ -201,11 +198,6 @@ pub(crate) mod test_utils {
             self.reload_calls.lock().unwrap().push(paths);
             Ok(())
         }
-
-        async fn reload_configuration(&self, path: PathBuf) -> Result<(), ReloadError> {
-            self.config_calls.lock().unwrap().push(path);
-            Ok(())
-        }
     }
 
     /// A [`RuntimeReloaderPlugin`] that does nothing, useful as a default in tests.
@@ -214,10 +206,6 @@ pub(crate) mod test_utils {
     #[async_trait]
     impl RuntimeReloaderPlugin for NoopReloadHandler {
         async fn reload_databases(&self, _mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
-            Ok(())
-        }
-
-        async fn reload_configuration(&self, _config_path: PathBuf) -> Result<(), ReloadError> {
             Ok(())
         }
     }
@@ -231,10 +219,6 @@ pub(crate) mod test_utils {
     impl RuntimeReloaderPlugin for FailingReloadHandler {
         async fn reload_databases(&self, _mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
             Err(ReloadError("simulated reload failure".to_string()))
-        }
-
-        async fn reload_configuration(&self, _config_path: PathBuf) -> Result<(), ReloadError> {
-            Ok(())
         }
     }
 }

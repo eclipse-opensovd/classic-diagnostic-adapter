@@ -29,16 +29,12 @@ use super::delete_collection_ignore_missing;
 
 /// Clear all staging and backup collections atomically.
 ///
-/// Deletes the `NextUpdate` collections entirely and clears all entries from the backup collections
-/// in a single transaction:
+/// Deletes MDD staging and clears the MDD backup in a single transaction:
 /// - [`CollectionName::DiagnosticDatabaseNextUpdate`] - deleted (collection removed)
 /// - [`CollectionName::DiagnosticDatabaseBackup`] - cleared
-/// - [`CollectionName::ConfigurationNextUpdate`] - deleted (collection removed)
-/// - [`CollectionName::ConfigurationBackup`] - cleared
 ///
 /// This operation is idempotent - calling it when collections are already absent or empty succeeds.
-/// The current database ([`CollectionName::DiagnosticDatabase`]) and active configuration
-/// ([`CollectionName::Configuration`]) are never touched.
+/// The current database ([`CollectionName::DiagnosticDatabase`]) is never touched.
 /// # Errors
 ///
 /// Returns [`RuntimeUpdateError`] if any storage operation fails.
@@ -46,10 +42,6 @@ pub async fn execute_cleanup<S: Storage>(storage: &S) -> Result<(), RuntimeUpdat
     let mdd_backup = storage
         .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
         .await?;
-    let cfg_backup = storage
-        .get_or_create_collection(&CollectionName::ConfigurationBackup)
-        .await?;
-
     let mut tx = storage.begin_transaction()?;
 
     delete_collection_ignore_missing(
@@ -59,9 +51,6 @@ pub async fn execute_cleanup<S: Storage>(storage: &S) -> Result<(), RuntimeUpdat
     )
     .await?;
     mdd_backup.delete_all(&mut tx).await?;
-    delete_collection_ignore_missing(storage, &mut tx, &CollectionName::ConfigurationNextUpdate)
-        .await?;
-    cfg_backup.delete_all(&mut tx).await?;
 
     tx.commit().await?;
     Ok(())
@@ -123,41 +112,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_clears_configuration_next_update() {
-        let (storage, _dir) = make_storage();
-        write_dummy(
-            &storage,
-            &CollectionName::ConfigurationNextUpdate,
-            "cfg.toml",
-        )
-        .await;
-
-        execute_cleanup(&storage).await.unwrap();
-
-        let result = storage
-            .get_collection(&CollectionName::ConfigurationNextUpdate)
-            .await;
-        assert!(
-            matches!(result, Err(StorageError::CollectionNotFound(_))),
-            "NextUpdate should be gone after cleanup"
-        );
-    }
-
-    #[tokio::test]
-    async fn cleanup_clears_configuration_backup() {
-        let (storage, _dir) = make_storage();
-        write_dummy(&storage, &CollectionName::ConfigurationBackup, "cfg.toml").await;
-
-        execute_cleanup(&storage).await.unwrap();
-
-        let col = storage
-            .get_or_create_collection(&CollectionName::ConfigurationBackup)
-            .await
-            .unwrap();
-        assert!(col.is_empty().await.unwrap());
-    }
-
-    #[tokio::test]
     async fn cleanup_is_idempotent_when_all_collections_empty() {
         let (storage, _dir) = make_storage();
 
@@ -179,21 +133,5 @@ mod tests {
         assert!(!col.is_empty().await.unwrap());
         let keys = col.list().await.unwrap();
         assert!(keys.contains(&"ecu.mdd".to_string()));
-    }
-
-    #[tokio::test]
-    async fn cleanup_does_not_modify_configuration() {
-        let (storage, _dir) = make_storage();
-        write_dummy(&storage, &CollectionName::Configuration, "config.toml").await;
-
-        execute_cleanup(&storage).await.unwrap();
-
-        let col = storage
-            .get_or_create_collection(&CollectionName::Configuration)
-            .await
-            .unwrap();
-        assert!(!col.is_empty().await.unwrap());
-        let keys = col.list().await.unwrap();
-        assert!(keys.contains(&"config.toml".to_string()));
     }
 }

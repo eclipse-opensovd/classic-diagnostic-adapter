@@ -762,10 +762,6 @@
 
 # Configuration for update plugin, i.e. storage paths
 [runtime_update_config]
-# When `true` and the `Configuration` storage collection is empty,
-# seed it from the configuration file loaded from disk on first startup.
-# Default: `false`.
-# init_storage_from_config_file = false
 # When `true` and the `DiagnosticDatabase` storage collection is empty,
 # seed it from `database.path` on first startup by copying all `.mdd` files.
 # Default: `false`.
@@ -774,7 +770,7 @@
 # temporarily unavailable due to a busy transaction.
 # Default: 1 second.
 # retry_after_seconds = 1
-# Directory where the updatable configuration and database are stored.
+# Directory where the updatable database is stored.
 # storage_dir = "."
 # Maximum upload body size in bytes for multipart file uploads.
 # Default: 50MB. Axum's built-in limit is 2MB which is too low for MDD files.
