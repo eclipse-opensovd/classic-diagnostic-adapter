@@ -257,7 +257,7 @@ impl<D: EcuGateway> EcuGateway for MultiTransportGateway<D> {
         message: ServicePayload,
         response_sender: mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
         expect_uds_reply: bool,
-    ) -> Result<(), DiagServiceError> {
+    ) -> Result<tokio::task::JoinHandle<()>, DiagServiceError> {
         let ecu_name = transmission_params.ecu_name.to_lowercase();
 
         let transport = if let Some(t) = self.pinned_or_bound(&ecu_name).await {
@@ -448,8 +448,9 @@ mod tests {
                 _message: ServicePayload,
                 _response_sender: mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
                 _expect_uds_reply: bool,
-            ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
-                std::future::ready(Ok(()))
+            ) -> impl Future<Output = Result<tokio::task::JoinHandle<()>, DiagServiceError>> + Send
+            {
+                std::future::ready(Ok(tokio::task::spawn(std::future::ready(()))))
             }
 
             fn ecu_online<T: EcuAddresses>(

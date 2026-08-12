@@ -68,7 +68,7 @@ impl cda_interfaces::EcuGateway for CanDiagGateway {
             Result<Option<cda_interfaces::UdsResponse>, cda_interfaces::DiagServiceError>,
         >,
         _expect_uds_reply: bool,
-    ) -> Result<(), cda_interfaces::DiagServiceError> {
+    ) -> Result<tokio::task::JoinHandle<()>, cda_interfaces::DiagServiceError> {
         Err(cda_interfaces::DiagServiceError::EcuOffline(
             "CAN support is not enabled. Compile with the `can` feature.".to_owned(),
         ))

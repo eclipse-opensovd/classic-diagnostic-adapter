@@ -247,10 +247,20 @@ Request-Response Flow
     Each application-layer attempt uses a *fresh* response channel. When an attempt
     is retried (transmission error, receive error, or plain timeout with no response),
     the previous attempt's channel is dropped, which signals the gateway's per-request
-    task to stop and release the ECU lock *before* the next request is sent. This
-    ensures a retry is gated solely by that attempt's own timeout: a late response or
-    error from a prior, superseded attempt can no longer leak into the current attempt
-    and trigger an immediate (sub-timeout) retry.
+    task to stop. This ensures a retry is gated solely by that attempt's own timeout: a
+    late response or error from a prior, superseded attempt can no longer leak into the
+    current attempt and trigger an immediate (sub-timeout) retry.
+
+    Dropping the previous attempt's channel only *signals* its gateway task to stop; it
+    does not by itself guarantee that task has finished releasing whatever per-ECU
+    resource it holds (e.g. a DoIP connection mutex, or - for CAN, which has no
+    equivalent per-connection lock - an ISO-TP socket bound to the same CAN ID pair).
+    To close that gap, ``EcuGateway::send`` returns a handle to its per-request task,
+    and the UDS layer awaits the *previous* attempt's handle - bounded by a short,
+    fixed grace period (``RETRY_TEARDOWN_GRACE``, 500 ms) - before issuing the next
+    attempt. If a gateway task does not finish within the grace period, a warning is
+    logged and the next attempt proceeds anyway, so a misbehaving gateway task cannot
+    stall retries indefinitely.
 
     .. uml::
         :caption: UDS Request-Response Flow
