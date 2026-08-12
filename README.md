@@ -220,6 +220,20 @@ The minimum required version of the toolchain is [Rust 1.88.0](https://blog.rust
 cargo build --release
 ```
 
+### Bazel
+
+Install [Bazelisk](https://github.com/bazelbuild/bazelisk), which uses the Bazel
+version pinned in `.bazelversion`. Python 3.11 or newer is also required for the
+mbedTLS revision consistency check.
+
+Run the same Bazel checks as CI from the repository root:
+
+```shell
+python3 bazel/check_mbedtls_revision.py
+bazel build //:cda_mbedtls
+bazel build //:opensovd-cda
+```
+
 ### Windows
 
 Prerequisite:
