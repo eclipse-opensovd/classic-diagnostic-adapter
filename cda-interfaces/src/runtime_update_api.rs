@@ -22,8 +22,8 @@
 
 //! Runtime Update Plugin API
 //!
-//! Provides the interface definitions for runtime file management (MDD databases and
-//! configuration), including security handler traits, reload handler traits, and error types.
+//! Provides the interface definitions for runtime MDD database management, including security
+//! handler traits, reload handler traits, and error types.
 //!
 //! The concrete plugin implementation lives in `cda-plugin-runtime-update`.
 
@@ -47,7 +47,7 @@ use crate::{
 };
 
 mod error;
-pub use error::{ConfigValidationError, ReloadError, RuntimeUpdateError, VerificationError};
+pub use error::{ReloadError, RuntimeUpdateError, VerificationError};
 
 /// Guards against activity during a runtime update.
 pub trait ActivityGuard: Send + Sync + 'static {
@@ -123,39 +123,15 @@ pub struct UploadFile {
 pub struct UpdateCollections<C: Collection + DirectFileAccess> {
     /// Staged MDD collection (`DiagnosticDatabaseNextUpdate`), or `None` if no update is pending.
     pub pending_mdd: Option<Arc<C>>,
-    /// Staged configuration collection (`ConfigurationNextUpdate`), or `None` if not pending.
-    pub pending_config: Option<Arc<C>>,
     /// Currently active MDD collection (`DiagnosticDatabase`), or `None` if not yet initialized.
     pub current_mdd: Option<Arc<C>>,
-    /// Currently active configuration collection (`Configuration`), or `None` if uninitialised.
-    pub current_config: Option<Arc<C>>,
 }
 
 impl<C: Collection + DirectFileAccess> Default for UpdateCollections<C> {
     fn default() -> Self {
         Self {
             pending_mdd: None,
-            pending_config: None,
             current_mdd: None,
-            current_config: None,
-        }
-    }
-}
-
-/// Determines the kind of file being applied in a runtime update.
-#[derive(Clone)]
-pub enum UpdateFileType<'a> {
-    /// A diagnostic database file (`.mdd`).
-    Mdd,
-    /// A CDA configuration file (`.toml`), with an associated config validator.
-    Config(&'a dyn ConfigValidator),
-}
-
-impl std::fmt::Debug for UpdateFileType<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Mdd => write!(f, "Mdd"),
-            Self::Config(_) => write!(f, "Config"),
         }
     }
 }
@@ -177,45 +153,13 @@ pub trait LockStateProvider: Send + Sync + 'static {
 /// Handler for reloading diagnostic runtime data after file operations (apply/rollback).
 ///
 /// Implementors bridge the runtime-files plugin to the application's live diagnostic state,
-/// ensuring that newly applied MDD databases and configuration are picked up without a restart.
+/// ensuring that newly applied MDD databases are picked up without a restart.
 #[async_trait]
 pub trait RuntimeReloaderPlugin: Send + Sync + 'static {
     /// Loads (or re-loads) the MDD databases at the given paths into the running system.
     ///
     /// Called after a successful apply operation with the paths of all newly active MDD files.
     async fn reload_databases(&self, mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError>;
-
-    /// Reloads the application configuration from the file at the given path.
-    ///
-    /// Called when a configuration file is part of the applied update.
-    /// The default implementation is a no-op (returns `Ok(())`).
-    async fn reload_configuration(&self, config_path: PathBuf) -> Result<(), ReloadError>;
-}
-
-/// Validates configuration file content during runtime updates.
-///
-/// Implementors parse and validate TOML (or other format) configuration files
-/// to ensure they are syntactically valid and semantically acceptable before
-/// being applied.
-pub trait ConfigValidator: Send + Sync + 'static {
-    /// Validates configuration file content.
-    ///
-    /// # Arguments
-    /// * `content` - Raw file content as string
-    ///
-    /// # Returns
-    /// * `Ok(())` if configuration is valid
-    /// * `Err(ConfigValidationError)` if invalid
-    /// # Errors
-    /// Returns `ConfigValidationError` on failure during validation.
-    fn validate(&self, content: &str) -> Result<(), ConfigValidationError>;
-}
-
-/// No-Op configuration validator, which can be used to skip configuration validation.
-impl ConfigValidator for () {
-    fn validate(&self, _content: &str) -> Result<(), ConfigValidationError> {
-        Ok(())
-    }
 }
 
 /// Security and file integrity handler for the diagnostic database update process.
@@ -251,23 +195,16 @@ pub trait RuntimeUpdateSecurityPlugin<
 
     /// Checks the integrity of all pending files before they are applied.
     ///
-    /// Called during the apply operation with all pending MDD and configuration files.
+    /// Called during the apply operation with all pending MDD files.
     /// Implementations may perform signature verification, hash checks, version
     /// compatibility validation, or any other file-level security checks.
     ///
-    /// The config validator, if needed, is embedded in the [`UpdateFileType::Config`] variant.
-    ///
     /// # Arguments
-    /// * `type_` - The type of file being validated (MDD or Config)
     /// * `path` - Path to the file to validate
     ///
     /// # Errors
     /// Return [`VerificationError`] to abort the apply operation.
-    async fn check_file_integrity(
-        &self,
-        type_: UpdateFileType<'_>,
-        path: &std::path::Path,
-    ) -> Result<(), VerificationError>;
+    async fn check_file_integrity(&self, path: &std::path::Path) -> Result<(), VerificationError>;
 }
 
 /// Status of an in-progress or completed database update execution.
@@ -408,7 +345,7 @@ pub struct UpdateExecution {
 
 // RuntimeFilesUpdatePlugin trait + ExclusiveRuntimePlugin wrapper
 
-/// The main plugin trait for managing diagnostic runtime files (MDD databases and configuration).
+/// The main plugin trait for managing diagnostic runtime files (MDD databases).
 ///
 /// Provides the full lifecycle for runtime file management: listing, uploading, deleting,
 /// and executing apply/rollback/cleanup operations on the diagnostic database.

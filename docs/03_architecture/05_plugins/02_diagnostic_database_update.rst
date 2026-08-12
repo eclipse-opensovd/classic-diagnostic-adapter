@@ -93,43 +93,8 @@ Diagnostic Database Update Plugin
        - ``x-sovd2uds-include-revision`` (boolean, default: false) - to include the revision inside the files
        - ``created-after`` and ``created-before`` (string:date-time) are accepted for ISO 17978-3 compatibility but do not currently filter results.
 
-    **Configuration File Support**
-
-    In addition to MDD database files (``.mdd``), the plugin supports uploading CDA configuration
-    files (``.toml``) through the **same** ``runtimefiles-*`` bulk-data endpoints. The upload handler
-    routes each file to the appropriate internal storage collection based on its extension:
-
-    - ``.mdd`` files go to the ``DiagnosticDatabase*`` collections.
-    - ``.toml`` files go to the ``Configuration*`` collections.
-
-    Only one ``.toml`` configuration file per upload request is supported; uploading more than one
-    in a single ``POST`` to ``runtimefiles-nextupdate`` is rejected.
-
-    All GET endpoints (``runtimefiles-current``, ``runtimefiles-nextupdate``, ``runtimefiles-backup``)
-    return both MDD and configuration file entries in a single combined response.
-
-    The HTTP handler implementation for the bulk-data endpoints resides in
-    ``cda-sovd/src/sovd/apps/sovd2uds/bulk_data/runtimefiles.rs``. The execution endpoints
-    (Apply/Rollback/Cleanup) reside in ``cda-sovd/src/sovd/apps/sovd2uds/operations.rs``.
-
-    **Coupled MDD and Configuration Updates**
-
-    When an MDD file update requires a simultaneous configuration change (e.g., a new MDD file
-    introduces changes that require updated communication parameters in the CDA configuration), both
-    files must be uploaded to ``runtimefiles-nextupdate`` and applied via a **single** ``Apply``
-    execution. A single ``Apply`` execution will atomically apply all pending MDD and configuration
-    changes together in one transaction, provided both ``NextUpdate`` collections are populated.
-
-    .. warning::
-
-        There is **no guaranteed atomic coupling** when MDD and configuration updates are applied
-        in separate executions. Applying them independently means they take effect at different
-        points in time, which may leave the system in a partially updated state during the interval
-        between the two applies.
-
-        Users must account for this by uploading all related files (MDD and configuration) in the
-        same ``runtimefiles-nextupdate`` batch and triggering a single ``Apply``. This is an accepted
-        limitation of the unified endpoint design.
+    The runtime update plugin accepts MDD database files (``.mdd``). CDA configuration files cannot
+    be updated through the runtime-files endpoints.
 
     **Limitations to bulk-data operations**
 

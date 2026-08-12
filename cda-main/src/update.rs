@@ -28,10 +28,8 @@ use cda_storage::LocalStorage;
 use tokio::sync::Mutex;
 
 use crate::{
-    AppError, UdsManagerType,
-    cda_factory::CdaMainVehicleFactory,
-    config::configfile::{Configuration, ConfigurationValidator},
-    setup::CdaRuntime,
+    AppError, UdsManagerType, cda_factory::CdaMainVehicleFactory,
+    config::configfile::Configuration, setup::CdaRuntime,
 };
 
 /// Trait for async plugin builders that produce a [`RuntimeFilesUpdatePlugin`].
@@ -191,6 +189,5 @@ where
         Arc::clone(&infra.lock_provider),
         infra.mdd_decompress,
         Arc::clone(&infra.update_in_progress),
-        ConfigurationValidator::new(),
     ))
 }

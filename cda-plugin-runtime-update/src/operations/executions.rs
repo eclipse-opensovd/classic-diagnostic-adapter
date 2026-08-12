@@ -65,19 +65,9 @@ where
             .get_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
             .await
             .ok(),
-        pending_config: params
-            .storage
-            .get_collection(&CollectionName::ConfigurationNextUpdate)
-            .await
-            .ok(),
         current_mdd: params
             .storage
             .get_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .ok(),
-        current_config: params
-            .storage
-            .get_collection(&CollectionName::Configuration)
             .await
             .ok(),
     };
@@ -121,10 +111,7 @@ where
     // before spawning the task so that the 404 is returned synchronously instead of
     // 202 being sent with a later Failed status (execute_apply's own check runs
     // inside the spawned task and is too late to affect the HTTP response).
-    if mode == ExecutionMode::Apply
-        && collections.pending_mdd.is_none()
-        && collections.pending_config.is_none()
-    {
+    if mode == ExecutionMode::Apply && collections.pending_mdd.is_none() {
         params.update_in_progress.store(false, Ordering::Release);
         return Err(RuntimeUpdateError::NoPendingUpdate);
     }
@@ -328,7 +315,7 @@ mod tests {
     async fn start_execution_apply_with_no_pending_update_rejected_synchronously() {
         let f = make_fixture();
 
-        // Nothing seeded into DiagnosticDatabaseNextUpdate or ConfigurationNextUpdate:
+        // Nothing seeded into DiagnosticDatabaseNextUpdate:
         // Apply must be rejected synchronously (i.e. `start_execution` itself returns
         // an error) rather than accepted (202-equivalent execution id) only to fail
         // later inside the spawned task.
