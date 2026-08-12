@@ -677,13 +677,26 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
 ) -> Result<DiagDataTypeContainer, DiagServiceError> {
     let uds_payload = payload.data()?;
 
-    // For MinMaxLength parameters, silently treat a boundary-position failure as an absent
-    // field: if the start position is at or beyond the payload end, the field is simply not
-    // present in this PDU. Fixed-size (StandardLength) parameters do not get this treatment.
-    // If their position is beyond the payload end, the ECU sent a malformed response.
-    let is_variable_length_at_boundary =
-        matches!(diag_type.type_(), DiagCodedTypeVariant::MinMaxLength(_))
-            && param_byte_pos >= uds_payload.len();
+    // A MinMaxLength parameter is optional only when its minimum length is zero.
+    // Treat an optional parameter as absent when its position is outside the payload.
+    // All other parameters are required. A response that omits a required parameter is too
+    // short.
+    let is_variable_length_at_boundary = matches!(
+        diag_type.type_(),
+        DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType { min_length: 0, .. })
+    ) && param_byte_pos >= uds_payload.len();
+
+    if let DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType { min_length, .. }) =
+        diag_type.type_()
+    {
+        let required_end = param_byte_pos.saturating_add(*min_length as usize);
+        if uds_payload.len() < required_end {
+            return Err(DiagServiceError::NotEnoughData {
+                expected: required_end,
+                actual: uds_payload.len(),
+            });
+        }
+    }
 
     let (data, bit_len) = match diag_type.decode(uds_payload, param_byte_pos, param_bit_pos) {
         Ok(result) => result,
@@ -691,19 +704,11 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
         Err(e) => return Err(e),
     };
 
-    // A parameter is optional when either:
-    //   - its type declares a minimum length of zero (MinMaxLength with min_length == 0), or
-    //   - it is a variable-length field at boundary position (absent from this PDU, see above).
-    //
-    // Fixed-size parameters at boundary are NOT optional: a positive UDS response that is
-    // too short to contain a required field is a malformed payload and must surface as an
-    // error rather than silently returning empty data (which would produce 204 No Content).
-    let is_optional = match diag_type.type_() {
-        DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType { min_length, .. }) => {
-            *min_length == 0 || param_byte_pos >= uds_payload.len()
-        }
-        _ => false,
-    };
+    // Only a MinMaxLength parameter with a minimum length of zero may contain no data.
+    let is_optional = matches!(
+        diag_type.type_(),
+        DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType { min_length: 0, .. })
+    );
     if data.is_empty() && !is_optional {
         tracing::debug!(
             "Not enough data for parameter {:?} in extract_diag_data_container, expected at least \
@@ -2214,7 +2219,7 @@ mod tests {
         let res = extract_diag_data_container(Some("test_param"), 0, 0, &mut payload, &dct, None);
         assert!(
             res.is_ok(),
-            "MinMaxLengthType with min_length 0 should be no error"
+            "Expected an optional MinMaxLength parameter to accept empty data, got {res:?}"
         );
 
         let dct_min1 =
@@ -2222,19 +2227,51 @@ mod tests {
         let mut payload = Payload::new(&data);
         let res: Result<crate::DiagDataTypeContainer, cda_interfaces::DiagServiceError> =
             extract_diag_data_container(Some("test_param"), 0, 0, &mut payload, &dct_min1, None);
-        // the param is at or beyond the payload boundary, so it is treated as absent and optional
-        // regardless of min_length.
         assert!(
-            res.is_ok(),
-            "MinMaxLengthType at boundary position should be treated as absent"
+            matches!(
+                res,
+                Err(cda_interfaces::DiagServiceError::NotEnoughData {
+                    expected: 1,
+                    actual: 0
+                })
+            ),
+            "Expected a missing required MinMaxLength parameter to report insufficient data, got \
+             {res:?}"
+        );
+    }
+
+    // This test reproduces a response that contains only the RoutineControl header. The
+    // required status record is missing, so decoding must fail.
+    #[test]
+    fn test_routine_control_missing_required_status_record_is_error() {
+        // These four bytes contain the response SID, subfunction, and routine identifier. The
+        // required output parameter starts at byte offset 4, but the payload ends there.
+        let header: [u8; 4] = [0x71, 0x01, 0x02, 0x04];
+        let mut payload = Payload::new(&header);
+
+        let status_record =
+            create_diag_coded_type_minmax(DataType::ByteField, 1, None, Termination::EndOfPdu);
+
+        let res = extract_diag_data_container(
+            Some("Fail_Safe_Reaction_Status"),
+            4,
+            0,
+            &mut payload,
+            &status_record,
+            None,
         );
 
-        // But if there IS data and it's shorter than min_length, that should still error.
-        let short_data: [u8; 0] = [];
-        let mut payload = Payload::new(&short_data);
-        let res =
-            extract_diag_data_container(Some("test_param"), 0, 0, &mut payload, &dct_min1, None);
-        assert!(res.is_ok(), "Boundary param is absent, not an error");
+        assert!(
+            matches!(
+                res,
+                Err(cda_interfaces::DiagServiceError::NotEnoughData {
+                    expected: 5,
+                    actual: 4
+                })
+            ),
+            "Expected missing required routine status record to report insufficient data, got \
+             {res:?}"
+        );
     }
 
     #[test]
