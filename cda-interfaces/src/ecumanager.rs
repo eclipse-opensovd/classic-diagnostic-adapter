@@ -342,12 +342,13 @@ impl ServicePayload {
     /// callers should not treat the absence of a positive response as an error.
     ///
     /// Only a subset of services actually carry a subfunction byte with SPRMIB semantics
-    /// (`DiagnosticSessionControl`, `ECUReset`, `CommunicationControl`, `Authentication`,
-    /// `ControlDTCSetting`, `LinkControl`, `TesterPresent`). Other services either have no subfunction byte
-    /// at all, or use byte index 1 for something else entirely - most notably
-    /// `ReadDataByIdentifier`/`WriteDataByIdentifier`, where byte index 1 is the *high byte
-    /// of the 2-byte data identifier* and can legitimately have bit 7 set (e.g. any DID in
-    /// the `0xF1xx`-`0xFFxx` range), which must never be misread as SPRMIB.
+    /// (`DiagnosticSessionControl`, `ECUReset`, `ReadDTCInformation`, `CommunicationControl`,
+    /// `SecurityAccess`, `Authentication`, `DynamicallyDefineDataIdentifier`, `RoutineControl`,
+    /// `ControlDTCSetting`, `ResponseOnEvent`, `LinkControl`, `TesterPresent`). Other services
+    /// either have no subfunction byte at all, or use byte index 1 for something else entirely -
+    /// most notably `ReadDataByIdentifier`/`WriteDataByIdentifier`, where byte index 1 is the
+    /// *high byte of the 2-byte data identifier* and can legitimately have bit 7 set (e.g. any
+    /// DID in the `0xF1xx`-`0xFFxx` range), which must never be misread as SPRMIB.
     #[must_use]
     pub fn is_suppress_positive_response(&self) -> bool {
         let Some(&sid) = self.data.first() else {
@@ -357,9 +358,14 @@ impl ServicePayload {
             sid,
             service_ids::SESSION_CONTROL
                 | service_ids::ECU_RESET
+                | service_ids::READ_DTC_INFORMATION
                 | service_ids::COMMUNICATION_CONTROL
+                | service_ids::SECURITY_ACCESS
                 | service_ids::AUTHENTICATION
+                | service_ids::DYNAMICALLY_DEFINE_DATA_IDENTIFIER
+                | service_ids::ROUTINE_CONTROL
                 | service_ids::CONTROL_DTC_SETTING
+                | service_ids::RESPONSE_ON_EVENT
                 | service_ids::LINK_CONTROL
                 | service_ids::TESTER_PRESENT
         );
@@ -1234,11 +1240,41 @@ mod tests {
     }
 
     #[test]
-    fn routine_control_with_high_bit_set_is_not_suppress_positive_response() {
-        // RoutineControl does not have SPRMIB semantics; its subfunction byte is the
-        // routineControlType (bits 6-0), so a set bit 7 here must not be treated as SPRMIB.
+    fn routine_control_with_high_bit_set_is_suppress_positive_response() {
+        // RoutineControl (0x31) does carry SPRMIB semantics per ISO 14229-1: bits 6-0 of
+        // the subfunction byte are the routineControlType, and bit 7 is SPRMIB.
         let request = make_payload(vec![service_ids::ROUTINE_CONTROL, 0x81, 0xF1, 0x90]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn routine_control_without_high_bit_is_not_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::ROUTINE_CONTROL, 0x01, 0xF1, 0x90]);
         assert!(!request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn read_dtc_information_with_sprmib_bit_set_is_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::READ_DTC_INFORMATION, 0x82]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn security_access_with_sprmib_bit_set_is_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::SECURITY_ACCESS, 0x81]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn dynamically_define_data_identifier_with_sprmib_bit_set_is_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::DYNAMICALLY_DEFINE_DATA_IDENTIFIER, 0x81]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn response_on_event_with_sprmib_bit_set_is_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::RESPONSE_ON_EVENT, 0x80]);
+        assert!(request.is_suppress_positive_response());
     }
 
     #[test]

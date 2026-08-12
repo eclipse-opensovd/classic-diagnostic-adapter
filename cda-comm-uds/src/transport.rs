@@ -282,8 +282,18 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
 
             // responses might be disabled, i.e. for functional tester presents...
             if !expect_response {
-                // ...but wait until the message was (n)ack'd
-                response_rx.recv().await;
+                // ...but wait until the message was (n)ack'd. Bounded by `rx_timeout`
+                // so a gateway that never (n)acks and never closes the channel cannot
+                // block this call forever.
+                if tokio::time::timeout(rx_timeout, response_rx.recv())
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        ecu_name,
+                        "Timed out waiting for (n)ack on a request with no expected response"
+                    );
+                }
                 return Ok(None);
             }
 
@@ -807,8 +817,8 @@ mod send_tests {
 
     use cda_interfaces::{
         DiagServiceError, EcuAddresses, EcuGateway, EcuRuntimeState, EcuStateManager, HashMap,
-        HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, VariantDetection,
-        datatypes::FaultConfig, service_ids,
+        HashMapExtensions, ServicePayload, TransmissionParameters, UDS_ID_RESPONSE_BITMASK,
+        UdsResponse, VariantDetection, datatypes::FaultConfig, service_ids,
     };
     use tokio::sync::{RwLock, mpsc};
 
@@ -1015,7 +1025,7 @@ mod send_tests {
         TestGateway {
             send_fn: Arc::new(|response_tx, _| {
                 let msg = UdsResponse::Message(ServicePayload {
-                    data: vec![0x50, 0x01],
+                    data: vec![service_ids::SESSION_CONTROL | UDS_ID_RESPONSE_BITMASK, 0x01],
                     source_address: 0x0001,
                     target_address: 0x0E00,
                     new_session: None,
@@ -1033,7 +1043,7 @@ mod send_tests {
     async fn test_send_with_raw_payload_positive_response() {
         let gateway = make_gateway();
         let manager = make_manager(gateway);
-        let payload = make_test_payload(0x10, &[0x01]);
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
             .send_with_raw_payload("TestECU", payload, None, true)
@@ -1043,7 +1053,10 @@ mod send_tests {
         let response = result.expect("should be Ok");
         assert!(response.is_some());
         let msg = response.expect("should have message");
-        assert_eq!(msg.data, vec![0x50, 0x01]);
+        assert_eq!(
+            msg.data,
+            vec![service_ids::SESSION_CONTROL | UDS_ID_RESPONSE_BITMASK, 0x01]
+        );
     }
 
     #[tokio::test]
@@ -1056,7 +1069,7 @@ mod send_tests {
             }),
         };
         let manager = make_manager(gateway);
-        let payload = make_test_payload(0x10, &[0x01]);
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
             .send_with_raw_payload("TestECU", payload, None, false)
@@ -1109,7 +1122,7 @@ mod send_tests {
             send_fn: Arc::new(|_, _| Ok(())),
         };
         let manager = make_manager_no_ecus(gateway);
-        let payload = make_test_payload(0x10, &[0x01]);
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
             .send_with_raw_payload("NonExistent", payload, None, true)
@@ -1153,7 +1166,7 @@ mod send_tests {
             send_fn: Arc::new(|_, _| Err(DiagServiceError::EcuOffline("TestECU".to_string()))),
         };
         let manager = make_manager(gateway);
-        let payload = make_test_payload(0x10, &[0x01]);
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
             .send_with_raw_payload("TestECU", payload, None, true)
@@ -1178,7 +1191,7 @@ mod send_tests {
             }),
         };
         let manager = make_manager(gateway);
-        let payload = make_test_payload(0x10, &[0x01]);
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
             .send_with_raw_payload("TestECU", payload, Some(Duration::from_millis(50)), true)
@@ -1208,7 +1221,15 @@ mod send_tests {
                 // the mismatched echo bytes, ignores the frame, and loops back
                 // to recv(); the gateway task then ends and drops its sender.
                 let msg = UdsResponse::Message(ServicePayload {
-                    data: vec![0x62, 0xF2, 0x00, 0x41, 0x42, 0x43, 0x44],
+                    data: vec![
+                        service_ids::READ_DATA_BY_IDENTIFIER | UDS_ID_RESPONSE_BITMASK,
+                        0xF2,
+                        0x00,
+                        0x41,
+                        0x42,
+                        0x43,
+                        0x44,
+                    ],
                     source_address: 0x0001,
                     target_address: 0x0E00,
                     new_session: None,
@@ -1225,7 +1246,7 @@ mod send_tests {
             0,
         );
         // Request: 22 F1 90 (ReadDataByIdentifier, DID 0xF190).
-        let payload = make_test_payload(0x22, &[0xF1, 0x90]);
+        let payload = make_test_payload(service_ids::READ_DATA_BY_IDENTIFIER, &[0xF1, 0x90]);
 
         let result = manager
             .send_with_raw_payload("TestECU", payload, None, true)
@@ -1261,7 +1282,7 @@ mod send_tests {
             Duration::from_millis(20),
             repeat_req_count_app,
         );
-        let payload = make_test_payload(0x10, &[0x01]);
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
             .send_with_raw_payload("TestECU", payload, None, true)
@@ -1293,7 +1314,7 @@ mod send_tests {
                     return Err(DiagServiceError::SendFailed("simulated".to_owned()));
                 }
                 let msg = UdsResponse::Message(ServicePayload {
-                    data: vec![0x50, 0x01],
+                    data: vec![service_ids::SESSION_CONTROL | UDS_ID_RESPONSE_BITMASK, 0x01],
                     source_address: 0x0001,
                     target_address: 0x0E00,
                     new_session: None,
@@ -1308,7 +1329,7 @@ mod send_tests {
             Duration::from_secs(5),
             3,
         );
-        let payload = make_test_payload(0x10, &[0x01]);
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
             .send_with_raw_payload("TestECU", payload, None, true)
@@ -1375,7 +1396,7 @@ mod send_tests {
             timeout,
             repeat_req_count_app,
         );
-        let payload = make_test_payload(0x10, &[0x01]);
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let start = std::time::Instant::now();
         let result = manager
@@ -1439,7 +1460,7 @@ mod send_tests {
             Duration::from_millis(50),
             repeat_req_count_app,
         );
-        let payload = make_test_payload(0x10, &[0x01]);
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = tokio::time::timeout(
             Duration::from_millis(200),
@@ -1487,7 +1508,7 @@ mod send_tests {
         };
         let short_timeout = Duration::from_millis(100);
         let manager = make_manager_with_timeout_default(gateway, short_timeout);
-        let payload = make_test_payload(0x10, &[0x01]);
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let start = std::time::Instant::now();
         // No explicit timeout: must fall back to `uds_params.timeout_default`
@@ -1527,7 +1548,7 @@ mod send_tests {
                         .ok();
                 } else {
                     let msg = UdsResponse::Message(ServicePayload {
-                        data: vec![0x50, 0x01],
+                        data: vec![service_ids::SESSION_CONTROL | UDS_ID_RESPONSE_BITMASK, 0x01],
                         source_address: 0x0001,
                         target_address: 0x0E00,
                         new_session: None,
@@ -1539,7 +1560,7 @@ mod send_tests {
             }),
         };
         let manager = make_manager(gateway);
-        let payload = make_test_payload(0x10, &[0x01]);
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
             .send_with_raw_payload("TestECU", payload, None, true)
@@ -1547,7 +1568,10 @@ mod send_tests {
 
         assert!(result.is_ok());
         let msg = result.expect("should be Ok").expect("should have message");
-        assert_eq!(msg.data, vec![0x50, 0x01]);
+        assert_eq!(
+            msg.data,
+            vec![service_ids::SESSION_CONTROL | UDS_ID_RESPONSE_BITMASK, 0x01]
+        );
         assert!(call_count.load(std::sync::atomic::Ordering::SeqCst) >= 2);
     }
 
@@ -1566,7 +1590,10 @@ mod send_tests {
                         .ok();
                     response_tx
                         .try_send(Ok(Some(UdsResponse::Message(ServicePayload {
-                            data: vec![0x50, 0x01],
+                            data: vec![
+                                service_ids::SESSION_CONTROL | UDS_ID_RESPONSE_BITMASK,
+                                0x01,
+                            ],
                             source_address: 0x0001,
                             target_address: 0x0E00,
                             new_session: None,
@@ -1578,7 +1605,7 @@ mod send_tests {
             }),
         };
         let manager = make_manager(gateway);
-        let payload = make_test_payload(0x10, &[0x01]);
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
             .send_with_raw_payload("TestECU", payload, None, true)
@@ -1586,7 +1613,10 @@ mod send_tests {
 
         assert!(result.is_ok());
         let msg = result.expect("should be Ok").expect("should have message");
-        assert_eq!(msg.data, vec![0x50, 0x01]);
+        assert_eq!(
+            msg.data,
+            vec![service_ids::SESSION_CONTROL | UDS_ID_RESPONSE_BITMASK, 0x01]
+        );
     }
 
     #[tokio::test]
@@ -1603,7 +1633,7 @@ mod send_tests {
                         .ok();
                 } else {
                     let msg = UdsResponse::Message(ServicePayload {
-                        data: vec![0x50, 0x01],
+                        data: vec![service_ids::SESSION_CONTROL | UDS_ID_RESPONSE_BITMASK, 0x01],
                         source_address: 0x0001,
                         target_address: 0x0E00,
                         new_session: None,
@@ -1615,7 +1645,7 @@ mod send_tests {
             }),
         };
         let manager = make_manager(gateway);
-        let payload = make_test_payload(0x10, &[0x01]);
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
             .send_with_raw_payload("TestECU", payload, None, true)
@@ -1623,7 +1653,10 @@ mod send_tests {
 
         assert!(result.is_ok());
         let msg = result.expect("should be Ok").expect("should have message");
-        assert_eq!(msg.data, vec![0x50, 0x01]);
+        assert_eq!(
+            msg.data,
+            vec![service_ids::SESSION_CONTROL | UDS_ID_RESPONSE_BITMASK, 0x01]
+        );
     }
 
     #[tokio::test]
@@ -1632,7 +1665,11 @@ mod send_tests {
             send_fn: Arc::new(|response_tx, _| {
                 // NRC 0x7F, SID 0x10, NRC code 0x22 (conditionsNotCorrect)
                 let msg = UdsResponse::Message(ServicePayload {
-                    data: vec![0x7F, 0x10, 0x22],
+                    data: vec![
+                        service_ids::NEGATIVE_RESPONSE,
+                        service_ids::SESSION_CONTROL,
+                        0x22, /* conditionsNotCorrect */
+                    ],
                     source_address: 0x0001,
                     target_address: 0x0E00,
                     new_session: None,
@@ -1643,7 +1680,7 @@ mod send_tests {
             }),
         };
         let manager = make_manager(gateway);
-        let payload = make_test_payload(0x10, &[0x01]);
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
             .send_with_raw_payload("TestECU", payload, None, true)
@@ -1652,14 +1689,21 @@ mod send_tests {
         assert!(result.is_ok());
         let msg = result.expect("should be Ok").expect("should have message");
         // Negative response: 0x7F + original SID + NRC
-        assert_eq!(msg.data, vec![0x7F, 0x10, 0x22]);
+        assert_eq!(
+            msg.data,
+            vec![
+                service_ids::NEGATIVE_RESPONSE,
+                service_ids::SESSION_CONTROL,
+                0x22
+            ]
+        );
     }
 
     #[tokio::test]
     async fn test_send_with_raw_payload_custom_timeout() {
         let gateway = make_gateway();
         let manager = make_manager(gateway);
-        let payload = make_test_payload(0x10, &[0x01]);
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
             .send_with_raw_payload("TestECU", payload, Some(Duration::from_secs(1)), true)
@@ -1673,7 +1717,7 @@ mod send_tests {
         let gateway = TestGateway {
             send_fn: Arc::new(|response_tx, _| {
                 let msg = UdsResponse::Message(ServicePayload {
-                    data: vec![0x50, 0x03],
+                    data: vec![service_ids::SESSION_CONTROL | UDS_ID_RESPONSE_BITMASK, 0x03],
                     source_address: 0x0001,
                     target_address: 0x0E00,
                     new_session: None,
@@ -1697,7 +1741,7 @@ mod send_tests {
 
         // Payload with new_session set - should be stored on positive response
         let payload = ServicePayload {
-            data: vec![0x10, 0x03],
+            data: vec![service_ids::SESSION_CONTROL, 0x03],
             source_address: 0x0E00,
             target_address: 0x0001,
             new_session: Some("extended".to_string()),
@@ -1731,7 +1775,7 @@ mod send_tests {
             }),
         };
         let manager = make_manager(gateway);
-        let payload = make_test_payload(0x10, &[0x01]);
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
             .send_with_raw_payload("TestECU", payload, None, true)
@@ -1751,7 +1795,12 @@ mod send_tests {
                 // First: a message with correct SID response but wrong DID (echo bytes)
                 // ReadDataByIdentifier (0x22) response SID is 0x62
                 let wrong_did = UdsResponse::Message(ServicePayload {
-                    data: vec![0x62, 0xF2, 0x00, 0xAA],
+                    data: vec![
+                        service_ids::READ_DATA_BY_IDENTIFIER | UDS_ID_RESPONSE_BITMASK,
+                        0xF2,
+                        0x00,
+                        0xAA,
+                    ],
                     source_address: 0x0001,
                     target_address: 0x0E00,
                     new_session: None,
@@ -1760,7 +1809,12 @@ mod send_tests {
                 response_tx.try_send(Ok(Some(wrong_did))).ok();
                 // Then: the correct response with matching DID
                 let correct = UdsResponse::Message(ServicePayload {
-                    data: vec![0x62, 0xF1, 0x90, 0xBB],
+                    data: vec![
+                        service_ids::READ_DATA_BY_IDENTIFIER | UDS_ID_RESPONSE_BITMASK,
+                        0xF1,
+                        0x90,
+                        0xBB,
+                    ],
                     source_address: 0x0001,
                     target_address: 0x0E00,
                     new_session: None,
@@ -1772,7 +1826,7 @@ mod send_tests {
         };
         let manager = make_manager(gateway);
         // ReadDataByIdentifier for DID 0xF190
-        let payload = make_test_payload(0x22, &[0xF1, 0x90]);
+        let payload = make_test_payload(service_ids::READ_DATA_BY_IDENTIFIER, &[0xF1, 0x90]);
 
         let result = manager
             .send_with_raw_payload("TestECU", payload, None, true)
@@ -1781,6 +1835,14 @@ mod send_tests {
         assert!(result.is_ok());
         let msg = result.expect("should be Ok").expect("should have message");
         // Should have received the second message (correct DID)
-        assert_eq!(msg.data, vec![0x62, 0xF1, 0x90, 0xBB]);
+        assert_eq!(
+            msg.data,
+            vec![
+                service_ids::READ_DATA_BY_IDENTIFIER | UDS_ID_RESPONSE_BITMASK,
+                0xF1,
+                0x90,
+                0xBB
+            ]
+        );
     }
 }
