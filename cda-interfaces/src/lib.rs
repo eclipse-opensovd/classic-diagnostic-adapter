@@ -211,12 +211,14 @@ pub mod service_ids {
     pub const AUTHENTICATION: u8 = 0x29;
     pub const WRITE_DATA_BY_IDENTIFIER: u8 = 0x2E;
     pub const INPUT_OUTPUT_CONTROL_BY_IDENTIFIER: u8 = 0x2F;
+    pub const DYNAMICALLY_DEFINE_DATA_IDENTIFIER: u8 = 0x2C;
     pub const ROUTINE_CONTROL: u8 = 0x31;
     pub const REQUEST_DOWNLOAD: u8 = 0x34;
     pub const TRANSFER_DATA: u8 = 0x36;
     pub const REQUEST_TRANSFER_EXIT: u8 = 0x37;
     pub const TESTER_PRESENT: u8 = 0x3E;
     pub const CONTROL_DTC_SETTING: u8 = 0x85;
+    pub const RESPONSE_ON_EVENT: u8 = 0x86;
     pub const LINK_CONTROL: u8 = 0x87;
     pub const NEGATIVE_RESPONSE: u8 = 0x7F;
 }
