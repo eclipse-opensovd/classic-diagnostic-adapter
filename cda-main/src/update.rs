@@ -127,7 +127,7 @@ pub async fn add_runtime_update_routes<S, P>(
 ///
 /// # Errors
 /// Returns [`AppError::RuntimeUpdateError`] if plugin initialization fails.
-pub(crate) async fn create_default_update_plugin<SP, SL>(
+pub async fn create_default_update_plugin<SP, SL>(
     infra: CdaRuntime<SP>,
 ) -> Result<impl RuntimeFilesUpdatePlugin, AppError>
 where
