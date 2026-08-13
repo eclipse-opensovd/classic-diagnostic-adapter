@@ -14,15 +14,18 @@ import argparse
 import json
 import os
 
+MAX_FRAGMENT_LENGTH = 4_000
+
 
 def normalize(p):
     return p.lstrip("./")
 
 
-def analyze(report_path, changed_files):
-    if not os.path.exists(report_path):
-        return []
+def is_excluded(path):
+    return path.startswith((".github/", "docs/"))
 
+
+def analyze(report_path, changed_files):
     with open(report_path) as f:
         report = json.load(f)
 
@@ -38,6 +41,8 @@ def analyze(report_path, changed_files):
 
         first_name = normalize(first.get("name", ""))
         second_name = normalize(second.get("name", ""))
+        if is_excluded(first_name) or is_excluded(second_name):
+            continue
         if first_name not in changed_set and second_name not in changed_set:
             continue
 
@@ -52,7 +57,7 @@ def analyze(report_path, changed_files):
                 "lines": dup.get("lines"),
                 "tokens": dup.get("tokens"),
                 "format": dup.get("format", ""),
-                "fragment": dup.get("fragment", ""),
+                "fragment": dup.get("fragment", "")[:MAX_FRAGMENT_LENGTH],
             }
         )
 
@@ -102,26 +107,41 @@ def main():
     parser.add_argument("--outdir", default="/tmp", help="Output directory for generated files")
     args = parser.parse_args()
 
-    with open(args.changed_files) as f:
-        changed_files = [line.strip() for line in f if line.strip()]
-
-    findings = analyze(args.report, changed_files)
+    error = None
+    try:
+        with open(args.changed_files) as f:
+            changed_files = [line.strip() for line in f if line.strip()]
+        findings = analyze(args.report, changed_files)
+    except json.JSONDecodeError as exc:
+        findings = []
+        error = f"Could not parse the jscpd JSON report: {exc}"
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    body = format_comment_body(findings)
+    body = f"<!-- duplicate-code-check -->\n{error}" if error else format_comment_body(findings)
     with open(os.path.join(args.outdir, "body.md"), "w") as f:
         f.write(body)
 
-    ok = len(findings) == 0
+    ok = not error and len(findings) == 0
     with open(os.path.join(args.outdir, "check-title.txt"), "w") as f:
-        f.write("No duplicate code found" if ok else "Duplicate code found (informational)")
+        f.write(
+            "Duplicate code check could not run"
+            if error
+            else "No duplicate code found"
+            if ok
+            else "Duplicate code found (informational)"
+        )
 
     with open(os.path.join(args.outdir, "check-summary.txt"), "w") as f:
-        f.write(check_summary(findings))
+        f.write(error or check_summary(findings))
+
+    with open(os.path.join(args.outdir, "check-conclusion.txt"), "w") as f:
+        f.write("success" if ok else "neutral")
 
     msg = (
-        "No duplicate code found touching PR changed files."
+        error
+        if error
+        else "No duplicate code found touching PR changed files."
         if ok
         else (
             f"Found {len(findings)} duplicate code cluster(s) touching "
