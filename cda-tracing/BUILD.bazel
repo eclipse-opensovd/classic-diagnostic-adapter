@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+load("//bazel:rust_crate.bzl", "workspace_rust_library")
+
+workspace_rust_library(
+    name = "cda_tracing",
+    srcs = glob(["src/**/*.rs"]),
+    crate_deps = [
+        "nu-ansi-term",
+        "opentelemetry",
+        "opentelemetry-otlp",
+        "opentelemetry-semantic-conventions",
+        "opentelemetry_sdk",
+        "schemars",
+        "serde",
+        "strip-ansi-escapes",
+        "thiserror",
+        "tokio",
+        "tracing",
+        "tracing-appender",
+        "tracing-core",
+        "tracing-opentelemetry",
+        "tracing-subscriber",
+    ],
+    crate_name = "cda_tracing",
+    crate_root = "src/lib.rs",
+    rustc_env = {
+        "CARGO_PKG_NAME": "cda-tracing",
+        "CARGO_PKG_VERSION": "0.1.0",
+    },
+    visibility = [
+        "//cda-main:__pkg__",
+        "//cda-sovd:__pkg__",
+    ],
+)

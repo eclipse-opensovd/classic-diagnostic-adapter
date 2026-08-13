@@ -35,8 +35,6 @@ members = [
   "cda-storage",
   "integration-tests",
   "cda-build",
-  "comm-mbedtls/mbedtls-sys",
-  "comm-mbedtls/mbedtls-rs",
 ]
 
 [workspace.dependencies]
@@ -60,8 +58,7 @@ cda-storage = { path = "cda-storage" }
 cda-extra = { path = "cda-extra" }
 sovd-interfaces = { path = "cda-sovd-interfaces" }
 cda-build = { path = "cda-build" }
-mbedtls-sys = { path = "comm-mbedtls/mbedtls-sys" }
-mbedtls-rs = { path = "comm-mbedtls/mbedtls-rs" }
+mbedtls-rs = { git = "https://github.com/eclipse-opensovd/mbedtls-rs.git", rev = "524e3b96ccad358b73e4e3ad706d15b8778845b9" }
 
 # ---- common crates ----
 async-trait = "0.1.89"

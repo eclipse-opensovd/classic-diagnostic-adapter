@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+load("//bazel:rust_crate.bzl", "workspace_rust_library")
+
+workspace_rust_library(
+    name = "cda_plugin_security",
+    srcs = glob(["src/**/*.rs"]),
+    crate_deps = [
+        "aide",
+        "axum",
+        "axum-extra",
+        "http",
+        "jsonwebtoken",
+        "schemars",
+        "serde",
+        "serde_json",
+        "thiserror",
+        "tracing",
+    ],
+    crate_name = "cda_plugin_security",
+    crate_root = "src/lib.rs",
+    proc_macro_crate_deps = ["async-trait"],
+    visibility = [
+        "//cda-core:__pkg__",
+        "//cda-main:__pkg__",
+        "//cda-sovd:__pkg__",
+    ],
+    deps = [
+        "//cda-database:cda_database",
+        "//cda-interfaces:cda_interfaces",
+        "//cda-sovd-interfaces:sovd_interfaces",
+    ],
+)

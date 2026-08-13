@@ -28,6 +28,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  bazel:
+    name: Bazel (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+      - name: Verify mbedTLS revision consistency
+        run: python3 bazel/check_mbedtls_revision.py
+      - name: Install Bazelisk
+        uses: bazelbuild/setup-bazelisk@v3
+      - name: Build mbedTLS library
+        run: bazel build //:cda_mbedtls
+      - name: Build reference binary
+        run: bazel build //:opensovd-cda
+      - name: Query targets
+        run: bazel query //...
+      - name: Verify mbedTLS graph excludes OpenSSL
+        run: |
+          openssl_targets="$(bazel cquery 'filter("openssl", deps(//:cda_mbedtls))' --output=label)"
+          if [[ -n "${openssl_targets}" ]]; then
+            echo "::error::mbedTLS target graph contains OpenSSL targets:"
+            echo "${openssl_targets}"
+            exit 1
+          fi
+
   features:
     runs-on: ubuntu-latest
     env:
