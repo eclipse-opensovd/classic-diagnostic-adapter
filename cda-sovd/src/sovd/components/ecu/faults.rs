@@ -179,7 +179,7 @@ pub(crate) fn docs_delete(op: TransformOperation) -> TransformOperation {
         res.description("On successfull call a 204 without content will be returned.")
     })
     .with(openapi::error_bad_request)
-    .with(openapi::error_forbidden)
+    .with(openapi::error_conflict)
     .with(openapi::error_not_found)
     .id("ecu_faults_delete")
 }
@@ -415,7 +415,7 @@ pub(crate) mod id {
                 res.description("Returns 204 without content if DTC could successfully be deleted.")
             })
             .with(openapi::error_bad_request)
-            .with(openapi::error_forbidden)
+            .with(openapi::error_conflict)
             .with(openapi::error_not_found)
             .id("ecu_faults_delete_by_id")
     }
