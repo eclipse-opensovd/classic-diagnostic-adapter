@@ -677,38 +677,19 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
 ) -> Result<DiagDataTypeContainer, DiagServiceError> {
     let uds_payload = payload.data()?;
 
-    // A MinMaxLength parameter is optional only when its minimum length is zero.
-    // Treat an optional parameter as absent when its position is outside the payload.
-    // All other parameters are required. A response that omits a required parameter is too
-    // short.
-    let is_variable_length_at_boundary = matches!(
-        diag_type.type_(),
-        DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType { min_length: 0, .. })
-    ) && param_byte_pos >= uds_payload.len();
-
-    if let DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType { min_length, .. }) =
-        diag_type.type_()
-    {
-        let required_end = param_byte_pos.saturating_add(*min_length as usize);
-        if uds_payload.len() < required_end {
-            return Err(DiagServiceError::NotEnoughData {
-                expected: required_end,
-                actual: uds_payload.len(),
-            });
-        }
-    }
-
-    let (data, bit_len) = match diag_type.decode(uds_payload, param_byte_pos, param_bit_pos) {
-        Ok(result) => result,
-        Err(_) if is_variable_length_at_boundary => (vec![], 0),
-        Err(e) => return Err(e),
-    };
-
     // Only a MinMaxLength parameter with a minimum length of zero may contain no data.
     let is_optional = matches!(
         diag_type.type_(),
         DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType { min_length: 0, .. })
     );
+
+    // An optional parameter whose start is at or beyond the payload is absent.
+    let (data, bit_len) = if is_optional && param_byte_pos >= uds_payload.len() {
+        (vec![], 0)
+    } else {
+        diag_type.decode(uds_payload, param_byte_pos, param_bit_pos)?
+    };
+
     if data.is_empty() && !is_optional {
         tracing::debug!(
             "Not enough data for parameter {:?} in extract_diag_data_container, expected at least \
