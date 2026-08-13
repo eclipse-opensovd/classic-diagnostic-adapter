@@ -1039,8 +1039,6 @@ mod send_tests {
     }
 
     impl EcuGateway for SlowTeardownGateway {
-        async fn shutdown(&mut self) {}
-
         fn get_gateway_network_address(
             &self,
             _logical_address: u16,
