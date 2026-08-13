@@ -11,14 +11,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     Json,
-    http::{
-        HeaderValue, StatusCode,
-        header::{LOCATION, RETRY_AFTER},
-    },
+    http::{StatusCode, header::LOCATION},
     response::{IntoResponse, Response},
 };
 use cda_interfaces::runtime_update_api::{
@@ -31,7 +28,7 @@ use crate::VendorErrorCode;
 pub struct RuntimeUpdateRouteState<P, L> {
     pub plugin: Arc<P>,
     pub vehicle_lock_states: Arc<L>,
-    pub retry_after_seconds: u64,
+    pub retry_after: Duration,
 }
 
 impl<P, L> Clone for RuntimeUpdateRouteState<P, L> {
@@ -39,22 +36,19 @@ impl<P, L> Clone for RuntimeUpdateRouteState<P, L> {
         Self {
             plugin: Arc::clone(&self.plugin),
             vehicle_lock_states: Arc::clone(&self.vehicle_lock_states),
-            retry_after_seconds: self.retry_after_seconds,
+            retry_after: self.retry_after,
         }
     }
 }
 
 pub(crate) struct DbUpdateErrorResponse {
     error: RuntimeUpdateError,
-    retry_after_seconds: u64,
+    retry_after: Duration,
 }
 
 impl DbUpdateErrorResponse {
-    pub(crate) fn new(error: RuntimeUpdateError, retry_after_seconds: u64) -> Self {
-        Self {
-            error,
-            retry_after_seconds,
-        }
+    pub(crate) fn new(error: RuntimeUpdateError, retry_after: Duration) -> Self {
+        Self { error, retry_after }
     }
 }
 impl IntoResponse for DbUpdateErrorResponse {
@@ -64,8 +58,8 @@ impl IntoResponse for DbUpdateErrorResponse {
             |status_code: StatusCode,
              error_code: ErrorCode,
              vendor_code: Option<VendorErrorCode>,
-             retry_after_seconds: Option<u64>| {
-                let mut resp = (
+             retry_after: Option<Duration>| {
+                let resp = (
                     status_code,
                     Json(ApiErrorResponse {
                         message: self.error.to_string(),
@@ -78,14 +72,7 @@ impl IntoResponse for DbUpdateErrorResponse {
                 )
                     .into_response();
 
-                if let Some(seconds) = retry_after_seconds {
-                    resp.headers_mut().insert(
-                        RETRY_AFTER,
-                        HeaderValue::from_str(&seconds.to_string())
-                            .expect("numeric retry-after is always valid"),
-                    );
-                }
-                resp
+                crate::sovd::with_retry_after(resp, retry_after)
             };
 
         match &self.error {
@@ -107,7 +94,7 @@ impl IntoResponse for DbUpdateErrorResponse {
                 StatusCode::CONFLICT,
                 ErrorCode::VendorSpecific,
                 Some(VendorErrorCode::StorageTransactionBusy),
-                Some(self.retry_after_seconds),
+                Some(self.retry_after),
             ),
             RuntimeUpdateError::NoPendingUpdate
             | RuntimeUpdateError::NoBackup
@@ -125,14 +112,15 @@ impl IntoResponse for DbUpdateErrorResponse {
                 Some(VendorErrorCode::InvalidData),
                 None,
             ),
-            RuntimeUpdateError::StorageError(_) | RuntimeUpdateError::ReloadFailed(_) => {
-                build_api_error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    ErrorCode::SovdServerFailure,
-                    None,
-                    None,
-                )
-            }
+            RuntimeUpdateError::StorageError(_)
+            | RuntimeUpdateError::ReloadFailed(_)
+            | RuntimeUpdateError::CommunicationFailure(_)
+            | RuntimeUpdateError::ReplacementFailure(_) => build_api_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::SovdServerFailure,
+                None,
+                None,
+            ),
             RuntimeUpdateError::NoLock(_) => build_api_error_response(
                 StatusCode::FORBIDDEN,
                 ErrorCode::InsufficientAccessRights,
@@ -176,7 +164,7 @@ fn bulk_data_created_response(
             RuntimeUpdateError::StorageError(cda_interfaces::storage_api::StorageError::Other(
                 "upload completed without creating bulk-data".to_owned(),
             )),
-            0,
+            Duration::ZERO,
         )
         .into_response();
     };
@@ -190,20 +178,20 @@ fn bulk_data_created_response(
 pub(crate) async fn require_vehicle_lock(
     lock_state: &dyn LockStateProvider,
     claims: &dyn cda_plugin_security::Claims,
-    retry_after_seconds: u64,
+    retry_after: Duration,
 ) -> Result<(), Box<Response>> {
     match lock_state.vehicle_lock_owner_sub().await {
         None => Err(Box::new(
             DbUpdateErrorResponse::new(
                 RuntimeUpdateError::NoLock("Vehicle lock is missing".to_owned()),
-                retry_after_seconds,
+                retry_after,
             )
             .into_response(),
         )),
         Some(owner) if owner != claims.sub() => Err(Box::new(
             DbUpdateErrorResponse::new(
                 RuntimeUpdateError::NoLock("Vehicle lock is owned by another user".to_owned()),
-                retry_after_seconds,
+                retry_after,
             )
             .into_response(),
         )),
@@ -229,7 +217,7 @@ pub(crate) mod current {
         >,
     ) -> Response {
         route_state.plugin.list_current(&query).await.map_or_else(
-            |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
+            |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
             |list| super::bulk_data_list_response(list, query.include_schema),
         )
     }
@@ -263,7 +251,7 @@ pub(crate) mod nextupdate {
             .list_nextupdate(&query)
             .await
             .map_or_else(
-                |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
+                |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
                 |list| super::bulk_data_list_response(list, query.include_schema),
             )
     }
@@ -429,7 +417,7 @@ pub(crate) mod nextupdate {
                      application/octet-stream"
                         .to_owned(),
                 ),
-                route_state.retry_after_seconds,
+                route_state.retry_after,
             )
             .into_response(),
         }
@@ -447,7 +435,7 @@ pub(crate) mod nextupdate {
                 Err(e) => {
                     return DbUpdateErrorResponse::new(
                         RuntimeUpdateError::ValidationFailed(e.to_string()),
-                        route_state.retry_after_seconds,
+                        route_state.retry_after,
                     )
                     .into_response();
                 }
@@ -458,7 +446,7 @@ pub(crate) mod nextupdate {
         if let Err(resp) = require_vehicle_lock(
             &*route_state.vehicle_lock_states,
             *claims,
-            route_state.retry_after_seconds,
+            route_state.retry_after,
         )
         .await
         {
@@ -482,7 +470,7 @@ pub(crate) mod nextupdate {
                 Err(e) => {
                     return DbUpdateErrorResponse::new(
                         RuntimeUpdateError::ValidationFailed(e.to_string()),
-                        route_state.retry_after_seconds,
+                        route_state.retry_after,
                     )
                     .into_response();
                 }
@@ -490,7 +478,7 @@ pub(crate) mod nextupdate {
         }
 
         route_state.plugin.upload(files).await.map_or_else(
-            |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
+            |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
             |result| super::bulk_data_created_response(&host, result),
         )
     }
@@ -505,7 +493,7 @@ pub(crate) mod nextupdate {
         if let Err(resp) = require_vehicle_lock(
             &*route_state.vehicle_lock_states,
             *claims,
-            route_state.retry_after_seconds,
+            route_state.retry_after,
         )
         .await
         {
@@ -526,7 +514,7 @@ pub(crate) mod nextupdate {
                      filename=\"foo.mdd\"'"
                         .to_owned(),
                 ),
-                route_state.retry_after_seconds,
+                route_state.retry_after,
             )
             .into_response();
         };
@@ -536,7 +524,7 @@ pub(crate) mod nextupdate {
             Err(e) => {
                 return DbUpdateErrorResponse::new(
                     RuntimeUpdateError::ValidationFailed(e.to_string()),
-                    route_state.retry_after_seconds,
+                    route_state.retry_after,
                 )
                 .into_response();
             }
@@ -547,7 +535,7 @@ pub(crate) mod nextupdate {
             .upload(vec![UploadFile { filename, data }])
             .await
             .map_or_else(
-                |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
+                |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
                 |result| super::bulk_data_created_response(&host, result),
             )
     }
@@ -560,14 +548,14 @@ pub(crate) mod nextupdate {
         if let Err(resp) = require_vehicle_lock(
             &*route_state.vehicle_lock_states,
             *claims,
-            route_state.retry_after_seconds,
+            route_state.retry_after,
         )
         .await
         {
             return (*resp).into_response();
         }
         route_state.plugin.delete_nextupdate().await.map_or_else(
-            |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
+            |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
             |deleted_ids| {
                 (
                     StatusCode::OK,
@@ -601,7 +589,7 @@ pub(crate) mod nextupdate {
             if let Err(resp) = require_vehicle_lock(
                 &*route_state.vehicle_lock_states,
                 *claims,
-                route_state.retry_after_seconds,
+                route_state.retry_after,
             )
             .await
             {
@@ -612,10 +600,7 @@ pub(crate) mod nextupdate {
                 .delete_nextupdate_by_id(&id)
                 .await
                 .map_or_else(
-                    |e| {
-                        DbUpdateErrorResponse::new(e, route_state.retry_after_seconds)
-                            .into_response()
-                    },
+                    |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
                     |()| StatusCode::NO_CONTENT.into_response(),
                 )
         }
@@ -642,7 +627,7 @@ pub(crate) mod backup {
         >,
     ) -> Response {
         route_state.plugin.list_backup(&query).await.map_or_else(
-            |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
+            |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
             |list| super::bulk_data_list_response(list, query.include_schema),
         )
     }
@@ -655,14 +640,14 @@ pub(crate) mod backup {
         if let Err(resp) = require_vehicle_lock(
             &*route_state.vehicle_lock_states,
             *claims,
-            route_state.retry_after_seconds,
+            route_state.retry_after,
         )
         .await
         {
             return (*resp).into_response();
         }
         route_state.plugin.delete_backup().await.map_or_else(
-            |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
+            |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
             |deleted_ids| {
                 (
                     StatusCode::OK,
@@ -677,6 +662,12 @@ pub(crate) mod backup {
     }
 }
 
+const RUNTIMEFILES_CURRENT_ROUTE: &str =
+    "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-current";
+const RUNTIMEFILES_NEXTUPDATE_ROUTE: &str =
+    "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate";
+const RUNTIMEFILES_BACKUP_ROUTE: &str = "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-backup";
+
 pub fn routes<
     S: cda_plugin_security::SecurityPluginLoader,
     P: RuntimeFilesUpdatePlugin,
@@ -687,11 +678,11 @@ pub fn routes<
 ) -> axum::Router {
     axum::Router::new()
         .route(
-            "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-current",
+            RUNTIMEFILES_CURRENT_ROUTE,
             axum::routing::get(current::get::<P, L>),
         )
         .route(
-            "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate",
+            RUNTIMEFILES_NEXTUPDATE_ROUTE,
             axum::routing::get(nextupdate::get::<P, L>)
                 .post(nextupdate::post::<P, L>)
                 .layer(axum::extract::DefaultBodyLimit::max(upload_limit))
@@ -702,7 +693,7 @@ pub fn routes<
             axum::routing::delete(nextupdate::id::delete::<P, L>),
         )
         .route(
-            "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-backup",
+            RUNTIMEFILES_BACKUP_ROUTE,
             axum::routing::get(backup::get::<P, L>).delete(backup::delete::<P, L>),
         )
         .layer(axum::middleware::from_fn(

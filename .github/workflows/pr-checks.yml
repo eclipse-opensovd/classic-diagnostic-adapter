@@ -57,16 +57,3 @@ jobs:
           clippy-features: "all-features"
           error-on-unformatted: "false"
           reporter: ${{ env.IS_FORK == 'true' && 'github-pr-annotations' || 'github-pr-review' }}
-      - name: Format and Clippy - Nightly toolchain latest
-        id: nightly-clippy
-        continue-on-error: true
-        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@07140bdd84f20b66fd4aff58a83c5148deec388c
-        with:
-          toolchain: nightly
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          fail-on-format-error: "false"
-          fail-on-clippy-error: "true"
-          clippy-deny-warnings: "false"
-          clippy-features: "all-features"
-          error-on-unformatted: "false"
-          reporter: ${{ env.IS_FORK == 'true' && 'github-pr-annotations' || 'github-pr-review' }}

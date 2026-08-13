@@ -51,7 +51,7 @@ pub mod sovd2uds {
             }
 
             /// The discriminant of an execution's status without the inner payload.
-            #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+            #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
             #[serde(rename_all = "lowercase")]
             pub enum ExecutionStatusKind {
                 Running,
@@ -67,24 +67,24 @@ pub mod sovd2uds {
             }
 
             /// Operation-specific values reported for an execution.
-            #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+            #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
             pub struct ExecutionResponseParameters {
                 /// The operation that was requested.
                 pub mode: ExecutionMode,
                 /// Human-readable failure description, present only when `status` is `failed`.
-                #[serde(skip_serializing_if = "Option::is_none")]
+                #[serde(default, skip_serializing_if = "Option::is_none")]
                 pub reason: Option<String>,
             }
 
             /// Response body returned by `GET /executions/{id}`.
-            #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+            #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
             pub struct ExecutionResponse {
                 /// Current lifecycle state of the execution.
                 pub status: ExecutionStatusKind,
                 /// Operation-specific status details.
                 pub parameters: ExecutionResponseParameters,
                 #[schemars(skip)]
-                #[serde(skip_serializing_if = "Option::is_none")]
+                #[serde(default, skip_serializing_if = "Option::is_none")]
                 pub schema: Option<schemars::Schema>,
             }
 

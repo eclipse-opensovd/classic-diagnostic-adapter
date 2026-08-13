@@ -421,6 +421,42 @@
 # nanos = 0
 # secs = 1
 
+# Diagnostic communication initialization and post-update behavior.
+[communication]
+# The value (in seconds) for the HTTP `Retry-After` header returned when a
+# diagnostic request arrives while initialization is still pending.
+# deferred_retry_after_seconds = 30
+# Controls when gateway creation and ECU communication begins:
+# - "Always": whole-vehicle communication initializes eagerly at startup (default).
+# - "OnDemand": HTTP/SOVD starts first; the first qualifying ECU diagnostic
+#   request, or an explicit `activate()` call, triggers initialization.
+# - "Disabled": HTTP/SOVD starts first; ordinary activation is rejected and no
+#   vehicle-network activity occurs until an explicit `trigger_detection()`
+#   call authorizes it.
+# init_mode = "Always"
+# Controls transport behavior after a runtime database update:
+# - "Enabled": resume the transport the update displaced, requesting
+#   activation if it started from a deferred runtime, subject to `init_mode`
+#   (default).
+# - "Deferred": leave communication deferred - the transport stays down until
+#   triggered - even if the update displaced an enabled one.
+# post_update_mode = "Enabled"
+# Controls whether enabling communication also runs whole-vehicle variant
+# detection. Independent of `init_mode`, which decides *when* communication
+# comes up; this decides whether bringing it up also settles every ECU's
+# variant:
+# - "Always": the registered detector runs as the last stage of every
+#   activation (default).
+# - "Never": activation brings the transport and its lifecycle hooks up only.
+#   Nothing settles a variant on its own, so variant-dependent surfaces
+#   (resource listings under an ECU, request/response schemas) report not-ready
+#   until detection is triggered. For deployments whose communication plugin
+#   owns the detection decision itself.
+#
+# Neither value disables detection outright: an explicit `trigger_detection()`
+# runs the detector in both.
+# variant_detection = "Always"
+
 [components.additional_fields.x-sovd2uds-can-ecus.CAN]
 # ignore_case = true
 # values = ["yes"]

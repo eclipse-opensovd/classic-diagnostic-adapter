@@ -15,7 +15,8 @@ use std::fmt;
 
 use cda_comm_doip::DoipGatewaySetupError;
 use cda_interfaces::{
-    DiagServiceError, config::ConfigSanityError, runtime_update_api::RuntimeUpdateError,
+    DiagServiceError, communication_control::CommunicationOperationFailure,
+    config::ConfigSanityError, runtime_update_api::RuntimeUpdateError,
 };
 use cda_tracing::TracingSetupError;
 
@@ -48,6 +49,8 @@ impl From<DiagServiceError> for AppError {
     fn from(value: DiagServiceError) -> Self {
         match value {
             DiagServiceError::RequestNotSupported(_)
+            | DiagServiceError::CommunicationDisabled(_)
+            | DiagServiceError::CommunicationNotReady { .. }
             | DiagServiceError::BadPayload(_)
             | DiagServiceError::ConnectionClosed(_)
             | DiagServiceError::UnexpectedResponse(_)
@@ -155,6 +158,29 @@ impl From<ConfigSanityError> for AppError {
 impl From<RuntimeUpdateError> for AppError {
     fn from(value: RuntimeUpdateError) -> Self {
         AppError::InitializationFailed(value.to_string())
+    }
+}
+
+impl From<CommunicationOperationFailure> for AppError {
+    fn from(value: CommunicationOperationFailure) -> Self {
+        match value {
+            CommunicationOperationFailure::TransportFailure { .. }
+            | CommunicationOperationFailure::InitializerFailure { .. }
+            | CommunicationOperationFailure::InitializerCleanupFailure { .. }
+            | CommunicationOperationFailure::DetectionFailure { .. }
+            | CommunicationOperationFailure::DetectionCleanupFailure { .. } => {
+                Self::InitializationFailed(value.to_string())
+            }
+            CommunicationOperationFailure::PermissionFailure { .. }
+            | CommunicationOperationFailure::TransitionFailure { .. }
+            | CommunicationOperationFailure::DisableLeaseHeld { .. }
+            | CommunicationOperationFailure::GuardsHeld { .. }
+            | CommunicationOperationFailure::ShuttingDown { .. }
+            | CommunicationOperationFailure::WorkerUnavailable { .. }
+            | CommunicationOperationFailure::ModeDisabled { .. } => {
+                Self::RuntimeError(value.to_string())
+            }
+        }
     }
 }
 

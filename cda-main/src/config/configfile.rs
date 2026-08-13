@@ -22,13 +22,18 @@
 pub use cda_comm_can::config::{CanConfig, CanEcuMapping, TransportOverride};
 pub use cda_comm_doip::config::DoipConfig;
 pub use cda_database::DatabaseConfig;
-pub use cda_interfaces::TransportType;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap,
     config::{ConfigSanity, ConfigSanityError},
     datatypes::{
         ComParams, ComponentsConfig, FaultConfig, FlatbBufConfig, SdBoolMappings,
         SdMappingsTruthyValue,
+    },
+};
+pub use cda_interfaces::{
+    TransportType,
+    communication_control::{
+        CommunicationInitMode, CommunicationSettings, PostUpdateCommunicationMode,
     },
 };
 pub use cda_plugin_runtime_update::config::RuntimeUpdateConfig;
@@ -100,6 +105,8 @@ pub struct Configuration {
     pub ecu: HashMap<String, EcuConfig>,
     /// Configuration for update plugin, i.e. storage paths
     pub runtime_update_config: RuntimeUpdateConfig,
+    /// Diagnostic communication initialization and post-update behavior.
+    pub communication: CommunicationSettings,
     /// Strict-mode validation flags.
     pub strict: StrictConfig,
 }
@@ -182,6 +189,7 @@ impl Default for Configuration {
             faults: FaultConfig::default(),
             ecu: HashMap::default(),
             runtime_update_config: RuntimeUpdateConfig::default(),
+            communication: CommunicationSettings::default(),
             strict: StrictConfig::default(),
         }
     }

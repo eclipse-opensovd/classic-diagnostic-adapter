@@ -42,6 +42,7 @@ COPY cda-transport-router/Cargo.toml ./cda-transport-router/Cargo.toml
 COPY cda-database/Cargo.toml ./cda-database/Cargo.toml
 COPY cda-plugin-security/Cargo.toml ./cda-plugin-security/Cargo.toml
 COPY cda-plugin-runtime-update/Cargo.toml ./cda-plugin-runtime-update/Cargo.toml
+COPY cda-plugin-communication-management/Cargo.toml ./cda-plugin-communication-management/Cargo.toml
 COPY cda-sovd/Cargo.toml ./cda-sovd/Cargo.toml
 COPY cda-tracing/Cargo.toml ./cda-tracing/Cargo.toml
 COPY cda-sovd-interfaces/Cargo.toml ./cda-sovd-interfaces/Cargo.toml
@@ -106,6 +107,7 @@ COPY cda-transport-router ./cda-transport-router
 COPY cda-database ./cda-database
 COPY cda-plugin-security ./cda-plugin-security
 COPY cda-plugin-runtime-update ./cda-plugin-runtime-update
+COPY cda-plugin-communication-management ./cda-plugin-communication-management
 COPY cda-sovd ./cda-sovd
 COPY cda-tracing ./cda-tracing
 COPY cda-sovd-interfaces ./cda-sovd-interfaces

@@ -20,17 +20,17 @@ pub(crate) mod runtimefilesupdate {
         response::IntoResponse,
     };
     use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
+    use cda_plugin_communication_management::http_protection::registry::{
+        HttpMethod, HttpRouteMatcher,
+    };
     use cda_plugin_security::Secured;
     use opensovd_axum_extra::ExtractHost;
     use sovd_interfaces::apps::sovd2uds::operations::runtimefilesupdate::{
         ExecutionCreatedResponse, ExecutionListResponse, ExecutionRequest,
     };
 
-    use crate::sovd::{
-        apps::sovd2uds::bulk_data::runtimefiles::{
-            DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock,
-        },
-        update_guard::ExemptRoute,
+    use crate::sovd::apps::sovd2uds::bulk_data::runtimefiles::{
+        DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock,
     };
 
     const EXECUTIONS_ROUTE: &str =
@@ -61,7 +61,7 @@ pub(crate) mod runtimefilesupdate {
         if let Err(resp) = require_vehicle_lock(
             &*route_state.vehicle_lock_states,
             *claims,
-            route_state.retry_after_seconds,
+            route_state.retry_after,
         )
         .await
         {
@@ -73,7 +73,7 @@ pub(crate) mod runtimefilesupdate {
             .start_execution(body.parameters.mode)
             .await
             .map_or_else(
-                |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
+                |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
                 |id| {
                     let location = format!("http://{host}{EXECUTIONS_ROUTE}/{id}");
                     (
@@ -141,11 +141,27 @@ pub(crate) mod runtimefilesupdate {
             .with_state(state)
     }
 
-    /// Returns the [`ExemptRoute`]s that must remain accessible during a database update.
-    pub fn update_exempt_routes() -> Vec<ExemptRoute> {
-        vec![ExemptRoute {
-            prefix: EXECUTIONS_ROUTE.to_string(),
-            methods: vec![http::Method::GET],
-        }]
+    /// Returns the [`HttpRouteMatcher`]s that must remain accessible while an update
+    /// execution owns the transport disable lease.
+    pub fn routes_accessible_during_update() -> Vec<HttpRouteMatcher> {
+        vec![
+            HttpRouteMatcher::new("/health", vec![HttpMethod::GET]),
+            HttpRouteMatcher::new("/vehicle/v15/data/version", vec![HttpMethod::GET]),
+            HttpRouteMatcher::new(
+                "/vehicle/v15/authorize",
+                vec![HttpMethod::GET, HttpMethod::POST],
+            ),
+            // Allow creating, listing, and extending locks, prevent deletion of locks.
+            // For example, during a flash procedure we do not allow clients to drop their locks this
+            // way, but make sure they can extend them.
+            HttpRouteMatcher::new(
+                "/vehicle/v15/locks",
+                vec![HttpMethod::GET, HttpMethod::POST, HttpMethod::PUT],
+            ),
+            HttpRouteMatcher {
+                prefix: EXECUTIONS_ROUTE.to_string(),
+                methods: vec![HttpMethod::GET],
+            },
+        ]
     }
 }

@@ -29,8 +29,12 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use cda_interfaces::{
     CanComParamProvider, CanId, DiagServiceError, EcuAddresses, FunctionalTransport, HashMap,
-    NetworkTopology, PhysicalTransport, RouteStatus, ServicePayload, TransmissionParameters,
-    TransportProbe, TransportResponse, dlt_ctx, pending_nrc_from_raw, uds_response_from_raw,
+    NetworkTopology, PhysicalTransport, RouteStatus, ServicePayload, Shutdown,
+    TransmissionParameters, TransportProbe, TransportResponse,
+    communication_control::{
+        GatewayLifecycle, TransportControl, TransportState, error::CommControlError,
+    },
+    dlt_ctx, pending_nrc_from_raw, uds_response_from_raw,
 };
 use tokio::sync::{RwLock, mpsc};
 
@@ -76,14 +80,21 @@ pub struct CanDiagGateway {
     probe_retry_delay: Duration,
     /// Ordered list of discovery probes to try per ECU.
     probe_sequence: Arc<Vec<ProbeRequest>>,
-    /// Keep-alive broadcast handle; `None` when disabled via
-    /// `keepalive_interval_ms = 0`. Stopped in [`EcuGateway::shutdown`];
-    /// dropping the last clone aborts the task as a fallback.
-    keepalive_handle: Option<Arc<BackgroundTask>>,
-    /// Rediscovery task handle; empty only in unit-test instances. Set once
-    /// right after construction (the task needs a gateway clone, so it
-    /// cannot be spawned before the struct exists).
-    rediscovery_handle: Arc<std::sync::OnceLock<BackgroundTask>>,
+    /// Functional CAN ID used when restarting the optional keepalive task.
+    functional_id: CanId,
+    /// Configured keepalive interval; zero disables keepalive.
+    keepalive_interval: Duration,
+    /// Notifies variant detection after discovery and rediscovery.
+    variant_detection: mpsc::Sender<Vec<String>>,
+    /// Shared restartable lifecycle state and retained task configuration.
+    lifecycle: Arc<GatewayLifecycle<CanGatewayOperation>>,
+}
+
+/// Background tasks owned by the current enabled lifecycle.
+#[derive(Default)]
+struct CanGatewayOperation {
+    keepalive: Option<BackgroundTask>,
+    rediscovery: Option<BackgroundTask>,
 }
 
 impl CanDiagGateway {
@@ -211,29 +222,6 @@ impl CanDiagGateway {
             return Err(CanGatewaySetupError::NoEcuMappings);
         }
 
-        // Fail fast when the CAN interface itself is unusable (interface
-        // missing, vcan module not loaded, socketcand unreachable). Opening a
-        // socket for a real connection exercises the exact same path every
-        // later request uses.
-        if let Some(conn) = connections.values().next() {
-            conn.verify_socket_openable().map_err(|e| {
-                CanGatewaySetupError::InterfaceOpenFailed(config.interface.clone(), e.to_string())
-            })?;
-        }
-
-        // Keeps ECUs awake while CDA runs; disabled (= 0) for resident
-        // deployments, see CanConfig::keepalive_interval_ms.
-        let keepalive_handle = if config.keepalive_interval_ms == 0 {
-            tracing::info!("Functional broadcast keep-alive disabled by config");
-            None
-        } else {
-            Some(Arc::new(keepalive::start_keepalive_broadcast(
-                config.interface.clone(),
-                functional_id,
-                Duration::from_millis(config.keepalive_interval_ms),
-            )))
-        };
-
         let gateway = Self {
             interface: config.interface.clone(),
             connections: Arc::new(connections),
@@ -244,33 +232,11 @@ impl CanDiagGateway {
             probe_retries: config.probe_retries,
             probe_retry_delay: Duration::from_millis(config.probe_retry_delay_ms),
             probe_sequence: Arc::new(probe_sequence),
-            keepalive_handle,
-            rediscovery_handle: Arc::new(std::sync::OnceLock::new()),
+            functional_id,
+            keepalive_interval: Duration::from_millis(config.keepalive_interval_ms),
+            variant_detection,
+            lifecycle: Arc::new(GatewayLifecycle::new(TransportState::Disabled)),
         };
-
-        // Perform initial discovery
-        let discovered = gateway.discover_ecus().await;
-        if discovered.is_empty() {
-            tracing::info!("No ECUs discovered on CAN bus during initial probe");
-        } else {
-            tracing::info!(
-                discovered_count = discovered.len(),
-                ecus = ?discovered,
-                "Initial CAN ECU discovery complete"
-            );
-            // Send discovered ECUs to trigger variant detection
-            if let Err(e) = variant_detection.send(discovered).await {
-                tracing::warn!(
-                    error = %e,
-                    "Failed to send variant detection notification"
-                );
-            }
-        }
-
-        // Start after the initial sweep so the two never probe concurrently.
-        let _ = gateway
-            .rediscovery_handle
-            .set(gateway.start_rediscovery(variant_detection));
 
         Ok(gateway)
     }
@@ -756,18 +722,120 @@ impl TransportProbe for CanDiagGateway {
 }
 
 #[async_trait]
-impl cda_interfaces::Shutdown for CanDiagGateway {
+impl Shutdown for CanDiagGateway {
     async fn shutdown(&self) {
+        if let Err(error) = self.disable().await {
+            tracing::error!(%error, "Failed to disable CAN communication during shutdown");
+        }
+    }
+}
+
+#[async_trait]
+impl TransportControl for CanDiagGateway {
+    async fn enable(&self) -> Result<(), CommControlError> {
+        let mut operation = self.lifecycle.operation.lock().await;
+        if self.lifecycle.coordinator.active().await {
+            return Ok(());
+        }
+
+        self.lifecycle
+            .coordinator
+            .transition(TransportState::Enabling)
+            .await;
+
+        let socket_check = self
+            .connections
+            .values()
+            .next()
+            .ok_or_else(|| {
+                CommControlError::InitFailed(format!(
+                    "No ECU connections configured for CAN interface {}",
+                    self.interface
+                ))
+            })
+            .and_then(|connection| {
+                connection.verify_socket_openable().map_err(|error| {
+                    CommControlError::InitFailed(format!(
+                        "Failed to open CAN interface {}: {error}",
+                        self.interface
+                    ))
+                })
+            });
+
+        if let Err(error) = socket_check {
+            self.lifecycle
+                .coordinator
+                .transition(TransportState::Failed)
+                .await;
+            return Err(error);
+        }
+
+        let discovered = self.discover_ecus().await;
+        if discovered.is_empty() {
+            tracing::info!("No ECUs discovered on CAN bus during probe");
+        } else {
+            tracing::info!(
+                discovered_count = discovered.len(),
+                ecus = ?discovered,
+                "Initial CAN ECU discovery complete"
+            );
+        }
+
+        if !discovered.is_empty()
+            && let Err(error) = self.variant_detection.send(discovered).await
+        {
+            self.lifecycle
+                .coordinator
+                .transition(TransportState::Failed)
+                .await;
+            return Err(CommControlError::InitFailed(format!(
+                "Failed to send discovered ECUs to variant detection: {error}"
+            )));
+        }
+
+        if !self.keepalive_interval.is_zero() {
+            operation.keepalive = Some(keepalive::start_keepalive_broadcast(
+                self.interface.clone(),
+                self.functional_id,
+                self.keepalive_interval,
+            ));
+        }
+
+        operation.rediscovery = Some(self.start_rediscovery(self.variant_detection.clone()));
+
+        self.lifecycle
+            .coordinator
+            .transition(TransportState::Enabled)
+            .await;
+        Ok(())
+    }
+
+    async fn disable(&self) -> Result<(), CommControlError> {
+        let mut operation = self.lifecycle.operation.lock().await;
+        self.lifecycle
+            .coordinator
+            .transition(TransportState::Disabling)
+            .await;
         // CAN uses per-transaction ISO-TP sockets (no long-lived connection
         // tasks); only the broadcast keep-alive and the rediscovery loop run
         // in the background. Rediscovery first: it holds a gateway clone, so
         // awaiting it here also breaks that reference cycle.
-        if let Some(rediscovery) = self.rediscovery_handle.get() {
+        if let Some(rediscovery) = operation.rediscovery.take() {
             rediscovery.shutdown().await;
         }
-        if let Some(ref keepalive) = self.keepalive_handle {
+        if let Some(keepalive) = operation.keepalive.take() {
             keepalive.shutdown().await;
         }
+        self.discovered_ecus.write().await.clear();
+        self.lifecycle
+            .coordinator
+            .transition(TransportState::Disabled)
+            .await;
+        Ok(())
+    }
+
+    async fn state(&self) -> TransportState {
+        self.lifecycle.coordinator.state().await
     }
 }
 
@@ -783,8 +851,10 @@ impl Clone for CanDiagGateway {
             probe_retries: self.probe_retries,
             probe_retry_delay: self.probe_retry_delay,
             probe_sequence: Arc::clone(&self.probe_sequence),
-            keepalive_handle: self.keepalive_handle.clone(),
-            rediscovery_handle: Arc::clone(&self.rediscovery_handle),
+            functional_id: self.functional_id,
+            keepalive_interval: self.keepalive_interval,
+            variant_detection: self.variant_detection.clone(),
+            lifecycle: Arc::clone(&self.lifecycle),
         }
     }
 }
@@ -819,8 +889,10 @@ impl CanDiagGateway {
             probe_retries: 0,
             probe_retry_delay: Duration::from_millis(10),
             probe_sequence: Arc::new(vec![ProbeRequest::tester_present()]),
-            rediscovery_handle: Arc::new(std::sync::OnceLock::new()),
-            keepalive_handle: None,
+            functional_id: CanId::try_from(0x7DF).expect("valid test CAN ID"),
+            keepalive_interval: Duration::ZERO,
+            variant_detection: mpsc::channel(1).0,
+            lifecycle: Arc::new(GatewayLifecycle::new(TransportState::Enabled)),
         }
     }
 }
