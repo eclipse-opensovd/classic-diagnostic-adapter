@@ -219,8 +219,8 @@ pub async fn load_databases<S: SecurityPlugin>(
 }
 
 /// Returns paths to MDD files, preferring files found in the CDA storage at `storage_dir`.
-/// Falls back to the configured `database_path` directory if storage is unavailable or empty.
-pub async fn resolve_mdd_paths(storage_dir: &str, database_path: &str) -> Vec<PathBuf> {
+/// Falls back to the configured `database_dir` directory if storage is unavailable or empty.
+pub async fn resolve_mdd_paths(storage_dir: &str, database_dir: &str) -> Vec<PathBuf> {
     let storage_paths = load_mdd_paths_from_storage(storage_dir).await;
     if let Some(storage_paths) = storage_paths
         && !storage_paths.is_empty()
@@ -228,15 +228,15 @@ pub async fn resolve_mdd_paths(storage_dir: &str, database_path: &str) -> Vec<Pa
         tracing::info!(
             count = storage_paths.len(),
             storage_dir,
-            "Using MDD files from CDA storage (overrides configured database path)"
+            "Using MDD files from CDA storage (overrides configured database dir)"
         );
         storage_paths
     } else {
         tracing::info!(
-            configured_path = %database_path,
-            "No MDD files found in storage, falling back to configured database path"
+            configured_dir = %database_dir,
+            "No MDD files found in storage, falling back to configured database dir"
         );
-        match std::fs::read_dir(database_path) {
+        match std::fs::read_dir(database_dir) {
             Ok(files) => get_mdd_files_and_size(files)
                 .into_iter()
                 .map(|(p, _)| p)
@@ -293,20 +293,23 @@ async fn load_mdd_paths_from_storage(storage_dir: &str) -> Option<Vec<PathBuf>> 
     )
 }
 
-/// Seeds the `DiagnosticDatabase` storage collection from `database_path` when the collection
+/// Seeds the `DiagnosticDatabase` storage collection from `database_dir` when the collection
 /// is empty. This copies all `.mdd` files from the filesystem into storage so that the runtime
 /// update plugin has a populated baseline to work with.
-pub async fn seed_storage_from_database_path(storage_dir: &str, database_path: &str) {
-    let mdd_files = match std::fs::read_dir(database_path) {
+pub async fn seed_storage_if_empty_from_database_dir(storage_dir: &str, database_dir: &str) {
+    let mdd_files = match std::fs::read_dir(database_dir) {
         Ok(entries) => get_mdd_files_and_size(entries),
         Err(e) => {
-            tracing::warn!(error = %e, database_path, "Cannot read database path for seeding");
+            tracing::warn!(error = %e, database_dir, "Cannot read database directory for seeding");
             return;
         }
     };
 
     if mdd_files.is_empty() {
-        tracing::debug!(database_path, "No MDD files found in database path to seed");
+        tracing::debug!(
+            database_dir,
+            "No MDD files found in database directory to seed"
+        );
         return;
     }
 
@@ -337,7 +340,7 @@ pub async fn seed_storage_from_database_path(storage_dir: &str, database_path: &
         }
     };
 
-    if let Some(count) = cda_storage::storage_seed::seed_storage_collection(
+    if let Some(count) = cda_storage::storage_seed::seed_storage_collection_if_empty(
         &storage,
         &CollectionName::DiagnosticDatabase,
         entries,
@@ -346,9 +349,9 @@ pub async fn seed_storage_from_database_path(storage_dir: &str, database_path: &
     {
         tracing::info!(
             count,
-            database_path,
+            database_dir,
             storage_dir,
-            "Seeded DiagnosticDatabase collection from database path"
+            "Seeded DiagnosticDatabase collection from database directory"
         );
     }
 }
@@ -697,7 +700,7 @@ mod tests {
     use cda_interfaces::storage_api::{Collection as _, CollectionName, DirectFileAccess, Storage};
     use cda_storage::LocalStorage;
 
-    use super::{resolve_mdd_paths, seed_storage_from_database_path};
+    use super::{resolve_mdd_paths, seed_storage_if_empty_from_database_dir};
 
     /// Helper: create a temp dir with `.mdd` files containing given data.
     fn create_database_dir(files: &[(&str, &[u8])]) -> tempfile::TempDir {
@@ -716,7 +719,7 @@ mod tests {
             ("ecu_b.mdd", b"MDD_CONTENT_B"),
         ]);
 
-        seed_storage_from_database_path(
+        seed_storage_if_empty_from_database_dir(
             storage_dir.path().to_str().unwrap(),
             db_dir.path().to_str().unwrap(),
         )
@@ -753,7 +756,7 @@ mod tests {
         tx.commit().await.unwrap();
         drop(storage);
 
-        seed_storage_from_database_path(
+        seed_storage_if_empty_from_database_dir(
             storage_dir.path().to_str().unwrap(),
             db_dir.path().to_str().unwrap(),
         )
@@ -778,7 +781,7 @@ mod tests {
             ("data.bin", b"BIN"),
         ]);
 
-        seed_storage_from_database_path(
+        seed_storage_if_empty_from_database_dir(
             storage_dir.path().to_str().unwrap(),
             db_dir.path().to_str().unwrap(),
         )
@@ -798,7 +801,7 @@ mod tests {
         let storage_dir = tempfile::tempdir().expect("storage dir");
         let db_dir = tempfile::tempdir().expect("empty db dir");
 
-        seed_storage_from_database_path(
+        seed_storage_if_empty_from_database_dir(
             storage_dir.path().to_str().unwrap(),
             db_dir.path().to_str().unwrap(),
         )
@@ -813,11 +816,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seed_handles_nonexistent_database_path() {
+    async fn seed_handles_nonexistent_database_dir() {
         let storage_dir = tempfile::tempdir().expect("storage dir");
 
         // Should not panic, just return early.
-        seed_storage_from_database_path(
+        seed_storage_if_empty_from_database_dir(
             storage_dir.path().to_str().unwrap(),
             "/tmp/nonexistent_cda_test_path_12345",
         )
@@ -836,7 +839,7 @@ mod tests {
         let storage_dir = tempfile::tempdir().expect("storage dir");
         let db_dir = create_database_dir(&[("ECU_UPPER.mdd", b"UPPER_DATA")]);
 
-        seed_storage_from_database_path(
+        seed_storage_if_empty_from_database_dir(
             storage_dir.path().to_str().unwrap(),
             db_dir.path().to_str().unwrap(),
         )
@@ -857,7 +860,7 @@ mod tests {
         let original_data = b"MDD_BINARY_PAYLOAD_1234567890";
         let db_dir = create_database_dir(&[("FLXC1000.mdd", original_data)]);
 
-        seed_storage_from_database_path(
+        seed_storage_if_empty_from_database_dir(
             storage_dir.path().to_str().unwrap(),
             db_dir.path().to_str().unwrap(),
         )
@@ -885,7 +888,7 @@ mod tests {
         let storage_str = storage_dir.path().to_str().unwrap();
         let db_str = db_dir.path().to_str().unwrap();
 
-        seed_storage_from_database_path(storage_str, db_str).await;
+        seed_storage_if_empty_from_database_dir(storage_str, db_str).await;
         let paths = resolve_mdd_paths(storage_str, db_str).await;
 
         assert_eq!(paths.len(), 2, "Expected 2 MDD paths from storage");
