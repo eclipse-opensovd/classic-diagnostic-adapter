@@ -17,7 +17,7 @@ use cda_interfaces::storage_api::{Collection, CollectionName, Storage};
 /// empty.  No-op if the collection is already populated or the iterator yields no items.
 ///
 /// Returns the number of entries written, or `None` when seeding was skipped.
-pub async fn seed_storage_collection(
+pub async fn seed_storage_collection_if_empty(
     storage: &impl Storage,
     collection_name: &CollectionName,
     entries: impl IntoIterator<Item = (String, Vec<u8>)>,

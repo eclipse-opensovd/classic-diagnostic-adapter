@@ -40,7 +40,7 @@ It handles the communication to the ECUs, by using the communication parameters 
 2. Start the CDA, pointing it at your databases directory and DoIP interface:
 
    ```shell
-   cargo run --release -- --databases-path ./databases --tester-address <YOUR_IP>
+   cargo run --release -- --seed-databases-dir ./databases --tester-address <YOUR_IP>
    ```
 
 3. Wait a few seconds for DoIP discovery, then confirm the CDA found your ECUs:
@@ -55,14 +55,14 @@ It handles the communication to the ECUs, by using the communication parameters 
 
 To run the CDA you will need at least one `MDD` file. Check out [eclipse-opensovd/odx-converter](https://github.com/eclipse-opensovd/odx-converter) on how to get started with creating `MDD`(s) from ODX.
 
-Once you have the `MDD`(s) you can update the config in `opensovd-cda.toml` to point `databases_path` to the directory containing the files. Alternatively you can pass the config via arg `--databases-path MY_PATH`.
+Once you have the `MDD`(s) you can update the config in `opensovd-cda.toml` to point `database.seed_dir` to the directory containing the files. Alternatively you can pass the config via arg `--seed-databases-dir MY_PATH`.
 
 ### running
 
 Ensure that the config (`opensovd-cda.toml`) fits your setup:
 
 - tester_address is set to the IP of your DoIP interface.
-- databases_path points to a valid path containing one or more `.mdd` files.
+- database.seed_dir points to a valid path containing one or more `.mdd` files.
 
 Run the cda via `cargo run --release` or after building from the target directory `./opensovd-cda`
 
@@ -79,7 +79,7 @@ Use `--protocol-name` to select the DoIP protocol variant used for com-param loo
 
 ```shell
 # Offboard
-cargo run --release -- --databases-path ./databases --tester-address <YOUR_IP> --protocol-name UDS_Ethernet_DoIP
+cargo run --release -- --seed-databases-dir ./databases --tester-address <YOUR_IP> --protocol-name UDS_Ethernet_DoIP
 ```
 
 ## ODX to SOVD path mapping

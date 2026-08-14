@@ -335,7 +335,7 @@ fn base_test_config(
         },
         can: None,
         database: DatabaseConfig {
-            path: mdd_file_path()?,
+            seed_dir: mdd_file_path()?,
             naming_convention: DatabaseNamingConvention::default(),
             exit_no_database_loaded: true,
             fallback_to_base_variant: true,
@@ -775,7 +775,7 @@ fn write_config_toml(
     config.functional_description.description_database = "functional_groups".into();
 
     "0.0.0.0".clone_into(&mut config.server.address);
-    "/app/odx".clone_into(&mut config.database.path);
+    "/app/odx".clone_into(&mut config.database.seed_dir);
 
     // In docker the socketcand daemon runs in its own service, reachable by
     // service name over the bridge network (not the host loopback used locally).
