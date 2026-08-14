@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use cda_interfaces::{
-    runtime_update_api::{RuntimeReloaderPlugin, RuntimeUpdateError},
+    runtime_update_api::{RuntimeFileInspector, RuntimeReloaderPlugin, RuntimeUpdateError},
     storage_api::{
         Collection, CollectionName, DirectFileAccess, Storage, StorageError, Transaction,
     },
@@ -51,6 +51,7 @@ pub(crate) async fn reload_database_if_present<S: Storage, R: RuntimeReloaderPlu
     storage: &S,
     reload_handler: &R,
     decompress: bool,
+    inspector: &dyn RuntimeFileInspector,
 ) -> Result<(), RuntimeUpdateError> {
     let db_col = storage
         .get_or_create_collection(&CollectionName::DiagnosticDatabase)
@@ -75,18 +76,13 @@ pub(crate) async fn reload_database_if_present<S: Storage, R: RuntimeReloaderPlu
 
     if decompress {
         for mdd_path in &mdd_paths {
-            if let Some(path_str) = mdd_path.to_str() {
-                if let Err(e) = cda_database::update_mdd_uncompressed(path_str) {
-                    tracing::warn!(
-                        mdd_file = %mdd_path.display(),
-                        error = %e,
-                        "Failed to decompress MDD file after apply, continuing"
-                    );
-                }
-            } else {
-                tracing::error!(
+            // Non-fatal: the applied database is valid either way, just not
+            // rewritten uncompressed.
+            if let Err(e) = inspector.decompress_in_place(mdd_path) {
+                tracing::warn!(
                     mdd_file = %mdd_path.display(),
-                    "MDD path is not valid UTF-8, skipping decompression",
+                    error = %e,
+                    "Failed to decompress database file after apply, continuing"
                 );
             }
         }
@@ -192,9 +188,14 @@ mod tests {
         .await;
 
         let handler = RecordingReloadHandler::new();
-        reload_database_if_present(&storage, &handler, false)
-            .await
-            .unwrap();
+        reload_database_if_present(
+            &storage,
+            &handler,
+            false,
+            &*crate::test_utils::test_inspector(),
+        )
+        .await
+        .unwrap();
 
         let calls = handler.reload_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -210,9 +211,14 @@ mod tests {
             .unwrap();
 
         let handler = RecordingReloadHandler::new();
-        reload_database_if_present(&storage, &handler, false)
-            .await
-            .unwrap();
+        reload_database_if_present(
+            &storage,
+            &handler,
+            false,
+            &*crate::test_utils::test_inspector(),
+        )
+        .await
+        .unwrap();
 
         let calls = handler.reload_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -224,7 +230,13 @@ mod tests {
         let (storage, _dir) = make_storage();
 
         let handler = RecordingReloadHandler::new();
-        let result = reload_database_if_present(&storage, &handler, false).await;
+        let result = reload_database_if_present(
+            &storage,
+            &handler,
+            false,
+            &*crate::test_utils::test_inspector(),
+        )
+        .await;
 
         assert!(result.is_ok());
         let calls = handler.reload_calls.lock().unwrap();

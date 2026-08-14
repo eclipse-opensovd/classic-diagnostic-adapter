@@ -114,6 +114,47 @@ impl<C: Collection + DirectFileAccess> Default for UpdateCollections<C> {
     }
 }
 
+/// Format-specific inspection of runtime database files.
+///
+/// The runtime-update plugin stages, swaps and rolls back files generically. Every
+/// operation that needs to understand their *content* goes through this trait, so
+/// the plugin depends on no concrete database format and an OEM can supply its own.
+///
+/// Methods are synchronous: implementations are expected to mmap or read the file
+/// directly rather than perform network I/O.
+pub trait RuntimeFileInspector: Send + Sync + 'static {
+    /// Verifies that `path` holds a well-formed runtime database.
+    ///
+    /// Called before a staged file is promoted to current.
+    ///
+    /// # Errors
+    /// Returns [`VerificationError`] when the file is malformed or unreadable.
+    fn validate(&self, path: &std::path::Path) -> Result<(), VerificationError>;
+
+    /// Returns the short name of the ECU this file describes.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeUpdateError`] when the file cannot be read or carries no name.
+    fn ecu_name(&self, path: &std::path::Path) -> Result<String, RuntimeUpdateError>;
+
+    /// Returns the file's revision, or `None` when it carries none or cannot be read.
+    ///
+    /// Surfaced on bulk-data listings as `x-sovd2uds-revision`; a missing revision is
+    /// reported as absent rather than as an error.
+    fn revision(&self, path: &std::path::Path) -> Option<String>;
+
+    /// Rewrites the file uncompressed in place.
+    ///
+    /// Called after an apply when the deployment trades disk for lower runtime
+    /// memory. Implementations for formats without compression should succeed
+    /// without doing anything.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeUpdateError`] when rewriting fails. Callers treat this as
+    /// non-fatal: the applied database is already valid, just not decompressed.
+    fn decompress_in_place(&self, path: &std::path::Path) -> Result<(), RuntimeUpdateError>;
+}
+
 /// Provides read-only access to vehicle lock state for security validation.
 ///
 /// Implemented by the SOVD server to expose lock information to plugins

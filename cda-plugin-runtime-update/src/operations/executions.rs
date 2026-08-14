@@ -24,8 +24,9 @@ use cda_interfaces::{
         OwnedHttpProtection,
     },
     runtime_update_api::{
-        ExecutionMode, ExecutionStatus, LockStateProvider, RuntimeReloaderPlugin,
-        RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateCollections, UpdateExecution,
+        ExecutionMode, ExecutionStatus, LockStateProvider, RuntimeFileInspector,
+        RuntimeReloaderPlugin, RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateCollections,
+        UpdateExecution,
     },
     storage_api::{CollectionName, Storage},
 };
@@ -42,6 +43,7 @@ pub(crate) struct ExecutionParams<'a, S, R: ?Sized, T, L> {
     pub(crate) update_retry_after: Duration,
     pub(crate) post_update_mode: PostUpdateCommunicationMode,
     pub(crate) mdd_decompress: bool,
+    pub(crate) inspector: &'a Arc<dyn RuntimeFileInspector>,
     pub(crate) lock_state_provider: &'a L,
 }
 
@@ -82,6 +84,7 @@ where
         Arc::clone(params.reload_handler),
         Arc::clone(params.executions),
         params.mdd_decompress,
+        Arc::clone(params.inspector),
         params.post_update_mode.clone(),
         Arc::clone(params.communication_access),
         disable_lease,
@@ -245,6 +248,7 @@ fn spawn_execution<S, R>(
     reload_handler: Arc<R>,
     executions: Arc<RwLock<HashMap<String, UpdateExecution>>>,
     mdd_decompress: bool,
+    inspector: Arc<dyn RuntimeFileInspector>,
     post_update_mode: PostUpdateCommunicationMode,
     communication_access: Arc<dyn CommunicationAccess>,
     disable_lease: Box<dyn DisableGuard>,
@@ -257,7 +261,14 @@ fn spawn_execution<S, R>(
     let supervised_execution_id = execution_id.clone();
 
     let handle = cda_interfaces::spawn_named!(&format!("runtime-update-{mode:?}"), async move {
-        let result = execute_operation(mode, &*storage, &*reload_handler, mdd_decompress).await;
+        let result = execute_operation(
+            mode,
+            &*storage,
+            &*reload_handler,
+            mdd_decompress,
+            &*inspector,
+        )
+        .await;
 
         if let Err(error) = &result {
             tracing::error!(
@@ -360,6 +371,7 @@ async fn execute_operation<S, R>(
     storage: &S,
     reload_handler: &R,
     mdd_decompress: bool,
+    inspector: &dyn RuntimeFileInspector,
 ) -> Result<(), RuntimeUpdateError>
 where
     S: Storage + Send + Sync + 'static,
@@ -367,10 +379,16 @@ where
 {
     match mode {
         ExecutionMode::Apply => {
-            crate::operations::apply::execute_apply(storage, reload_handler, mdd_decompress).await
+            crate::operations::apply::execute_apply(
+                storage,
+                reload_handler,
+                mdd_decompress,
+                inspector,
+            )
+            .await
         }
         ExecutionMode::Rollback => {
-            crate::operations::rollback::execute_rollback(storage, reload_handler).await
+            crate::operations::rollback::execute_rollback(storage, reload_handler, inspector).await
         }
         ExecutionMode::Cleanup => crate::operations::cleanup::execute_cleanup(storage).await,
     }
@@ -489,6 +507,7 @@ mod tests {
         communication_disable: Arc<dyn DisableCommunication>,
         communication_access: Arc<dyn CommunicationAccess>,
         http_restriction_manager: HttpProtectionRegistry,
+        inspector: std::sync::Arc<dyn cda_interfaces::runtime_update_api::RuntimeFileInspector>,
         _dir: tempfile::TempDir,
     }
 
@@ -513,6 +532,7 @@ mod tests {
                 update_retry_after: Duration::from_secs(1),
                 post_update_mode: PostUpdateCommunicationMode::Enabled,
                 mdd_decompress: false,
+                inspector: &self.inspector,
                 lock_state_provider: &self.lock_provider,
             }
         }
@@ -533,6 +553,7 @@ mod tests {
             communication_disable,
             communication_access: enabled_communication_access_for_test(),
             http_restriction_manager: mgr,
+            inspector: crate::test_utils::test_inspector(),
             _dir: dir,
         }
     }
@@ -745,6 +766,7 @@ mod tests {
             update_retry_after: Duration::from_secs(1),
             post_update_mode: PostUpdateCommunicationMode::Enabled,
             mdd_decompress: false,
+            inspector: &f.inspector,
             lock_state_provider: &f.lock_provider,
         };
 
@@ -781,6 +803,7 @@ mod tests {
             update_retry_after: Duration::from_secs(1),
             post_update_mode: PostUpdateCommunicationMode::Enabled,
             mdd_decompress: false,
+            inspector: &f.inspector,
             lock_state_provider: &f.lock_provider,
         };
 

@@ -20,7 +20,8 @@ use cda_interfaces::{
     datatypes::ComponentsConfig,
     health::HealthProvider,
     runtime_update_api::{
-        ReloadError, RuntimeReloaderPlugin, VehicleComponentFactory, VehicleComponents,
+        ReloadError, RuntimeFileInspector, RuntimeReloaderPlugin, VehicleComponentFactory,
+        VehicleComponents,
     },
     storage_api::Storage,
 };
@@ -86,6 +87,10 @@ where
     /// Persistent storage used to execute automatic rollback when installing the
     /// newly built components fails.
     pub storage: Arc<S>,
+
+    /// Format-specific reads for that rollback, so this plugin needs no database
+    /// format of its own.
+    pub file_inspector: Arc<dyn RuntimeFileInspector>,
 }
 
 /// Shared state for installing vehicle routes.
@@ -205,6 +210,9 @@ where
     route_state: Arc<RouteInstallState<Uds, Gateway>>,
     factory: Arc<VehicleFactory>,
     storage: Arc<S>,
+    /// Needed for the automatic rollback this plugin performs when installing a
+    /// freshly built runtime fails.
+    file_inspector: Arc<dyn RuntimeFileInspector>,
     _phantom: std::marker::PhantomData<SecurityLoader>,
 }
 
@@ -277,6 +285,7 @@ where
             route_state,
             factory: config.factory,
             storage: config.infrastructure.storage,
+            file_inspector: config.infrastructure.file_inspector,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -312,8 +321,12 @@ where
                 route_state: Arc::clone(&self.route_state),
                 _phantom: std::marker::PhantomData::<SecurityLoader>,
             };
-            match crate::operations::rollback::execute_rollback(&*self.storage, &rollback_handler)
-                .await
+            match crate::operations::rollback::execute_rollback(
+                &*self.storage,
+                &rollback_handler,
+                &*self.file_inspector,
+            )
+            .await
             {
                 Ok(()) => tracing::info!("Automatic rollback completed successfully"),
                 Err(rollback_err) => tracing::error!(

@@ -142,6 +142,10 @@ where
         AppError::InitializationFailed(format!("Failed to init storage, error={e:?}"))
     })?);
 
+    // The application supplies the database format; the plugin stays agnostic.
+    let file_inspector: Arc<dyn cda_interfaces::runtime_update_api::RuntimeFileInspector> =
+        Arc::new(crate::mdd_inspector::MddFileInspector);
+
     let reloader_infra = ReloaderContext {
         config: infra.config,
         dynamic_router: infra.dynamic_router,
@@ -157,6 +161,7 @@ where
         storage_dir: infra.storage_dir.clone(),
         mdd_decompress: infra.mdd_decompress,
         storage: Arc::clone(&storage),
+        file_inspector: Arc::clone(&file_inspector),
     };
 
     let reloader_config =
@@ -174,9 +179,12 @@ where
     Ok(DefaultRuntimeUpdatePlugin::new(
         storage,
         reloader_plugin,
-        Arc::new(DefaultUpdateSecurityHandler::new()),
+        Arc::new(DefaultUpdateSecurityHandler::new(Arc::clone(
+            &file_inspector,
+        ))),
         Arc::clone(&infra.lock_provider),
         infra.mdd_decompress,
+        Arc::clone(&file_inspector),
         infra.communication_disable,
         Arc::clone(&infra.communication_access),
         infra.http_protections,
