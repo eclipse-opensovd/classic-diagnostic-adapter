@@ -420,7 +420,6 @@ where
     add_runtime_update_routes::<SL, _>(
         &ws.dynamic_router,
         plugin,
-        lock_provider,
         upload_body_limit_bytes,
         update_retry_after,
     )
@@ -583,22 +582,40 @@ mod tests {
 
     #[async_trait::async_trait]
     impl RuntimeFileStore for NoOpPlugin {
+        async fn authorize_mutation(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+        ) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+
         async fn upload(
             &self,
             _files: Vec<cda_interfaces::runtime_update_api::UploadFile>,
+            _security: &cda_interfaces::DynamicPlugin,
         ) -> Result<Vec<String>, RuntimeUpdateError> {
             Ok(Vec::new())
         }
 
-        async fn delete_nextupdate(&self) -> Result<Vec<String>, RuntimeUpdateError> {
+        async fn delete_nextupdate(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+        ) -> Result<Vec<String>, RuntimeUpdateError> {
             Ok(vec![])
         }
 
-        async fn delete_nextupdate_by_id(&self, _id: &str) -> Result<(), RuntimeUpdateError> {
+        async fn delete_nextupdate_by_id(
+            &self,
+            _id: &str,
+            _security: &cda_interfaces::DynamicPlugin,
+        ) -> Result<(), RuntimeUpdateError> {
             Ok(())
         }
 
-        async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
+        async fn delete_backup(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+        ) -> Result<Vec<String>, RuntimeUpdateError> {
             Ok(vec![])
         }
     }
@@ -608,6 +625,7 @@ mod tests {
         async fn start_execution(
             &self,
             _mode: ExecutionMode,
+            _security: &cda_interfaces::DynamicPlugin,
         ) -> Result<String, RuntimeUpdateError> {
             Ok(String::new())
         }

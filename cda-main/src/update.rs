@@ -23,7 +23,6 @@ use cda_plugin_runtime_update::{
     },
 };
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
-use cda_sovd::SovdLockStateProvider;
 use cda_storage::LocalStorage;
 use cda_transport_router::DiagnosticTransportRouter;
 
@@ -96,7 +95,6 @@ where
 pub async fn add_runtime_update_routes<S, P>(
     dynamic_router: &cda_sovd::dynamic_router::DynamicRouter,
     plugin: P,
-    lock_provider: Arc<SovdLockStateProvider>,
     upload_body_limit_bytes: usize,
     update_retry_after: Duration,
 ) where
@@ -104,10 +102,9 @@ pub async fn add_runtime_update_routes<S, P>(
     P: RuntimeFilesUpdatePlugin,
 {
     let service = Arc::new(WithExclusiveAccess::with_exclusive_access(plugin));
-    cda_sovd::add_runtime_update_routes::<S, _, SovdLockStateProvider>(
+    cda_sovd::add_runtime_update_routes::<S, _>(
         dynamic_router,
         service,
-        lock_provider,
         upload_body_limit_bytes,
         update_retry_after,
     )
@@ -179,7 +176,7 @@ where
     Ok(DefaultRuntimeUpdatePlugin::new(
         storage,
         reloader_plugin,
-        Arc::new(DefaultUpdateSecurityHandler::new(Arc::clone(
+        Arc::new(DefaultUpdateSecurityHandler::<_, SP>::new(Arc::clone(
             &file_inspector,
         ))),
         Arc::clone(&infra.lock_provider),

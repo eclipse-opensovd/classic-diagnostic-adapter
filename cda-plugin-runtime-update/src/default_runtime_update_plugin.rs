@@ -15,7 +15,7 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    HashMap,
+    DynamicPlugin, HashMap,
     communication_control::{CommunicationAccess, PostUpdateCommunicationMode},
     http_protection::registry::HttpProtectionRegistry,
     runtime_update_api::{
@@ -150,19 +150,43 @@ impl<
     Lock: LockStateProvider,
 > RuntimeFileStore for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
 {
-    async fn upload(&self, files: Vec<UploadFile>) -> Result<Vec<String>, RuntimeUpdateError> {
+    async fn authorize_mutation(&self, security: &DynamicPlugin) -> Result<(), RuntimeUpdateError> {
+        self.security_handler
+            .check_mutation_allowed(security, &self.lock_provider)
+            .await
+    }
+
+    async fn upload(
+        &self,
+        files: Vec<UploadFile>,
+        security: &DynamicPlugin,
+    ) -> Result<Vec<String>, RuntimeUpdateError> {
+        self.authorize_mutation(security).await?;
         crate::storage::upload_files(&*self.storage, &*self.security_handler, files).await
     }
 
-    async fn delete_nextupdate(&self) -> Result<Vec<String>, RuntimeUpdateError> {
+    async fn delete_nextupdate(
+        &self,
+        security: &DynamicPlugin,
+    ) -> Result<Vec<String>, RuntimeUpdateError> {
+        self.authorize_mutation(security).await?;
         crate::storage::delete_all_nextupdate(&*self.storage).await
     }
 
-    async fn delete_nextupdate_by_id(&self, file_id: &str) -> Result<(), RuntimeUpdateError> {
+    async fn delete_nextupdate_by_id(
+        &self,
+        file_id: &str,
+        security: &DynamicPlugin,
+    ) -> Result<(), RuntimeUpdateError> {
+        self.authorize_mutation(security).await?;
         crate::storage::delete_nextupdate_file(&*self.storage, file_id).await
     }
 
-    async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
+    async fn delete_backup(
+        &self,
+        security: &DynamicPlugin,
+    ) -> Result<Vec<String>, RuntimeUpdateError> {
+        self.authorize_mutation(security).await?;
         crate::storage::delete_all_backup(&*self.storage).await
     }
 }
@@ -174,7 +198,11 @@ impl<
     Lock: LockStateProvider,
 > RuntimeUpdateExecutor for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
 {
-    async fn start_execution(&self, mode: ExecutionMode) -> Result<String, RuntimeUpdateError> {
+    async fn start_execution(
+        &self,
+        mode: ExecutionMode,
+        security: &DynamicPlugin,
+    ) -> Result<String, RuntimeUpdateError> {
         let params = crate::operations::executions::ExecutionParams {
             storage: &self.storage,
             security_handler: &self.security_handler,
@@ -189,7 +217,7 @@ impl<
             inspector: &self.file_inspector,
             lock_state_provider: &*self.lock_provider,
         };
-        crate::operations::executions::start_execution(&params, mode).await
+        crate::operations::executions::start_execution(&params, mode, security).await
     }
 
     async fn get_execution_status(&self, execution_id: &str) -> Option<UpdateExecution> {
@@ -397,7 +425,10 @@ mod tests {
         .await;
         let plugin = make_plugin(storage);
 
-        plugin.delete_nextupdate().await.unwrap();
+        plugin
+            .delete_nextupdate(&crate::test_utils::test_security())
+            .await
+            .unwrap();
 
         let query = FileListOptions::default();
         let result = plugin.list_nextupdate(query).await.unwrap();
@@ -423,7 +454,10 @@ mod tests {
         .await;
         let plugin = make_plugin(storage);
 
-        plugin.delete_nextupdate_by_id("remove.mdd").await.unwrap();
+        plugin
+            .delete_nextupdate_by_id("remove.mdd", &crate::test_utils::test_security())
+            .await
+            .unwrap();
 
         let query = FileListOptions::default();
         let result = plugin.list_nextupdate(query).await.unwrap();
@@ -444,7 +478,7 @@ mod tests {
         let state = make_plugin(storage);
 
         state
-            .delete_nextupdate_by_id("ECU_ALPHA.MDD")
+            .delete_nextupdate_by_id("ECU_ALPHA.MDD", &crate::test_utils::test_security())
             .await
             .unwrap();
 
@@ -465,7 +499,9 @@ mod tests {
         .await;
         let state = make_plugin(storage);
 
-        let result = state.delete_nextupdate_by_id("nonexistent.mdd").await;
+        let result = state
+            .delete_nextupdate_by_id("nonexistent.mdd", &crate::test_utils::test_security())
+            .await;
         assert!(matches!(result, Err(RuntimeUpdateError::FileNotFound(_))));
     }
 
@@ -481,7 +517,10 @@ mod tests {
         .await;
         let state = make_plugin(storage);
 
-        state.delete_backup().await.unwrap();
+        state
+            .delete_backup(&crate::test_utils::test_security())
+            .await
+            .unwrap();
 
         let query = FileListOptions::default();
         let result = state.list_backup(query).await.unwrap();
@@ -495,7 +534,9 @@ mod tests {
         let config = make_valid_config();
         let files = make_upload_files(&[("opensovd-cda.toml", &config)]);
 
-        let result = plugin.upload(files).await;
+        let result = plugin
+            .upload(files, &crate::test_utils::test_security())
+            .await;
 
         assert!(matches!(
             result,
@@ -509,7 +550,10 @@ mod tests {
         let files = make_upload_files(&[("bad.txt", b"not an mdd or config")]);
         let plugin = make_plugin(storage);
 
-        let err = plugin.upload(files).await.unwrap_err();
+        let err = plugin
+            .upload(files, &crate::test_utils::test_security())
+            .await
+            .unwrap_err();
 
         assert!(matches!(err, RuntimeUpdateError::InvalidFileType(_)));
     }
@@ -531,7 +575,7 @@ mod tests {
         let plugin = make_plugin(storage);
 
         plugin
-            .start_execution(ExecutionMode::Apply)
+            .start_execution(ExecutionMode::Apply, &crate::test_utils::test_security())
             .await
             .expect("an update must start while communication is deferred");
         assert_eq!(plugin.list_executions().await.len(), 1);
@@ -558,7 +602,9 @@ mod tests {
             .await
             .expect("lease must be granted from a deferred runtime");
 
-        let result = plugin.start_execution(ExecutionMode::Apply).await;
+        let result = plugin
+            .start_execution(ExecutionMode::Apply, &crate::test_utils::test_security())
+            .await;
         assert!(matches!(result, Err(RuntimeUpdateError::ExecutionConflict)));
         assert!(plugin.list_executions().await.is_empty());
 
