@@ -274,9 +274,8 @@ mod tests {
 
     use async_trait::async_trait;
     use cda_interfaces::runtime_update_api::{
-        BulkDataCreatedList, BulkDataList, ExclusiveRuntimePlugin, ExecutionMode,
-        RuntimeFilesQuery, RuntimeFilesUpdatePlugin, RuntimeUpdateError, UpdateExecution,
-        UploadFile,
+        ExclusiveRuntimePlugin, ExecutionMode, FileListOptions, RuntimeFile,
+        RuntimeFilesUpdatePlugin, RuntimeUpdateError, UpdateExecution, UploadFile,
     };
     use tokio::sync::{Barrier, Notify};
 
@@ -297,42 +296,30 @@ mod tests {
     impl RuntimeFilesUpdatePlugin for DelayPlugin {
         async fn list_current(
             &self,
-            _query: &RuntimeFilesQuery,
-        ) -> Result<BulkDataList, RuntimeUpdateError> {
+            _options: FileListOptions,
+        ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
             self.concurrent_reads.fetch_add(1, Ordering::SeqCst);
             self.read_barrier.wait().await;
             self.read_notify.notified().await;
             self.concurrent_reads.fetch_sub(1, Ordering::SeqCst);
-            Ok(BulkDataList {
-                items: vec![],
-                schema: None,
-            })
+            Ok(Vec::new())
         }
 
         async fn list_nextupdate(
             &self,
-            _query: &RuntimeFilesQuery,
-        ) -> Result<BulkDataList, RuntimeUpdateError> {
-            Ok(BulkDataList {
-                items: vec![],
-                schema: None,
-            })
+            _options: FileListOptions,
+        ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
+            Ok(Vec::new())
         }
 
         async fn list_backup(
             &self,
-            _query: &RuntimeFilesQuery,
-        ) -> Result<BulkDataList, RuntimeUpdateError> {
-            Ok(BulkDataList {
-                items: vec![],
-                schema: None,
-            })
+            _options: FileListOptions,
+        ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
+            Ok(Vec::new())
         }
 
-        async fn upload(
-            &self,
-            _files: Vec<UploadFile>,
-        ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
+        async fn upload(&self, _files: Vec<UploadFile>) -> Result<Vec<String>, RuntimeUpdateError> {
             self.concurrent_writes.fetch_add(1, Ordering::SeqCst);
             self.write_barrier.wait().await;
             self.write_notify.notified().await;
@@ -402,12 +389,10 @@ mod tests {
         let (plugin, concurrent_reads, _, read_notify, _) = make_plugin(2, 1);
         let plugin = Arc::new(plugin);
         let p1 = Arc::clone(&plugin);
-        let t1 =
-            tokio::spawn(async move { p1.list_current(&<RuntimeFilesQuery>::default()).await });
+        let t1 = tokio::spawn(async move { p1.list_current(FileListOptions::default()).await });
 
         let p2 = Arc::clone(&plugin);
-        let t2 =
-            tokio::spawn(async move { p2.list_current(&<RuntimeFilesQuery>::default()).await });
+        let t2 = tokio::spawn(async move { p2.list_current(FileListOptions::default()).await });
 
         // Both tasks will reach the barrier and wait, proving they run concurrently.
         // Once both hit the barrier they proceed to notified() - at that point
@@ -494,8 +479,7 @@ mod tests {
 
         // Start a read - it should be blocked by the write lock
         let p2 = Arc::clone(&plugin);
-        let t2 =
-            tokio::spawn(async move { p2.list_current(&<RuntimeFilesQuery>::default()).await });
+        let t2 = tokio::spawn(async move { p2.list_current(FileListOptions::default()).await });
 
         for _ in 0..20 {
             tokio::task::yield_now().await;

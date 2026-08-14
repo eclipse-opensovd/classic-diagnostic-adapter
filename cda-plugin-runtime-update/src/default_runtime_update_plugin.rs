@@ -19,9 +19,9 @@ use cda_interfaces::{
     communication_control::{CommunicationAccess, PostUpdateCommunicationMode},
     http_protection::registry::HttpProtectionRegistry,
     runtime_update_api::{
-        BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider, RuntimeFilesQuery,
-        RuntimeFilesUpdatePlugin, RuntimeReloaderPlugin, RuntimeUpdateError,
-        RuntimeUpdateSecurityPlugin, UpdateExecution, UploadFile,
+        ExecutionMode, FileListOptions, LockStateProvider, RuntimeFile, RuntimeFilesUpdatePlugin,
+        RuntimeReloaderPlugin, RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateExecution,
+        UploadFile,
     },
     storage_api::Storage,
 };
@@ -116,29 +116,26 @@ impl<
 {
     async fn list_current(
         &self,
-        query: &RuntimeFilesQuery,
-    ) -> Result<BulkDataList, RuntimeUpdateError> {
-        crate::storage::list_current_files(&*self.storage, query).await
+        options: FileListOptions,
+    ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
+        crate::storage::list_current_files(&*self.storage, options).await
     }
 
     async fn list_nextupdate(
         &self,
-        query: &RuntimeFilesQuery,
-    ) -> Result<BulkDataList, RuntimeUpdateError> {
-        crate::storage::compute_nextupdate_state(&*self.storage, query).await
+        options: FileListOptions,
+    ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
+        crate::storage::compute_nextupdate_state(&*self.storage, options).await
     }
 
     async fn list_backup(
         &self,
-        query: &RuntimeFilesQuery,
-    ) -> Result<BulkDataList, RuntimeUpdateError> {
-        crate::storage::list_backup_files(&*self.storage, query).await
+        options: FileListOptions,
+    ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
+        crate::storage::list_backup_files(&*self.storage, options).await
     }
 
-    async fn upload(
-        &self,
-        files: Vec<UploadFile>,
-    ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
+    async fn upload(&self, files: Vec<UploadFile>) -> Result<Vec<String>, RuntimeUpdateError> {
         crate::storage::upload_files(&*self.storage, &*self.security_handler, files).await
     }
 
@@ -188,7 +185,7 @@ mod tests {
         communication_control::{CommunicationState, PostUpdateCommunicationMode},
         http_protection::registry::HttpProtectionRegistry,
         runtime_update_api::{
-            ExecutionMode, HashAlgorithm, RuntimeFilesQuery, RuntimeFilesUpdatePlugin,
+            ExecutionMode, FileListOptions, HashAlgorithm, RuntimeFilesUpdatePlugin,
             RuntimeUpdateError,
         },
         storage_api::CollectionName,
@@ -249,10 +246,10 @@ mod tests {
     async fn get_current_empty_collection_returns_empty_items() {
         let (storage, _dir) = make_storage();
         let plugin = make_plugin(storage);
-        let query = RuntimeFilesQuery::default();
+        let query = FileListOptions::default();
 
-        let result = plugin.list_current(&query).await.unwrap();
-        assert!(result.items.is_empty());
+        let result = plugin.list_current(query).await.unwrap();
+        assert!(result.is_empty());
     }
 
     #[tokio::test]
@@ -274,18 +271,17 @@ mod tests {
         .await;
         let plugin = make_plugin(storage);
 
-        let query = RuntimeFilesQuery {
-            include_file_size: true,
+        let query = FileListOptions {
+            include_size: true,
             include_hash: Some(HashAlgorithm::Sha256),
             ..Default::default()
         };
-        let result = plugin.list_current(&query).await.unwrap();
+        let result = plugin.list_current(query).await.unwrap();
 
-        assert_eq!(result.items.len(), 2);
-        for item in &result.items {
+        assert_eq!(result.len(), 2);
+        for item in &result {
             assert!(item.size.is_some());
             assert!(item.hash.is_some());
-            assert_eq!(item.hash_algorithm, Some(HashAlgorithm::Sha256));
         }
     }
 
@@ -315,20 +311,16 @@ mod tests {
         .await;
         let plugin = make_plugin(storage);
 
-        let query = RuntimeFilesQuery {
-            include_file_size: true,
+        let query = FileListOptions {
+            include_size: true,
             ..Default::default()
         };
-        let result = plugin.list_nextupdate(&query).await.unwrap();
+        let result = plugin.list_nextupdate(query).await.unwrap();
 
-        assert_eq!(result.items.len(), 2, "{:#?}", result.items);
-        let existing = result
-            .items
-            .iter()
-            .find(|i| i.id == "existing.mdd")
-            .unwrap();
+        assert_eq!(result.len(), 2, "{result:#?}");
+        let existing = result.iter().find(|i| i.id == "existing.mdd").unwrap();
         assert_eq!(existing.size, Some(11));
-        let added = result.items.iter().find(|i| i.id == "added.mdd").unwrap();
+        let added = result.iter().find(|i| i.id == "added.mdd").unwrap();
         assert_eq!(added.size, Some(9));
     }
 
@@ -336,10 +328,10 @@ mod tests {
     async fn get_backup_empty_returns_empty() {
         let (storage, _dir) = make_storage();
         let plugin = make_plugin(storage);
-        let query = RuntimeFilesQuery::default();
+        let query = FileListOptions::default();
 
-        let result = plugin.list_backup(&query).await.unwrap();
-        assert!(result.items.is_empty());
+        let result = plugin.list_backup(query).await.unwrap();
+        assert!(result.is_empty());
     }
 
     #[tokio::test]
@@ -354,14 +346,14 @@ mod tests {
         .await;
         let plugin = make_plugin(storage);
 
-        let query = RuntimeFilesQuery {
-            include_file_size: true,
+        let query = FileListOptions {
+            include_size: true,
             ..Default::default()
         };
-        let result = plugin.list_backup(&query).await.unwrap();
+        let result = plugin.list_backup(query).await.unwrap();
 
-        assert_eq!(result.items.len(), 1);
-        let Some(item) = result.items.first() else {
+        assert_eq!(result.len(), 1);
+        let Some(item) = result.first() else {
             panic!("expected item")
         };
         assert_eq!(item.id, "old_ecu.mdd");
@@ -382,9 +374,9 @@ mod tests {
 
         plugin.delete_nextupdate().await.unwrap();
 
-        let query = RuntimeFilesQuery::default();
-        let result = plugin.list_nextupdate(&query).await.unwrap();
-        assert!(result.items.is_empty());
+        let query = FileListOptions::default();
+        let result = plugin.list_nextupdate(query).await.unwrap();
+        assert!(result.is_empty());
     }
 
     #[tokio::test]
@@ -408,10 +400,10 @@ mod tests {
 
         plugin.delete_nextupdate_by_id("remove.mdd").await.unwrap();
 
-        let query = RuntimeFilesQuery::default();
-        let result = plugin.list_nextupdate(&query).await.unwrap();
-        assert_eq!(result.items.len(), 1);
-        assert_eq!(result.items.first().unwrap().id, "keep.mdd");
+        let query = FileListOptions::default();
+        let result = plugin.list_nextupdate(query).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.first().unwrap().id, "keep.mdd");
     }
 
     #[tokio::test]
@@ -431,9 +423,9 @@ mod tests {
             .await
             .unwrap();
 
-        let query = RuntimeFilesQuery::default();
-        let result = state.list_nextupdate(&query).await.unwrap();
-        assert!(result.items.is_empty());
+        let query = FileListOptions::default();
+        let result = state.list_nextupdate(query).await.unwrap();
+        assert!(result.is_empty());
     }
 
     #[tokio::test]
@@ -466,9 +458,9 @@ mod tests {
 
         state.delete_backup().await.unwrap();
 
-        let query = RuntimeFilesQuery::default();
-        let result = state.list_backup(&query).await.unwrap();
-        assert!(result.items.is_empty());
+        let query = FileListOptions::default();
+        let result = state.list_backup(query).await.unwrap();
+        assert!(result.is_empty());
     }
 
     #[tokio::test]

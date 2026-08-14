@@ -545,8 +545,8 @@ where
 #[cfg(test)]
 mod tests {
     use cda_interfaces::runtime_update_api::{
-        BulkDataCreatedList, BulkDataList, ExecutionMode, RuntimeFilesQuery,
-        RuntimeFilesUpdatePlugin, RuntimeUpdateError, UpdateExecution,
+        ExecutionMode, FileListOptions, RuntimeFile, RuntimeFilesUpdatePlugin, RuntimeUpdateError,
+        UpdateExecution,
     };
     use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 
@@ -560,30 +560,30 @@ mod tests {
     impl RuntimeFilesUpdatePlugin for NoOpPlugin {
         async fn list_current(
             &self,
-            _q: &RuntimeFilesQuery,
-        ) -> Result<BulkDataList, RuntimeUpdateError> {
-            Ok(BulkDataList::default())
+            _options: FileListOptions,
+        ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
+            Ok(Vec::new())
         }
 
         async fn list_nextupdate(
             &self,
-            _q: &RuntimeFilesQuery,
-        ) -> Result<BulkDataList, RuntimeUpdateError> {
-            Ok(BulkDataList::default())
+            _options: FileListOptions,
+        ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
+            Ok(Vec::new())
         }
 
         async fn list_backup(
             &self,
-            _q: &RuntimeFilesQuery,
-        ) -> Result<BulkDataList, RuntimeUpdateError> {
-            Ok(BulkDataList::default())
+            _options: FileListOptions,
+        ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
+            Ok(Vec::new())
         }
 
         async fn upload(
             &self,
             _files: Vec<cda_interfaces::runtime_update_api::UploadFile>,
-        ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
-            Ok(BulkDataCreatedList::default())
+        ) -> Result<Vec<String>, RuntimeUpdateError> {
+            Ok(Vec::new())
         }
 
         async fn delete_nextupdate(&self) -> Result<Vec<String>, RuntimeUpdateError> {

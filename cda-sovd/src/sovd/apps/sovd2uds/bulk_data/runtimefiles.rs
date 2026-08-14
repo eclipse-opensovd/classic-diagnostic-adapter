@@ -157,7 +157,7 @@ fn bulk_data_list_response(
 
 fn bulk_data_created_response(
     host: &str,
-    result: cda_interfaces::runtime_update_api::BulkDataCreatedList,
+    result: sovd_interfaces::apps::sovd2uds::bulk_data::BulkDataCreatedList,
 ) -> Response {
     let Some(first) = result.items.first() else {
         return DbUpdateErrorResponse::new(
@@ -216,10 +216,19 @@ pub(crate) mod current {
             sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::RuntimeFilesQuery,
         >,
     ) -> Response {
-        route_state.plugin.list_current(&query).await.map_or_else(
-            |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
-            |list| super::bulk_data_list_response(list, query.include_schema),
-        )
+        route_state
+            .plugin
+            .list_current(query.list_options())
+            .await
+            .map_or_else(
+                |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
+                |files| {
+                    super::bulk_data_list_response(
+                        sovd_interfaces::runtime_files::bulk_data_list(files),
+                        query.include_schema,
+                    )
+                },
+            )
     }
 }
 
@@ -248,11 +257,16 @@ pub(crate) mod nextupdate {
     ) -> Response {
         route_state
             .plugin
-            .list_nextupdate(&query)
+            .list_nextupdate(query.list_options())
             .await
             .map_or_else(
                 |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
-                |list| super::bulk_data_list_response(list, query.include_schema),
+                |files| {
+                    super::bulk_data_list_response(
+                        sovd_interfaces::runtime_files::bulk_data_list(files),
+                        query.include_schema,
+                    )
+                },
             )
     }
 
@@ -479,7 +493,12 @@ pub(crate) mod nextupdate {
 
         route_state.plugin.upload(files).await.map_or_else(
             |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
-            |result| super::bulk_data_created_response(&host, result),
+            |ids| {
+                super::bulk_data_created_response(
+                    &host,
+                    sovd_interfaces::runtime_files::bulk_data_created(ids),
+                )
+            },
         )
     }
 
@@ -536,7 +555,12 @@ pub(crate) mod nextupdate {
             .await
             .map_or_else(
                 |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
-                |result| super::bulk_data_created_response(&host, result),
+                |ids| {
+                    super::bulk_data_created_response(
+                        &host,
+                        sovd_interfaces::runtime_files::bulk_data_created(ids),
+                    )
+                },
             )
     }
 
@@ -559,10 +583,12 @@ pub(crate) mod nextupdate {
             |deleted_ids| {
                 (
                     StatusCode::OK,
-                    Json(cda_interfaces::runtime_update_api::BulkDataDeleted {
-                        deleted_ids,
-                        errors: vec![],
-                    }),
+                    Json(
+                        sovd_interfaces::apps::sovd2uds::bulk_data::BulkDataDeleted {
+                            deleted_ids,
+                            errors: vec![],
+                        },
+                    ),
                 )
                     .into_response()
             },
@@ -626,10 +652,19 @@ pub(crate) mod backup {
             sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::RuntimeFilesQuery,
         >,
     ) -> Response {
-        route_state.plugin.list_backup(&query).await.map_or_else(
-            |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
-            |list| super::bulk_data_list_response(list, query.include_schema),
-        )
+        route_state
+            .plugin
+            .list_backup(query.list_options())
+            .await
+            .map_or_else(
+                |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
+                |files| {
+                    super::bulk_data_list_response(
+                        sovd_interfaces::runtime_files::bulk_data_list(files),
+                        query.include_schema,
+                    )
+                },
+            )
     }
 
     pub(crate) async fn delete<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
@@ -651,10 +686,12 @@ pub(crate) mod backup {
             |deleted_ids| {
                 (
                     StatusCode::OK,
-                    Json(cda_interfaces::runtime_update_api::BulkDataDeleted {
-                        deleted_ids,
-                        errors: vec![],
-                    }),
+                    Json(
+                        sovd_interfaces::apps::sovd2uds::bulk_data::BulkDataDeleted {
+                            deleted_ids,
+                            errors: vec![],
+                        },
+                    ),
                 )
                     .into_response()
             },

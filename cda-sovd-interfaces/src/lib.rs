@@ -22,6 +22,7 @@ pub mod docs;
 pub mod error;
 pub mod functions;
 pub mod locking;
+pub mod runtime_files;
 
 fn default_true() -> bool {
     true
@@ -90,8 +91,9 @@ pub struct IncludeSchemaQuery {
 pub mod sovd2uds {
     use std::path::PathBuf;
 
-    pub use cda_interfaces::runtime_update_api::{BulkDataDescriptor, HashAlgorithm};
     use serde::Serialize;
+
+    pub use crate::runtime_files::{BulkDataDescriptor, HashAlgorithm};
 
     #[derive(Serialize, schemars::JsonSchema)]
     pub struct FileList {
