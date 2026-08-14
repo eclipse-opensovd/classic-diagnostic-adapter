@@ -15,7 +15,10 @@ use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
     HashMap,
-    communication_control::{ActivationCause, CommunicationAccess, PostUpdateCommunicationMode},
+    communication_control::{
+        ActivationCause, CommunicationAccess, DisableCommunication, DisableError, DisableGuard,
+        DisableReason, PostUpdateCommunicationMode,
+    },
     http_protection::registry::{
         HttpProtectionConfig, HttpProtectionReason, HttpProtectionRegistry, HttpStatusCode,
         OwnedHttpProtection,
@@ -25,9 +28,6 @@ use cda_interfaces::{
         RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateCollections, UpdateExecution,
     },
     storage_api::{CollectionName, Storage},
-};
-use cda_plugin_communication_management::lifecycle::disable::{
-    DisableCommunication, DisableError, DisableLease, DisableReason,
 };
 use tokio::sync::RwLock;
 
@@ -93,7 +93,7 @@ where
 
 async fn acquire_execution_guards<S, R: ?Sized, T, L>(
     params: &ExecutionParams<'_, S, R, T, L>,
-) -> Result<(OwnedHttpProtection, DisableLease), RuntimeUpdateError> {
+) -> Result<(OwnedHttpProtection, Box<dyn DisableGuard>), RuntimeUpdateError> {
     let protection = params
         .http_protections
         .protect(http_protection_config_for_update(params.update_retry_after))
@@ -146,8 +146,8 @@ async fn validate_execution_preconditions<S, R, T, L>(
     mode: ExecutionMode,
     collections: &UpdateCollections<S::CollectionHandle>,
     protection: OwnedHttpProtection,
-    disable_lease: DisableLease,
-) -> Result<(OwnedHttpProtection, DisableLease), RuntimeUpdateError>
+    disable_lease: Box<dyn DisableGuard>,
+) -> Result<(OwnedHttpProtection, Box<dyn DisableGuard>), RuntimeUpdateError>
 where
     S: Storage + Send + Sync + 'static,
     R: RuntimeReloaderPlugin + ?Sized,
@@ -197,7 +197,7 @@ where
 async fn reject_execution(
     error: RuntimeUpdateError,
     protection: OwnedHttpProtection,
-    disable_lease: DisableLease,
+    disable_lease: Box<dyn DisableGuard>,
 ) -> RuntimeUpdateError {
     // Resume first, drop the update protection second - the same order the
     // completion path in `spawn_execution` uses. Dropping first would open a
@@ -247,7 +247,7 @@ fn spawn_execution<S, R>(
     mdd_decompress: bool,
     post_update_mode: PostUpdateCommunicationMode,
     communication_access: Arc<dyn CommunicationAccess>,
-    disable_lease: DisableLease,
+    disable_lease: Box<dyn DisableGuard>,
     protection: OwnedHttpProtection,
 ) where
     S: Storage + Send + Sync + 'static,
