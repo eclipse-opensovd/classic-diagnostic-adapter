@@ -19,9 +19,9 @@ use cda_interfaces::{
     communication_control::{CommunicationAccess, PostUpdateCommunicationMode},
     http_protection::registry::HttpProtectionRegistry,
     runtime_update_api::{
-        ExecutionMode, FileListOptions, LockStateProvider, RuntimeFile, RuntimeFilesUpdatePlugin,
-        RuntimeReloaderPlugin, RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateExecution,
-        UploadFile,
+        ExecutionMode, FileListOptions, LockStateProvider, RuntimeFile, RuntimeFileInspector,
+        RuntimeFilesUpdatePlugin, RuntimeReloaderPlugin, RuntimeUpdateError,
+        RuntimeUpdateSecurityPlugin, UpdateExecution, UploadFile,
     },
     storage_api::Storage,
 };
@@ -44,8 +44,11 @@ pub struct DefaultRuntimeUpdatePlugin<
     lock_provider: Arc<Lock>,
     /// Tracking map for in-progress executions: `exec_id` -> `DbUpdateExecution`
     executions: Arc<RwLock<HashMap<String, UpdateExecution>>>,
-    /// If true, call `update_mdd_uncompressed()` after Apply for each MDD file
+    /// If true, rewrite database files uncompressed after Apply
     mdd_decompress: bool,
+    /// Format-specific reads (validate, revision, ECU name, decompress), so the
+    /// plugin carries no database format of its own.
+    file_inspector: Arc<dyn RuntimeFileInspector>,
     communication_disable: Arc<dyn DisableCommunication>,
     /// Used to request the configured post-update communication state. Requests
     /// only - `init_mode` still decides whether one is honoured.
@@ -85,6 +88,7 @@ impl<
         security_handler: Arc<UpdateSecurityPlugin>,
         lock_provider: Arc<Lock>,
         mdd_decompress: bool,
+        file_inspector: Arc<dyn RuntimeFileInspector>,
         communication_disable: Arc<dyn DisableCommunication>,
         communication_access: Arc<dyn CommunicationAccess>,
         http_protections: HttpProtectionRegistry,
@@ -98,6 +102,7 @@ impl<
             lock_provider,
             executions: Arc::new(RwLock::new(HashMap::default())),
             mdd_decompress,
+            file_inspector,
             communication_disable,
             communication_access,
             http_protections,
@@ -118,21 +123,22 @@ impl<
         &self,
         options: FileListOptions,
     ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
-        crate::storage::list_current_files(&*self.storage, options).await
+        crate::storage::list_current_files(&*self.storage, options, &*self.file_inspector).await
     }
 
     async fn list_nextupdate(
         &self,
         options: FileListOptions,
     ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
-        crate::storage::compute_nextupdate_state(&*self.storage, options).await
+        crate::storage::compute_nextupdate_state(&*self.storage, options, &*self.file_inspector)
+            .await
     }
 
     async fn list_backup(
         &self,
         options: FileListOptions,
     ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
-        crate::storage::list_backup_files(&*self.storage, options).await
+        crate::storage::list_backup_files(&*self.storage, options, &*self.file_inspector).await
     }
 
     async fn upload(&self, files: Vec<UploadFile>) -> Result<Vec<String>, RuntimeUpdateError> {
@@ -163,6 +169,7 @@ impl<
             update_retry_after: self.update_retry_after,
             post_update_mode: self.post_update_mode.clone(),
             mdd_decompress: self.mdd_decompress,
+            inspector: &self.file_inspector,
             lock_state_provider: &*self.lock_provider,
         };
         crate::operations::executions::start_execution(&params, mode).await
@@ -233,6 +240,7 @@ mod tests {
                 has_conflicts,
             }),
             false,
+            crate::test_utils::test_inspector(),
             Arc::clone(&communication_disable),
             enabled_communication_access_for_test(),
             http_protections,

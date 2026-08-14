@@ -25,7 +25,6 @@ path = "src/lib.rs"
 
 [dependencies]
 cda-interfaces = { workspace = true }
-cda-database = { workspace = true }
 cda-plugin-security = { workspace = true }
 cda-plugin-communication-management = { workspace = true }
 cda-sovd = { workspace = true }

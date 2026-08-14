@@ -86,6 +86,62 @@ pub(crate) mod test_utils {
         Ok(())
     }
 
+    /// Test file inspector backed by the real MDD reader.
+    ///
+    /// `cda-database` is a dev-dependency, so tests keep exercising genuine MDD
+    /// parsing (revision extraction, malformed-file rejection) even though the
+    /// plugin itself no longer depends on the format.
+    pub struct TestMddInspector;
+
+    impl cda_interfaces::runtime_update_api::RuntimeFileInspector for TestMddInspector {
+        fn validate(&self, path: &std::path::Path) -> Result<(), VerificationError> {
+            let path_str = path
+                .to_str()
+                .ok_or_else(|| VerificationError("non-UTF-8 path".to_owned()))?;
+            cda_database::mmap_and_decode_mdd(path_str)
+                .map_err(|error| VerificationError(format!("{error}")))?;
+            Ok(())
+        }
+
+        fn ecu_name(&self, path: &std::path::Path) -> Result<String, RuntimeUpdateError> {
+            let path_str = path
+                .to_str()
+                .ok_or_else(|| RuntimeUpdateError::ValidationFailed("non-UTF-8 path".to_owned()))?;
+            cda_database::mmap_and_decode_mdd(path_str)
+                .map(|mdd| mdd.ecu_name)
+                .map_err(|error| RuntimeUpdateError::ValidationFailed(format!("{error}")))
+        }
+
+        fn revision(&self, path: &std::path::Path) -> Option<String> {
+            cda_database::mmap_and_decode_mdd(path.to_str()?)
+                .ok()
+                .and_then(|mdd| mdd.revision)
+        }
+
+        fn decompress_in_place(&self, path: &std::path::Path) -> Result<(), RuntimeUpdateError> {
+            let path_str = path
+                .to_str()
+                .ok_or_else(|| RuntimeUpdateError::ValidationFailed("non-UTF-8 path".to_owned()))?;
+            cda_database::update_mdd_uncompressed(path_str)
+                .map(|_| ())
+                .map_err(|error| RuntimeUpdateError::ValidationFailed(format!("{error}")))
+        }
+    }
+
+    /// Opaque security context for tests.
+    ///
+    /// The mock security handler ignores it; it exists so tests exercise the same
+    /// call shape production uses.
+    pub fn test_security() -> cda_interfaces::DynamicPlugin {
+        Box::new(())
+    }
+
+    /// Shared inspector handle for tests.
+    pub fn test_inspector()
+    -> std::sync::Arc<dyn cda_interfaces::runtime_update_api::RuntimeFileInspector> {
+        std::sync::Arc::new(TestMddInspector)
+    }
+
     pub struct MockLockProvider {
         pub owner: Option<String>,
         pub has_conflicts: bool,

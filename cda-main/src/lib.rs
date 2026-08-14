@@ -55,6 +55,7 @@ pub mod cda_factory;
 pub mod config;
 pub mod error;
 pub mod mdd;
+pub mod mdd_inspector;
 pub mod setup;
 pub mod update;
 

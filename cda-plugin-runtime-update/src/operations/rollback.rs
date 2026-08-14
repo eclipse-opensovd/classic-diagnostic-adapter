@@ -12,7 +12,7 @@
  */
 
 use cda_interfaces::{
-    runtime_update_api::{RuntimeReloaderPlugin, RuntimeUpdateError},
+    runtime_update_api::{RuntimeFileInspector, RuntimeReloaderPlugin, RuntimeUpdateError},
     storage_api::{Collection, CollectionName, Storage, Transaction},
 };
 
@@ -38,6 +38,7 @@ async fn restore_from_backup<S: Storage, C: Collection>(
 pub async fn execute_rollback<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
     storage: &S,
     reload_handler: &R,
+    inspector: &dyn RuntimeFileInspector,
 ) -> Result<(), RuntimeUpdateError> {
     let mdd_backup_col = storage
         .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
@@ -67,7 +68,7 @@ pub async fn execute_rollback<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
     tx.commit().await?;
 
     if !mdd_backup_empty {
-        reload_database_if_present(storage, reload_handler, false).await?;
+        reload_database_if_present(storage, reload_handler, false, inspector).await?;
     }
 
     Ok(())
@@ -105,9 +106,13 @@ mod tests {
         )
         .await;
 
-        execute_rollback(&storage, &NoopReloadHandler)
-            .await
-            .unwrap();
+        execute_rollback(
+            &storage,
+            &NoopReloadHandler,
+            &*crate::test_utils::test_inspector(),
+        )
+        .await
+        .unwrap();
 
         let db_col = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
@@ -141,9 +146,13 @@ mod tests {
         )
         .await;
 
-        execute_rollback(&storage, &NoopReloadHandler)
-            .await
-            .unwrap();
+        execute_rollback(
+            &storage,
+            &NoopReloadHandler,
+            &*crate::test_utils::test_inspector(),
+        )
+        .await
+        .unwrap();
 
         let result = storage
             .get_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
@@ -165,9 +174,13 @@ mod tests {
         )
         .await;
 
-        execute_rollback(&storage, &NoopReloadHandler)
-            .await
-            .unwrap();
+        execute_rollback(
+            &storage,
+            &NoopReloadHandler,
+            &*crate::test_utils::test_inspector(),
+        )
+        .await
+        .unwrap();
 
         let backup_col = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
@@ -180,7 +193,12 @@ mod tests {
     async fn rollback_with_empty_backup_returns_no_backup_error() {
         let (storage, _dir) = make_storage();
 
-        let result = execute_rollback(&storage, &NoopReloadHandler).await;
+        let result = execute_rollback(
+            &storage,
+            &NoopReloadHandler,
+            &*crate::test_utils::test_inspector(),
+        )
+        .await;
         assert!(
             matches!(result, Err(RuntimeUpdateError::NoBackup)),
             "expected NoBackup, got: {result:?}"
@@ -199,7 +217,9 @@ mod tests {
         .await;
 
         let handler = RecordingReloadHandler::new();
-        execute_rollback(&storage, &handler).await.unwrap();
+        execute_rollback(&storage, &handler, &*crate::test_utils::test_inspector())
+            .await
+            .unwrap();
 
         let calls = handler.reload_calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "reload_databases should be called once");
@@ -209,7 +229,12 @@ mod tests {
     async fn rollback_no_backup_returns_error() {
         let (storage, _dir) = make_storage();
 
-        let result = execute_rollback(&storage, &NoopReloadHandler).await;
+        let result = execute_rollback(
+            &storage,
+            &NoopReloadHandler,
+            &*crate::test_utils::test_inspector(),
+        )
+        .await;
         assert!(
             matches!(result, Err(RuntimeUpdateError::NoBackup)),
             "expected NoBackup when both backup collections are empty, got: {result:?}"
