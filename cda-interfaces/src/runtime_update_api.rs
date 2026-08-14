@@ -193,86 +193,49 @@ pub enum ExecutionStatus {
     Failed(String),
 }
 
-// Bulk-data types used by RuntimeFilesUpdatePlugin
-
-/// Hash algorithm for bulk-data integrity checks (ISO 17978-3).
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(rename_all = "lowercase")]
+/// Digest algorithm for runtime-file integrity reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HashAlgorithm {
     Sha256,
 }
 
-/// A single item in a bulk-data creation response (Table 303 shape).
-#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
-pub struct BulkDataCreated {
-    /// Bulk-data identifier created by the SOVD server to identify the bulk-data.
+/// A digest of a runtime file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileHash {
+    pub algorithm: HashAlgorithm,
+    /// Lower-case hex.
+    pub value: String,
+}
+
+/// A runtime database file as the update plugin describes it.
+///
+/// Domain shape, not a wire shape: the ISO 17978-3 bulk-data representation -
+/// `mimetype`, the duplicate `name`, the `x-sovd2uds-*` field names, the schema
+/// envelope - lives in `cda-sovd-interfaces` and is produced by `cda-sovd` when
+/// rendering a response. A plugin reports what it knows and nothing more.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeFile {
+    /// Identifier, which is also the file name.
     pub id: String,
-}
-
-/// Response body for deleting all bulk-data in a category (ISO 17978-3 Table 306).
-#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
-pub struct BulkDataDeleted {
-    pub deleted_ids: Vec<String>,
-    // spec requires an errors array to be present, however with transaction semantics
-    // this will always be an empty array
-    pub errors: Vec<BulkDataDeletionError>,
-}
-
-/// A bulk-data item that could not be deleted and its reason.
-#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
-pub struct BulkDataDeletionError {
-    pub id: String,
-    pub error: serde_json::Value,
-}
-
-/// Generic list wrapper used for bulk-data responses.
-#[derive(Deserialize, Serialize, Debug, schemars::JsonSchema)]
-pub struct BulkDataItems<T> {
-    pub items: Vec<T>,
-    #[schemars(skip)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema: Option<schemars::Schema>,
-}
-
-impl<T> Default for BulkDataItems<T> {
-    fn default() -> Self {
-        Self {
-            items: Vec::new(),
-            schema: None,
-        }
-    }
-}
-
-/// A bulk-data descriptor as defined by ISO 17978-3, Table 298.
-#[derive(Serialize, Deserialize, Debug, Clone, schemars::JsonSchema)]
-pub struct BulkDataDescriptor {
-    pub id: String,
-    pub mimetype: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Byte size, when [`FileListOptions::include_size`] was requested.
     pub size: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hash_algorithm: Option<HashAlgorithm>,
-    #[serde(
-        rename = "x-sovd2uds-OrigPath",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub origin_path: Option<String>,
-    #[serde(
-        rename = "x-sovd2uds-revision",
-        skip_serializing_if = "Option::is_none"
-    )]
+    /// Digest, when [`FileListOptions::include_hash`] was requested.
+    pub hash: Option<FileHash>,
+    /// Format-reported revision, when [`FileListOptions::include_revision`] was
+    /// requested and the file carries one.
     pub revision: Option<String>,
 }
 
-/// Response body for bulk-data list endpoints (`BulkDataDescriptor` follows Table 298 shape).
-pub type BulkDataList = BulkDataItems<BulkDataDescriptor>;
-
-/// Response body for bulk-data creation (Table 303 shape).
-pub type BulkDataCreatedList = BulkDataItems<BulkDataCreated>;
+/// Which optional metadata a listing should compute.
+///
+/// Each field costs work - hashing reads the whole file, revision parses it -
+/// so they are opt-in per request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FileListOptions {
+    pub include_size: bool,
+    pub include_hash: Option<HashAlgorithm>,
+    pub include_revision: bool,
+}
 
 /// Execution mode for database update operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, EnumString, schemars::JsonSchema)]
@@ -292,25 +255,6 @@ impl<'de> Deserialize<'de> for ExecutionMode {
         let s = String::deserialize(deserializer)?;
         ExecutionMode::from_str(&s).map_err(serde::de::Error::custom)
     }
-}
-
-/// Query parameters for runtime file list endpoints.
-#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
-pub struct RuntimeFilesQuery {
-    #[serde(rename = "include-schema", default)]
-    pub include_schema: bool,
-    #[serde(rename = "x-sovd2uds-include-hash")]
-    pub include_hash: Option<HashAlgorithm>,
-    #[serde(rename = "x-sovd2uds-include-file-size", default)]
-    pub include_file_size: bool,
-    #[serde(rename = "x-sovd2uds-include-revision", default)]
-    pub include_revision: bool,
-    /// Accepted for ISO 17978-3 compatibility but not currently applied.
-    #[serde(rename = "created-after")]
-    pub created_after: Option<String>,
-    /// Accepted for ISO 17978-3 compatibility but not currently applied.
-    #[serde(rename = "created-before")]
-    pub created_before: Option<String>,
 }
 
 /// Stored state for a single database update execution.
@@ -337,30 +281,28 @@ pub trait RuntimeFilesUpdatePlugin: Send + Sync + 'static {
     /// Returns files currently loaded and in use by the system.
     async fn list_current(
         &self,
-        query: &RuntimeFilesQuery,
-    ) -> Result<BulkDataList, RuntimeUpdateError>;
+        options: FileListOptions,
+    ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError>;
 
     /// Lists files staged for the next update (pending apply).
     ///
     /// Returns files uploaded via [`upload`] that have not yet been applied.
     async fn list_nextupdate(
         &self,
-        query: &RuntimeFilesQuery,
-    ) -> Result<BulkDataList, RuntimeUpdateError>;
+        options: FileListOptions,
+    ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError>;
 
     /// Lists backup files from the previous apply operation.
     ///
     /// Returns files that were current before the last apply. Used for rollback.
     async fn list_backup(
         &self,
-        query: &RuntimeFilesQuery,
-    ) -> Result<BulkDataList, RuntimeUpdateError>;
+        options: FileListOptions,
+    ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError>;
 
     /// Uploads one or more files to the next-update staging area.
-    async fn upload(
-        &self,
-        files: Vec<UploadFile>,
-    ) -> Result<BulkDataCreatedList, RuntimeUpdateError>;
+    /// Returns the identifiers of the created files.
+    async fn upload(&self, files: Vec<UploadFile>) -> Result<Vec<String>, RuntimeUpdateError>;
 
     /// Deletes all files from the next-update staging area and returns their identifiers.
     async fn delete_nextupdate(&self) -> Result<Vec<String>, RuntimeUpdateError>;
@@ -419,32 +361,29 @@ impl<P> ExclusiveRuntimePlugin<P> {
 impl<P: RuntimeFilesUpdatePlugin> RuntimeFilesUpdatePlugin for ExclusiveRuntimePlugin<P> {
     async fn list_current(
         &self,
-        query: &RuntimeFilesQuery,
-    ) -> Result<BulkDataList, RuntimeUpdateError> {
+        options: FileListOptions,
+    ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
         let _guard = self.lock.read().await;
-        self.inner.list_current(query).await
+        self.inner.list_current(options).await
     }
 
     async fn list_nextupdate(
         &self,
-        query: &RuntimeFilesQuery,
-    ) -> Result<BulkDataList, RuntimeUpdateError> {
+        options: FileListOptions,
+    ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
         let _guard = self.lock.read().await;
-        self.inner.list_nextupdate(query).await
+        self.inner.list_nextupdate(options).await
     }
 
     async fn list_backup(
         &self,
-        query: &RuntimeFilesQuery,
-    ) -> Result<BulkDataList, RuntimeUpdateError> {
+        options: FileListOptions,
+    ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
         let _guard = self.lock.read().await;
-        self.inner.list_backup(query).await
+        self.inner.list_backup(options).await
     }
 
-    async fn upload(
-        &self,
-        files: Vec<UploadFile>,
-    ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
+    async fn upload(&self, files: Vec<UploadFile>) -> Result<Vec<String>, RuntimeUpdateError> {
         let _guard = self.lock.write().await;
         self.inner.upload(files).await
     }
