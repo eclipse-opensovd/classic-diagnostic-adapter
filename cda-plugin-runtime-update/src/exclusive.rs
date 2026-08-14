@@ -34,8 +34,9 @@
 
 use async_trait::async_trait;
 use cda_interfaces::runtime_update_api::{
-    ExecutionMode, FileListOptions, RuntimeFile, RuntimeFilesUpdatePlugin, RuntimeUpdateError,
-    UpdateExecution, UploadFile,
+    ExecutionMode, FileListOptions, RuntimeFile, RuntimeFileCatalog, RuntimeFileStore,
+    RuntimeFilesUpdatePlugin, RuntimeUpdateError, RuntimeUpdateExecutor, UpdateExecution,
+    UploadFile,
 };
 
 /// Extension trait adding [`with_exclusive_access`](WithExclusiveAccess::with_exclusive_access).
@@ -73,7 +74,7 @@ impl<P> ExclusiveRuntimePlugin<P> {
 }
 
 #[async_trait]
-impl<P: RuntimeFilesUpdatePlugin> RuntimeFilesUpdatePlugin for ExclusiveRuntimePlugin<P> {
+impl<P: RuntimeFileCatalog> RuntimeFileCatalog for ExclusiveRuntimePlugin<P> {
     async fn list_current(
         &self,
         options: FileListOptions,
@@ -97,7 +98,10 @@ impl<P: RuntimeFilesUpdatePlugin> RuntimeFilesUpdatePlugin for ExclusiveRuntimeP
         let _guard = self.lock.read().await;
         self.inner.list_backup(options).await
     }
+}
 
+#[async_trait]
+impl<P: RuntimeFileStore> RuntimeFileStore for ExclusiveRuntimePlugin<P> {
     async fn upload(&self, files: Vec<UploadFile>) -> Result<Vec<String>, RuntimeUpdateError> {
         let _guard = self.lock.write().await;
         self.inner.upload(files).await
@@ -117,7 +121,10 @@ impl<P: RuntimeFilesUpdatePlugin> RuntimeFilesUpdatePlugin for ExclusiveRuntimeP
         let _guard = self.lock.write().await;
         self.inner.delete_backup().await
     }
+}
 
+#[async_trait]
+impl<P: RuntimeUpdateExecutor> RuntimeUpdateExecutor for ExclusiveRuntimePlugin<P> {
     async fn start_execution(&self, mode: ExecutionMode) -> Result<String, RuntimeUpdateError> {
         let _guard = self.lock.write().await;
         self.inner.start_execution(mode).await

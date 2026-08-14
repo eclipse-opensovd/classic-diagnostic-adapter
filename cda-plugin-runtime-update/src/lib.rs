@@ -322,8 +322,9 @@ mod tests {
 
     use async_trait::async_trait;
     use cda_interfaces::runtime_update_api::{
-        ExecutionMode, FileListOptions, RuntimeFile, RuntimeFilesUpdatePlugin, RuntimeUpdateError,
-        UpdateExecution, UploadFile,
+        ExecutionMode, FileListOptions, RuntimeFile, RuntimeFileCatalog, RuntimeFileStore,
+        RuntimeFilesUpdatePlugin, RuntimeUpdateError, RuntimeUpdateExecutor, UpdateExecution,
+        UploadFile,
     };
     use tokio::sync::{Barrier, Notify};
 
@@ -341,7 +342,7 @@ mod tests {
     type Notifier = Arc<Notify>;
 
     #[async_trait]
-    impl RuntimeFilesUpdatePlugin for DelayPlugin {
+    impl RuntimeFileCatalog for DelayPlugin {
         async fn list_current(
             &self,
             _options: FileListOptions,
@@ -366,7 +367,10 @@ mod tests {
         ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
             Ok(Vec::new())
         }
+    }
 
+    #[async_trait]
+    impl RuntimeFileStore for DelayPlugin {
         async fn upload(&self, _files: Vec<UploadFile>) -> Result<Vec<String>, RuntimeUpdateError> {
             self.concurrent_writes.fetch_add(1, Ordering::SeqCst);
             self.write_barrier.wait().await;
@@ -390,7 +394,10 @@ mod tests {
         async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
             Ok(vec![])
         }
+    }
 
+    #[async_trait]
+    impl RuntimeUpdateExecutor for DelayPlugin {
         async fn start_execution(
             &self,
             _mode: ExecutionMode,
