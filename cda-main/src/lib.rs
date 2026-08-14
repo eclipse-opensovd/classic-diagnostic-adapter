@@ -58,6 +58,7 @@ pub mod mdd;
 pub mod mdd_inspector;
 pub mod setup;
 pub mod update;
+pub mod update_security;
 
 pub use error::AppError;
 pub use setup::Setup;

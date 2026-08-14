@@ -12,14 +12,12 @@
  */
 
 pub use default_runtime_update_plugin::DefaultRuntimeUpdatePlugin;
-pub use security::DefaultUpdateSecurityHandler;
 
 pub mod config;
 pub mod default_runtime_reloader_plugin;
 pub use default_runtime_reloader_plugin::{DefaultReloadContext, RuntimeReloaderConfig};
 pub mod default_runtime_update_plugin;
 pub mod operations;
-pub mod security;
 pub mod storage;
 
 /// Shared test utilities for the runtime update plugin tests.

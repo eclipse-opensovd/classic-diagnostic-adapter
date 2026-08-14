@@ -208,7 +208,8 @@ mod tests {
         MockLockProvider,
     ) {
         let lock_provider = make_lock_provider(owner, has_ecu_conflicts, has_fg_conflicts);
-        let handler = DefaultUpdateSecurityHandler::new(crate::test_utils::test_inspector());
+        let handler =
+            DefaultUpdateSecurityHandler::new(Arc::new(crate::mdd_inspector::MddFileInspector));
         (handler, lock_provider)
     }
 
