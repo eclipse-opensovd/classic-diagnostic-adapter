@@ -306,8 +306,6 @@ pub struct UpdateExecution {
     pub status: ExecutionStatus,
 }
 
-// RuntimeFilesUpdatePlugin trait + ExclusiveRuntimePlugin wrapper
-
 /// The main plugin trait for managing diagnostic runtime files (MDD databases).
 ///
 /// Provides the full lifecycle for runtime file management: listing, uploading, deleting,
@@ -365,97 +363,4 @@ pub trait RuntimeFilesUpdatePlugin: Send + Sync + 'static {
 
     /// Returns the current status of an execution by its ID, or `None` if not found.
     async fn get_execution_status(&self, execution_id: &str) -> Option<UpdateExecution>;
-
-    /// Wraps this plugin in [`ExclusiveRuntimePlugin`], adding read/write mutual exclusion.
-    fn with_exclusive_access(self) -> ExclusiveRuntimePlugin<Self>
-    where
-        Self: Sized,
-    {
-        ExclusiveRuntimePlugin::new(self)
-    }
-}
-
-/// Wrapper that enforces mutual exclusion on any [`RuntimeFilesUpdatePlugin`].
-///
-/// Read operations (`list_*`, `get_execution_status`) acquire a shared read lock,
-/// write operations (`upload`, `delete_*`, `start_execution`) acquire an exclusive
-/// write lock. This prevents concurrent mutations from racing each other while
-/// still allowing parallel reads.
-///
-/// Obtain via [`RuntimeFilesUpdatePlugin::with_exclusive_access`], which is a
-/// provided default method on the trait.
-pub struct ExclusiveRuntimePlugin<P> {
-    inner: P,
-    lock: tokio::sync::RwLock<()>,
-}
-
-impl<P> ExclusiveRuntimePlugin<P> {
-    pub fn new(inner: P) -> Self {
-        Self {
-            inner,
-            lock: tokio::sync::RwLock::new(()),
-        }
-    }
-}
-
-#[async_trait]
-impl<P: RuntimeFilesUpdatePlugin> RuntimeFilesUpdatePlugin for ExclusiveRuntimePlugin<P> {
-    async fn list_current(
-        &self,
-        options: FileListOptions,
-    ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
-        let _guard = self.lock.read().await;
-        self.inner.list_current(options).await
-    }
-
-    async fn list_nextupdate(
-        &self,
-        options: FileListOptions,
-    ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
-        let _guard = self.lock.read().await;
-        self.inner.list_nextupdate(options).await
-    }
-
-    async fn list_backup(
-        &self,
-        options: FileListOptions,
-    ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
-        let _guard = self.lock.read().await;
-        self.inner.list_backup(options).await
-    }
-
-    async fn upload(&self, files: Vec<UploadFile>) -> Result<Vec<String>, RuntimeUpdateError> {
-        let _guard = self.lock.write().await;
-        self.inner.upload(files).await
-    }
-
-    async fn delete_nextupdate(&self) -> Result<Vec<String>, RuntimeUpdateError> {
-        let _guard = self.lock.write().await;
-        self.inner.delete_nextupdate().await
-    }
-
-    async fn delete_nextupdate_by_id(&self, file_id: &str) -> Result<(), RuntimeUpdateError> {
-        let _guard = self.lock.write().await;
-        self.inner.delete_nextupdate_by_id(file_id).await
-    }
-
-    async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
-        let _guard = self.lock.write().await;
-        self.inner.delete_backup().await
-    }
-
-    async fn start_execution(&self, mode: ExecutionMode) -> Result<String, RuntimeUpdateError> {
-        let _guard = self.lock.write().await;
-        self.inner.start_execution(mode).await
-    }
-
-    async fn get_execution_status(&self, execution_id: &str) -> Option<UpdateExecution> {
-        let _guard = self.lock.read().await;
-        self.inner.get_execution_status(execution_id).await
-    }
-
-    async fn list_executions(&self) -> Vec<UpdateExecution> {
-        let _guard = self.lock.read().await;
-        self.inner.list_executions().await
-    }
 }
