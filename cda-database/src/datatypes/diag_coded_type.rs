@@ -417,10 +417,10 @@ impl DiagCodedType {
 
         let len = end_pos.saturating_sub(byte_pos);
         if len < mmlt.min_length as usize {
-            return Err(DiagServiceError::BadPayload(format!(
-                "Not enough data in payload, needed at least {} bytes, got {} bytes",
-                mmlt.min_length, len
-            )));
+            return Err(DiagServiceError::NotEnoughData {
+                expected: byte_pos.saturating_add(mmlt.min_length as usize),
+                actual: uds_payload.len(),
+            });
         }
 
         Ok((
@@ -2870,6 +2870,15 @@ mod tests {
         let (data, bit_len) = diag_type.decode(&payload, 1, 0).unwrap();
         assert_eq!(data, vec![0xBB, 0xCC, 0xDD]);
         assert_eq!(bit_len, 24);
+
+        let error = diag_type.decode(&payload, 4, 0).unwrap_err();
+        assert_eq!(
+            error,
+            DiagServiceError::NotEnoughData {
+                expected: 5,
+                actual: 4
+            }
+        );
     }
 
     #[test]

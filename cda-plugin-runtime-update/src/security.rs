@@ -17,18 +17,27 @@ use async_trait::async_trait;
 use cda_database::mmap_and_decode_mdd;
 use cda_interfaces::{
     runtime_update_api::{
-        ActivityGuard, LockStateProvider, RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError,
-        UpdateCollections, UpdateFileType, VerificationError,
+        ActivityGuard, LockStateProvider, RuntimeUpdateError, RuntimeUpdateSecurityPlugin,
+        UpdateCollections, VerificationError,
     },
     storage_api::{Collection, DirectFileAccess},
 };
 
-pub struct UpdateSecurityHandler<L: LockStateProvider> {
+/// Default implementation of the runtime update security handler.
+///
+/// Validates vehicle lock ownership, detects lock conflicts, and verifies
+/// MDD file integrity.
+pub struct DefaultUpdateSecurityHandler<L: LockStateProvider> {
     guard: Vec<Box<dyn ActivityGuard>>,
     _lock_provider: std::marker::PhantomData<L>,
 }
 
-impl<L: LockStateProvider> UpdateSecurityHandler<L> {
+impl<L: LockStateProvider> DefaultUpdateSecurityHandler<L> {
+    /// Creates a new security handler with the given activity guards.
+    ///
+    /// # Arguments
+    /// * `_lock_provider` - The lock state provider (used for type inference)
+    /// * `guard` - Activity guards that prevent updates while operations are in progress
     pub fn new(_lock_provider: Arc<L>, guard: Vec<Box<dyn ActivityGuard>>) -> Self {
         Self {
             guard,
@@ -39,7 +48,7 @@ impl<L: LockStateProvider> UpdateSecurityHandler<L> {
 
 #[async_trait]
 impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'static>
-    RuntimeFilesUpdateSecurityHandler<L, C> for UpdateSecurityHandler<L>
+    RuntimeUpdateSecurityPlugin<L, C> for DefaultUpdateSecurityHandler<L>
 {
     /// Validates that the caller is allowed to start an execution (apply/rollback/cleanup).
     ///
@@ -82,34 +91,13 @@ impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'sta
         Ok(())
     }
 
-    async fn check_file_integrity(
-        &self,
-        type_: UpdateFileType,
-        path: &std::path::Path,
-    ) -> Result<(), VerificationError> {
-        match type_ {
-            UpdateFileType::Mdd => {
-                let path_str = path.to_str().ok_or_else(|| {
-                    VerificationError(format!("Invalid UTF-8 path: {}", path.display()))
-                })?;
-                mmap_and_decode_mdd(path_str).map_err(|e| {
-                    VerificationError(format!("Failed to parse MDD '{}': {e}", path.display()))
-                })?;
-            }
-            UpdateFileType::Config => {
-                let content = tokio::fs::read_to_string(path).await.map_err(|e| {
-                    VerificationError(format!("Failed to read config '{}': {e}", path.display()))
-                })?;
-                toml::from_str::<crate::config::configfile::Configuration>(&content).map_err(
-                    |e| {
-                        VerificationError(format!(
-                            "Failed to parse config '{}': {e}",
-                            path.display()
-                        ))
-                    },
-                )?;
-            }
-        }
+    async fn check_file_integrity(&self, path: &std::path::Path) -> Result<(), VerificationError> {
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| VerificationError(format!("Invalid UTF-8 path: {}", path.display())))?;
+        mmap_and_decode_mdd(path_str).map_err(|e| {
+            VerificationError(format!("Failed to parse MDD '{}': {e}", path.display()))
+        })?;
         Ok(())
     }
 }
@@ -148,10 +136,7 @@ mod tests {
 
     use async_trait::async_trait;
     use cda_interfaces::{
-        runtime_update_api::{
-            RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError, UpdateCollections,
-            UpdateFileType,
-        },
+        runtime_update_api::{RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateCollections},
         storage_api::{CollectionName, Storage as _},
     };
     use cda_storage::{LocalCollection, LocalStorage};
@@ -195,14 +180,13 @@ mod tests {
     }
 
     async fn check_file_integrity(
-        handler: &UpdateSecurityHandler<MockLockProvider>,
-        type_: UpdateFileType,
+        handler: &DefaultUpdateSecurityHandler<MockLockProvider>,
         path: &std::path::Path,
     ) -> Result<(), VerificationError> {
-        <UpdateSecurityHandler<_> as RuntimeFilesUpdateSecurityHandler<
+        <DefaultUpdateSecurityHandler<_> as RuntimeUpdateSecurityPlugin<
             MockLockProvider,
             LocalCollection,
-        >>::check_file_integrity(handler, type_, path)
+        >>::check_file_integrity(handler, path)
         .await
     }
 
@@ -239,16 +223,8 @@ mod tests {
                 .get_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
                 .await
                 .ok(),
-            pending_config: storage
-                .get_collection(&CollectionName::ConfigurationNextUpdate)
-                .await
-                .ok(),
             current_mdd: storage
                 .get_collection(&CollectionName::DiagnosticDatabase)
-                .await
-                .ok(),
-            current_config: storage
-                .get_collection(&CollectionName::Configuration)
                 .await
                 .ok(),
         }
@@ -258,9 +234,12 @@ mod tests {
         owner: Option<&str>,
         has_ecu_conflicts: bool,
         has_fg_conflicts: bool,
-    ) -> (UpdateSecurityHandler<MockLockProvider>, MockLockProvider) {
+    ) -> (
+        DefaultUpdateSecurityHandler<MockLockProvider>,
+        MockLockProvider,
+    ) {
         let lock_provider = make_lock_provider(owner, has_ecu_conflicts, has_fg_conflicts);
-        let handler = UpdateSecurityHandler::new(
+        let handler = DefaultUpdateSecurityHandler::new(
             Arc::new(MockLockProvider {
                 owner: owner.map(ToOwned::to_owned),
                 has_ecu_conflicts,
@@ -337,40 +316,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_file_integrity_config_fails_on_nonexistent_file() {
-        let (handler, _) = make_handler(Some("user-a"), false, false);
-        let path = PathBuf::from("/nonexistent/config.toml");
-        let result = check_file_integrity(&handler, UpdateFileType::Config, &path).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn check_file_integrity_config_fails_on_invalid_toml() {
-        let (handler, _) = make_handler(Some("user-a"), false, false);
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bad.toml");
-        std::fs::write(&path, "this is not valid toml {{{").unwrap();
-        let result = check_file_integrity(&handler, UpdateFileType::Config, &path).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn check_file_integrity_config_succeeds_on_valid_toml() {
-        let (handler, _) = make_handler(Some("user-a"), false, false);
-        let config = crate::config::configfile::Configuration::default();
-        let toml_str = toml::to_string(&config).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("valid.toml");
-        std::fs::write(&path, &toml_str).unwrap();
-        let result = check_file_integrity(&handler, UpdateFileType::Config, &path).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
     async fn check_file_integrity_mdd_fails_on_nonexistent_file() {
         let (handler, _) = make_handler(Some("user-a"), false, false);
         let path = PathBuf::from("/nonexistent/test.mdd");
-        let result = check_file_integrity(&handler, UpdateFileType::Mdd, &path).await;
+        let result = check_file_integrity(&handler, &path).await;
         assert!(result.is_err());
     }
 
@@ -380,7 +329,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.mdd");
         std::fs::write(&path, b"not a valid mdd file").unwrap();
-        let result = check_file_integrity(&handler, UpdateFileType::Mdd, &path).await;
+        let result = check_file_integrity(&handler, &path).await;
         assert!(result.is_err());
     }
 

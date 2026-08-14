@@ -1,4 +1,4 @@
-.. SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+.. SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
 ..
 .. See the NOTICE file(s) distributed with this work for additional
 .. information regarding copyright ownership.
@@ -12,6 +12,9 @@
 SOVD-API
 ========
 
-.. include:: /03_architecture/02_sovd-api/01_introduction.rst
-.. include:: /03_architecture/02_sovd-api/02_sovd-api.rst
-.. include:: /03_architecture/02_sovd-api/03_extensions.rst
+.. toctree::
+   :maxdepth: 2
+
+   01_introduction
+   02_sovd-api
+   03_extensions/index

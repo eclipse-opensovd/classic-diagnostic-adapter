@@ -93,43 +93,8 @@ Diagnostic Database Update Plugin
        - ``x-sovd2uds-include-revision`` (boolean, default: false) - to include the revision inside the files
        - ``created-after`` and ``created-before`` (string:date-time) are accepted for ISO 17978-3 compatibility but do not currently filter results.
 
-    **Configuration File Support**
-
-    In addition to MDD database files (``.mdd``), the plugin supports uploading CDA configuration
-    files (``.toml``) through the **same** ``runtimefiles-*`` bulk-data endpoints. The upload handler
-    routes each file to the appropriate internal storage collection based on its extension:
-
-    - ``.mdd`` files go to the ``DiagnosticDatabase*`` collections.
-    - ``.toml`` files go to the ``Configuration*`` collections.
-
-    Only one ``.toml`` configuration file per upload request is supported; uploading more than one
-    in a single ``POST`` to ``runtimefiles-nextupdate`` is rejected.
-
-    All GET endpoints (``runtimefiles-current``, ``runtimefiles-nextupdate``, ``runtimefiles-backup``)
-    return both MDD and configuration file entries in a single combined response.
-
-    The HTTP handler implementation for the bulk-data endpoints resides in
-    ``cda-sovd/src/sovd/apps/sovd2uds/bulk_data/runtimefiles.rs``. The execution endpoints
-    (Apply/Rollback/Cleanup) reside in ``cda-sovd/src/sovd/apps/sovd2uds/operations.rs``.
-
-    **Coupled MDD and Configuration Updates**
-
-    When an MDD file update requires a simultaneous configuration change (e.g., a new MDD file
-    introduces changes that require updated communication parameters in the CDA configuration), both
-    files must be uploaded to ``runtimefiles-nextupdate`` and applied via a **single** ``Apply``
-    execution. A single ``Apply`` execution will atomically apply all pending MDD and configuration
-    changes together in one transaction, provided both ``NextUpdate`` collections are populated.
-
-    .. warning::
-
-        There is **no guaranteed atomic coupling** when MDD and configuration updates are applied
-        in separate executions. Applying them independently means they take effect at different
-        points in time, which may leave the system in a partially updated state during the interval
-        between the two applies.
-
-        Users must account for this by uploading all related files (MDD and configuration) in the
-        same ``runtimefiles-nextupdate`` batch and triggering a single ``Apply``. This is an accepted
-        limitation of the unified endpoint design.
+    The runtime update plugin accepts MDD database files (``.mdd``). CDA configuration files cannot
+    be updated through the runtime-files endpoints.
 
     **Limitations to bulk-data operations**
 
@@ -153,6 +118,37 @@ Diagnostic Database Update Plugin
 
     The verification includes, but is not limited to, signature verification, hash verification, and version checks
     of the currently active database, as well as the new one.
+
+    **Providing a Custom Update Plugin**
+
+    Applications embedding CDA can replace the complete runtime update implementation at startup.
+    Implement ``cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin`` and pass a builder
+    to ``Setup::with_update_plugin``. The builder receives ``CdaRuntime``, which exposes the live
+    configuration, UDS manager, DoIP gateway, lock provider, storage directory, update guard, and
+    reload-related infrastructure required by an implementation.
+
+    The ``update_plugin_fn`` helper adapts an async closure without requiring a separate builder
+    type:
+
+    .. code:: rust
+
+       use opensovd_cda_lib::{Setup, run_with_ext_from_config};
+       use opensovd_cda_lib::update::update_plugin_fn;
+
+       let setup = Setup::<MySecurityPlugin, MySecurityLoader>::new()
+           .with_update_plugin(update_plugin_fn(|runtime| async move {
+               Ok(MyRuntimeUpdatePlugin::new(runtime))
+           }));
+
+       run_with_ext_from_config(config, setup).await?;
+
+    CDA mounts the returned plugin on the standard ``runtimefiles-*`` endpoints and wraps it
+    with read/write mutual exclusion. A replacement plugin therefore implements the complete
+    update lifecycle (listing, upload, deletion, apply, rollback, cleanup, and execution status).
+
+    Implementations that only need custom authorization, signature checks, version policy, or
+    reload behavior should normally retain ``DefaultRuntimeUpdatePlugin`` and provide custom
+    ``RuntimeUpdateSecurityPlugin`` and/or ``RuntimeReloaderPlugin`` implementations instead.
 
 
     **Application of the update**

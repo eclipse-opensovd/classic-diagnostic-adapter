@@ -13,8 +13,11 @@
 Architecture Decision Records
 *****************************
 
-.. include:: 01_mimalloc.rst
-.. include:: 02_mbedtls_tls_backend.rst
-.. include:: 03_mmap_strategy.rst
-.. include:: 04_wal_format.rst
-.. include:: 05_error_handling_library.rst
+.. toctree::
+   :maxdepth: 2
+
+   01_mimalloc
+   02_mbedtls_tls_backend
+   03_mmap_strategy
+   04_wal_format
+   05_error_handling_library

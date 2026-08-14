@@ -14,14 +14,41 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write,
+    path::PathBuf,
 };
 
 use cda_interfaces::{FunctionalDescriptionConfig, datatypes::FaultConfig};
 
-use crate::config::{
-    com_params::EcuComParams,
-    configfile::{Configuration, EcuConfig},
+use crate::{
+    AppError,
+    config::{
+        com_params::EcuComParams,
+        configfile::{Configuration, EcuConfig},
+    },
 };
+
+/// Generate a reference CDA configuration and write it to the requested output.
+///
+/// # Errors
+/// Returns [`AppError`] if generating the reference configuration or writing it fails.
+pub fn generate_config_cmd(output: Option<&PathBuf>) -> Result<(), AppError> {
+    let content = generate_reference_config()
+        .map_err(|e| AppError::RuntimeError(format!("Failed to generate config: {e}")))?;
+
+    match output.map(|p| p.as_os_str()) {
+        Some(p) if p == "-" => {
+            use std::io::Write;
+            std::io::stdout()
+                .write_all(content.as_bytes())
+                .map_err(|e| AppError::RuntimeError(format!("Failed to write stdout: {e}")))?;
+            Ok(())
+        }
+        Some(path) => std::fs::write(path, &content)
+            .map_err(|e| AppError::RuntimeError(format!("Failed to write config: {e}"))),
+        None => std::fs::write("opensovd-cda.toml", &content)
+            .map_err(|e| AppError::RuntimeError(format!("Failed to write config: {e}"))),
+    }
+}
 
 /// Create a Configuration instance with example values for fields that default to `None`.
 /// This ensures they appear in the generated reference config output.

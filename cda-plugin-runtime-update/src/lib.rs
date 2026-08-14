@@ -11,20 +11,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// SPDX-License-Identifier: Apache-2.0
-//
-// See the NOTICE file(s) distributed with this work for additional
-// information regarding copyright ownership.
-//
-// This program and the accompanying materials are made available under the
-// terms of the Apache License Version 2.0 which is available at
-// https://www.apache.org/licenses/LICENSE-2.0
-
-pub use default_runtime_update_plugin::DefaultRuntimeFilesUpdatePlugin;
+pub use default_runtime_update_plugin::DefaultRuntimeUpdatePlugin;
+pub use security::DefaultUpdateSecurityHandler;
 
 pub mod config;
+pub mod default_runtime_reloader_plugin;
+pub use default_runtime_reloader_plugin::{DefaultReloadContext, RuntimeReloaderConfig};
 pub mod default_runtime_update_plugin;
 pub mod operations;
+pub mod security;
 pub mod storage;
 
 /// Shared test utilities for the runtime update plugin tests.
@@ -39,8 +34,8 @@ pub(crate) mod test_utils {
     use bytes::Bytes;
     use cda_interfaces::{
         runtime_update_api::{
-            LockStateProvider, ReloadError, RuntimeFileReloadHandler, RuntimeUpdateError,
-            UpdateFileType, UploadFile, VerificationError,
+            LockStateProvider, ReloadError, RuntimeReloaderPlugin, RuntimeUpdateError, UploadFile,
+            VerificationError,
         },
         storage_api::{
             Collection, CollectionName, DirectFileAccess, ReadableStream, Storage, Transaction,
@@ -87,7 +82,7 @@ pub(crate) mod test_utils {
 
     #[async_trait]
     impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'static>
-        cda_interfaces::runtime_update_api::RuntimeFilesUpdateSecurityHandler<L, C>
+        cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
         for MockSecurityHandler
     {
         async fn check_apply_allowed(
@@ -106,7 +101,6 @@ pub(crate) mod test_utils {
 
         async fn check_file_integrity(
             &self,
-            _type: UpdateFileType,
             _path: &std::path::Path,
         ) -> Result<(), VerificationError> {
             Ok(())
@@ -188,58 +182,43 @@ pub(crate) mod test_utils {
 
     pub struct RecordingReloadHandler {
         pub reload_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
-        pub config_calls: Arc<Mutex<Vec<PathBuf>>>,
     }
 
     impl RecordingReloadHandler {
         pub fn new() -> Self {
             Self {
                 reload_calls: Arc::new(Mutex::new(Vec::new())),
-                config_calls: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
 
     #[async_trait]
-    impl RuntimeFileReloadHandler for RecordingReloadHandler {
+    impl RuntimeReloaderPlugin for RecordingReloadHandler {
         async fn reload_databases(&self, paths: Vec<PathBuf>) -> Result<(), ReloadError> {
             self.reload_calls.lock().unwrap().push(paths);
             Ok(())
         }
-
-        async fn reload_configuration(&self, path: PathBuf) -> Result<(), ReloadError> {
-            self.config_calls.lock().unwrap().push(path);
-            Ok(())
-        }
     }
 
-    /// A [`RuntimeFileReloadHandler`] that does nothing, useful as a default in tests.
+    /// A [`RuntimeReloaderPlugin`] that does nothing, useful as a default in tests.
     pub struct NoopReloadHandler;
 
     #[async_trait]
-    impl RuntimeFileReloadHandler for NoopReloadHandler {
+    impl RuntimeReloaderPlugin for NoopReloadHandler {
         async fn reload_databases(&self, _mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
-            Ok(())
-        }
-
-        async fn reload_configuration(&self, _config_path: PathBuf) -> Result<(), ReloadError> {
             Ok(())
         }
     }
 
-    /// A [`RuntimeFileReloadHandler`] whose database reload always fails, useful for
+    /// A [`RuntimeReloaderPlugin`] whose database reload always fails, useful for
     /// exercising the async-failure path of an execution that has otherwise been
     /// accepted (i.e. that got past all synchronous pre-checks in `start_execution`).
     pub struct FailingReloadHandler;
 
     #[async_trait]
-    impl RuntimeFileReloadHandler for FailingReloadHandler {
+    impl RuntimeReloaderPlugin for FailingReloadHandler {
         async fn reload_databases(&self, _mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
             Err(ReloadError("simulated reload failure".to_string()))
-        }
-
-        async fn reload_configuration(&self, _config_path: PathBuf) -> Result<(), ReloadError> {
-            Ok(())
         }
     }
 }

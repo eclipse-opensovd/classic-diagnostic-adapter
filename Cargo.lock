@@ -380,7 +380,9 @@ dependencies = [
 name = "cda-comm-can"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "cda-interfaces",
+ "cda-transport-router",
  "futures",
  "hex",
  "schemars",
@@ -397,6 +399,7 @@ dependencies = [
 name = "cda-comm-doip"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "cda-interfaces",
  "doip-codec",
  "doip-definitions",
@@ -511,6 +514,7 @@ dependencies = [
  "bytes",
  "cda-build",
  "foldhash",
+ "futures",
  "hex",
  "mockall",
  "parking_lot",
@@ -533,12 +537,13 @@ dependencies = [
  "bytes",
  "cda-database",
  "cda-interfaces",
+ "cda-plugin-security",
+ "cda-sovd",
  "cda-storage",
  "schemars",
  "serde",
  "serde_json",
  "sha2",
- "sovd-interfaces",
  "tempfile",
  "thiserror 2.0.17",
  "tokio",
@@ -577,10 +582,9 @@ dependencies = [
  "axum-extra",
  "bytes",
  "cda-build",
+ "cda-comm-doip",
  "cda-interfaces",
- "cda-plugin-runtime-update",
  "cda-plugin-security",
- "cda-tracing",
  "chrono",
  "http",
  "indexmap",
@@ -640,6 +644,16 @@ dependencies = [
  "tracing-dlt",
  "tracing-opentelemetry",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "cda-transport-router"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cda-interfaces",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2435,6 +2449,7 @@ dependencies = [
  "cda-sovd",
  "cda-storage",
  "cda-tracing",
+ "cda-transport-router",
  "chrono",
  "clap",
  "figment",

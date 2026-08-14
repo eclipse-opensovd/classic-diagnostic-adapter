@@ -189,3 +189,73 @@ DLT Logging Plugin
 
     Application log levels must be mapped to their corresponding DLT log levels, so that DLT-side filtering by
     severity works correctly.
+
+
+Vehicle Topology Plugin
+------------------------
+
+.. req:: Vehicle Topology Plugin
+    :id: req~plugin-vehicle-topology
+    :links: arch~plugin-vehicle-topology-retrieval
+    :status: draft
+
+    A vehicle topology plugin must be available. It must provide an SOVD-API endpoint that returns the
+    network structure of the vehicle, consisting of functional groups, gateways, and the ECUs reachable
+    through them.
+
+    While a ``networkreset`` execution is in progress, this endpoint must respond with ``409 Conflict``.
+
+
+.. req:: Vehicle Topology Plugin - Reset
+    :id: req~plugin-vehicle-topology-reset
+    :links: arch~plugin-vehicle-topology-reset
+    :status: draft
+
+    It must be possible to reset the network structure via the ``networkreset`` operation, following the
+    standard SOVD operations semantics (i.e. listed under ``/apps/sovd2uds/operations``, executed via
+    ``POST /apps/sovd2uds/operations/networkreset/executions``, with the list of current execution
+    identifiers queryable via ``GET /apps/sovd2uds/operations/networkreset/executions``, the status of a
+    specific execution queryable via ``GET /apps/sovd2uds/operations/networkreset/executions/{id}``, and
+    the execution terminable and removable via ``DELETE
+    /apps/sovd2uds/operations/networkreset/executions/{id}``).
+
+    Executing the ``networkreset`` operation must require the caller to already hold an exclusive vehicle
+    lock, and no diagnostic operations may be in progress while the network structure is being reset.
+
+
+.. req:: Vehicle Topology Plugin - Reset with Persisted List Control
+    :id: req~plugin-vehicle-topology-reset-clear-persisted
+    :links: arch~plugin-vehicle-topology-reset-persistence
+    :status: draft
+
+    The ``networkreset`` operation execution must accept the following independent, optional input flags,
+    both defaulting to ``true`` to preserve the existing behavior when omitted:
+
+    - ``clear_persisted`` -- clear the persisted ECU topology (see :need:`req~dt-ecu-list-persistence`)
+      before/regardless of running a new detection.
+    - ``trigger_detection`` -- perform a live ECU detection run (VIR/VAM discovery and variant detection)
+      as part of this execution.
+
+    The resulting behavior depends on the combination of flags:
+
+    - ``clear_persisted=true``, ``trigger_detection=true`` (default): the persisted topology is cleared,
+      a full detection run is performed, and its results are persisted -- equivalent to the previously
+      defined ``networkreset`` behavior.
+    - ``clear_persisted=true``, ``trigger_detection=false``: the persisted topology is cleared without
+      performing any live detection or vehicle communication. Subsequent behavior is governed by
+      :need:`req~dt-deferred-initialization` (``init_mode``) as if no persisted topology had ever existed.
+    - ``clear_persisted=false``, ``trigger_detection=true``: a live detection run is performed and its
+      results are merged (upserted) into the existing persisted topology, without first removing entries
+      for gateways/ECUs not seen during this run.
+    - ``clear_persisted=false``, ``trigger_detection=false``: no operation is performed; this combination
+      must be rejected as an invalid request.
+
+    When ECU list persistence is configured as disabled (see :need:`req~dt-ecu-list-persistence`),
+    ``clear_persisted`` has no observable effect (there is no persisted topology to clear), regardless of
+    its value; only ``trigger_detection`` is meaningful in that configuration.
+
+    **Rationale**
+
+    Decoupling the clearing of persisted data from triggering live detection allows clients to, for
+    example, force the CDA back into a quiet state without any vehicle communication (clear only), or
+    refresh persisted data incrementally without discarding previously known entries (detect only).

@@ -15,9 +15,7 @@ use std::sync::Arc;
 
 use aide::axum::{ApiRouter as Router, routing};
 use cda_interfaces::HashMap;
-use cda_sovd::dynamic_router::DynamicRouter;
 use futures::future;
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 pub mod config;
@@ -28,21 +26,8 @@ pub enum HealthError {
     ProviderAlreadyExists(String),
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, schemars::JsonSchema, Eq, PartialEq)]
-pub enum Status {
-    Up,
-    Starting,
-    Pending,
-    Failed,
-}
-
-/// Trait for health providers that are queried on-demand when a health check request comes in.
-/// Implementors should return the current health status when `check_health` is called.
-#[async_trait::async_trait]
-pub trait HealthProvider: Send + Sync {
-    /// Returns the current health status of the component.
-    async fn check_health(&self) -> Status;
-}
+pub use cda_interfaces::health::{HealthProvider, Status};
+use cda_sovd::dynamic_router::DynamicRouter;
 
 /// A simple health provider implementation that stores the last status.
 /// Useful for components that run through an initialization once and their health
@@ -69,8 +54,12 @@ impl StatusHealthProvider {
 
 #[async_trait::async_trait]
 impl HealthProvider for StatusHealthProvider {
-    async fn check_health(&self) -> Status {
+    async fn status(&self) -> Status {
         *self.status.read().await
+    }
+
+    async fn set_status(&self, status: Status) {
+        *self.status.write().await = status;
     }
 }
 
@@ -107,7 +96,7 @@ impl HealthState {
         let providers = self.providers.read().await;
 
         let futures = providers.iter().map(|(name, provider)| async move {
-            let status = provider.check_health().await;
+            let status = provider.status().await;
             (name.clone(), status)
         });
 

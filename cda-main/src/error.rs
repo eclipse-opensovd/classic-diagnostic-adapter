@@ -13,7 +13,10 @@
 
 use std::fmt;
 
-use cda_interfaces::{DiagServiceError, DoipGatewaySetupError, config::ConfigSanityError};
+use cda_comm_doip::DoipGatewaySetupError;
+use cda_interfaces::{
+    DiagServiceError, config::ConfigSanityError, runtime_update_api::RuntimeUpdateError,
+};
 use cda_tracing::TracingSetupError;
 
 #[derive(thiserror::Error)]
@@ -146,6 +149,12 @@ impl From<ConfigSanityError> for AppError {
             message: "Error while checking configuration sanity".to_string(),
             source: Some(value.into()),
         }
+    }
+}
+
+impl From<RuntimeUpdateError> for AppError {
+    fn from(value: RuntimeUpdateError) -> Self {
+        AppError::InitializationFailed(value.to_string())
     }
 }
 
