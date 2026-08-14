@@ -18,24 +18,28 @@ use axum::{
     http::{StatusCode, header::LOCATION},
     response::{IntoResponse, Response},
 };
-use cda_interfaces::runtime_update_api::{
-    LockStateProvider, RuntimeFilesUpdatePlugin, RuntimeUpdateError,
+use cda_interfaces::{
+    DynamicPlugin,
+    runtime_update_api::{RuntimeFilesUpdatePlugin, RuntimeUpdateError},
 };
 use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
 
 use crate::VendorErrorCode;
 
-pub struct RuntimeUpdateRouteState<P, L> {
+/// State shared by every runtime-update route.
+///
+/// Carries no lock provider: authorization is the update plugin's decision, and
+/// this layer only transports the request and renders the verdict. See
+/// [`require_mutation_allowed`].
+pub struct RuntimeUpdateRouteState<P> {
     pub plugin: Arc<P>,
-    pub vehicle_lock_states: Arc<L>,
     pub retry_after: Duration,
 }
 
-impl<P, L> Clone for RuntimeUpdateRouteState<P, L> {
+impl<P> Clone for RuntimeUpdateRouteState<P> {
     fn clone(&self) -> Self {
         Self {
             plugin: Arc::clone(&self.plugin),
-            vehicle_lock_states: Arc::clone(&self.vehicle_lock_states),
             retry_after: self.retry_after,
         }
     }
@@ -175,28 +179,24 @@ fn bulk_data_created_response(
     (StatusCode::CREATED, [(LOCATION, location)], Json(result)).into_response()
 }
 
-pub(crate) async fn require_vehicle_lock(
-    lock_state: &dyn LockStateProvider,
-    claims: &dyn cda_plugin_security::Claims,
+/// Asks the update plugin whether this caller may mutate the staging area.
+///
+/// The security plugin is the authority for that decision; this layer only
+/// transports the request and renders the plugin's verdict as HTTP. It
+/// deliberately does not inspect claims or lock ownership itself, because a
+/// replacement security policy may apply checks that such a shortcut would skip.
+///
+/// Called before reading a request body so an unauthorized upload is rejected
+/// without buffering it. The mutating calls re-check.
+pub(crate) async fn require_mutation_allowed(
+    plugin: &impl RuntimeFilesUpdatePlugin,
+    security: &DynamicPlugin,
     retry_after: Duration,
 ) -> Result<(), Box<Response>> {
-    match lock_state.vehicle_lock_owner_sub().await {
-        None => Err(Box::new(
-            DbUpdateErrorResponse::new(
-                RuntimeUpdateError::NoLock("Vehicle lock is missing".to_owned()),
-                retry_after,
-            )
-            .into_response(),
-        )),
-        Some(owner) if owner != claims.sub() => Err(Box::new(
-            DbUpdateErrorResponse::new(
-                RuntimeUpdateError::NoLock("Vehicle lock is owned by another user".to_owned()),
-                retry_after,
-            )
-            .into_response(),
-        )),
-        Some(_) => Ok(()),
-    }
+    plugin
+        .authorize_mutation(security)
+        .await
+        .map_err(|error| Box::new(DbUpdateErrorResponse::new(error, retry_after).into_response()))
 }
 
 pub(crate) mod current {
@@ -204,13 +204,13 @@ pub(crate) mod current {
         extract::{Query, State},
         response::{IntoResponse, Response},
     };
-    use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
+    use cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin;
     use cda_plugin_security::Secured;
 
     use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState};
 
-    pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
-        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
+    pub(crate) async fn get<P: RuntimeFilesUpdatePlugin>(
+        State(route_state): State<RuntimeUpdateRouteState<P>>,
         Secured(_sec_plugin): Secured,
         Query(query): Query<
             sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::RuntimeFilesQuery,
@@ -241,15 +241,15 @@ pub(crate) mod nextupdate {
         response::{IntoResponse, Response},
     };
     use cda_interfaces::runtime_update_api::{
-        LockStateProvider, RuntimeFilesUpdatePlugin, RuntimeUpdateError, UploadFile,
+        RuntimeFilesUpdatePlugin, RuntimeUpdateError, UploadFile,
     };
     use cda_plugin_security::Secured;
     use opensovd_axum_extra::ExtractHost;
 
-    use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
+    use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_mutation_allowed};
 
-    pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
-        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
+    pub(crate) async fn get<P: RuntimeFilesUpdatePlugin>(
+        State(route_state): State<RuntimeUpdateRouteState<P>>,
         Secured(_sec_plugin): Secured,
         Query(query): Query<
             sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::RuntimeFilesQuery,
@@ -406,8 +406,8 @@ pub(crate) mod nextupdate {
     /// filenames taken from each field's `filename` parameter), or a single
     /// `application/octet-stream` upload, where the filename must be provided via
     /// the `Content-Disposition` header (e.g. `attachment; filename="foo.mdd"`).
-    pub(crate) async fn post<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
-        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
+    pub(crate) async fn post<P: RuntimeFilesUpdatePlugin>(
+        State(route_state): State<RuntimeUpdateRouteState<P>>,
         UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
         Secured(sec_plugin): Secured,
         request: Request,
@@ -437,8 +437,8 @@ pub(crate) mod nextupdate {
         }
     }
 
-    async fn handle_multipart_upload<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
-        route_state: RuntimeUpdateRouteState<P, L>,
+    async fn handle_multipart_upload<P: RuntimeFilesUpdatePlugin>(
+        route_state: RuntimeUpdateRouteState<P>,
         sec_plugin: cda_plugin_security::SecurityPluginData,
         host: String,
         request: Request,
@@ -456,13 +456,9 @@ pub(crate) mod nextupdate {
             };
 
         // The plugin takes care about rejecting new uploads during an active apply
-        let claims = sec_plugin.as_auth_plugin().claims();
-        if let Err(resp) = require_vehicle_lock(
-            &*route_state.vehicle_lock_states,
-            *claims,
-            route_state.retry_after,
-        )
-        .await
+        let security = sec_plugin as cda_interfaces::DynamicPlugin;
+        if let Err(resp) =
+            require_mutation_allowed(&*route_state.plugin, &security, route_state.retry_after).await
         {
             // The client may still be streaming the (potentially large) multipart
             // body. If we respond and close/reset the connection before the body
@@ -491,30 +487,30 @@ pub(crate) mod nextupdate {
             }
         }
 
-        route_state.plugin.upload(files).await.map_or_else(
-            |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
-            |ids| {
-                super::bulk_data_created_response(
-                    &host,
-                    sovd_interfaces::runtime_files::bulk_data_created(ids),
-                )
-            },
-        )
+        route_state
+            .plugin
+            .upload(files, &security)
+            .await
+            .map_or_else(
+                |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
+                |ids| {
+                    super::bulk_data_created_response(
+                        &host,
+                        sovd_interfaces::runtime_files::bulk_data_created(ids),
+                    )
+                },
+            )
     }
 
-    async fn handle_octet_stream_upload<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
-        route_state: RuntimeUpdateRouteState<P, L>,
+    async fn handle_octet_stream_upload<P: RuntimeFilesUpdatePlugin>(
+        route_state: RuntimeUpdateRouteState<P>,
         sec_plugin: cda_plugin_security::SecurityPluginData,
         host: String,
         request: Request,
     ) -> Response {
-        let claims = sec_plugin.as_auth_plugin().claims();
-        if let Err(resp) = require_vehicle_lock(
-            &*route_state.vehicle_lock_states,
-            *claims,
-            route_state.retry_after,
-        )
-        .await
+        let security = sec_plugin as cda_interfaces::DynamicPlugin;
+        if let Err(resp) =
+            require_mutation_allowed(&*route_state.plugin, &security, route_state.retry_after).await
         {
             // As with the multipart path: drain the (potentially large) body before
             // responding, so an early rejection doesn't race the client's in-flight
@@ -551,7 +547,7 @@ pub(crate) mod nextupdate {
 
         route_state
             .plugin
-            .upload(vec![UploadFile { filename, data }])
+            .upload(vec![UploadFile { filename, data }], &security)
             .await
             .map_or_else(
                 |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
@@ -564,35 +560,35 @@ pub(crate) mod nextupdate {
             )
     }
 
-    pub(crate) async fn delete<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
-        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
+    pub(crate) async fn delete<P: RuntimeFilesUpdatePlugin>(
+        State(route_state): State<RuntimeUpdateRouteState<P>>,
         Secured(sec_plugin): Secured,
     ) -> impl IntoResponse {
-        let claims = sec_plugin.as_auth_plugin().claims();
-        if let Err(resp) = require_vehicle_lock(
-            &*route_state.vehicle_lock_states,
-            *claims,
-            route_state.retry_after,
-        )
-        .await
+        let security = sec_plugin as cda_interfaces::DynamicPlugin;
+        if let Err(resp) =
+            require_mutation_allowed(&*route_state.plugin, &security, route_state.retry_after).await
         {
             return (*resp).into_response();
         }
-        route_state.plugin.delete_nextupdate().await.map_or_else(
-            |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
-            |deleted_ids| {
-                (
-                    StatusCode::OK,
-                    Json(
-                        sovd_interfaces::apps::sovd2uds::bulk_data::BulkDataDeleted {
-                            deleted_ids,
-                            errors: vec![],
-                        },
-                    ),
-                )
-                    .into_response()
-            },
-        )
+        route_state
+            .plugin
+            .delete_nextupdate(&security)
+            .await
+            .map_or_else(
+                |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
+                |deleted_ids| {
+                    (
+                        StatusCode::OK,
+                        Json(
+                            sovd_interfaces::apps::sovd2uds::bulk_data::BulkDataDeleted {
+                                deleted_ids,
+                                errors: vec![],
+                            },
+                        ),
+                    )
+                        .into_response()
+                },
+            )
     }
 
     pub(crate) mod id {
@@ -601,29 +597,28 @@ pub(crate) mod nextupdate {
             http::StatusCode,
             response::IntoResponse,
         };
-        use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
+        use cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin;
         use cda_plugin_security::Secured;
 
-        use super::super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
+        use super::super::{
+            DbUpdateErrorResponse, RuntimeUpdateRouteState, require_mutation_allowed,
+        };
 
-        pub(crate) async fn delete<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
-            State(route_state): State<RuntimeUpdateRouteState<P, L>>,
+        pub(crate) async fn delete<P: RuntimeFilesUpdatePlugin>(
+            State(route_state): State<RuntimeUpdateRouteState<P>>,
             Secured(sec_plugin): Secured,
             Path(id): Path<String>,
         ) -> impl IntoResponse {
-            let claims = sec_plugin.as_auth_plugin().claims();
-            if let Err(resp) = require_vehicle_lock(
-                &*route_state.vehicle_lock_states,
-                *claims,
-                route_state.retry_after,
-            )
-            .await
+            let security = sec_plugin as cda_interfaces::DynamicPlugin;
+            if let Err(resp) =
+                require_mutation_allowed(&*route_state.plugin, &security, route_state.retry_after)
+                    .await
             {
                 return (*resp).into_response();
             }
             route_state
                 .plugin
-                .delete_nextupdate_by_id(&id)
+                .delete_nextupdate_by_id(&id, &security)
                 .await
                 .map_or_else(
                     |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
@@ -640,13 +635,13 @@ pub(crate) mod backup {
         http::StatusCode,
         response::{IntoResponse, Response},
     };
-    use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
+    use cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin;
     use cda_plugin_security::Secured;
 
-    use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
+    use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_mutation_allowed};
 
-    pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
-        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
+    pub(crate) async fn get<P: RuntimeFilesUpdatePlugin>(
+        State(route_state): State<RuntimeUpdateRouteState<P>>,
         Secured(_sec_plugin): Secured,
         Query(query): Query<
             sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::RuntimeFilesQuery,
@@ -667,35 +662,35 @@ pub(crate) mod backup {
             )
     }
 
-    pub(crate) async fn delete<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
-        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
+    pub(crate) async fn delete<P: RuntimeFilesUpdatePlugin>(
+        State(route_state): State<RuntimeUpdateRouteState<P>>,
         Secured(sec_plugin): Secured,
     ) -> impl IntoResponse {
-        let claims = sec_plugin.as_auth_plugin().claims();
-        if let Err(resp) = require_vehicle_lock(
-            &*route_state.vehicle_lock_states,
-            *claims,
-            route_state.retry_after,
-        )
-        .await
+        let security = sec_plugin as cda_interfaces::DynamicPlugin;
+        if let Err(resp) =
+            require_mutation_allowed(&*route_state.plugin, &security, route_state.retry_after).await
         {
             return (*resp).into_response();
         }
-        route_state.plugin.delete_backup().await.map_or_else(
-            |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
-            |deleted_ids| {
-                (
-                    StatusCode::OK,
-                    Json(
-                        sovd_interfaces::apps::sovd2uds::bulk_data::BulkDataDeleted {
-                            deleted_ids,
-                            errors: vec![],
-                        },
-                    ),
-                )
-                    .into_response()
-            },
-        )
+        route_state
+            .plugin
+            .delete_backup(&security)
+            .await
+            .map_or_else(
+                |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
+                |deleted_ids| {
+                    (
+                        StatusCode::OK,
+                        Json(
+                            sovd_interfaces::apps::sovd2uds::bulk_data::BulkDataDeleted {
+                                deleted_ids,
+                                errors: vec![],
+                            },
+                        ),
+                    )
+                        .into_response()
+                },
+            )
     }
 }
 
@@ -705,33 +700,29 @@ const RUNTIMEFILES_NEXTUPDATE_ROUTE: &str =
     "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate";
 const RUNTIMEFILES_BACKUP_ROUTE: &str = "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-backup";
 
-pub fn routes<
-    S: cda_plugin_security::SecurityPluginLoader,
-    P: RuntimeFilesUpdatePlugin,
-    L: LockStateProvider,
->(
-    state: RuntimeUpdateRouteState<P, L>,
+pub fn routes<S: cda_plugin_security::SecurityPluginLoader, P: RuntimeFilesUpdatePlugin>(
+    state: RuntimeUpdateRouteState<P>,
     upload_limit: usize,
 ) -> axum::Router {
     axum::Router::new()
         .route(
             RUNTIMEFILES_CURRENT_ROUTE,
-            axum::routing::get(current::get::<P, L>),
+            axum::routing::get(current::get::<P>),
         )
         .route(
             RUNTIMEFILES_NEXTUPDATE_ROUTE,
-            axum::routing::get(nextupdate::get::<P, L>)
-                .post(nextupdate::post::<P, L>)
+            axum::routing::get(nextupdate::get::<P>)
+                .post(nextupdate::post::<P>)
                 .layer(axum::extract::DefaultBodyLimit::max(upload_limit))
-                .delete(nextupdate::delete::<P, L>),
+                .delete(nextupdate::delete::<P>),
         )
         .route(
             "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/{id}",
-            axum::routing::delete(nextupdate::id::delete::<P, L>),
+            axum::routing::delete(nextupdate::id::delete::<P>),
         )
         .route(
             RUNTIMEFILES_BACKUP_ROUTE,
-            axum::routing::get(backup::get::<P, L>).delete(backup::delete::<P, L>),
+            axum::routing::get(backup::get::<P>).delete(backup::delete::<P>),
         )
         .layer(axum::middleware::from_fn(
             cda_plugin_security::security_plugin_middleware::<S>,

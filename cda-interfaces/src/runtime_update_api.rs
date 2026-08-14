@@ -196,6 +196,18 @@ pub trait RuntimeUpdateSecurityPlugin<
     C: Collection + DirectFileAccess + Send + Sync + 'static,
 >: Send + Sync + 'static
 {
+    /// Validates that the caller may mutate the staging area (upload or delete).
+    ///
+    /// Called by the plugin before any file mutation.
+    ///
+    /// # Errors
+    /// Return an appropriate [`RuntimeUpdateError`] to deny the mutation.
+    async fn check_mutation_allowed(
+        &self,
+        security: &crate::DynamicPlugin,
+        lock_state_provider: &L,
+    ) -> Result<(), RuntimeUpdateError>;
+
     /// Validates that the caller is allowed to start an execution (apply/rollback/cleanup).
     /// Called by the plugin before `start_execution`.
     ///
@@ -208,6 +220,7 @@ pub trait RuntimeUpdateSecurityPlugin<
     /// Return an appropriate [`RuntimeUpdateError`] variant to deny the execution.
     async fn check_apply_allowed(
         &self,
+        security: &crate::DynamicPlugin,
         lock_state_provider: &L,
         collections: &UpdateCollections<C>,
     ) -> Result<(), RuntimeUpdateError>;
@@ -339,19 +352,46 @@ pub trait RuntimeFileCatalog: Send + Sync + 'static {
 /// anything; see [`RuntimeUpdateSecurityPlugin`].
 #[async_trait]
 pub trait RuntimeFileStore: Send + Sync + 'static {
+    /// Asks whether `security` may mutate the staging area, without mutating it.
+    ///
+    /// Lets a transport reject an unauthorized request before reading a large
+    /// request body, while the decision still belongs to the plugin's configured
+    /// security policy. The mutating methods re-check, so skipping this is safe.
+    ///
+    /// # Errors
+    /// Returns the same error the corresponding mutation would return.
+    async fn authorize_mutation(
+        &self,
+        security: &crate::DynamicPlugin,
+    ) -> Result<(), RuntimeUpdateError>;
+
     /// Uploads one or more files to the next-update staging area.
     ///
     /// Returns the identifiers of the created files.
-    async fn upload(&self, files: Vec<UploadFile>) -> Result<Vec<String>, RuntimeUpdateError>;
+    async fn upload(
+        &self,
+        files: Vec<UploadFile>,
+        security: &crate::DynamicPlugin,
+    ) -> Result<Vec<String>, RuntimeUpdateError>;
 
     /// Deletes all files from the next-update staging area and returns their identifiers.
-    async fn delete_nextupdate(&self) -> Result<Vec<String>, RuntimeUpdateError>;
+    async fn delete_nextupdate(
+        &self,
+        security: &crate::DynamicPlugin,
+    ) -> Result<Vec<String>, RuntimeUpdateError>;
 
     /// Deletes a single file by ID from the next-update staging area.
-    async fn delete_nextupdate_by_id(&self, file_id: &str) -> Result<(), RuntimeUpdateError>;
+    async fn delete_nextupdate_by_id(
+        &self,
+        file_id: &str,
+        security: &crate::DynamicPlugin,
+    ) -> Result<(), RuntimeUpdateError>;
 
     /// Deletes all files from the backup area and returns their identifiers.
-    async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError>;
+    async fn delete_backup(
+        &self,
+        security: &crate::DynamicPlugin,
+    ) -> Result<Vec<String>, RuntimeUpdateError>;
 }
 
 /// Running and observing apply / rollback / cleanup executions.
@@ -363,7 +403,11 @@ pub trait RuntimeUpdateExecutor: Send + Sync + 'static {
     /// Starts an asynchronous execution (Apply, Rollback, or Cleanup).
     ///
     /// Returns an execution ID that can be polled via [`get_execution_status`](Self::get_execution_status).
-    async fn start_execution(&self, mode: ExecutionMode) -> Result<String, RuntimeUpdateError>;
+    async fn start_execution(
+        &self,
+        mode: ExecutionMode,
+        security: &crate::DynamicPlugin,
+    ) -> Result<String, RuntimeUpdateError>;
 
     /// Returns all currently tracked executions. Always contains at most one entry;
     /// terminal-state entries are purged when the next execution starts.

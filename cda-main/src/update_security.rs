@@ -15,37 +15,82 @@ use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use cda_interfaces::{
+    DynamicPlugin,
     runtime_update_api::{
         LockStateProvider, RuntimeFileInspector, RuntimeUpdateError, RuntimeUpdateSecurityPlugin,
         UpdateCollections, VerificationError,
     },
     storage_api::{Collection, DirectFileAccess},
 };
+use cda_plugin_security::SecurityPlugin;
 
 /// Default implementation of the runtime update security handler.
 ///
 /// Validates vehicle lock ownership, detects lock conflicts, and verifies file
 /// integrity through the injected [`RuntimeFileInspector`].
-pub struct DefaultUpdateSecurityHandler<L: LockStateProvider> {
+pub struct DefaultUpdateSecurityHandler<L: LockStateProvider, S: SecurityPlugin> {
     inspector: Arc<dyn RuntimeFileInspector>,
     _lock: std::marker::PhantomData<L>,
+    _security: std::marker::PhantomData<S>,
 }
 
-impl<L: LockStateProvider> DefaultUpdateSecurityHandler<L> {
+impl<L: LockStateProvider, S: SecurityPlugin> DefaultUpdateSecurityHandler<L, S> {
     /// Creates a security handler that inspects files with `inspector`.
     #[must_use]
     pub fn new(inspector: Arc<dyn RuntimeFileInspector>) -> Self {
         Self {
             inspector,
             _lock: std::marker::PhantomData,
+            _security: std::marker::PhantomData,
         }
+    }
+
+    /// Resolves the caller's identity by asking the security plugin.
+    ///
+    /// Mirrors `cda_core`'s `check_security_plugin`: downcast the type-erased
+    /// handle to the configured plugin, then go through its own accessors. A
+    /// handle of the wrong type means the request never passed the security
+    /// middleware, so it is refused rather than treated as anonymous.
+    fn caller_identity(security: &DynamicPlugin) -> Result<String, RuntimeUpdateError> {
+        let plugin = security.downcast_ref::<S>().ok_or_else(|| {
+            RuntimeUpdateError::NoLock("No valid security context for this request".to_owned())
+        })?;
+        Ok(plugin.as_auth_plugin().claims().sub().to_owned())
+    }
+
+    /// Shared by mutation and execution: the caller must hold the vehicle lock.
+    async fn require_vehicle_lock_owner(
+        security: &DynamicPlugin,
+        lock_state_provider: &L,
+    ) -> Result<(), RuntimeUpdateError> {
+        let owner = lock_state_provider
+            .vehicle_lock_owner_sub()
+            .await
+            .ok_or_else(|| RuntimeUpdateError::NoLock("Vehicle lock is missing".to_owned()))?;
+        if owner != Self::caller_identity(security)? {
+            return Err(RuntimeUpdateError::NoLock(
+                "Vehicle lock is owned by another user".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
 #[async_trait]
-impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'static>
-    RuntimeUpdateSecurityPlugin<L, C> for DefaultUpdateSecurityHandler<L>
+impl<
+    L: LockStateProvider,
+    S: SecurityPlugin,
+    C: Collection + DirectFileAccess + Send + Sync + 'static,
+> RuntimeUpdateSecurityPlugin<L, C> for DefaultUpdateSecurityHandler<L, S>
 {
+    async fn check_mutation_allowed(
+        &self,
+        security: &DynamicPlugin,
+        lock_state_provider: &L,
+    ) -> Result<(), RuntimeUpdateError> {
+        Self::require_vehicle_lock_owner(security, lock_state_provider).await
+    }
+
     /// Validates that the caller is allowed to start an execution (apply/rollback/cleanup).
     ///
     /// Ensures the caller owns the vehicle lock, no ECU or functional-group locks
@@ -53,6 +98,7 @@ impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'sta
     /// coordinator's runtime-update block before this handler runs.
     async fn check_apply_allowed(
         &self,
+        security: &DynamicPlugin,
         lock_state_provider: &L,
         collections: &UpdateCollections<C>,
     ) -> Result<(), RuntimeUpdateError> {
@@ -136,6 +182,52 @@ mod tests {
         }
     }
 
+    /// Stands in for the configured security plugin: the identity it reports is
+    /// the one authorization is decided against.
+    struct TestSecurityPlugin {
+        sub: String,
+    }
+
+    impl cda_plugin_security::Claims for TestSecurityPlugin {
+        fn sub(&self) -> &str {
+            &self.sub
+        }
+    }
+
+    impl cda_plugin_security::AuthApi for TestSecurityPlugin {
+        fn claims(&self) -> Box<&dyn cda_plugin_security::Claims> {
+            Box::new(self)
+        }
+    }
+
+    impl cda_plugin_security::SecurityApi for TestSecurityPlugin {
+        fn validate_service(
+            &self,
+            _service: &cda_database::datatypes::DiagService,
+        ) -> Result<(), cda_interfaces::DiagServiceError> {
+            Ok(())
+        }
+    }
+
+    impl SecurityPlugin for TestSecurityPlugin {
+        fn as_auth_plugin(&self) -> &dyn cda_plugin_security::AuthApi {
+            self
+        }
+
+        fn as_security_plugin(&self) -> &dyn cda_plugin_security::SecurityApi {
+            self
+        }
+    }
+
+    type Handler = DefaultUpdateSecurityHandler<MockLockProvider, TestSecurityPlugin>;
+
+    fn security_context(sub: &str) -> DynamicPlugin {
+        let plugin: cda_plugin_security::SecurityPluginData = Box::new(TestSecurityPlugin {
+            sub: sub.to_owned(),
+        });
+        plugin as DynamicPlugin
+    }
+
     fn make_lock_provider(
         owner: Option<&str>,
         has_ecu_conflicts: bool,
@@ -149,13 +241,11 @@ mod tests {
     }
 
     async fn check_file_integrity(
-        handler: &DefaultUpdateSecurityHandler<MockLockProvider>,
+        handler: &Handler,
         path: &std::path::Path,
     ) -> Result<(), VerificationError> {
-        <DefaultUpdateSecurityHandler<_> as RuntimeUpdateSecurityPlugin<
-            MockLockProvider,
-            LocalCollection,
-        >>::check_file_integrity(handler, path)
+        <Handler as RuntimeUpdateSecurityPlugin<MockLockProvider, LocalCollection>>::
+            check_file_integrity(handler, path)
         .await
     }
 
@@ -203,13 +293,9 @@ mod tests {
         owner: Option<&str>,
         has_ecu_conflicts: bool,
         has_fg_conflicts: bool,
-    ) -> (
-        DefaultUpdateSecurityHandler<MockLockProvider>,
-        MockLockProvider,
-    ) {
+    ) -> (Handler, MockLockProvider) {
         let lock_provider = make_lock_provider(owner, has_ecu_conflicts, has_fg_conflicts);
-        let handler =
-            DefaultUpdateSecurityHandler::new(Arc::new(crate::mdd_inspector::MddFileInspector));
+        let handler = Handler::new(Arc::new(crate::mdd_inspector::MddFileInspector));
         (handler, lock_provider)
     }
 
@@ -218,6 +304,7 @@ mod tests {
         let (handler, lock_provider) = make_handler(None, false, false);
         let result = handler
             .check_apply_allowed(
+                &security_context("tester"),
                 &lock_provider,
                 &UpdateCollections::<LocalCollection>::default(),
             )
@@ -230,6 +317,7 @@ mod tests {
         let (handler, lock_provider) = make_handler(Some("user-b"), false, false);
         let result = handler
             .check_apply_allowed(
+                &security_context("tester"),
                 &lock_provider,
                 &UpdateCollections::<LocalCollection>::default(),
             )
@@ -242,6 +330,7 @@ mod tests {
         let (handler, lock_provider) = make_handler(Some("user-a"), true, false);
         let result = handler
             .check_apply_allowed(
+                &security_context("tester"),
                 &lock_provider,
                 &UpdateCollections::<LocalCollection>::default(),
             )
@@ -254,6 +343,7 @@ mod tests {
         let (handler, lock_provider) = make_handler(Some("user-a"), false, true);
         let result = handler
             .check_apply_allowed(
+                &security_context("tester"),
                 &lock_provider,
                 &UpdateCollections::<LocalCollection>::default(),
             )
@@ -270,6 +360,7 @@ mod tests {
         assert!(
             handler
                 .check_apply_allowed(
+                    &security_context("tester"),
                     &lock_provider,
                     &UpdateCollections::<LocalCollection>::default()
                 )
@@ -319,7 +410,7 @@ mod tests {
 
         let collections = make_collections(&storage).await;
         let result = handler
-            .check_apply_allowed(&lock_provider, &collections)
+            .check_apply_allowed(&security_context("tester"), &lock_provider, &collections)
             .await;
         assert!(result.is_ok());
     }

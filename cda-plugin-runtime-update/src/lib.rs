@@ -128,6 +128,14 @@ pub(crate) mod test_utils {
         }
     }
 
+    /// Opaque security context for tests.
+    ///
+    /// The mock security handler ignores it; it exists so tests exercise the
+    /// same call shape production uses.
+    pub fn test_security() -> cda_interfaces::DynamicPlugin {
+        Box::new(())
+    }
+
     /// Shared inspector handle for tests.
     pub fn test_inspector()
     -> std::sync::Arc<dyn cda_interfaces::runtime_update_api::RuntimeFileInspector> {
@@ -163,8 +171,17 @@ pub(crate) mod test_utils {
         cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
         for MockSecurityHandler
     {
+        async fn check_mutation_allowed(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+            _lock_state_provider: &L,
+        ) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+
         async fn check_apply_allowed(
             &self,
+            _security: &cda_interfaces::DynamicPlugin,
             lock_state_provider: &L,
             _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
         ) -> Result<(), RuntimeUpdateError> {
@@ -323,8 +340,7 @@ mod tests {
     use async_trait::async_trait;
     use cda_interfaces::runtime_update_api::{
         ExecutionMode, FileListOptions, RuntimeFile, RuntimeFileCatalog, RuntimeFileStore,
-        RuntimeFilesUpdatePlugin, RuntimeUpdateError, RuntimeUpdateExecutor, UpdateExecution,
-        UploadFile,
+        RuntimeUpdateError, RuntimeUpdateExecutor, UpdateExecution, UploadFile,
     };
     use tokio::sync::{Barrier, Notify};
 
@@ -371,7 +387,18 @@ mod tests {
 
     #[async_trait]
     impl RuntimeFileStore for DelayPlugin {
-        async fn upload(&self, _files: Vec<UploadFile>) -> Result<Vec<String>, RuntimeUpdateError> {
+        async fn authorize_mutation(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+        ) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+
+        async fn upload(
+            &self,
+            _files: Vec<UploadFile>,
+            _security: &cda_interfaces::DynamicPlugin,
+        ) -> Result<Vec<String>, RuntimeUpdateError> {
             self.concurrent_writes.fetch_add(1, Ordering::SeqCst);
             self.write_barrier.wait().await;
             self.write_notify.notified().await;
@@ -379,7 +406,10 @@ mod tests {
             Ok(<_>::default())
         }
 
-        async fn delete_nextupdate(&self) -> Result<Vec<String>, RuntimeUpdateError> {
+        async fn delete_nextupdate(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+        ) -> Result<Vec<String>, RuntimeUpdateError> {
             self.concurrent_writes.fetch_add(1, Ordering::SeqCst);
             self.write_barrier.wait().await;
             self.write_notify.notified().await;
@@ -387,11 +417,18 @@ mod tests {
             Ok(vec![])
         }
 
-        async fn delete_nextupdate_by_id(&self, _file_id: &str) -> Result<(), RuntimeUpdateError> {
+        async fn delete_nextupdate_by_id(
+            &self,
+            _file_id: &str,
+            _security: &cda_interfaces::DynamicPlugin,
+        ) -> Result<(), RuntimeUpdateError> {
             Ok(())
         }
 
-        async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
+        async fn delete_backup(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+        ) -> Result<Vec<String>, RuntimeUpdateError> {
             Ok(vec![])
         }
     }
@@ -401,6 +438,7 @@ mod tests {
         async fn start_execution(
             &self,
             _mode: ExecutionMode,
+            _security: &cda_interfaces::DynamicPlugin,
         ) -> Result<String, RuntimeUpdateError> {
             Ok("exec-1".to_owned())
         }
@@ -473,7 +511,10 @@ mod tests {
         let plugin = Arc::new(plugin);
 
         let p1 = Arc::clone(&plugin);
-        let t1 = tokio::spawn(async move { p1.delete_nextupdate().await });
+        let t1 = tokio::spawn(async move {
+            p1.delete_nextupdate(&crate::test_utils::test_security())
+                .await
+        });
 
         // Yield until the first write is inside the lock
         for _ in 0..20 {
@@ -486,7 +527,10 @@ mod tests {
 
         // Second write should block on the lock
         let p2 = Arc::clone(&plugin);
-        let t2 = tokio::spawn(async move { p2.upload(vec![]).await });
+        let t2 =
+            tokio::spawn(
+                async move { p2.upload(vec![], &crate::test_utils::test_security()).await },
+            );
 
         // Yield and verify second write has NOT entered
         for _ in 0..20 {
@@ -522,7 +566,10 @@ mod tests {
 
         // Start a write that will hold the lock
         let p1 = Arc::clone(&plugin);
-        let t1 = tokio::spawn(async move { p1.upload(vec![]).await });
+        let t1 =
+            tokio::spawn(
+                async move { p1.upload(vec![], &crate::test_utils::test_security()).await },
+            );
 
         for _ in 0..20 {
             if concurrent_writes.load(Ordering::SeqCst) == 1 {

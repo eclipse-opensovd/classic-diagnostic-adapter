@@ -33,10 +33,13 @@
 //! semantics, simply does not wrap itself in it.
 
 use async_trait::async_trait;
-use cda_interfaces::runtime_update_api::{
-    ExecutionMode, FileListOptions, RuntimeFile, RuntimeFileCatalog, RuntimeFileStore,
-    RuntimeFilesUpdatePlugin, RuntimeUpdateError, RuntimeUpdateExecutor, UpdateExecution,
-    UploadFile,
+use cda_interfaces::{
+    DynamicPlugin,
+    runtime_update_api::{
+        ExecutionMode, FileListOptions, RuntimeFile, RuntimeFileCatalog, RuntimeFileStore,
+        RuntimeFilesUpdatePlugin, RuntimeUpdateError, RuntimeUpdateExecutor, UpdateExecution,
+        UploadFile,
+    },
 };
 
 /// Extension trait adding [`with_exclusive_access`](WithExclusiveAccess::with_exclusive_access).
@@ -102,32 +105,56 @@ impl<P: RuntimeFileCatalog> RuntimeFileCatalog for ExclusiveRuntimePlugin<P> {
 
 #[async_trait]
 impl<P: RuntimeFileStore> RuntimeFileStore for ExclusiveRuntimePlugin<P> {
-    async fn upload(&self, files: Vec<UploadFile>) -> Result<Vec<String>, RuntimeUpdateError> {
-        let _guard = self.lock.write().await;
-        self.inner.upload(files).await
+    async fn authorize_mutation(&self, security: &DynamicPlugin) -> Result<(), RuntimeUpdateError> {
+        // A read lock: this only asks, it does not mutate.
+        let _guard = self.lock.read().await;
+        self.inner.authorize_mutation(security).await
     }
 
-    async fn delete_nextupdate(&self) -> Result<Vec<String>, RuntimeUpdateError> {
+    async fn upload(
+        &self,
+        files: Vec<UploadFile>,
+        security: &DynamicPlugin,
+    ) -> Result<Vec<String>, RuntimeUpdateError> {
         let _guard = self.lock.write().await;
-        self.inner.delete_nextupdate().await
+        self.inner.upload(files, security).await
     }
 
-    async fn delete_nextupdate_by_id(&self, file_id: &str) -> Result<(), RuntimeUpdateError> {
+    async fn delete_nextupdate(
+        &self,
+        security: &DynamicPlugin,
+    ) -> Result<Vec<String>, RuntimeUpdateError> {
         let _guard = self.lock.write().await;
-        self.inner.delete_nextupdate_by_id(file_id).await
+        self.inner.delete_nextupdate(security).await
     }
 
-    async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
+    async fn delete_nextupdate_by_id(
+        &self,
+        file_id: &str,
+        security: &DynamicPlugin,
+    ) -> Result<(), RuntimeUpdateError> {
         let _guard = self.lock.write().await;
-        self.inner.delete_backup().await
+        self.inner.delete_nextupdate_by_id(file_id, security).await
+    }
+
+    async fn delete_backup(
+        &self,
+        security: &DynamicPlugin,
+    ) -> Result<Vec<String>, RuntimeUpdateError> {
+        let _guard = self.lock.write().await;
+        self.inner.delete_backup(security).await
     }
 }
 
 #[async_trait]
 impl<P: RuntimeUpdateExecutor> RuntimeUpdateExecutor for ExclusiveRuntimePlugin<P> {
-    async fn start_execution(&self, mode: ExecutionMode) -> Result<String, RuntimeUpdateError> {
+    async fn start_execution(
+        &self,
+        mode: ExecutionMode,
+        security: &DynamicPlugin,
+    ) -> Result<String, RuntimeUpdateError> {
         let _guard = self.lock.write().await;
-        self.inner.start_execution(mode).await
+        self.inner.start_execution(mode, security).await
     }
 
     async fn get_execution_status(&self, execution_id: &str) -> Option<UpdateExecution> {

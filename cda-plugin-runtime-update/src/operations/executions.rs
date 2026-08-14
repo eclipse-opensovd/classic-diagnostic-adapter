@@ -14,7 +14,7 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    HashMap,
+    DynamicPlugin, HashMap,
     communication_control::{
         ActivationCause, CommunicationAccess, DisableCommunication, DisableError, DisableGuard,
         DisableReason, PostUpdateCommunicationMode,
@@ -60,6 +60,7 @@ fn http_protection_config_for_update(retry_after: Duration) -> HttpProtectionCon
 pub(crate) async fn start_execution<S, R, T, L>(
     params: &ExecutionParams<'_, S, R, T, L>,
     mode: ExecutionMode,
+    security: &DynamicPlugin,
 ) -> Result<String, RuntimeUpdateError>
 where
     S: Storage + Send + Sync + 'static,
@@ -72,9 +73,15 @@ where
         Ok(collections) => collections,
         Err(error) => return Err(reject_execution(error, protection, disable_lease).await),
     };
-    let (protection, disable_lease) =
-        validate_execution_preconditions(params, mode, &collections, protection, disable_lease)
-            .await?;
+    let (protection, disable_lease) = validate_execution_preconditions(
+        params,
+        mode,
+        &collections,
+        protection,
+        disable_lease,
+        security,
+    )
+    .await?;
     let execution_id = register_execution(params.executions, mode).await;
 
     spawn_execution(
@@ -150,6 +157,7 @@ async fn validate_execution_preconditions<S, R, T, L>(
     collections: &UpdateCollections<S::CollectionHandle>,
     protection: OwnedHttpProtection,
     disable_lease: Box<dyn DisableGuard>,
+    security: &DynamicPlugin,
 ) -> Result<(OwnedHttpProtection, Box<dyn DisableGuard>), RuntimeUpdateError>
 where
     S: Storage + Send + Sync + 'static,
@@ -159,7 +167,7 @@ where
 {
     if let Err(error) = params
         .security_handler
-        .check_apply_allowed(params.lock_state_provider, collections)
+        .check_apply_allowed(security, params.lock_state_provider, collections)
         .await
     {
         return Err(reject_execution(error, protection, disable_lease).await);
@@ -590,9 +598,13 @@ mod tests {
         )
         .await;
 
-        let exec_id = super::start_execution(&f.params(), ExecutionMode::Apply)
-            .await
-            .unwrap();
+        let exec_id = super::start_execution(
+            &f.params(),
+            ExecutionMode::Apply,
+            &crate::test_utils::test_security(),
+        )
+        .await
+        .unwrap();
         assert!(!exec_id.is_empty());
 
         let status = super::get_execution_status(&f.executions, &exec_id).await;
@@ -610,9 +622,13 @@ mod tests {
         )
         .await;
 
-        let exec_id = super::start_execution(&f.params(), ExecutionMode::Rollback)
-            .await
-            .unwrap();
+        let exec_id = super::start_execution(
+            &f.params(),
+            ExecutionMode::Rollback,
+            &crate::test_utils::test_security(),
+        )
+        .await
+        .unwrap();
         assert!(!exec_id.is_empty());
     }
 
@@ -624,7 +640,12 @@ mod tests {
         // Apply must be rejected synchronously (i.e. `start_execution` itself returns
         // an error) rather than accepted (202-equivalent execution id) only to fail
         // later inside the spawned task.
-        let result = super::start_execution(&f.params(), ExecutionMode::Apply).await;
+        let result = super::start_execution(
+            &f.params(),
+            ExecutionMode::Apply,
+            &crate::test_utils::test_security(),
+        )
+        .await;
 
         assert!(
             matches!(result, Err(RuntimeUpdateError::NoPendingUpdate)),
@@ -644,9 +665,13 @@ mod tests {
     #[tokio::test]
     async fn start_execution_cleanup_succeeds() {
         let f = make_fixture();
-        let exec_id = super::start_execution(&f.params(), ExecutionMode::Cleanup)
-            .await
-            .unwrap();
+        let exec_id = super::start_execution(
+            &f.params(),
+            ExecutionMode::Cleanup,
+            &crate::test_utils::test_security(),
+        )
+        .await
+        .unwrap();
         assert!(!exec_id.is_empty());
 
         let status = poll_until_terminal(&f.executions, &exec_id).await;
@@ -668,9 +693,13 @@ mod tests {
         let mut f = make_fixture();
         f.communication_disable = communication_disable_for_test(transport, true);
 
-        let exec_id = super::start_execution(&f.params(), ExecutionMode::Cleanup)
-            .await
-            .unwrap();
+        let exec_id = super::start_execution(
+            &f.params(),
+            ExecutionMode::Cleanup,
+            &crate::test_utils::test_security(),
+        )
+        .await
+        .unwrap();
 
         resume.entered().await;
         assert_eq!(
@@ -717,24 +746,36 @@ mod tests {
             );
         }
 
-        let exec_id = super::start_execution(&f.params(), ExecutionMode::Cleanup)
-            .await
-            .unwrap();
+        let exec_id = super::start_execution(
+            &f.params(),
+            ExecutionMode::Cleanup,
+            &crate::test_utils::test_security(),
+        )
+        .await
+        .unwrap();
         assert!(!exec_id.is_empty());
     }
 
     #[tokio::test]
     async fn previous_execution_removed_when_new_one_starts() {
         let f = make_fixture();
-        let first_id = super::start_execution(&f.params(), ExecutionMode::Cleanup)
-            .await
-            .unwrap();
+        let first_id = super::start_execution(
+            &f.params(),
+            ExecutionMode::Cleanup,
+            &crate::test_utils::test_security(),
+        )
+        .await
+        .unwrap();
 
         poll_until_terminal(&f.executions, &first_id).await;
 
-        let _second_id = super::start_execution(&f.params(), ExecutionMode::Cleanup)
-            .await
-            .unwrap();
+        let _second_id = super::start_execution(
+            &f.params(),
+            ExecutionMode::Cleanup,
+            &crate::test_utils::test_security(),
+        )
+        .await
+        .unwrap();
 
         let status = super::get_execution_status(&f.executions, &first_id).await;
         assert!(
@@ -770,9 +811,13 @@ mod tests {
             lock_state_provider: &f.lock_provider,
         };
 
-        let exec_id = super::start_execution(&params, ExecutionMode::Apply)
-            .await
-            .unwrap();
+        let exec_id = super::start_execution(
+            &params,
+            ExecutionMode::Apply,
+            &crate::test_utils::test_security(),
+        )
+        .await
+        .unwrap();
 
         let status = poll_until_terminal(&f.executions, &exec_id).await;
         assert!(matches!(status, ExecutionStatus::Failed(_)));
@@ -807,9 +852,13 @@ mod tests {
             lock_state_provider: &f.lock_provider,
         };
 
-        let exec_id = super::start_execution(&params, ExecutionMode::Apply)
-            .await
-            .unwrap();
+        let exec_id = super::start_execution(
+            &params,
+            ExecutionMode::Apply,
+            &crate::test_utils::test_security(),
+        )
+        .await
+        .unwrap();
 
         // Without the supervisor task, this would hang until poll_until_terminal's
         // 5s deadline panics the test - the execution task panicked mid-flight and

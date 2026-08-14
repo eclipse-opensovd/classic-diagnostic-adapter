@@ -523,8 +523,17 @@ mod tests {
     > cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
         for RejectingSecurityHandler
     {
+        async fn check_mutation_allowed(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+            _lock_state_provider: &L,
+        ) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+
         async fn check_apply_allowed(
             &self,
+            _security: &cda_interfaces::DynamicPlugin,
             _lock_state_provider: &L,
             _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
         ) -> Result<(), cda_interfaces::runtime_update_api::RuntimeUpdateError> {
@@ -575,8 +584,17 @@ mod tests {
     > cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
         for RejectingByNameSecurityHandler
     {
+        async fn check_mutation_allowed(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+            _lock_state_provider: &L,
+        ) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+
         async fn check_apply_allowed(
             &self,
+            _security: &cda_interfaces::DynamicPlugin,
             _lock_state_provider: &L,
             _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
         ) -> Result<(), cda_interfaces::runtime_update_api::RuntimeUpdateError> {
