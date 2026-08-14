@@ -25,10 +25,6 @@ path = "src/lib.rs"
 
 [dependencies]
 cda-interfaces = { workspace = true }
-cda-plugin-security = { workspace = true }
-cda-plugin-communication-management = { workspace = true }
-cda-sovd = { workspace = true }
-cda-storage = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 serde_json = { workspace = true }
@@ -40,6 +36,16 @@ uuid = { workspace = true, features = ["v4"] }
 schemars = { workspace = true }
 
 [dev-dependencies]
+# Test-only: `MockUdsEcu` satisfies the `Uds` bound in the reloader tests.
+cda-interfaces = { workspace = true, features = ["test-utils"] }
+# Test-only: the unit tests exercise real MDD parsing through a test inspector,
+# so the format stays covered even though the plugin no longer depends on it.
 cda-database = { workspace = true, features = ["database-builder"] }
+# Test-only. The contract this crate implements lives in `cda-interfaces`, so it
+# does not depend on a sibling plugin at build time; the concrete lifecycle
+# doubles the unit tests use do live there.
+# Test-only: `LocalStorage` backs the fixtures. Production code speaks only the
+# `Storage` trait, so the concrete backend is injected by the caller.
+cda-storage = { workspace = true }
 cda-plugin-communication-management = { workspace = true, features = ["test-utils"] }
 tempfile = { workspace = true }

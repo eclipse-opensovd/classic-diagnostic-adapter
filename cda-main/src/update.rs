@@ -15,14 +15,20 @@ use std::{sync::Arc, time::Duration};
 use cda_comm_can::CanDiagGateway;
 use cda_comm_doip::DoipDiagGateway;
 use cda_core::EcuManager;
-use cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin;
-use cda_plugin_runtime_update::{
-    DefaultRuntimeUpdatePlugin, WithExclusiveAccess,
-    default_runtime_reloader_plugin::{
-        DefaultReloadContext as ReloaderContext, DefaultRuntimeReloaderPlugin,
+use cda_interfaces::{
+    Shutdown, UdsQuery,
+    communication_control::CommunicationAccess,
+    component_slot::ReplaceComponent,
+    datatypes::ComponentsConfig,
+    runtime_update_api::{
+        ReloadError, RuntimeFilesUpdatePlugin, VehicleComponentPublisher, VehicleComponents,
     },
 };
+use cda_plugin_runtime_update::{
+    DefaultRuntimeReloaderPlugin, DefaultRuntimeUpdatePlugin, WithExclusiveAccess,
+};
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
+use cda_sovd::SovdLockStateProvider;
 use cda_storage::LocalStorage;
 use cda_transport_router::DiagnosticTransportRouter;
 
@@ -92,6 +98,132 @@ where
 /// read/write mutual exclusion and
 /// mounts the HTTP endpoints by delegating to [`cda_sovd::add_runtime_update_routes`].
 /// The caller is responsible for constructing the plugin before calling this function.
+type GatewayType<SP> = DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>;
+
+/// Publishes a freshly built component generation into the live runtime.
+///
+/// This is the half of a reload that needs `cda-sovd`: rebuilding the vehicle
+/// routes over the new components. Keeping it here is what lets the update
+/// plugin orchestrate reloads without depending on the HTTP layer.
+pub(crate) struct CdaVehicleComponentPublisher<SP, SL>
+where
+    SP: SecurityPlugin,
+    SL: SecurityPluginLoader,
+{
+    uds_manager: Arc<dyn ReplaceComponent<UdsManagerType<SP>>>,
+    gateway: Arc<dyn ReplaceComponent<GatewayType<SP>>>,
+    dynamic_router: cda_sovd::dynamic_router::DynamicRouter,
+    vehicle_route_handle: cda_sovd::RouteHandle,
+    flash_files_path: String,
+    components_config: ComponentsConfig,
+    lock_provider: Arc<SovdLockStateProvider>,
+    communication_access: Arc<dyn CommunicationAccess>,
+    _security_loader: std::marker::PhantomData<SL>,
+}
+
+impl<SP, SL> CdaVehicleComponentPublisher<SP, SL>
+where
+    SP: SecurityPlugin,
+    SL: SecurityPluginLoader,
+{
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Application composition boundary"
+    )]
+    pub(crate) fn new(
+        uds_manager: Arc<dyn ReplaceComponent<UdsManagerType<SP>>>,
+        gateway: Arc<dyn ReplaceComponent<GatewayType<SP>>>,
+        dynamic_router: cda_sovd::dynamic_router::DynamicRouter,
+        vehicle_route_handle: cda_sovd::RouteHandle,
+        flash_files_path: String,
+        components_config: ComponentsConfig,
+        lock_provider: Arc<SovdLockStateProvider>,
+        communication_access: Arc<dyn CommunicationAccess>,
+    ) -> Self {
+        Self {
+            uds_manager,
+            gateway,
+            dynamic_router,
+            vehicle_route_handle,
+            flash_files_path,
+            components_config,
+            lock_provider,
+            communication_access,
+            _security_loader: std::marker::PhantomData,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<SP, SL>
+    VehicleComponentPublisher<UdsManagerType<SP>, GatewayType<SP>, cda_database::FileManager>
+    for CdaVehicleComponentPublisher<SP, SL>
+where
+    SP: SecurityPlugin,
+    SL: SecurityPluginLoader,
+{
+    async fn publish(
+        &self,
+        components: VehicleComponents<
+            UdsManagerType<SP>,
+            GatewayType<SP>,
+            cda_database::FileManager,
+        >,
+    ) -> Result<(), ReloadError> {
+        let VehicleComponents {
+            uds_manager: new_uds,
+            diagnostic_gateway: new_gateway,
+            file_managers,
+            functional_group_config,
+        } = components;
+
+        let ecu_names = new_uds.get_physical_ecus().await;
+        if let Err(e) = self.lock_provider.update_entries(ecu_names).await {
+            // The freshly built components never went live; shut them down here,
+            // or they keep holding their transport resources until process exit.
+            new_gateway.shutdown().await;
+            new_uds.shutdown().await;
+            return Err(ReloadError::General(format!(
+                "Failed to update runtime locks: {e}"
+            )));
+        }
+        let current_locks = self.lock_provider.current_locks().await;
+
+        let vehicle_router = cda_sovd::build_vehicle_routes::<_, _, SL>(
+            cda_sovd::VehicleConfig {
+                flash_files_path: self.flash_files_path.clone(),
+                functional_group_config,
+                components_config: self.components_config.clone(),
+            },
+            cda_sovd::VehicleResources {
+                ecu_uds: new_uds.clone(),
+                file_managers,
+                locks: current_locks,
+                communication_access: Arc::clone(&self.communication_access),
+            },
+        )
+        .await;
+
+        if let Err(e) = self
+            .dynamic_router
+            .replace_routes(&self.vehicle_route_handle, vehicle_router)
+            .await
+        {
+            new_gateway.shutdown().await;
+            new_uds.shutdown().await;
+            return Err(ReloadError::ReplacementFailure(format!(
+                "Failed to replace vehicle routes: {e}"
+            )));
+        }
+
+        // Only now swap the live components: the routes just installed already
+        // hold their own clone of the new UDS manager, so the old one can go.
+        self.gateway.replace(new_gateway).await;
+        self.uds_manager.replace(new_uds).await;
+        Ok(())
+    }
+}
+
 pub async fn add_runtime_update_routes<S, P>(
     dynamic_router: &cda_sovd::dynamic_router::DynamicRouter,
     plugin: P,
@@ -143,35 +275,22 @@ where
     let file_inspector: Arc<dyn cda_interfaces::runtime_update_api::RuntimeFileInspector> =
         Arc::new(crate::mdd_inspector::MddFileInspector);
 
-    let reloader_infra = ReloaderContext {
-        config: infra.config,
-        dynamic_router: infra.dynamic_router,
-        vehicle_route_handle: infra.vehicle_route_handle,
-        flash_files_path: infra.flash_files_path,
-        components_config: infra.components_config,
-        lock_provider: Arc::clone(&infra.lock_provider),
-        shutdown_signal: infra.shutdown_signal,
-        communication_access: Arc::clone(&infra.communication_access),
-        uds_manager: infra.uds_manager_replacer,
-        diagnostic_gateway: infra.gateway_replacer,
-        health: infra.health,
-        storage_dir: infra.storage_dir.clone(),
-        mdd_decompress: infra.mdd_decompress,
-        storage: Arc::clone(&storage),
-        file_inspector: Arc::clone(&file_inspector),
-    };
+    let publisher = Arc::new(CdaVehicleComponentPublisher::<SP, SL>::new(
+        infra.uds_manager_replacer,
+        infra.gateway_replacer,
+        infra.dynamic_router,
+        infra.vehicle_route_handle,
+        infra.flash_files_path,
+        infra.components_config,
+        Arc::clone(&infra.lock_provider),
+        Arc::clone(&infra.communication_access),
+    ));
 
-    let reloader_config =
-        cda_plugin_runtime_update::RuntimeReloaderConfig::new(reloader_infra, factory);
-
-    let reloader_plugin = Arc::new(DefaultRuntimeReloaderPlugin::<
-        UdsManagerType<SP>,
-        DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
-        Configuration,
-        SL,
-        _,
-        LocalStorage,
-    >::new(reloader_config));
+    let reloader_plugin = Arc::new(DefaultRuntimeReloaderPlugin::new(
+        infra.config,
+        factory,
+        publisher,
+    ));
 
     Ok(DefaultRuntimeUpdatePlugin::new(
         storage,
@@ -185,6 +304,9 @@ where
         infra.communication_disable,
         Arc::clone(&infra.communication_access),
         infra.http_protections,
+        // The set of routes that stay reachable while an update holds its
+        // protection is a SOVD fact, so the application supplies it.
+        cda_sovd::routes_accessible_during_update(),
         infra.update_retry_after,
         infra.post_update_mode,
     ))

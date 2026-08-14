@@ -728,6 +728,11 @@ pub mod mock {
         }
 
         #[async_trait]
+        impl crate::Shutdown for UdsEcu {
+            async fn shutdown(&self);
+        }
+
+        #[async_trait]
         impl UdsTransport for UdsEcu {
             type Response = crate::diagservices::mock::MockDiagServiceResponse;
 

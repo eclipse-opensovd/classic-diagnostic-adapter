@@ -20,8 +20,8 @@ use cda_interfaces::{
         DisableReason, PostUpdateCommunicationMode,
     },
     http_protection::registry::{
-        HttpProtectionConfig, HttpProtectionReason, HttpProtectionRegistry, HttpStatusCode,
-        OwnedHttpProtection,
+        HttpProtectionConfig, HttpProtectionReason, HttpProtectionRegistry, HttpRouteMatcher,
+        HttpStatusCode, OwnedHttpProtection,
     },
     runtime_update_api::{
         ExecutionMode, ExecutionStatus, LockStateProvider, RuntimeFileInspector,
@@ -40,6 +40,7 @@ pub(crate) struct ExecutionParams<'a, S, R: ?Sized, T, L> {
     pub(crate) communication_disable: &'a Arc<dyn DisableCommunication>,
     pub(crate) communication_access: &'a Arc<dyn CommunicationAccess>,
     pub(crate) http_protections: &'a HttpProtectionRegistry,
+    pub(crate) update_exempt_routes: &'a [HttpRouteMatcher],
     pub(crate) update_retry_after: Duration,
     pub(crate) post_update_mode: PostUpdateCommunicationMode,
     pub(crate) mdd_decompress: bool,
@@ -47,13 +48,16 @@ pub(crate) struct ExecutionParams<'a, S, R: ?Sized, T, L> {
     pub(crate) lock_state_provider: &'a L,
 }
 
-fn http_protection_config_for_update(retry_after: Duration) -> HttpProtectionConfig {
+fn http_protection_config_for_update(
+    retry_after: Duration,
+    exempt_routes: &[HttpRouteMatcher],
+) -> HttpProtectionConfig {
     HttpProtectionConfig::new(
         HttpProtectionReason::UpdateInProgress,
         HttpStatusCode::CONFLICT,
         "Update in progress",
     )
-    .with_exempt_routes(cda_sovd::routes_accessible_during_update())
+    .with_exempt_routes(exempt_routes.to_vec())
     .with_retry_after(retry_after)
 }
 
@@ -106,7 +110,10 @@ async fn acquire_execution_guards<S, R: ?Sized, T, L>(
 ) -> Result<(OwnedHttpProtection, Box<dyn DisableGuard>), RuntimeUpdateError> {
     let protection = params
         .http_protections
-        .protect(http_protection_config_for_update(params.update_retry_after))
+        .protect(http_protection_config_for_update(
+            params.update_retry_after,
+            params.update_exempt_routes,
+        ))
         .map_err(|error| {
             // The config is built in-process, so this can only be a programming
             // error. Refuse the execution rather than run it unprotected.
@@ -537,6 +544,7 @@ mod tests {
                 executions: &self.executions,
                 communication_disable: &self.communication_disable,
                 http_protections: &self.http_restriction_manager,
+                update_exempt_routes: &[],
                 update_retry_after: Duration::from_secs(1),
                 post_update_mode: PostUpdateCommunicationMode::Enabled,
                 mdd_decompress: false,
@@ -804,6 +812,7 @@ mod tests {
             executions: &f.executions,
             communication_disable: &f.communication_disable,
             http_protections: &f.http_restriction_manager,
+            update_exempt_routes: &[],
             update_retry_after: Duration::from_secs(1),
             post_update_mode: PostUpdateCommunicationMode::Enabled,
             mdd_decompress: false,
@@ -845,6 +854,7 @@ mod tests {
             executions: &f.executions,
             communication_disable: &f.communication_disable,
             http_protections: &f.http_restriction_manager,
+            update_exempt_routes: &[],
             update_retry_after: Duration::from_secs(1),
             post_update_mode: PostUpdateCommunicationMode::Enabled,
             mdd_decompress: false,

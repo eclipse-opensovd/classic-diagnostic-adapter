@@ -553,8 +553,6 @@ dependencies = [
  "cda-database",
  "cda-interfaces",
  "cda-plugin-communication-management",
- "cda-plugin-security",
- "cda-sovd",
  "cda-storage",
  "schemars",
  "serde",
