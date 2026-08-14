@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use cda_interfaces::{
     HashMap,
     communication_control::{CommunicationAccess, PostUpdateCommunicationMode},
+    http_protection::registry::HttpProtectionRegistry,
     runtime_update_api::{
         BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider, RuntimeFilesQuery,
         RuntimeFilesUpdatePlugin, RuntimeReloaderPlugin, RuntimeUpdateError,
@@ -24,9 +25,7 @@ use cda_interfaces::{
     },
     storage_api::Storage,
 };
-use cda_plugin_communication_management::{
-    http_protection::registry::HttpProtectionRegistry, lifecycle::disable::DisableCommunication,
-};
+use cda_plugin_communication_management::lifecycle::disable::DisableCommunication;
 use tokio::sync::RwLock;
 
 /// Default implementation of [`RuntimeFilesUpdatePlugin`] with injectable security and storage.
@@ -187,19 +186,17 @@ mod tests {
 
     use cda_interfaces::{
         communication_control::{CommunicationState, PostUpdateCommunicationMode},
+        http_protection::registry::HttpProtectionRegistry,
         runtime_update_api::{
             ExecutionMode, HashAlgorithm, RuntimeFilesQuery, RuntimeFilesUpdatePlugin,
             RuntimeUpdateError,
         },
         storage_api::CollectionName,
     };
-    use cda_plugin_communication_management::{
-        http_protection::registry::HttpProtectionRegistry,
-        lifecycle::{
-            communication_disable_for_test,
-            disable::{DisableCommunication, DisableReason},
-            enabled_communication_access_for_test,
-        },
+    use cda_plugin_communication_management::lifecycle::{
+        communication_disable_for_test,
+        disable::{DisableCommunication, DisableReason},
+        enabled_communication_access_for_test,
     };
     use cda_storage::LocalStorage;
 

@@ -15,11 +15,6 @@
 
 use std::sync::{Arc, RwLock};
 
-use cda_interfaces::{
-    config::{ConfigSanity, ConfigSanityError},
-    util::std_ext,
-};
-
 pub use crate::http_protection::{
     config::{
         HttpMethod, HttpProtectionConfig, HttpProtectionReason, HttpProtectionScope,
@@ -27,6 +22,10 @@ pub use crate::http_protection::{
     },
     evaluator::{HttpRestrictionDecision, HttpRestrictionDenial, HttpRestrictionGuard},
     owned::OwnedHttpProtection,
+};
+use crate::{
+    config::{ConfigSanity, ConfigSanityError},
+    util::std_ext,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

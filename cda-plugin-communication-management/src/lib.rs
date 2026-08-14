@@ -29,6 +29,5 @@
 //! (`Always`/`OnDemand`/`Disabled`). Other implementations can be
 //! substituted via `Setup::with_communication_plugin`.
 
-pub mod http_protection;
 pub mod lifecycle;
 pub mod plugin;

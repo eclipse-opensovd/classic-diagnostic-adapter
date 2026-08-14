@@ -39,7 +39,7 @@ use axum::{
     Json,
     response::{IntoResponse, Response},
 };
-use cda_plugin_communication_management::http_protection::registry::{
+use cda_interfaces::http_protection::registry::{
     HttpProtectionReason, HttpRestrictionDecision, HttpRestrictionDenial, HttpRestrictionGuard,
 };
 use sovd_interfaces::error::ErrorCode;
@@ -186,7 +186,7 @@ mod tests {
     };
 
     use axum::{Router, body::Body, http::header::RETRY_AFTER, routing::get};
-    use cda_plugin_communication_management::http_protection::registry::{
+    use cda_interfaces::http_protection::registry::{
         HttpProtectionConfig, HttpProtectionReason, HttpProtectionRegistry,
         HttpRestrictionDecision, HttpRestrictionDenial, HttpRestrictionGuard,
     };

@@ -36,9 +36,9 @@ use cda_interfaces::{
     },
     component_slot::{ComponentSlot, ReplaceComponent},
     health::HealthProvider,
+    http_protection::registry::HttpProtectionRegistry,
 };
 use cda_plugin_communication_management::{
-    http_protection::registry::HttpProtectionRegistry,
     lifecycle::{
         CommunicationRuntime,
         access::CommunicationAccessView,

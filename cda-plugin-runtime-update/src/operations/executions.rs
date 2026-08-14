@@ -16,18 +16,18 @@ use std::{sync::Arc, time::Duration};
 use cda_interfaces::{
     HashMap,
     communication_control::{ActivationCause, CommunicationAccess, PostUpdateCommunicationMode},
+    http_protection::registry::{
+        HttpProtectionConfig, HttpProtectionReason, HttpProtectionRegistry, HttpStatusCode,
+        OwnedHttpProtection,
+    },
     runtime_update_api::{
         ExecutionMode, ExecutionStatus, LockStateProvider, RuntimeReloaderPlugin,
         RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateCollections, UpdateExecution,
     },
     storage_api::{CollectionName, Storage},
 };
-use cda_plugin_communication_management::{
-    http_protection::registry::{
-        HttpProtectionConfig, HttpProtectionReason, HttpProtectionRegistry, HttpStatusCode,
-        OwnedHttpProtection,
-    },
-    lifecycle::disable::{DisableCommunication, DisableError, DisableLease, DisableReason},
+use cda_plugin_communication_management::lifecycle::disable::{
+    DisableCommunication, DisableError, DisableLease, DisableReason,
 };
 use tokio::sync::RwLock;
 
@@ -386,15 +386,13 @@ mod tests {
             CommunicationAccess, PostUpdateCommunicationMode, TransportControl, TransportState,
             error::CommControlError,
         },
+        http_protection::registry::{HttpProtectionRegistry, HttpRestrictionGuard},
         runtime_update_api::{ExecutionMode, ExecutionStatus, RuntimeUpdateError, UpdateExecution},
         storage_api::CollectionName,
     };
-    use cda_plugin_communication_management::{
-        http_protection::registry::{HttpProtectionRegistry, HttpRestrictionGuard},
-        lifecycle::{
-            communication_disable_for_test, disable::DisableCommunication,
-            enabled_communication_access_for_test,
-        },
+    use cda_plugin_communication_management::lifecycle::{
+        communication_disable_for_test, disable::DisableCommunication,
+        enabled_communication_access_for_test,
     };
     use cda_storage::LocalStorage;
     use tokio::sync::RwLock;

@@ -22,9 +22,8 @@ use cda_comm_doip::DoipGatewaySetupError;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
     communication_control::CommunicationAccess, datatypes::ComponentsConfig, dlt_ctx,
-    file_manager::FileManager,
+    file_manager::FileManager, http_protection::registry::HttpRouteMatcher,
 };
-use cda_plugin_communication_management::http_protection::registry::HttpRouteMatcher;
 use cda_plugin_security::SecurityPluginLoader;
 use dynamic_router::DynamicRouter;
 pub use dynamic_router::{RouteGroupNotFound, RouteHandle};
