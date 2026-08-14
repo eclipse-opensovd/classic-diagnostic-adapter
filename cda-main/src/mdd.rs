@@ -236,7 +236,7 @@ pub async fn resolve_mdd_paths(storage_dir: &str, database_dir: &str) -> Vec<Pat
             configured_dir = %database_dir,
             "No MDD files found in storage, falling back to configured database dir"
         );
-        match std::fs::read_dir(database_dir) {
+        let mdd_files = match std::fs::read_dir(database_dir) {
             Ok(files) => get_mdd_files_and_size(files)
                 .into_iter()
                 .map(|(p, _)| p)
@@ -245,7 +245,9 @@ pub async fn resolve_mdd_paths(storage_dir: &str, database_dir: &str) -> Vec<Pat
                 tracing::error!(error = %e, "Failed to read directory");
                 vec![]
             }
-        }
+        };
+        seed_storage_if_empty_from_mdd_files(storage_dir, &mdd_files).await;
+        mdd_files
     }
 }
 
@@ -293,44 +295,31 @@ async fn load_mdd_paths_from_storage(storage_dir: &str) -> Option<Vec<PathBuf>> 
     )
 }
 
-/// Seeds the `DiagnosticDatabase` storage collection from `database_dir` when the collection
-/// is empty. This copies all `.mdd` files from the filesystem into storage so that the runtime
+/// Seeds the `DiagnosticDatabase` storage collection from `mdd_files` when the collection
+/// is empty. This copies the passed file paths into storage so that the runtime
 /// update plugin has a populated baseline to work with.
-pub async fn seed_storage_if_empty_from_database_dir(storage_dir: &str, database_dir: &str) {
-    let mdd_files = match std::fs::read_dir(database_dir) {
-        Ok(entries) => get_mdd_files_and_size(entries),
-        Err(e) => {
-            tracing::warn!(error = %e, database_dir, "Cannot read database directory for seeding");
-            return;
-        }
-    };
-
-    if mdd_files.is_empty() {
-        tracing::debug!(
-            database_dir,
-            "No MDD files found in database directory to seed"
-        );
-        return;
-    }
-
-    let entries = mdd_files.into_iter().filter_map(|(path, _)| {
-        let key = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(str::to_lowercase)
-            .unwrap_or_default();
-        if key.is_empty() {
-            return None;
-        }
-        match std::fs::read(&path) {
-            Ok(data) => Some((key, data)),
-            Err(e) => {
-                tracing::warn!(path = %path.display(),
-                    error = %e, "Failed to read MDD file for seeding, skipping");
-                None
+pub async fn seed_storage_if_empty_from_mdd_files(storage_dir: &str, mdd_files: &[PathBuf]) {
+    let entries: Vec<(String, Vec<u8>)> = mdd_files
+        .iter()
+        .filter_map(|path| {
+            let key = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_lowercase)
+                .unwrap_or_default();
+            if key.is_empty() {
+                return None;
             }
-        }
-    });
+            match std::fs::read(path) {
+                Ok(data) => Some((key, data)),
+                Err(e) => {
+                    tracing::warn!(path = %path.display(),
+                    error = %e, "Failed to read MDD file for seeding, skipping");
+                    None
+                }
+            }
+        })
+        .collect();
 
     let storage = match cda_storage::LocalStorage::new(storage_dir) {
         Ok(s) => s,
@@ -349,9 +338,8 @@ pub async fn seed_storage_if_empty_from_database_dir(storage_dir: &str, database
     {
         tracing::info!(
             count,
-            database_dir,
             storage_dir,
-            "Seeded DiagnosticDatabase collection from database directory"
+            "Seeded DiagnosticDatabase collection from MDD files"
         );
     }
 }
@@ -697,35 +685,28 @@ fn insert_or_update_ecu<S: SecurityPlugin>(
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::storage_api::{Collection as _, CollectionName, DirectFileAccess, Storage};
+    use std::path::PathBuf;
+
+    use cda_interfaces::storage_api::{CollectionName, DirectFileAccess, Storage};
     use cda_storage::LocalStorage;
+    use tempfile::TempDir;
 
-    use super::{resolve_mdd_paths, seed_storage_if_empty_from_database_dir};
-
-    /// Helper: create a temp dir with `.mdd` files containing given data.
-    fn create_database_dir(files: &[(&str, &[u8])]) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("create temp dir");
-        for (name, data) in files {
-            std::fs::write(dir.path().join(name), data).expect("write file");
-        }
-        dir
-    }
+    use super::*;
 
     #[tokio::test]
     async fn seed_copies_mdd_files_into_empty_storage() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
-        let db_dir = create_database_dir(&[
+        let fixture = Fixture::new_with_mdd_files(&[
             ("ecu_a.mdd", b"MDD_CONTENT_A"),
             ("ecu_b.mdd", b"MDD_CONTENT_B"),
         ]);
 
-        seed_storage_if_empty_from_database_dir(
-            storage_dir.path().to_str().unwrap(),
-            db_dir.path().to_str().unwrap(),
+        seed_storage_if_empty_from_mdd_files(
+            fixture.storage_dir.path().to_str().unwrap(),
+            &fixture.mdd_files,
         )
         .await;
 
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
+        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
         let collection = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
             .await
@@ -738,11 +719,10 @@ mod tests {
 
     #[tokio::test]
     async fn seed_skips_when_collection_already_populated() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
-        let db_dir = create_database_dir(&[("new.mdd", b"NEW_DATA")]);
+        let fixture = Fixture::new_with_mdd_files(&[("new.mdd", b"NEW_DATA")]);
 
         // Pre-populate storage with an existing entry.
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
+        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
         let collection = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
             .await
@@ -756,14 +736,14 @@ mod tests {
         tx.commit().await.unwrap();
         drop(storage);
 
-        seed_storage_if_empty_from_database_dir(
-            storage_dir.path().to_str().unwrap(),
-            db_dir.path().to_str().unwrap(),
+        seed_storage_if_empty_from_mdd_files(
+            fixture.storage_dir.path().to_str().unwrap(),
+            &fixture.mdd_files,
         )
         .await;
 
         // Verify collection was NOT modified.
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
+        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
         let collection = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
             .await
@@ -773,60 +753,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seed_ignores_non_mdd_files() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
-        let db_dir = create_database_dir(&[
-            ("valid.mdd", b"MDD_DATA"),
-            ("readme.txt", b"TEXT"),
-            ("data.bin", b"BIN"),
-        ]);
+    async fn seed_handles_no_database_files() {
+        let fixture = Fixture::new_with_mdd_files(&[]);
 
-        seed_storage_if_empty_from_database_dir(
-            storage_dir.path().to_str().unwrap(),
-            db_dir.path().to_str().unwrap(),
+        seed_storage_if_empty_from_mdd_files(
+            fixture.storage_dir.path().to_str().unwrap(),
+            &fixture.mdd_files,
         )
         .await;
 
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
-        let collection = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
-        let keys = collection.list().await.unwrap();
-        assert_eq!(keys, vec!["valid.mdd"]);
-    }
-
-    #[tokio::test]
-    async fn seed_handles_empty_database_dir() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
-        let db_dir = tempfile::tempdir().expect("empty db dir");
-
-        seed_storage_if_empty_from_database_dir(
-            storage_dir.path().to_str().unwrap(),
-            db_dir.path().to_str().unwrap(),
-        )
-        .await;
-
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
-        let collection = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
-        assert!(collection.is_empty().await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn seed_handles_nonexistent_database_dir() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
-
-        // Should not panic, just return early.
-        seed_storage_if_empty_from_database_dir(
-            storage_dir.path().to_str().unwrap(),
-            "/tmp/nonexistent_cda_test_path_12345",
-        )
-        .await;
-
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
+        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
         let collection = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
             .await
@@ -836,16 +772,15 @@ mod tests {
 
     #[tokio::test]
     async fn seed_lowercases_mdd_filenames_as_keys() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
-        let db_dir = create_database_dir(&[("ECU_UPPER.mdd", b"UPPER_DATA")]);
+        let fixture = Fixture::new_with_mdd_files(&[("ECU_UPPER.mdd", b"UPPER_DATA")]);
 
-        seed_storage_if_empty_from_database_dir(
-            storage_dir.path().to_str().unwrap(),
-            db_dir.path().to_str().unwrap(),
+        seed_storage_if_empty_from_mdd_files(
+            fixture.storage_dir.path().to_str().unwrap(),
+            &fixture.mdd_files,
         )
         .await;
 
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
+        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
         let collection = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
             .await
@@ -856,17 +791,16 @@ mod tests {
 
     #[tokio::test]
     async fn seed_preserves_file_content_through_storage_roundtrip() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
         let original_data = b"MDD_BINARY_PAYLOAD_1234567890";
-        let db_dir = create_database_dir(&[("FLXC1000.mdd", original_data)]);
+        let fixture = Fixture::new_with_mdd_files(&[("FLXC1000.mdd", original_data)]);
 
-        seed_storage_if_empty_from_database_dir(
-            storage_dir.path().to_str().unwrap(),
-            db_dir.path().to_str().unwrap(),
+        seed_storage_if_empty_from_mdd_files(
+            fixture.storage_dir.path().to_str().unwrap(),
+            &fixture.mdd_files,
         )
         .await;
 
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
+        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
         let collection = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
             .await
@@ -881,14 +815,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_mdd_paths_ignores_non_mdd_files() {
+        let fixture = Fixture::new_with_mdd_files(&[
+            ("valid.mdd", b"MDD_DATA"),
+            ("readme.txt", b"TEXT"),
+            ("data.bin", b"BIN"),
+        ]);
+
+        let mdd_files = resolve_mdd_paths(
+            fixture.storage_dir.path().to_str().unwrap(),
+            fixture.db_dir.path().to_str().unwrap(),
+        )
+        .await;
+
+        let [valid_file] = mdd_files.as_slice() else {
+            panic!("Exactly one file expected.");
+        };
+        assert_eq!(valid_file.file_name().unwrap(), "valid.mdd");
+    }
+
+    #[tokio::test]
     async fn resolve_mdd_paths_returns_storage_paths_after_seed() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
-        let db_dir = create_database_dir(&[("FLXC1000.mdd", b"MDD_A"), ("FSNR2000.mdd", b"MDD_B")]);
+        let fixture =
+            Fixture::new_with_mdd_files(&[("FLXC1000.mdd", b"MDD_A"), ("FSNR2000.mdd", b"MDD_B")]);
 
-        let storage_str = storage_dir.path().to_str().unwrap();
-        let db_str = db_dir.path().to_str().unwrap();
+        let storage_str = fixture.storage_dir.path().to_str().unwrap();
+        let db_str = fixture.db_dir.path().to_str().unwrap();
 
-        seed_storage_if_empty_from_database_dir(storage_str, db_str).await;
+        seed_storage_if_empty_from_mdd_files(storage_str, &fixture.mdd_files).await;
         let paths = resolve_mdd_paths(storage_str, db_str).await;
 
         assert_eq!(paths.len(), 2, "Expected 2 MDD paths from storage");
@@ -896,7 +850,7 @@ mod tests {
             assert!(p.exists(), "Resolved path must exist: {}", p.display());
             // Paths should come from storage, not from the original database dir.
             assert!(
-                !p.starts_with(db_dir.path()),
+                !p.starts_with(fixture.db_dir.path()),
                 "Path should come from storage, not the database dir: {}",
                 p.display()
             );
@@ -905,13 +859,12 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_mdd_paths_falls_back_when_storage_empty() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
-        let db_dir = create_database_dir(&[("ECU.mdd", b"DATA")]);
+        let fixture = Fixture::new_with_mdd_files(&[("ECU.mdd", b"DATA")]);
 
         // Do NOT seed - storage remains empty.
         let paths = resolve_mdd_paths(
-            storage_dir.path().to_str().unwrap(),
-            db_dir.path().to_str().unwrap(),
+            fixture.storage_dir.path().to_str().unwrap(),
+            fixture.db_dir.path().to_str().unwrap(),
         )
         .await;
 
@@ -919,9 +872,36 @@ mod tests {
 
         assert_eq!(paths.len(), 1, "Expected 1 MDD path from fallback");
         assert!(
-            first.starts_with(db_dir.path()),
+            first.starts_with(fixture.db_dir.path()),
             "Path should come from database dir when storage is empty: {}",
             first.display()
         );
+    }
+
+    struct Fixture {
+        mdd_files: Vec<PathBuf>,
+        storage_dir: TempDir,
+        db_dir: TempDir,
+    }
+    impl Fixture {
+        fn new_with_mdd_files(mdd_files: &[(&str, &[u8])]) -> Self {
+            let storage_dir = tempfile::tempdir().expect("storage dir");
+            let db_dir = tempfile::tempdir().expect("DB dir");
+
+            let mdd_files = mdd_files
+                .iter()
+                .map(|(name, data)| (db_dir.path().join(name), *data))
+                .collect::<Vec<_>>();
+
+            for (path, data) in &mdd_files {
+                std::fs::write(path, data).expect("write MDD file");
+            }
+
+            Self {
+                mdd_files: mdd_files.into_iter().map(|(path, _)| path).collect(),
+                storage_dir,
+                db_dir,
+            }
+        }
     }
 }
