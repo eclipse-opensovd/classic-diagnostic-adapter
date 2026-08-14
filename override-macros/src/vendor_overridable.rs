@@ -19,7 +19,9 @@ use syn::{
     punctuated::Punctuated,
 };
 
-use crate::shared::{hook_ident_for, mentions_generics, param_ident};
+use crate::shared::{
+    contains_reference, hook_ident_for, mentions_generics, param_ident, with_lifetime,
+};
 
 /// Parses `name = <ident>` from `vendor_overridable` arguments.
 struct Args {
@@ -59,6 +61,7 @@ struct HookParams {
 fn build_hook_params(
     inputs: &Punctuated<syn::FnArg, Token![,]>,
     generic_idents: &[Ident],
+    async_lifetime: Option<&syn::Lifetime>,
 ) -> syn::Result<HookParams> {
     let mut hook_param_types = Vec::new();
     let mut hook_call_args = Vec::new();
@@ -80,13 +83,25 @@ fn build_hook_params(
             match ty.as_ref() {
                 Type::Reference(reference) if reference.mutability.is_none() => {
                     any_erased = true;
-                    hook_param_types.push(quote! { &dyn ::core::any::Any });
-                    hook_call_args.push(quote! { #ident as &dyn ::core::any::Any });
+                    if let Some(lifetime) = async_lifetime {
+                        hook_param_types.push(
+                            quote! { &#lifetime (dyn ::core::any::Any + ::core::marker::Sync) },
+                        );
+                    } else {
+                        hook_param_types.push(quote! { &dyn ::core::any::Any });
+                    }
+                    hook_call_args.push(quote! { #ident });
                 }
                 Type::Reference(_) => {
                     any_erased = true;
-                    hook_param_types.push(quote! { &mut dyn ::core::any::Any });
-                    hook_call_args.push(quote! { &mut *#ident as &mut dyn ::core::any::Any });
+                    if let Some(lifetime) = async_lifetime {
+                        hook_param_types.push(
+                            quote! { &#lifetime mut (dyn ::core::any::Any + ::core::marker::Send) },
+                        );
+                    } else {
+                        hook_param_types.push(quote! { &mut dyn ::core::any::Any });
+                    }
+                    hook_call_args.push(quote! { &mut *#ident });
                 }
                 _ => {
                     return Err(syn::Error::new_spanned(
@@ -97,7 +112,11 @@ fn build_hook_params(
                 }
             }
         } else {
-            hook_param_types.push(quote! { #ty });
+            let hook_ty = async_lifetime.map_or_else(
+                || ty.as_ref().clone(),
+                |lifetime| with_lifetime(ty, lifetime),
+            );
+            hook_param_types.push(quote! { #hook_ty });
             hook_call_args.push(quote! { #ident });
         }
     }
@@ -110,18 +129,44 @@ fn build_hook_params(
     })
 }
 
+/// Builds sync return type or boxed async future used by hook function pointers.
+fn build_hook_return(
+    ret_type: &Type,
+    any_erased: bool,
+    is_async: bool,
+    hook_lifetime: Option<&syn::Lifetime>,
+) -> proc_macro2::TokenStream {
+    let hook_ret_type = hook_lifetime.map_or_else(
+        || ret_type.clone(),
+        |lifetime| with_lifetime(ret_type, lifetime),
+    );
+    let hook_result = if any_erased {
+        quote! { ::core::option::Option<#hook_ret_type> }
+    } else {
+        quote! { #hook_ret_type }
+    };
+    if !is_async {
+        return hook_result;
+    }
+
+    let future_lifetime =
+        hook_lifetime.map_or_else(|| quote! { 'static }, |lifetime| quote! { #lifetime });
+    quote! {
+        ::core::pin::Pin<::std::boxed::Box<
+            dyn ::core::future::Future<Output = #hook_result>
+                + ::core::marker::Send
+                + #future_lifetime
+        >>
+    }
+}
+
 pub(crate) fn expand(
     attr: proc_macro2::TokenStream,
     item: proc_macro2::TokenStream,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let args = parse2::<Args>(attr)?;
     let fallback_fn = parse2::<ItemFn>(item)?;
-    if let Some(asyncness) = fallback_fn.sig.asyncness {
-        return Err(syn::Error::new_spanned(
-            asyncness,
-            "vendor_overridable does not support async functions",
-        ));
-    }
+    let is_async = fallback_fn.sig.asyncness.is_some();
     if let Some(lifetime) = fallback_fn.sig.generics.lifetimes().next() {
         return Err(syn::Error::new_spanned(
             lifetime,
@@ -146,8 +191,8 @@ pub(crate) fn expand(
                 .map(|param| param.ident.clone()),
         )
         .collect();
-    let ret_ty = match &fallback_fn.sig.output {
-        ReturnType::Default => quote! { () },
+    let ret_type = match &fallback_fn.sig.output {
+        ReturnType::Default => parse_quote! { () },
         ReturnType::Type(_, ty) => {
             if mentions_generics(ty, &generic_idents) {
                 return Err(syn::Error::new_spanned(
@@ -155,15 +200,21 @@ pub(crate) fn expand(
                     "vendor_overridable: return type must not mention generic parameters",
                 ));
             }
-            quote! { #ty }
+            ty.as_ref().clone()
         }
     };
+    let async_lifetime: syn::Lifetime = parse_quote!('__vendor_override);
+    let has_borrowed_input = fallback_fn.sig.inputs.iter().any(|arg| match arg {
+        syn::FnArg::Typed(pat_type) => contains_reference(&pat_type.ty),
+        syn::FnArg::Receiver(_) => false,
+    });
+    let hook_lifetime = (is_async && has_borrowed_input).then_some(&async_lifetime);
     let HookParams {
         hook_param_types,
         hook_call_args,
         fallback_call_args,
         any_erased,
-    } = build_hook_params(&fallback_fn.sig.inputs, &generic_idents)?;
+    } = build_hook_params(&fallback_fn.sig.inputs, &generic_idents, hook_lifetime)?;
 
     let doc_attrs: Vec<syn::Attribute> = fallback_fn
         .attrs
@@ -191,12 +242,26 @@ pub(crate) fn expand(
     dispatcher_fn.sig.ident = public_name.clone();
     // Erased hooks return `Option<Ret>` so a failed downcast can fall through
     // to the typed fallback. Non-erased hooks can return directly.
-    let override_dispatch = if any_erased {
+    let override_dispatch = if any_erased && is_async {
+        quote! {
+            if let Some(overridden_fn) = #hook_ident.first()
+                && let Some(result) = overridden_fn(#(#hook_call_args),*).await
+            {
+                return result;
+            }
+        }
+    } else if any_erased {
         quote! {
             if let Some(overridden_fn) = #hook_ident.first()
                 && let Some(result) = overridden_fn(#(#hook_call_args),*)
             {
                 return result;
+            }
+        }
+    } else if is_async {
+        quote! {
+            if let Some(overridden_fn) = #hook_ident.first() {
+                return overridden_fn(#(#hook_call_args),*).await;
             }
         }
     } else {
@@ -206,6 +271,7 @@ pub(crate) fn expand(
             }
         }
     };
+    let fallback_await = is_async.then(|| quote! { .await });
     dispatcher_fn.block = parse_quote!({
         debug_assert!(
             #hook_ident.len() <= 1,
@@ -214,14 +280,11 @@ pub(crate) fn expand(
             stringify!(#public_name),
         );
         #override_dispatch
-        #fallback_ident(#(#fallback_call_args),*)
+        #fallback_ident(#(#fallback_call_args),*) #fallback_await
     });
 
-    let hook_return = if any_erased {
-        quote! { ::core::option::Option<#ret_ty> }
-    } else {
-        ret_ty
-    };
+    let hook_return = build_hook_return(&ret_type, any_erased, is_async, hook_lifetime);
+    let hook_binder = hook_lifetime.map(|lifetime| quote! { for<#lifetime> });
     Ok(quote! {
         #fallback_fn
 
@@ -229,28 +292,8 @@ pub(crate) fn expand(
         #[deny(unreachable_pub, reason = "vendor_overridable items must be reachable from the \
             crate root so external crates can register overrides")]
         #[doc = #hook_doc]
-        pub static #hook_ident: [fn(#(#hook_param_types),*) -> #hook_return];
+        pub static #hook_ident: [#hook_binder fn(#(#hook_param_types),*) -> #hook_return];
 
         #dispatcher_fn
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use quote::quote;
-
-    #[test]
-    fn rejects_async_fallback() {
-        let result = super::expand(
-            quote!(name = lookup),
-            quote!(
-                async fn lookup_fallback(value: u32) -> u32 {
-                    value
-                }
-            ),
-        );
-
-        let error = result.expect_err("async fallback must be rejected");
-        assert!(error.to_string().contains("does not support async"));
-    }
 }

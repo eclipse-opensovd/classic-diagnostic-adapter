@@ -19,7 +19,10 @@ use syn::{
     punctuated::Punctuated,
 };
 
-use crate::shared::{hook_ident_for, param_ident, registration_ident_for, registry_paths};
+use crate::shared::{
+    contains_reference, hook_ident_for, param_ident, registration_ident_for, registry_paths,
+    with_lifetime,
+};
 
 /// Parses `path::to::function` and optional `, erase(param, ...)` arguments.
 struct Args {
@@ -63,7 +66,12 @@ struct ShimParts {
 ///
 /// Erased parameters must be references because `Any` downcasts borrowed
 /// values without transferring ownership.
-fn build_shim_parts(func: &ItemFn, erased: &[Ident], fn_name: &str) -> syn::Result<ShimParts> {
+fn build_shim_parts(
+    func: &ItemFn,
+    erased: &[Ident],
+    fn_name: &str,
+    async_lifetime: Option<&syn::Lifetime>,
+) -> syn::Result<ShimParts> {
     let param_names: Vec<&Ident> = func
         .sig
         .inputs
@@ -109,17 +117,36 @@ fn build_shim_parts(func: &ItemFn, erased: &[Ident], fn_name: &str) -> syn::Resu
                 ));
             };
             let concrete_ty = &reference.elem;
-            let (any_ty, downcast) = if reference.mutability.is_some() {
+            let (any_ty, downcast_ty, downcast) = if reference.mutability.is_some() {
                 (
+                    async_lifetime.map_or_else(
+                        || quote! { &mut dyn ::core::any::Any },
+                        |lifetime| {
+                            quote! {
+                                &#lifetime mut (dyn ::core::any::Any + ::core::marker::Send)
+                            }
+                        },
+                    ),
                     quote! { &mut dyn ::core::any::Any },
                     quote! { downcast_mut },
                 )
             } else {
-                (quote! { &dyn ::core::any::Any }, quote! { downcast_ref })
+                (
+                    async_lifetime.map_or_else(
+                        || quote! { &dyn ::core::any::Any },
+                        |lifetime| {
+                            quote! {
+                                &#lifetime (dyn ::core::any::Any + ::core::marker::Sync)
+                            }
+                        },
+                    ),
+                    quote! { &dyn ::core::any::Any },
+                    quote! { downcast_ref },
+                )
             };
             shim_params.push(parse_quote!(#ident: #any_ty));
             shim_bindings.push(quote! {
-                let Some(#ident) = #ident.#downcast::<#concrete_ty>() else {
+                let Some(#ident) = (#ident as #downcast_ty).#downcast::<#concrete_ty>() else {
                     ::tracing::debug!(
                         "Vendor override `{}`: downcast of `{}` to `{}` failed, falling back to \
                          the default implementation",
@@ -131,7 +158,13 @@ fn build_shim_parts(func: &ItemFn, erased: &[Ident], fn_name: &str) -> syn::Resu
                 };
             });
         } else {
-            shim_params.push(arg.clone());
+            let mut shim_arg = arg.clone();
+            if let Some(lifetime) = async_lifetime
+                && let syn::FnArg::Typed(pat_type) = &mut shim_arg
+            {
+                *pat_type.ty = with_lifetime(&pat_type.ty, lifetime);
+            }
+            shim_params.push(shim_arg);
         }
         shim_call_args.push(quote! { #ident });
     }
@@ -150,10 +183,12 @@ pub(crate) fn expand(
 ) -> syn::Result<proc_macro2::TokenStream> {
     let args = parse2::<Args>(attr)?;
     let func = parse2::<ItemFn>(item)?;
-    if let Some(asyncness) = func.sig.asyncness {
+    let is_async = func.sig.asyncness.is_some();
+    if is_async && let Some(lifetime) = func.sig.generics.lifetimes().next() {
         return Err(syn::Error::new_spanned(
-            asyncness,
-            "vendor_override does not support async functions",
+            lifetime,
+            "vendor_override: explicit lifetime parameters are not supported; use elided \
+             lifetimes instead",
         ));
     }
 
@@ -181,7 +216,7 @@ pub(crate) fn expand(
         };
     };
 
-    if args.erased.is_empty() {
+    if args.erased.is_empty() && !is_async {
         return Ok(quote! {
             #[::linkme::distributed_slice(#hook_path)]
             #func
@@ -195,16 +230,23 @@ pub(crate) fn expand(
         &format!("__{fn_name}_vendor_override_shim"),
         fn_ident.span(),
     );
-    let ret_ty = match &func.sig.output {
-        ReturnType::Default => quote! { () },
-        ReturnType::Type(_, ty) => quote! { #ty },
+    let ret_type = match &func.sig.output {
+        ReturnType::Default => parse_quote! { () },
+        ReturnType::Type(_, ty) => ty.as_ref().clone(),
     };
+    let ret_ty = quote! { #ret_type };
+    let async_lifetime: syn::Lifetime = parse_quote!('__vendor_override);
+    let has_borrowed_input = func.sig.inputs.iter().any(|arg| match arg {
+        syn::FnArg::Typed(pat_type) => contains_reference(&pat_type.ty),
+        syn::FnArg::Receiver(_) => false,
+    });
+    let shim_lifetime = (is_async && has_borrowed_input).then_some(&async_lifetime);
     let ShimParts {
         shim_params,
         shim_bindings,
         shim_call_args,
         assert_param_types,
-    } = build_shim_parts(&func, &args.erased, &fn_name)?;
+    } = build_shim_parts(&func, &args.erased, &fn_name, shim_lifetime)?;
 
     // Keep the original override intact. Register a private ABI adapter that
     // downcasts erased arguments and returns `None` when concrete types differ.
@@ -213,41 +255,67 @@ pub(crate) fn expand(
     shim_fn.vis = Visibility::Inherited;
     shim_fn.sig.ident = shim_ident;
     shim_fn.sig.inputs = shim_params;
-    shim_fn.sig.output = parse_quote!(-> ::core::option::Option<#ret_ty>);
-    shim_fn.block = parse_quote!({
-        #(#shim_bindings)*
-        ::core::option::Option::Some(#fn_ident(#(#shim_call_args),*))
+    if is_async {
+        shim_fn.sig.asyncness = None;
+        if let Some(lifetime) = shim_lifetime {
+            shim_fn
+                .sig
+                .generics
+                .params
+                .insert(0, parse_quote!(#lifetime));
+        }
+        let shim_ret_type = shim_lifetime.map_or_else(
+            || ret_type.clone(),
+            |lifetime| with_lifetime(&ret_type, lifetime),
+        );
+        let shim_result = if args.erased.is_empty() {
+            quote! { #shim_ret_type }
+        } else {
+            quote! { ::core::option::Option<#shim_ret_type> }
+        };
+        let future_lifetime =
+            shim_lifetime.map_or_else(|| quote! { 'static }, |lifetime| quote! { #lifetime });
+        shim_fn.sig.output = parse_quote! {
+            -> ::core::pin::Pin<::std::boxed::Box<
+                dyn ::core::future::Future<Output = #shim_result>
+                    + ::core::marker::Send
+                    + #future_lifetime
+            >>
+        };
+        let shim_result = if args.erased.is_empty() {
+            quote! { #fn_ident(#(#shim_call_args),*).await }
+        } else {
+            quote! { ::core::option::Option::Some(#fn_ident(#(#shim_call_args),*).await) }
+        };
+        shim_fn.block = parse_quote!({
+            ::std::boxed::Box::pin(async move {
+                #(#shim_bindings)*
+                #shim_result
+            })
+        });
+    } else {
+        shim_fn.sig.output = parse_quote!(-> ::core::option::Option<#ret_ty>);
+        shim_fn.block = parse_quote!({
+            #(#shim_bindings)*
+            ::core::option::Option::Some(#fn_ident(#(#shim_call_args),*))
+        });
+    }
+
+    let signature_assertion = (!is_async).then(|| {
+        quote! {
+            // Ensure the concrete override is a valid instantiation of the public
+            // dispatcher, including parameter types, return type, and trait bounds.
+            const _: fn(#(#assert_param_types),*) -> #ret_ty = #public_fn_path;
+        }
     });
 
     Ok(quote! {
         #func
 
-        // Ensure the concrete override is a valid instantiation of the public
-        // dispatcher, including parameter types, return type, and trait bounds.
-        const _: fn(#(#assert_param_types),*) -> #ret_ty = #public_fn_path;
+        #signature_assertion
 
         #shim_fn
 
         #registration
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use quote::quote;
-
-    #[test]
-    fn rejects_async_override() {
-        let result = super::expand(
-            quote!(crate_name::lookup),
-            quote!(
-                async fn lookup_override(value: u32) -> u32 {
-                    value
-                }
-            ),
-        );
-
-        let error = result.expect_err("async override must be rejected");
-        assert!(error.to_string().contains("does not support async"));
-    }
 }

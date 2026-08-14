@@ -27,10 +27,11 @@ path = "src/lib.rs"
 [dependencies]
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
-syn = { workspace = true }
+syn = { workspace = true, features = ["visit-mut"] }
 
 [dev-dependencies]
 # The generated code references `::linkme` and `::tracing`; the macros
 # themselves do not use them, but this crate's own tests do.
 linkme = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
 tracing = { workspace = true }

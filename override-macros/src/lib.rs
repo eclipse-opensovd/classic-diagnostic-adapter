@@ -27,8 +27,8 @@ fn render(result: syn::Result<proc_macro2::TokenStream>) -> TokenStream {
 ///
 /// Generic parameters used by reference in input types are erased through
 /// `Any`. Return types may not reference generic parameters. Explicit lifetime
-/// parameters, `self` parameters, non-identifier parameter patterns, and async
-/// functions are unsupported.
+/// parameters, `self` parameters, and non-identifier parameter patterns are
+/// unsupported. Async functions use boxed `Send` futures in generated hooks.
 ///
 /// # Example
 /// ```rust,ignore
@@ -85,14 +85,16 @@ fn render(result: syn::Result<proc_macro2::TokenStream>) -> TokenStream {
 ///   rejected
 /// - return type must not mention generic parameters
 /// - erased concrete type must be `'static`, as required by `dyn Any`
+/// - async erased shared references must be `Sync`, and mutable references must
+///   be `Send`
 /// - non-erased values must remain usable if override declines and fallback is
 ///   called; by-value parameters therefore generally need to be `Copy`
 ///
 /// # General restrictions
 ///
-/// Async functions, explicit lifetime parameters, `self` parameters, and
-/// parameter patterns other than plain identifiers are unsupported. Elided
-/// lifetimes are supported.
+/// Explicit lifetime parameters, `self` parameters, and parameter patterns
+/// other than plain identifiers are unsupported. Elided lifetimes and async
+/// functions are supported. Async override futures must be `Send`.
 ///
 /// # Visibility requirement
 ///
@@ -108,7 +110,7 @@ pub fn vendor_overridable(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// Generic dispatcher parameters must be listed in `erase(...)` on the
 /// concrete override. Hook paths require an explicit `crate::` or crate-name
-/// prefix. Async override functions are unsupported.
+/// prefix. Async override functions produce boxed `Send` hook futures.
 ///
 /// # Example
 /// ```rust,ignore

@@ -2655,6 +2655,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+ "tokio",
  "tracing",
 ]
 
