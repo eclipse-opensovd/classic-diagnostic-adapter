@@ -84,6 +84,24 @@ where
     ) -> Result<VehicleComponents<Uds, Gateway, Self::FileManager>, ReloadError>;
 }
 
+/// Publishes a prepared set of vehicle components into an application's live runtime.
+///
+/// This keeps generic reload orchestration independent from HTTP servers, routing, and concrete
+/// runtime state holders.
+#[async_trait]
+pub trait VehicleComponentPublisher<Uds, Gateway, File>: Send + Sync + 'static
+where
+    Uds: UdsQuery + Shutdown,
+    Gateway: Shutdown,
+    File: FileManager,
+{
+    /// Publishes a fully prepared, mutually compatible component generation.
+    async fn publish(
+        &self,
+        components: VehicleComponents<Uds, Gateway, File>,
+    ) -> Result<(), ReloadError>;
+}
+
 /// A file to be uploaded to the CDA during a runtime update.
 #[derive(Debug)]
 pub struct UploadFile {

@@ -16,8 +16,10 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use cda_interfaces::{
     DynamicPlugin, HashMap,
-    communication_control::{CommunicationAccess, PostUpdateCommunicationMode},
-    http_protection::registry::HttpProtectionRegistry,
+    communication_control::{
+        CommunicationAccess, DisableCommunication, PostUpdateCommunicationMode,
+    },
+    http_protection::registry::{HttpProtectionRegistry, HttpRouteMatcher},
     runtime_update_api::{
         ExecutionMode, FileListOptions, LockStateProvider, RuntimeFile, RuntimeFileCatalog,
         RuntimeFileInspector, RuntimeFileStore, RuntimeFilesUpdatePlugin, RuntimeReloaderPlugin,
@@ -26,7 +28,6 @@ use cda_interfaces::{
     },
     storage_api::Storage,
 };
-use cda_plugin_communication_management::lifecycle::disable::DisableCommunication;
 use tokio::sync::RwLock;
 
 /// Default implementation of [`RuntimeFilesUpdatePlugin`] with injectable security and storage.
@@ -55,6 +56,7 @@ pub struct DefaultRuntimeUpdatePlugin<
     /// only - `init_mode` still decides whether one is honoured.
     communication_access: Arc<dyn CommunicationAccess>,
     http_protections: HttpProtectionRegistry,
+    update_exempt_routes: Vec<HttpRouteMatcher>,
     update_retry_after: Duration,
     post_update_mode: PostUpdateCommunicationMode,
 }
@@ -93,6 +95,7 @@ impl<
         communication_disable: Arc<dyn DisableCommunication>,
         communication_access: Arc<dyn CommunicationAccess>,
         http_protections: HttpProtectionRegistry,
+        update_exempt_routes: Vec<HttpRouteMatcher>,
         update_retry_after: Duration,
         post_update_mode: PostUpdateCommunicationMode,
     ) -> Self {
@@ -107,6 +110,7 @@ impl<
             communication_disable,
             communication_access,
             http_protections,
+            update_exempt_routes,
             update_retry_after,
             post_update_mode,
         }
@@ -211,6 +215,7 @@ impl<
             communication_disable: &self.communication_disable,
             communication_access: &self.communication_access,
             http_protections: &self.http_protections,
+            update_exempt_routes: &self.update_exempt_routes,
             update_retry_after: self.update_retry_after,
             post_update_mode: self.post_update_mode.clone(),
             mdd_decompress: self.mdd_decompress,
@@ -235,7 +240,7 @@ mod tests {
 
     use cda_interfaces::{
         communication_control::{CommunicationState, PostUpdateCommunicationMode},
-        http_protection::registry::HttpProtectionRegistry,
+        http_protection::registry::{HttpProtectionRegistry, HttpRouteMatcher},
         runtime_update_api::{
             ExecutionMode, FileListOptions, HashAlgorithm, RuntimeFileCatalog, RuntimeFileStore,
             RuntimeFilesUpdatePlugin, RuntimeUpdateError, RuntimeUpdateExecutor,
@@ -289,6 +294,7 @@ mod tests {
             Arc::clone(&communication_disable),
             enabled_communication_access_for_test(),
             http_protections,
+            Vec::new(),
             Duration::from_secs(1),
             PostUpdateCommunicationMode::Enabled,
         );
