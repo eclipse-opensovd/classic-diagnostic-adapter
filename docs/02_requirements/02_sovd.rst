@@ -725,7 +725,7 @@ three lock scopes.
     :links: arch~sovd-api-lock-vehicle-blocking
     :status: draft
 
-    When a vehicle lock is held by a client, any other client's attempt to acquire an ECU
+    When a vehicle lock is held by a client, any other clients attempt to acquire an ECU
     lock or a functional group lock must be rejected with HTTP 409.
 
     The vehicle lock owner may still acquire ECU or functional group locks.
@@ -918,7 +918,9 @@ MDD Embedded files
     :links: arch~sovd-api-mdd-embedded-files
     :status: draft
 
-    The CDA must support reading embedded files from the mdd file, and provide them via the ``/components/{ecu-name}/files/{file-name}`` endpoint.
+    The CDA must support reading embedded files from the MDD file, and provide them via the
+    ``/components/{ecuName}/x-sovd2uds-bulk-data/mdd-embedded-files`` endpoint (listing) and
+    ``/components/{ecuName}/x-sovd2uds-bulk-data/mdd-embedded-files/{id}`` endpoint (retrieval).
 
     **Rationale**
 
