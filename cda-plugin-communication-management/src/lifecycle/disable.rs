@@ -16,30 +16,18 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+// The disable contract lives in `cda-interfaces` so consumers that need exclusive
+// transport ownership (the runtime-update plugin) do not depend on this crate.
+// `DisableLease` below is the authoritative implementation of `DisableGuard`.
+pub use cda_interfaces::communication_control::disable::{
+    DisableCommunication, DisableError, DisableGuard, DisableReason,
+};
 use cda_interfaces::communication_control::{
     CommunicationOperation, CommunicationOperationFailure, CommunicationState,
 };
 
 use super::controller::CommunicationHandle;
 use crate::plugin::CommunicationPlugin;
-
-/// Reason supplied by the owner who is taking the communication offline.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DisableReason {
-    /// A runtime file update needs exclusive transport ownership.
-    RuntimeUpdate,
-    /// An application-defined disable reason.
-    Custom(String),
-}
-
-/// Exclusive transport-disable capability.
-/// Only one `DisableLease` can be active at a time.
-#[async_trait]
-pub trait DisableCommunication: Send + Sync + 'static {
-    /// Disables communication to the ECUs until the lease is released.
-    /// Does not stop communication to SOVD.
-    async fn disable(&self, reason: DisableReason) -> Result<DisableLease, DisableError>;
-}
 
 /// Cloneable narrow disable view forwarding to the authoritative plugin.
 /// This adapter lets diagnostic consumers depend on [`DisableCommunication`]
@@ -59,23 +47,12 @@ impl CommunicationDisableView {
 
 #[async_trait]
 impl DisableCommunication for CommunicationDisableView {
-    async fn disable(&self, reason: DisableReason) -> Result<DisableLease, DisableError> {
-        self.plugin.disable(reason).await
+    async fn disable(&self, reason: DisableReason) -> Result<Box<dyn DisableGuard>, DisableError> {
+        self.plugin
+            .disable(reason)
+            .await
+            .map(|lease| Box::new(lease) as Box<dyn DisableGuard>)
     }
-}
-
-/// Failure to acquire the exclusive disable lease.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum DisableError {
-    /// Diagnostics are currently using communication.
-    #[error("Communication is in use")]
-    InUse,
-    /// Disabling is unavailable in the current lifecycle state.
-    #[error("Cannot disable in the current lifecycle state")]
-    Conflict,
-    /// Disabling the physical transport failed.
-    #[error("Disabling communication failed: {0}")]
-    Failed(CommunicationOperationFailure),
 }
 
 /// Private identity used to prevent stale leases from resuming after a later disable.
@@ -204,6 +181,9 @@ impl DisableLease {
     /// Returns `Ok(CommunicationState::Enabled)` when re-activation succeeds, or
     /// `Err` when re-activating the transport or an initializer fails.
     ///
+    /// Inherent rather than only via [`DisableGuard`] so callers holding a
+    /// concrete lease need no boxing.
+    ///
     /// # Errors
     ///
     /// Returns an error when re-activating the transport or an initializer
@@ -233,6 +213,13 @@ impl DisableLease {
     #[cfg(test)]
     pub(crate) fn identity(&self) -> Option<DisableLeaseId> {
         self.id
+    }
+}
+
+#[async_trait]
+impl DisableGuard for DisableLease {
+    async fn release(self: Box<Self>) -> Result<CommunicationState, CommunicationOperationFailure> {
+        DisableLease::release(*self).await
     }
 }
 
