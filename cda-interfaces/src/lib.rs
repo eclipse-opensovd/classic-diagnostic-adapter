@@ -38,6 +38,7 @@ mod ecuuds;
 pub use ecuuds::*;
 pub mod file_manager;
 pub mod health;
+pub mod http_protection;
 mod schema;
 pub use schema::*;
 pub mod communication_control;

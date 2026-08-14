@@ -19,9 +19,9 @@ pub(crate) mod runtimefilesupdate {
         http::{StatusCode, header::LOCATION},
         response::IntoResponse,
     };
-    use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
-    use cda_plugin_communication_management::http_protection::registry::{
-        HttpMethod, HttpRouteMatcher,
+    use cda_interfaces::{
+        http_protection::registry::{HttpMethod, HttpRouteMatcher},
+        runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin},
     };
     use cda_plugin_security::Secured;
     use opensovd_axum_extra::ExtractHost;
