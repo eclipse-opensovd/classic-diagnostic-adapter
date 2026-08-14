@@ -128,14 +128,6 @@ pub(crate) mod test_utils {
         }
     }
 
-    /// Opaque security context for tests.
-    ///
-    /// The mock security handler ignores it; it exists so tests exercise the same
-    /// call shape production uses.
-    pub fn test_security() -> cda_interfaces::DynamicPlugin {
-        Box::new(())
-    }
-
     /// Shared inspector handle for tests.
     pub fn test_inspector()
     -> std::sync::Arc<dyn cda_interfaces::runtime_update_api::RuntimeFileInspector> {

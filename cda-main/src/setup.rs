@@ -55,10 +55,11 @@ use futures::future::BoxFuture;
 use tokio::sync::RwLock;
 
 use crate::{
-    ApplicationState, UdsManagerType, VehicleData,
+    ApplicationState,
     config::configfile::Configuration,
     error::AppError,
     update::{UpdatePluginBuilder, add_runtime_update_routes},
+    vehicle::{UdsManagerType, VehicleData},
 };
 
 // Type alias
@@ -475,7 +476,7 @@ where
     .await?;
     let plugin = Arc::clone(&communication_runtime.plugin);
 
-    let components = crate::finish_vehicle_components(
+    let components = crate::vehicle::finish_vehicle_components(
         vehicle_data.prepared,
         &config,
         Arc::clone(&communication_access),

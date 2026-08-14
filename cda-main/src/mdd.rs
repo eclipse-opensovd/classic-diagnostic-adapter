@@ -31,8 +31,9 @@ use cda_plugin_security::SecurityPlugin;
 use tokio::sync::RwLock;
 
 use crate::{
-    AppError, DatabaseMap, FileManagerMap,
+    AppError,
     config::configfile::{Configuration, EcuConfig},
+    vehicle::{DatabaseMap, FileManagerMap},
 };
 
 pub(crate) const DB_HEALTH_COMPONENT_KEY: &str = "database";
