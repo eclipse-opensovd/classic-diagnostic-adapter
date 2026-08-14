@@ -17,7 +17,7 @@ use cda_comm_doip::DoipDiagGateway;
 use cda_core::EcuManager;
 use cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin;
 use cda_plugin_runtime_update::{
-    DefaultRuntimeUpdatePlugin, DefaultUpdateSecurityHandler,
+    DefaultRuntimeUpdatePlugin,
     default_runtime_reloader_plugin::{
         DefaultReloadContext as ReloaderContext, DefaultRuntimeReloaderPlugin,
     },
@@ -30,6 +30,7 @@ use cda_transport_router::DiagnosticTransportRouter;
 use crate::{
     AppError, UdsManagerType, cda_factory::CdaMainVehicleFactory,
     config::configfile::Configuration, setup::CdaRuntime,
+    update_security::DefaultUpdateSecurityHandler,
 };
 
 /// Trait for async plugin builders that produce a [`RuntimeFilesUpdatePlugin`].
