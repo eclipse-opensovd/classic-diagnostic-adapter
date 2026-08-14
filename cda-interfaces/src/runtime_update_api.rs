@@ -306,40 +306,41 @@ pub struct UpdateExecution {
     pub status: ExecutionStatus,
 }
 
-/// The main plugin trait for managing diagnostic runtime files (MDD databases).
+/// Reading the diagnostic runtime file collections.
 ///
-/// Provides the full lifecycle for runtime file management: listing, uploading, deleting,
-/// and executing apply/rollback/cleanup operations on the diagnostic database.
-///
-/// Security validation for mutating operations is delegated to the associated
-/// [`RuntimeUpdateSecurityPlugin`].
+/// Split from mutation and execution so an implementation can replace one concern
+/// without reimplementing the others: an integration that only changes *where*
+/// files live implements this and [`RuntimeFileStore`], and inherits the execution
+/// state machine unchanged.
 #[async_trait]
-pub trait RuntimeFilesUpdatePlugin: Send + Sync + 'static {
+pub trait RuntimeFileCatalog: Send + Sync + 'static {
     /// Lists the currently active diagnostic runtime files.
-    ///
-    /// Returns files currently loaded and in use by the system.
     async fn list_current(
         &self,
         options: FileListOptions,
     ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError>;
 
     /// Lists files staged for the next update (pending apply).
-    ///
-    /// Returns files uploaded via [`upload`] that have not yet been applied.
     async fn list_nextupdate(
         &self,
         options: FileListOptions,
     ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError>;
 
-    /// Lists backup files from the previous apply operation.
-    ///
-    /// Returns files that were current before the last apply. Used for rollback.
+    /// Lists backup files from the previous apply operation. Used for rollback.
     async fn list_backup(
         &self,
         options: FileListOptions,
     ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError>;
+}
 
+/// Mutating the staging and backup areas.
+///
+/// Every method authorizes through the configured security policy before touching
+/// anything; see [`RuntimeUpdateSecurityPlugin`].
+#[async_trait]
+pub trait RuntimeFileStore: Send + Sync + 'static {
     /// Uploads one or more files to the next-update staging area.
+    ///
     /// Returns the identifiers of the created files.
     async fn upload(&self, files: Vec<UploadFile>) -> Result<Vec<String>, RuntimeUpdateError>;
 
@@ -351,10 +352,17 @@ pub trait RuntimeFilesUpdatePlugin: Send + Sync + 'static {
 
     /// Deletes all files from the backup area and returns their identifiers.
     async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError>;
+}
 
+/// Running and observing apply / rollback / cleanup executions.
+///
+/// An execution is asynchronous: [`start_execution`](Self::start_execution) returns
+/// an id once the operation is admitted, and progress is polled.
+#[async_trait]
+pub trait RuntimeUpdateExecutor: Send + Sync + 'static {
     /// Starts an asynchronous execution (Apply, Rollback, or Cleanup).
     ///
-    /// Returns an execution ID that can be polled via [`get_execution_status`].
+    /// Returns an execution ID that can be polled via [`get_execution_status`](Self::get_execution_status).
     async fn start_execution(&self, mode: ExecutionMode) -> Result<String, RuntimeUpdateError>;
 
     /// Returns all currently tracked executions. Always contains at most one entry;
@@ -363,4 +371,18 @@ pub trait RuntimeFilesUpdatePlugin: Send + Sync + 'static {
 
     /// Returns the current status of an execution by its ID, or `None` if not found.
     async fn get_execution_status(&self, execution_id: &str) -> Option<UpdateExecution>;
+}
+
+/// The complete runtime-files update surface.
+///
+/// A blanket impl covers anything implementing all three halves, so implementors
+/// name the parts and consumers (route mounting, `Setup`) name the whole.
+pub trait RuntimeFilesUpdatePlugin:
+    RuntimeFileCatalog + RuntimeFileStore + RuntimeUpdateExecutor
+{
+}
+
+impl<P> RuntimeFilesUpdatePlugin for P where
+    P: RuntimeFileCatalog + RuntimeFileStore + RuntimeUpdateExecutor
+{
 }

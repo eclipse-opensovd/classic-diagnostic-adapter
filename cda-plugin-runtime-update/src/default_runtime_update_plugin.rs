@@ -19,9 +19,10 @@ use cda_interfaces::{
     communication_control::{CommunicationAccess, PostUpdateCommunicationMode},
     http_protection::registry::HttpProtectionRegistry,
     runtime_update_api::{
-        ExecutionMode, FileListOptions, LockStateProvider, RuntimeFile, RuntimeFileInspector,
-        RuntimeFilesUpdatePlugin, RuntimeReloaderPlugin, RuntimeUpdateError,
-        RuntimeUpdateSecurityPlugin, UpdateExecution, UploadFile,
+        ExecutionMode, FileListOptions, LockStateProvider, RuntimeFile, RuntimeFileCatalog,
+        RuntimeFileInspector, RuntimeFileStore, RuntimeFilesUpdatePlugin, RuntimeReloaderPlugin,
+        RuntimeUpdateError, RuntimeUpdateExecutor, RuntimeUpdateSecurityPlugin, UpdateExecution,
+        UploadFile,
     },
     storage_api::Storage,
 };
@@ -117,7 +118,7 @@ impl<
     Store: Storage + Send + Sync + 'static,
     UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
     Lock: LockStateProvider,
-> RuntimeFilesUpdatePlugin for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
+> RuntimeFileCatalog for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
 {
     async fn list_current(
         &self,
@@ -140,7 +141,15 @@ impl<
     ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
         crate::storage::list_backup_files(&*self.storage, options, &*self.file_inspector).await
     }
+}
 
+#[async_trait]
+impl<
+    Store: Storage + Send + Sync + 'static,
+    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    Lock: LockStateProvider,
+> RuntimeFileStore for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
+{
     async fn upload(&self, files: Vec<UploadFile>) -> Result<Vec<String>, RuntimeUpdateError> {
         crate::storage::upload_files(&*self.storage, &*self.security_handler, files).await
     }
@@ -156,7 +165,15 @@ impl<
     async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
         crate::storage::delete_all_backup(&*self.storage).await
     }
+}
 
+#[async_trait]
+impl<
+    Store: Storage + Send + Sync + 'static,
+    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    Lock: LockStateProvider,
+> RuntimeUpdateExecutor for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
+{
     async fn start_execution(&self, mode: ExecutionMode) -> Result<String, RuntimeUpdateError> {
         let params = crate::operations::executions::ExecutionParams {
             storage: &self.storage,
@@ -192,8 +209,8 @@ mod tests {
         communication_control::{CommunicationState, PostUpdateCommunicationMode},
         http_protection::registry::HttpProtectionRegistry,
         runtime_update_api::{
-            ExecutionMode, FileListOptions, HashAlgorithm, RuntimeFilesUpdatePlugin,
-            RuntimeUpdateError,
+            ExecutionMode, FileListOptions, HashAlgorithm, RuntimeFileCatalog, RuntimeFileStore,
+            RuntimeFilesUpdatePlugin, RuntimeUpdateError, RuntimeUpdateExecutor,
         },
         storage_api::CollectionName,
     };

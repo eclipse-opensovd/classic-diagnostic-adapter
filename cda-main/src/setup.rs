@@ -546,8 +546,8 @@ where
 #[cfg(test)]
 mod tests {
     use cda_interfaces::runtime_update_api::{
-        ExecutionMode, FileListOptions, RuntimeFile, RuntimeFilesUpdatePlugin, RuntimeUpdateError,
-        UpdateExecution,
+        ExecutionMode, FileListOptions, RuntimeFile, RuntimeFileCatalog, RuntimeFileStore,
+        RuntimeFilesUpdatePlugin, RuntimeUpdateError, RuntimeUpdateExecutor, UpdateExecution,
     };
     use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 
@@ -558,7 +558,7 @@ mod tests {
     struct NoOpPlugin;
 
     #[async_trait::async_trait]
-    impl RuntimeFilesUpdatePlugin for NoOpPlugin {
+    impl RuntimeFileCatalog for NoOpPlugin {
         async fn list_current(
             &self,
             _options: FileListOptions,
@@ -579,7 +579,10 @@ mod tests {
         ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
             Ok(Vec::new())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl RuntimeFileStore for NoOpPlugin {
         async fn upload(
             &self,
             _files: Vec<cda_interfaces::runtime_update_api::UploadFile>,
@@ -598,7 +601,10 @@ mod tests {
         async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
             Ok(vec![])
         }
+    }
 
+    #[async_trait::async_trait]
+    impl RuntimeUpdateExecutor for NoOpPlugin {
         async fn start_execution(
             &self,
             _mode: ExecutionMode,
