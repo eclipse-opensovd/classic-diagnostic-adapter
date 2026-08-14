@@ -17,7 +17,7 @@ use cda_comm_doip::DoipDiagGateway;
 use cda_core::EcuManager;
 use cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin;
 use cda_plugin_runtime_update::{
-    DefaultRuntimeUpdatePlugin,
+    DefaultRuntimeUpdatePlugin, WithExclusiveAccess,
     default_runtime_reloader_plugin::{
         DefaultReloadContext as ReloaderContext, DefaultRuntimeReloaderPlugin,
     },
@@ -90,7 +90,7 @@ where
 /// Registers the runtime update routes on the dynamic router using the provided plugin.
 ///
 /// Wraps the plugin in
-/// [`ExclusiveRuntimePlugin`](cda_interfaces::runtime_update_api::ExclusiveRuntimePlugin) for
+/// [`ExclusiveRuntimePlugin`](cda_plugin_runtime_update::ExclusiveRuntimePlugin) for
 /// read/write mutual exclusion and
 /// mounts the HTTP endpoints by delegating to [`cda_sovd::add_runtime_update_routes`].
 /// The caller is responsible for constructing the plugin before calling this function.
@@ -104,7 +104,7 @@ pub async fn add_runtime_update_routes<S, P>(
     S: SecurityPluginLoader,
     P: RuntimeFilesUpdatePlugin,
 {
-    let service = Arc::new(plugin.with_exclusive_access());
+    let service = Arc::new(WithExclusiveAccess::with_exclusive_access(plugin));
     cda_sovd::add_runtime_update_routes::<S, _, SovdLockStateProvider>(
         dynamic_router,
         service,

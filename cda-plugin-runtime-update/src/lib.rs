@@ -12,9 +12,11 @@
  */
 
 pub use default_runtime_update_plugin::DefaultRuntimeUpdatePlugin;
+pub use exclusive::{ExclusiveRuntimePlugin, WithExclusiveAccess};
 
 pub mod config;
 pub mod default_runtime_reloader_plugin;
+pub mod exclusive;
 pub use default_runtime_reloader_plugin::{DefaultReloadContext, RuntimeReloaderConfig};
 pub mod default_runtime_update_plugin;
 pub mod operations;
@@ -328,8 +330,8 @@ mod tests {
 
     use async_trait::async_trait;
     use cda_interfaces::runtime_update_api::{
-        ExclusiveRuntimePlugin, ExecutionMode, FileListOptions, RuntimeFile,
-        RuntimeFilesUpdatePlugin, RuntimeUpdateError, UpdateExecution, UploadFile,
+        ExecutionMode, FileListOptions, RuntimeFile, RuntimeFilesUpdatePlugin, RuntimeUpdateError,
+        UpdateExecution, UploadFile,
     };
     use tokio::sync::{Barrier, Notify};
 
@@ -342,7 +344,7 @@ mod tests {
         concurrent_writes: Arc<AtomicUsize>,
     }
 
-    type PluginHandle = ExclusiveRuntimePlugin<DelayPlugin>;
+    type PluginHandle = crate::exclusive::ExclusiveRuntimePlugin<DelayPlugin>;
     type Counter = Arc<AtomicUsize>;
     type Notifier = Arc<Notify>;
 
@@ -430,7 +432,7 @@ mod tests {
             concurrent_writes: Arc::clone(&concurrent_writes),
         };
         (
-            plugin.with_exclusive_access(),
+            crate::exclusive::WithExclusiveAccess::with_exclusive_access(plugin),
             concurrent_reads,
             concurrent_writes,
             read_notify,
@@ -517,7 +519,7 @@ mod tests {
             concurrent_reads: Arc::clone(&concurrent_reads),
             concurrent_writes: Arc::clone(&concurrent_writes),
         };
-        let plugin = Arc::new(plugin.with_exclusive_access());
+        let plugin = Arc::new(crate::exclusive::WithExclusiveAccess::with_exclusive_access(plugin));
 
         // Start a write that will hold the lock
         let p1 = Arc::clone(&plugin);
