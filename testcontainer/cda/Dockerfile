@@ -54,6 +54,10 @@ COPY cda-build/Cargo.toml ./cda-build/Cargo.toml
 COPY comm-mbedtls/mbedtls-rs/Cargo.toml ./comm-mbedtls/mbedtls-rs/Cargo.toml
 COPY comm-mbedtls/mbedtls-sys/Cargo.toml ./comm-mbedtls/mbedtls-sys/Cargo.toml
 COPY opensovd-axum-extra/Cargo.toml ./opensovd-axum-extra/Cargo.toml
+# Whole tree rather than one line per manifest: the examples are workspace
+# members, so `cargo metadata` fails outright if one is missing, and a
+# per-example line is a step every new example would have to remember.
+COPY examples ./examples
 
 # Generate the recipe.json which describes dependencies
 RUN cargo chef prepare --recipe-path recipe.json
@@ -118,6 +122,9 @@ COPY integration-tests ./integration-tests
 COPY cda-build ./cda-build
 COPY comm-mbedtls ./comm-mbedtls
 COPY opensovd-axum-extra ./opensovd-axum-extra
+# Workspace members; `cargo metadata` runs over all of them even though only
+# `--bin opensovd-cda` is built here.
+COPY examples ./examples
 
 ENV RUSTC_WRAPPER=sccache \
     SCCACHE_DIR=/sccache

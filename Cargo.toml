@@ -39,6 +39,43 @@ members = [
   "cda-build",
   "comm-mbedtls/mbedtls-sys",
   "comm-mbedtls/mbedtls-rs",
+  "examples/oem-communication",
+  "examples/oem-health",
+  "examples/oem-routes",
+  "examples/oem-security",
+  "examples/oem-storage",
+  "examples/oem-update-policy",
+]
+
+# The examples stand in for external OEM integrations: they exist so CI notices a
+# breaking change to a public extension point, not because anything here depends
+# on them. Keeping them out of the default set means a plain `cargo build` /
+# `cargo test` ignores them; CI builds them explicitly (see `build.yml`), which is
+# also what makes that step able to report a useful error instead of being
+# shadowed by the workspace build.
+default-members = [
+  "opensovd-axum-extra",
+  "cda-database",
+  "cda-interfaces",
+  "cda-core",
+  "cda-comm-doip",
+  "cda-comm-can",
+  "cda-comm-uds",
+  "cda-transport-router",
+  "cda-sovd",
+  "cda-sovd-interfaces",
+  "cda-main",
+  "cda-tracing",
+  "cda-plugin-security",
+  "cda-plugin-runtime-update",
+  "cda-plugin-communication-management",
+  "cda-health",
+  "cda-extra",
+  "cda-storage",
+  "integration-tests",
+  "cda-build",
+  "comm-mbedtls/mbedtls-sys",
+  "comm-mbedtls/mbedtls-rs",
 ]
 
 [workspace.dependencies]
