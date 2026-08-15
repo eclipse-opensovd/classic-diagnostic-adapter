@@ -308,7 +308,7 @@ impl SovdLockStateProvider {
 
 #[async_trait]
 impl LockStateProvider for SovdLockStateProvider {
-    async fn vehicle_lock_owner_sub(&self) -> Option<String> {
+    async fn vehicle_lock_owner_id(&self) -> Option<String> {
         let locks = self.locks.read().await.clone();
         let vehicle_lock = locks.vehicle.lock_ro().await;
         match &vehicle_lock {
