@@ -27,55 +27,109 @@ the authority and request context explicitly assigned to its plugin type.
 Communication Lifecycle Plugins
 -------------------------------
 
-The communication lifecycle plugin is an authoritative startup-selected facade,
-not a generic HTTP interceptor. Its synchronous restricted-request hook may
-trigger nonblocking deferred communication enablement, but it cannot select,
-delay, replace, or mutate the denial response. HTTP protections are separately
-owned opaque resources; no plugin hook receives an identifier or authority to
-lift another owner's protection.
+.. req:: Communication Lifecycle Plugin Authority
+    :id: req~plugin-communication-lifecycle
+    :status: draft
 
-A future generic request/response interception extension may provide a Tower
-finalizer that observes requests and downstream responses. That extension must
-remain separate from communication lifecycle authority and HTTP-protection
-ownership. It must not use response customization to grant cross-owner
-protection mutation authority.
+    The communication lifecycle plugin is an authoritative startup-selected facade,
+    not a generic HTTP interceptor. Its synchronous restricted-request hook may
+    trigger nonblocking deferred communication enablement, but it cannot select,
+    delay, replace, or mutate the denial response. HTTP protections are separately
+    owned opaque resources; no plugin hook receives an identifier or authority to
+    lift another owner's protection.
+
+    A future generic request/response interception extension may provide a Tower
+    finalizer that observes requests and downstream responses. That extension must
+    remain separate from communication lifecycle authority and HTTP-protection
+    ownership. It must not use response customization to grant cross-owner
+    protection mutation authority.
+
+    The architecture and rationale are documented in ADR-006
+    (``docs/04_adr/06_deferred_initialization.rst``).
 
 .. _requirements-plugins-security:
 
 Security
 --------
 
-A SOVD security plugin must be able to:
+.. req:: Security Plugin
+    :id: req~plugin-security
+    :status: draft
 
-* Validate and verify the JWT token from incoming HTTP Requests
-* Utilize additional headers from the request
-* Reject the incoming request
-* Enhance the SOVD-request-context with data, this context can then be used in other addons
+    A SOVD security plugin must be able to:
+
+    * Validate and verify the JWT token from incoming HTTP Requests
+    * Utilize additional headers from the request
+    * Reject the incoming request
+    * Enhance the SOVD-request-context with data, this context can then be used in other addons
+
+.. req:: Security Plugin Is The Authority
+    :id: req~plugin-security-authority
+    :links: req~plugin-security
+    :status: draft
+
+    Access decisions must be made by the security plugin, not by the layers that
+    transport it. A layer holding a request must pass the plugin instance on and
+    render its verdict; it must not read claims and decide for itself, because a
+    replacement plugin may apply additional checks that such a shortcut would skip.
+
+    This applies to the runtime-update path: authorization for uploads, deletions
+    and executions is decided by ``RuntimeUpdateSecurityPlugin``, which receives the
+    live plugin instance. The HTTP layer does not compare lock ownership itself.
 
 Paths
 -----
 
-A SOVD plugin must be able to:
+.. req:: Plugin Path Registration
+    :id: req~plugin-paths-add
+    :status: draft
 
-* Add paths to the SOVD-API, and handle them
-* Restructure existing path structures
-* Modify existing path structures to run different code
+    A SOVD plugin must be able to add paths to the SOVD-API and handle them.
+
+    Implemented by the versioned OEM extension surface: routes are registered under
+    a vendor-owned ``/vehicle/<version>/x-*`` namespace. See
+    :need:`arch~oem-library-integration`.
+
+.. req:: Plugin Path Restructuring
+    :id: req~plugin-paths-restructure
+    :status: draft
+
+    A SOVD plugin must be able to restructure existing path structures, and modify
+    existing path structures to run different code.
+
+    Partially implemented: a registered group can be replaced or removed through the
+    handle returned by registration, so a plugin can restructure paths it owns.
+    Overriding a *standard* CDA path is deliberately not offered through the
+    versioned surface - OEM namespaces are confined to the ``x-`` prefix so vendor
+    routes cannot shadow standard SOVD paths.
 
 UDS
 ---
 
-An UDS plugin must be able to:
+.. req:: UDS Interception Plugin
+    :id: req~plugin-uds-interception
+    :status: draft
 
-* Intercept UDS requests before they are sent to the ECU
-* Intercept UDS responses
+    An UDS plugin must be able to:
+
+    * Intercept UDS requests before they are sent to the ECU
+    * Intercept UDS responses
+
+    .. note:: Not implemented. No interception trait exists in the workspace today.
 
 DoIP
 ----
 
-A DoIP plugin must be able to:
+.. req:: DoIP Interception Plugin
+    :id: req~plugin-doip-interception
+    :status: draft
 
-* Intercept DoIP requests before they are sent to the ECU
-* Intercept DoIP responses
+    A DoIP plugin must be able to:
+
+    * Intercept DoIP requests before they are sent to the ECU
+    * Intercept DoIP responses
+
+    .. note:: Not implemented. No interception trait exists in the workspace today.
 
 
 
@@ -178,10 +232,10 @@ DLT Logging Plugin
     When DLT logging support is compiled in, it must be possible to enable or disable DLT output at runtime
     through the application configuration. The following parameters must be configurable:
 
-    * **Application ID** -- A short identifier (up to 4 characters) registered with the DLT daemon to identify this
+    * **Application ID** - A short identifier (up to 4 characters) registered with the DLT daemon to identify this
       application.
-    * **Application Description** -- A human-readable description of the application registered with the DLT daemon.
-    * **Enabled** -- A toggle to enable or disable DLT output at startup.
+    * **Application Description** - A human-readable description of the application registered with the DLT daemon.
+    * **Enabled** - A toggle to enable or disable DLT output at startup.
 
 
 .. req:: DLT Logging - Context Identification

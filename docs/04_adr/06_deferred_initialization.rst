@@ -19,8 +19,8 @@ Accepted
 
 .. note::
 
-   This ADR records *decisions and their rationale*. Mechanics -- exact
-   signatures, state cells, channel shapes, failure payloads -- live in the
+   This ADR records *decisions and their rationale*. Mechanics - exact
+   signatures, state cells, channel shapes, failure payloads - live in the
    rustdoc of ``cda-plugin-communication-management`` and are not repeated
    here, so that they have exactly one place to drift from.
 
@@ -51,8 +51,8 @@ facade for communication lifecycle changes. It is built once by
 configured ``CommunicationInitMode`` as a typed fact. Runtime plugin
 replacement and transfer of this authority are not supported.
 
-``CommunicationHandle`` claims lifecycle-state transitions synchronously -- so
-guard acquisition and lease drop need no ``.await`` -- and submits the
+``CommunicationHandle`` claims lifecycle-state transitions synchronously - so
+guard acquisition and lease drop need no ``.await`` - and submits the
 resulting physical work to a bounded lifecycle worker. Only that worker
 invokes ``TransportControl::enable()``/``disable()``. A custom plugin can
 delegate the facade's operations through the handle, but receives neither raw
@@ -106,10 +106,14 @@ That narrowing **is** type-level, including for runtime update. The gateway
 and UDS manager each live behind a ``ComponentSlot``, owned exclusively by
 setup, which mints two disjoint views: ``read()`` for consumers that operate
 the live component, and ``replacer()`` for installing a replacement (shutting
-down the one displaced) with no read access at all. Runtime update -- via
-``CdaRuntime``'s ``gateway_replacer`` and ``uds_manager_replacer`` -- holds
-only the latter for both, so it has no method reaching
-``TransportControl::enable()`` or any ``UdsEcu`` operation. See
+down the one displaced) with no read access at all.
+
+Runtime update holds **neither**. Its ``UpdatePluginContext`` carries no slot
+view of any kind, so it has no method reaching ``TransportControl::enable()``
+or any ``UdsEcu`` operation. Replacement happens one level out: after an apply
+the plugin calls ``RuntimeReloaderPlugin``, which builds a new generation via
+``VehicleComponentFactory`` and installs it via ``VehicleComponentPublisher``;
+only that publisher, owned by ``cda-main``, holds the ``replacer()`` views. See
 ``cda_interfaces::component_slot`` for the mechanism.
 
 The guarantee covers the *live* gateway and UDS manager reachable through
@@ -122,7 +126,7 @@ in-process type.
 transport view) takes a read guard, and only ``replace()`` takes the write
 guard, held just for the swap. A single mutex would have reintroduced the
 barrier that the router's and each gateway's own operation lock exist to
-avoid one layer down -- status reads (``TransportStateTracker::state``) must
+avoid one layer down - status reads (``TransportStateTracker::state``) must
 stay available while an ``enable()`` is in flight.
 
 There is no event channel, ``on_event`` handler, or typed request-pending
@@ -138,8 +142,8 @@ The authoritative state machine is ``Disabled``, ``Enabling``, ``Enabled``,
 ``Disabling``, ``DisabledExclusive``, or ``Error(_)``. There is no separate
 last-failure accessor: the current ``Error`` payload is authoritative.
 
-``Enabling`` carries activation-shaped operations only -- ``Enable``,
-``EnableAndDetect``, ``Resume`` -- and therefore always means a transport is
+``Enabling`` carries activation-shaped operations only - ``Enable``,
+``EnableAndDetect``, ``Resume`` - and therefore always means a transport is
 being brought up. Explicit re-detection is not among them and moves the state
 machine nowhere; see ``redetect()`` below.
 
@@ -147,7 +151,7 @@ machine nowhere; see ``redetect()`` below.
 function**, ``lifecycle::transition::decide``. All three claim sites consult
 it and apply its verdict; none decides anything itself, and a new state or
 operation cannot compile until every new cell has been decided explicitly.
-The matrix only ever asks what the *state* permits -- authority
+The matrix only ever asks what the *state* permits - authority
 (``init_mode`` policy, lease ownership) stays with the caller, as the
 authority model above requires.
 
@@ -164,10 +168,10 @@ whole duration and the sweep is tracked by its own in-flight slot rather than by
 
 Two properties depend on that, and both are load-bearing. Communication remains
 available throughout a sweep: guard admission reads the state, and the state
-says the transport is up -- which it is. And a failed sweep has somewhere honest
+says the transport is up - which it is. And a failed sweep has somewhere honest
 to land: it reports the failure to its caller and leaves the runtime
 ``Enabled``, rather than being forced through the activation-outcome path whose
-only failure exit is ``Error(_)`` -- a state every consumer reads as "the
+only failure exit is ``Error(_)`` - a state every consumer reads as "the
 transport is not up", which for a re-detection is false.
 
 ``redetect()`` is strict, and this is a safety property rather than a
@@ -180,9 +184,9 @@ detection authority put packets on the vehicle network, which under
 brought up first, by whoever holds that authority. ``Error(_)`` is no
 exception: recovery is an activation, and only ``activate()`` performs one.
 
-A successful activation runs three ordered stages -- transport, then every
+A successful activation runs three ordered stages - transport, then every
 registered ``CommunicationLifecycle`` hook in registration order, then the
-registered detector -- before publishing ``Enabled``. No external participant
+registered detector - before publishing ``Enabled``. No external participant
 votes on or blocks a lifecycle decision.
 
 **Variant detection is deliberately not a lifecycle hook.** A hook is coupled
@@ -190,13 +194,13 @@ to the transport, runs on every enable, and has a matching ``deinitialize()``;
 detection is optional, repeatable against a live transport, and has no
 teardown counterpart. Keeping them apart is what lets ``enable()`` bring the
 transport up without detecting, and lets ``redetect()`` run without
-re-entering any hook's ``initialize()`` -- which would otherwise break that
+re-entering any hook's ``initialize()`` - which would otherwise break that
 trait's paired contract, since a re-detection has no ``deinitialize()`` in
 between. Only one detector exists; detection is whole-vehicle by definition,
 so a second registration replaces the first.
 
 Any *activation* failure publishes ``Error(_)``, which therefore always means
-the transport is down or its state is unknown -- the invariant the matrix and
+the transport is down or its state is unknown - the invariant the matrix and
 the readiness gate both rely on when they treat ``Error`` as somewhere to
 recover *from*. A failed re-detection is not an activation failure and does not
 publish it: nothing was brought up or torn down, so the runtime stays
@@ -243,7 +247,7 @@ physical transport and the initializer list.
 Its capacity bounds *admission* only: a command is either fully enqueued or
 not sent at all, and every enqueued command is eventually processed or
 explicitly failed, never silently dropped. That is what makes activation
-triggers durable and coalesced -- concurrent triggers for an uninitialized
+triggers durable and coalesced - concurrent triggers for an uninitialized
 vehicle join the one in-flight generation, and none can be lost to a full
 mailbox. ``DisableLease::release()`` is cancellation-safe by the same
 guarantee: it stays a synchronous defer-on-drop capability until the release
@@ -252,15 +256,15 @@ command is durably accepted, after which the worker owns finishing it.
 **Shutdown uses a separate, unbounded out-of-band channel** so it can never be
 blocked by a full command mailbox. It closes admission immediately, fails
 queued commands deterministically, then best-effort disables the transport.
-It does *not* preemptively cancel a command already executing -- safe, because
+It does *not* preemptively cancel a command already executing - safe, because
 commands and shutdown share one sequential loop, so teardown can never run
 concurrently with a command still touching the transport, but it does not
 bound shutdown latency. Preemptive cancellation needs a cancellable unit
 smaller than one command; tracked separately.
 
 *Why not an actor framework* (``kameo`` is already a workspace dependency):
-a framework mailbox carries the stop signal as just another message -- FIFO
-behind queued commands, and itself blockable on a full mailbox -- which is
+a framework mailbox carries the stop signal as just another message - FIFO
+behind queued commands, and itself blockable on a full mailbox - which is
 precisely what the out-of-band lane exists to avoid. A working sender must
 also exist *before* the task is spawned, since the plugin builder is handed a
 functional handle during construction. Decisively, this worker must never be
@@ -275,14 +279,14 @@ Disable Ownership
 ``disable(reason)`` is accepted from ``Enabled`` **and** from ``Disabled``,
 with no active guards and no existing owner. The lease is exclusive ownership
 of the runtime, not an operation on the transport: a consumer that needs
-everything else held still while it works -- runtime update, swapping
-databases -- needs no transport at all, and refusing it while communication is
+everything else held still while it works - runtime update, swapping
+databases - needs no transport at all, and refusing it while communication is
 deferred would force a deferred deployment to bring the whole vehicle network
 up purely to become eligible. ``Error(_)`` is a conflict: its transport state
 is unknown, so no resume shape could be chosen honestly.
 
-Both halves of what a release means -- whether the transport comes back at
-all, and whether it detects when it does -- are decided in the single locked
+Both halves of what a release means - whether the transport comes back at
+all, and whether it detects when it does - are decided in the single locked
 read that *grants* the lease and travel together on its ``DisableOwner``.
 Neither the releaser nor the passage of time gets a say, and a later disable
 generation cannot inherit an earlier one's shape.
@@ -290,7 +294,7 @@ generation cannot inherit an earlier one's shape.
 * Granted from ``Enabled``: hooks are deinitialized and the transport taken
   down. ``release()`` restores both, in the detection shape the displaced
   runtime had *when the lease was granted*.
-* Granted from ``Disabled``: neither transport nor hooks are touched -- there
+* Granted from ``Disabled``: neither transport nor hooks are touched - there
   is nothing up to take down, and deinitializing hooks that never saw an
   ``initialize()`` would break the paired contract. ``release()`` returns to
   plain ``Disabled``.
@@ -304,11 +308,11 @@ never authorized.
 Recording what the runtime *was doing* rather than what its enable *asked for*
 is deliberate: the two differ only when an activation meant to detect but
 found no detector registered, and there the effective mode is the honest
-answer -- consumers were already told nothing would settle a variant, so a
+answer - consumers were already told nothing would settle a variant, so a
 release must not quietly settle one behind that answer.
 
-Dropping an unreleased lease -- or a ``release()`` future cancelled before the
-worker accepts it -- performs a **synchronous defer**: it clears ownership and
+Dropping an unreleased lease - or a ``release()`` future cancelled before the
+worker accepts it - performs a **synchronous defer**: it clears ownership and
 transitions to ``Disabled`` without attempting re-activation. Drop never
 blocks, never requires a Tokio runtime, and cannot fail.
 
@@ -338,7 +342,7 @@ the update owner removes only its own record.
 
 ``PostUpdateCommunicationMode`` names the intended state *after* the update,
 not what the update displaced. ``Deferred`` drops the lease. ``Enabled``
-releases it and *then* requests activation -- a second step, because releasing
+releases it and *then* requests activation - a second step, because releasing
 only restores what the lease took away, and an update may legitimately start
 from a deferred runtime, so a release alone would leave ``Enabled``
 unhonoured exactly when it matters. The request goes through
@@ -348,7 +352,7 @@ no-op. A post-update preference must not override an authorization boundary.
 
 There is deliberately no third "restore whatever it was before" value: the
 lease already restores what it displaced, so such a value would only mean
-declining to ask afterwards -- which is ``Deferred``.
+declining to ask afterwards - which is ``Deferred``.
 
 An update therefore runs to completion on an ``OnDemand``/``Disabled``
 deployment without the vehicle network ever coming up, which is the point of
@@ -389,7 +393,7 @@ publishes routes.
      - Re-detect while ``Enabled``; refused otherwise
 
 ``trigger_detection()`` is identical in all three modes because it never
-initiates communication -- it is not, and must not become, an escape hatch out
+initiates communication - it is not, and must not become, an escape hatch out
 of ``Disabled``. That mode therefore means what it says: with the default
 plugin *nothing* brings communication up, and such a deployment inhibits
 vehicle communication outright. Enabling it is the business of a replacement
@@ -421,7 +425,7 @@ because it rules on a transition, not on an acquisition.
 ``[communication] variant_detection`` selects a ``VariantDetectionMode``:
 ``Always`` runs the detector as the last stage of every activation; ``Never``
 brings transport and hooks up without it. ``Never`` means never
-*automatically* -- an explicit ``trigger_detection()`` runs the detector
+*automatically* - an explicit ``trigger_detection()`` runs the detector
 regardless, which is how such a runtime becomes ready. That override applies
 to the detection stage only and never relaxes the state rule, so a ``Never``
 runtime still has to be enabled before anything can detect. Unlike
@@ -436,13 +440,13 @@ describes what an activation *is* rather than who may ask for one.
    scheduled to settle it.
 
 ``Always`` calls ``activate(Startup)`` through the plugin at setup and
-propagates failure per existing application-start semantics -- the only place
+propagates failure per existing application-start semantics - the only place
 the framework itself inspects ``init_mode`` to initiate communication.
 
 **Deferred DoIP resource creation.** ``DoipDiagGateway::new()`` is purely
 in-memory: no socket, no packet, no task. The UDP bind, VIR broadcast, ECU
 connection, and VAM listener all happen lazily inside the gateway's own
-``enable()`` -- the same authorization choke point ``init_mode`` already
+``enable()`` - the same authorization choke point ``init_mode`` already
 gates. This lets ``cda-main``'s startup construction stay unconditional (no
 mode branch) while still guaranteeing zero network activity before an
 authorized trigger: without a bound socket, no packet can physically be sent
@@ -468,10 +472,10 @@ the actual readiness signal.
      - Yes, in every ``init_mode``
    * - Resource listings under an ECU, request/response schemas
      - Detected variant
-     - No -- return pending
+     - No - return pending
    * - Operation execution
      - Transport plus detected variant
-     - No -- return pending
+     - No - return pending
 
 The SOVD URL space is a function of the loaded databases alone and never of a
 detected variant, which is why routes are registered at startup in all three
@@ -488,7 +492,7 @@ would buy nothing; detection still in flight -> answer with a retry hint.
 effective ``VariantDetectionMode`` is published when an operation is *claimed*,
 so before the first claim it reads ``Never`` regardless of configuration.
 Consulting it while ``Disabled`` would read that initial value as "nothing will
-ever settle this" and skip the activation request -- which under ``OnDemand``
+ever settle this" and skip the activation request - which under ``OnDemand``
 is the one request that would have brought communication up, leaving every
 subsequent request pending forever. Both rules genuinely match that state;
 only this ordering resolves them correctly.
@@ -505,13 +509,13 @@ available as future work.
 
 An eagerly-constructed but
 network-inert UDS manager is accepted, and the property the criterion exists
-to guarantee is enforced directly by two independent mechanisms instead -- the
+to guarantee is enforced directly by two independent mechanisms instead - the
 lazy DoIP socket rules out network activity before authorization, and the
 readiness gate rules out premature wrong-variant data, including the
 post-activation pre-detection window that deferring construction alone would
 not have closed.
 
-**An actor framework for the lifecycle worker** -- see `Lifecycle Worker`_.
+**An actor framework for the lifecycle worker** - see `Lifecycle Worker`_.
 
 Deferred And Out Of Scope
 --------------------------
@@ -524,14 +528,14 @@ topology or readiness. Explicitly deferred:
 * Persisted topology storage, loading, validation, clearing, atomic updates,
   direct reconnect to a persisted gateway, per-gateway fallback discovery, and
   post-detection persistence publication.
-* Per-ECU/per-gateway ``OnDemand`` initialization scope -- every accepted
+* Per-ECU/per-gateway ``OnDemand`` initialization scope - every accepted
   trigger normalizes to whole-vehicle.
 * Topology re-discovery (the ``networkreset(trigger_detection=true)``
   endpoint). Unlike variant re-detection it may construct gateways. It has no
   ``DetectionCause`` variant, so it is *unrequestable* rather than rejected;
   when the endpoint lands, its cause must be rejected while ``Enabled`` with a
   structured failure rather than silently falling back to the weaker variant
-  re-detection. No failure variant is reserved in advance -- an unconstructed
+  re-detection. No failure variant is reserved in advance - an unconstructed
   variant is dead code.
 * Response interception. A future generic Tower finalizer may inspect request
   metadata and downstream responses, but must remain independent of protection
@@ -542,7 +546,7 @@ Future persistence work must not alter the plugin authorization boundary or
 permit ``Disabled``-mode traffic under any circumstance: persisted topology
 may change *what* an authorized trigger does, never *whether* an unauthorized
 one may act. Absence, corruption, staleness, and partial records are
-unresolved -- this ADR prescribes neither fail-open nor fail-closed, and a
+unresolved - this ADR prescribes neither fail-open nor fail-closed, and a
 future revision must decide before persisted topology ships.
 
 Extension points are marked ``TODO(persistence-init-mode): ... See ADR-006.``
