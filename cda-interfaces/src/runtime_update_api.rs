@@ -11,15 +11,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// SPDX-License-Identifier: Apache-2.0
-//
-// See the NOTICE file(s) distributed with this work for additional
-// information regarding copyright ownership.
-//
-// This program and the accompanying materials are made available under the
-// terms of the Apache License Version 2.0 which is available at
-// https://www.apache.org/licenses/LICENSE-2.0
-
 //! Runtime Update Plugin API
 //!
 //! Provides the interface definitions for runtime MDD database management, including security
@@ -62,9 +53,9 @@ where
 ///
 ///
 /// # Type parameters
-/// - `C`: opaque application configuration
-/// - `Q`: UDS manager type - must implement [`UdsQuery`] + [`Shutdown`]
-/// - `G`: diagnostic gateway type - must implement [`Shutdown`]
+/// - `Config`: opaque application configuration
+/// - `Uds`: UDS manager type - must implement [`UdsQuery`] + [`Shutdown`]
+/// - `Gateway`: diagnostic gateway type - must implement [`Shutdown`]
 #[async_trait]
 pub trait VehicleComponentFactory<Config, Uds, Gateway>: Send + Sync + 'static
 where
@@ -76,7 +67,6 @@ where
     type FileManager: FileManager;
 
     /// Creates a fresh set of vehicle components.
-    ///
     async fn create(
         &self,
         config: &Config,
@@ -205,13 +195,22 @@ pub trait RuntimeReloaderPlugin: Send + Sync + 'static {
 
 /// Security and file integrity handler for the diagnostic database update process.
 ///
-/// Implementors define the authorization and verification policies that guard
-/// execution operations (apply, rollback) and file integrity checks. This is the
-/// primary OEM extension point for adding custom lock validation, signature checks,
-/// hash verification, version compatibility rules, or any other security requirements.
+/// Implementors define the authorization and verification policies that guard both
+/// mutating operations (upload, delete) and executions (apply, rollback, cleanup).
+/// This is the OEM extension point for custom lock validation, signature checks,
+/// hash verification, version compatibility rules, or any other requirement.
 ///
-/// Vehicle lock ownership for modifying operations (upload, delete) is enforced at
-/// the HTTP handler layer in cda-sovd, not through this trait.
+/// # The security plugin is the authority
+///
+/// Every method receives the live per-request security plugin as a
+/// [`DynamicPlugin`](crate::DynamicPlugin) - the same type-erased handle
+/// `UdsQuery::send_by_sid` takes. Implementations downcast it and ask the plugin,
+/// rather than deriving a decision from a claim they read themselves: a downstream
+/// plugin may apply additional checks that such a shortcut would skip.
+///
+/// No layer above this trait decides authorization on its own. In particular the
+/// HTTP handlers in `cda-sovd` transport the plugin here; they do not compare
+/// claims.
 #[async_trait]
 pub trait RuntimeUpdateSecurityPlugin<
     L: LockStateProvider,
@@ -225,7 +224,7 @@ pub trait RuntimeUpdateSecurityPlugin<
     /// [`check_apply_allowed`](Self::check_apply_allowed) and before the plugin
     /// acquires any resource. Starting an execution takes the vehicle transport
     /// offline and installs a process-wide HTTP restriction, so a caller who
-    /// cannot pass this check must be rejected before either happens -
+    /// cannot pass this check must be rejected before either happens --
     /// otherwise being refused is itself a denial of service.
     ///
     /// Implementations must therefore keep this cheap and free of side effects:
@@ -296,7 +295,7 @@ pub struct FileHash {
 
 /// A runtime database file as the update plugin describes it.
 ///
-/// Domain shape, not a wire shape: the ISO 17978-3 bulk-data representation -
+/// Domain shape, not a wire shape: the ISO 17978-3 bulk-data representation --
 /// `mimetype`, the duplicate `name`, the `x-sovd2uds-*` field names, the schema
 /// envelope - lives in `cda-sovd-interfaces` and is produced by `cda-sovd` when
 /// rendering a response. A plugin reports what it knows and nothing more.
@@ -315,7 +314,7 @@ pub struct RuntimeFile {
 
 /// Which optional metadata a listing should compute.
 ///
-/// Each field costs work - hashing reads the whole file, revision parses it -
+/// Each field costs work - hashing reads the whole file, revision parses it --
 /// so they are opt-in per request.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FileListOptions {
@@ -351,6 +350,8 @@ pub struct UpdateExecution {
     pub mode: ExecutionMode,
     pub status: ExecutionStatus,
 }
+
+// RuntimeFilesUpdatePlugin trait + ExclusiveRuntimePlugin wrapper
 
 /// Reading the diagnostic runtime file collections.
 ///

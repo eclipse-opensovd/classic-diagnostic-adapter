@@ -107,14 +107,10 @@ pub(crate) async fn list_collection_files(
 
         if let Some(algorithm) = options.include_hash {
             let data = collection.read(key).await?;
-            match algorithm {
-                HashAlgorithm::Sha256 => {
-                    item.hash = Some(FileHash {
-                        algorithm: HashAlgorithm::Sha256,
-                        value: compute_sha256(&*data)?,
-                    });
-                }
-            }
+            let value = match algorithm {
+                HashAlgorithm::Sha256 => compute_sha256(&*data)?,
+            };
+            item.hash = Some(FileHash { algorithm, value });
         }
 
         if options.include_revision {
@@ -286,7 +282,7 @@ pub async fn compute_nextupdate_state(
     options: FileListOptions,
     inspector: &dyn RuntimeFileInspector,
 ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
-    let mut items = get_nextupdate_or_current_items(
+    let mdd_items = get_nextupdate_or_current_items(
         storage,
         &CollectionName::DiagnosticDatabaseNextUpdate,
         &CollectionName::DiagnosticDatabase,
@@ -294,6 +290,7 @@ pub async fn compute_nextupdate_state(
         inspector,
     )
     .await?;
+    let mut items = mdd_items;
     items.sort_by(|a, b| a.id.cmp(&b.id));
 
     Ok(items)
@@ -466,10 +463,7 @@ async fn get_collection_items(
     inspector: &dyn RuntimeFileInspector,
 ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
     match storage.get_collection(name).await {
-        Ok(collection) => {
-            let list = list_collection_files(&*collection, options, inspector).await?;
-            Ok(list)
-        }
+        Ok(collection) => list_collection_files(&*collection, options, inspector).await,
         Err(StorageError::CollectionNotFound(_)) => Ok(vec![]),
         Err(e) => Err(RuntimeUpdateError::from(e)),
     }
@@ -737,9 +731,9 @@ mod tests {
             .await
             .unwrap();
 
-        let query = FileListOptions::default();
+        let options = FileListOptions::default();
         let result =
-            list_collection_files(&*collection, query, &*crate::test_utils::test_inspector())
+            list_collection_files(&*collection, options, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -757,9 +751,9 @@ mod tests {
         write_test_file_to_collection(&storage, &*collection, "alpha.mdd", b"alpha content").await;
         write_test_file_to_collection(&storage, &*collection, "beta.mdd", b"beta content").await;
 
-        let query = FileListOptions::default();
+        let options = FileListOptions::default();
         let result =
-            list_collection_files(&*collection, query, &*crate::test_utils::test_inspector())
+            list_collection_files(&*collection, options, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -781,12 +775,12 @@ mod tests {
         assert_eq!(data.len(), 20);
         write_test_file_to_collection(&storage, &*collection, "sized.mdd", data).await;
 
-        let query = FileListOptions {
+        let options = FileListOptions {
             include_size: true,
-            ..Default::default()
+            ..FileListOptions::default()
         };
         let result =
-            list_collection_files(&*collection, query, &*crate::test_utils::test_inspector())
+            list_collection_files(&*collection, options, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -806,19 +800,23 @@ mod tests {
 
         write_test_file_to_collection(&storage, &*collection, "hashed.mdd", b"hello world").await;
 
-        let query = FileListOptions {
+        let options = FileListOptions {
             include_hash: Some(HashAlgorithm::Sha256),
-            ..Default::default()
+            ..FileListOptions::default()
         };
         let result =
-            list_collection_files(&*collection, query, &*crate::test_utils::test_inspector())
+            list_collection_files(&*collection, options, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
         assert_eq!(result.len(), 1);
         let item = result.first().unwrap();
         assert_eq!(
-            item.hash.as_ref().map(|hash| hash.value.as_str()),
+            item.hash.as_ref().map(|h| h.algorithm),
+            Some(HashAlgorithm::Sha256)
+        );
+        assert_eq!(
+            item.hash.as_ref().map(|h| h.value.as_str()),
             Some("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9")
         );
     }
@@ -833,9 +831,9 @@ mod tests {
 
         write_test_file_to_collection(&storage, &*collection, "plain.mdd", b"some data").await;
 
-        let query = FileListOptions::default();
+        let options = FileListOptions::default();
         let result =
-            list_collection_files(&*collection, query, &*crate::test_utils::test_inspector())
+            list_collection_files(&*collection, options, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -845,6 +843,7 @@ mod tests {
         assert!(item.hash.is_none());
         assert!(item.size.is_none());
         assert!(item.revision.is_none());
+        // The JSON shape is asserted in `sovd-interfaces`, which owns the wire type.
     }
 
     #[tokio::test]
@@ -858,13 +857,13 @@ mod tests {
         let mdd = make_valid_mdd_with_revision("FullECU", "v1.2.3");
         write_test_file_to_collection(&storage, &*collection, "full.mdd", &mdd).await;
 
-        let query = FileListOptions {
+        let options = FileListOptions {
             include_hash: Some(HashAlgorithm::Sha256),
             include_size: true,
             include_revision: true,
         };
         let result =
-            list_collection_files(&*collection, query, &*crate::test_utils::test_inspector())
+            list_collection_files(&*collection, options, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -872,6 +871,10 @@ mod tests {
         let item = result.first().unwrap();
         assert_eq!(item.id, "full.mdd");
         assert!(item.hash.is_some());
+        assert_eq!(
+            item.hash.as_ref().map(|h| h.algorithm),
+            Some(HashAlgorithm::Sha256)
+        );
         assert_eq!(item.size, Some(mdd.len() as u64));
         assert_eq!(item.revision, Some("v1.2.3".to_owned()));
     }
@@ -887,12 +890,12 @@ mod tests {
         let mdd = make_valid_mdd_with_revision("RevECU", "rev-42");
         write_test_file_to_collection(&storage, &*collection, "rev.mdd", &mdd).await;
 
-        let query = FileListOptions {
+        let options = FileListOptions {
             include_revision: true,
             ..FileListOptions::default()
         };
         let result =
-            list_collection_files(&*collection, query, &*crate::test_utils::test_inspector())
+            list_collection_files(&*collection, options, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -911,12 +914,12 @@ mod tests {
         let mdd = make_valid_mdd("NoRevECU");
         write_test_file_to_collection(&storage, &*collection, "norev.mdd", &mdd).await;
 
-        let query = FileListOptions {
+        let options = FileListOptions {
             include_revision: true,
             ..FileListOptions::default()
         };
         let result =
-            list_collection_files(&*collection, query, &*crate::test_utils::test_inspector())
+            list_collection_files(&*collection, options, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -1012,10 +1015,10 @@ mod tests {
     #[tokio::test]
     async fn empty_nextupdate_and_empty_current_returns_empty() {
         let (storage, _dir) = make_storage();
-        let query = FileListOptions::default();
+        let options = FileListOptions::default();
 
         let result =
-            compute_nextupdate_state(&storage, query, &*crate::test_utils::test_inspector())
+            compute_nextupdate_state(&storage, options, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -1033,9 +1036,9 @@ mod tests {
         write_test_file_by_name(&storage, &*collection, "alpha.mdd", b"alpha content").await;
         write_test_file_by_name(&storage, &*collection, "beta.mdd", b"beta content").await;
 
-        let query = FileListOptions::default();
+        let options = FileListOptions::default();
         let result =
-            compute_nextupdate_state(&storage, query, &*crate::test_utils::test_inspector())
+            compute_nextupdate_state(&storage, options, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -1065,12 +1068,12 @@ mod tests {
             .unwrap();
         write_test_file_by_name(&storage, &*pending, "alpha.mdd", b"new alpha").await;
 
-        let query = FileListOptions {
+        let options = FileListOptions {
             include_size: true,
-            ..Default::default()
+            ..FileListOptions::default()
         };
         let result =
-            compute_nextupdate_state(&storage, query, &*crate::test_utils::test_inspector())
+            compute_nextupdate_state(&storage, options, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -1096,9 +1099,9 @@ mod tests {
             .unwrap();
         write_test_file_by_name(&storage, &*pending, "new_file.mdd", b"brand new").await;
 
-        let query = FileListOptions::default();
+        let options = FileListOptions::default();
         let result =
-            compute_nextupdate_state(&storage, query, &*crate::test_utils::test_inspector())
+            compute_nextupdate_state(&storage, options, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -1126,12 +1129,12 @@ mod tests {
             .unwrap();
         write_test_file_by_name(&storage, &*pending, "file.mdd", b"updated content").await;
 
-        let query = FileListOptions {
+        let options = FileListOptions {
             include_hash: Some(HashAlgorithm::Sha256),
-            ..Default::default()
+            ..FileListOptions::default()
         };
         let result =
-            compute_nextupdate_state(&storage, query, &*crate::test_utils::test_inspector())
+            compute_nextupdate_state(&storage, options, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -1142,7 +1145,7 @@ mod tests {
         assert_eq!(item.id, "file.mdd");
         let expected_hash = format!("{:x}", Sha256::digest(b"updated content"));
         assert_eq!(
-            item.hash.as_ref().map(|hash| hash.value.as_str()),
+            item.hash.as_ref().map(|h| h.value.as_str()),
             Some(expected_hash.as_str())
         );
     }
@@ -1161,9 +1164,9 @@ mod tests {
             .await
             .unwrap();
 
-        let query = FileListOptions::default();
+        let options = FileListOptions::default();
         let result =
-            compute_nextupdate_state(&storage, query, &*crate::test_utils::test_inspector())
+            compute_nextupdate_state(&storage, options, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
         let mdd_ids: Vec<&str> = result
@@ -1195,9 +1198,9 @@ mod tests {
             .await
             .expect("delete should succeed by initializing NextUpdate from current first");
 
-        let query = FileListOptions::default();
+        let options = FileListOptions::default();
         let result =
-            compute_nextupdate_state(&storage, query, &*crate::test_utils::test_inspector())
+            compute_nextupdate_state(&storage, options, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
         let ids: Vec<&str> = result.iter().map(|i| i.id.as_str()).collect();

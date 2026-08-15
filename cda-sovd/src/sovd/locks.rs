@@ -35,7 +35,7 @@ use uuid::Uuid;
 use crate::{
     openapi,
     sovd::{
-        IntoSovd, WebserverEcuState, WebserverState,
+        IntoSovd, VehicleRequestState, WebserverEcuState,
         error::{ApiError, ErrorWrapper},
     },
 };
@@ -50,6 +50,13 @@ pub enum LockUpdateError {
     EcuLocksHeld,
     #[error("Cannot update while functional-group locks are held")]
     FunctionalGroupLocksHeld,
+    /// A `Locks` whose fields hold the wrong [`LockType`] variants.
+    ///
+    /// Unreachable through [`Locks::new`]. Reported rather than ignored so a
+    /// mis-constructed value fails loudly instead of silently skipping the
+    /// topology update and leaving stale ECU entries in place.
+    #[error("Lock topology is inconsistent: {0} field holds the wrong lock type")]
+    InconsistentTopology(&'static str),
 }
 
 pub struct Lock {
@@ -141,21 +148,19 @@ impl Locks {
     /// # Errors
     /// Returns an error if any ECU or functional-group lock is currently held.
     pub async fn update_entries(&self, new_ecu_names: Vec<String>) -> Result<(), LockUpdateError> {
-        let LockType::FunctionalGroup(fg_rwlock) = &self.functional_group else {
-            return Ok(());
-        };
-        let fg_map = fg_rwlock.read().await;
-        if fg_map.values().any(Option::is_some) {
-            return Err(LockUpdateError::FunctionalGroupLocksHeld);
-        }
-        drop(fg_map);
-
         let LockType::Ecu(ecu_rwlock) = &self.ecu else {
-            return Ok(());
+            return Err(LockUpdateError::InconsistentTopology("ecu"));
         };
         let mut ecu_map = ecu_rwlock.write().await;
         if ecu_map.values().any(Option::is_some) {
             return Err(LockUpdateError::EcuLocksHeld);
+        }
+        let LockType::FunctionalGroup(fg_rwlock) = &self.functional_group else {
+            return Err(LockUpdateError::InconsistentTopology("functional_group"));
+        };
+        let fg_map = fg_rwlock.read().await;
+        if fg_map.values().any(Option::is_some) {
+            return Err(LockUpdateError::FunctionalGroupLocksHeld);
         }
 
         let new_ecu_set: std::collections::HashSet<&str> =
@@ -164,8 +169,19 @@ impl Locks {
         for name in new_ecu_names {
             ecu_map.entry(name).or_insert(None);
         }
-
+        drop(fg_map);
         Ok(())
+    }
+
+    /// Returns the ECU names represented by the current lock topology.
+    ///
+    /// Empty for a mis-constructed `Locks`; callers that must distinguish that
+    /// from "no ECUs" use [`Self::update_entries`], which reports it.
+    pub async fn ecu_names(&self) -> Vec<String> {
+        let LockType::Ecu(ecu_rwlock) = &self.ecu else {
+            return Vec::new();
+        };
+        ecu_rwlock.read().await.keys().cloned().collect()
     }
 }
 
@@ -484,7 +500,7 @@ pub(crate) mod vehicle {
 
     use super::{
         ApiError, ErrorWrapper, IntoResponse, Json, LockContext, LockPathParam, Path, Response,
-        State, WebserverState, WithRejection, all_locks_owned, delete_handler, get_handler,
+        State, VehicleRequestState, WithRejection, all_locks_owned, delete_handler, get_handler,
         get_id_handler, post_handler, put_handler, validate_claim,
     };
     use crate::openapi;
@@ -494,14 +510,14 @@ pub(crate) mod vehicle {
 
         use super::{
             ApiError, Json, LockPathParam, Path, Response, Secured, State, TransformOperation,
-            UseApi, WebserverState, WithRejection, delete_handler, get_id_handler, openapi,
+            UseApi, VehicleRequestState, WithRejection, delete_handler, get_id_handler, openapi,
             put_handler,
         };
 
         pub(crate) async fn delete<T: UdsEcu + Clone>(
             Path(lock): Path<LockPathParam>,
             UseApi(sec_plugin, _): UseApi<Secured, ()>,
-            State(state): State<WebserverState<T>>,
+            State(state): State<VehicleRequestState<T>>,
         ) -> Response {
             let claims = sec_plugin.as_auth_plugin().claims();
             delete_handler(&state.locks.vehicle, &lock, &claims, None, false).await
@@ -517,7 +533,7 @@ pub(crate) mod vehicle {
         pub(crate) async fn put<T: UdsEcu + Clone>(
             Path(lock): Path<LockPathParam>,
             UseApi(sec_plugin, _): UseApi<Secured, ()>,
-            State(state): State<WebserverState<T>>,
+            State(state): State<VehicleRequestState<T>>,
             WithRejection(Json(body), _): WithRejection<
                 Json<sovd_interfaces::locking::Request>,
                 ApiError,
@@ -537,7 +553,7 @@ pub(crate) mod vehicle {
         pub(crate) async fn get<T: UdsEcu + Clone>(
             Path(lock): Path<LockPathParam>,
             UseApi(_sec_plugin, _): UseApi<Secured, ()>,
-            State(state): State<WebserverState<T>>,
+            State(state): State<VehicleRequestState<T>>,
         ) -> Response {
             get_id_handler(&state.locks.vehicle, &lock, None, false).await
         }
@@ -558,7 +574,7 @@ pub(crate) mod vehicle {
 
     pub(crate) async fn post<T: UdsEcu + Clone>(
         UseApi(Secured(sec_plugin), _): UseApi<Secured, ()>,
-        State(state): State<WebserverState<T>>,
+        State(state): State<VehicleRequestState<T>>,
         WithRejection(Json(body), _): WithRejection<
             Json<sovd_interfaces::locking::Request>,
             ApiError,
@@ -632,7 +648,7 @@ pub(crate) mod vehicle {
 
     pub(crate) async fn get<T: UdsEcu + Clone>(
         UseApi(sec_plugin, _): UseApi<Secured, ()>,
-        State(state): State<WebserverState<T>>,
+        State(state): State<VehicleRequestState<T>>,
     ) -> Response {
         let claims = sec_plugin.as_auth_plugin().claims();
         get_handler(&state.locks.vehicle, &claims, None).await
@@ -880,114 +896,141 @@ pub(crate) fn get_locks(
     }
 }
 
+/// Refusal reason from a lock check.
+///
+/// Typed rather than an HTTP response, so callers that are not HTTP handlers --
+/// notably OEM extensions - can act on the outcome. `cda-sovd`'s own handlers
+/// render it; see [`validate_lock`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LockDenied {
+    /// Neither an entity lock nor the vehicle lock is held.
+    #[error("required {entity} lock is missing")]
+    Missing { entity: &'static str },
+    /// A lock is held, but not by this caller.
+    #[error("lock is held by another user")]
+    NotOwner,
+}
+
+impl From<LockDenied> for ApiError {
+    fn from(denied: LockDenied) -> Self {
+        // Both refusals are 403: telling a caller which of "no lock" and "not
+        // your lock" applies would leak who else holds it.
+        ApiError::Forbidden(Some(denied.to_string()))
+    }
+}
+
+/// Decides whether `claims` may act on `ecu_name`.
+///
+/// The caller must hold a lock on that ECU or the vehicle lock, and every lock
+/// in the checked scopes must be owned by them. This is the decision the
+/// standard component routes enforce; it is public so an OEM route that mutates
+/// ECU state participates in the same discipline instead of reimplementing it
+/// against the raw lock maps.
+///
+/// # Errors
+/// Returns [`LockDenied`] when the caller may not proceed.
+pub async fn check_ecu_lock(
+    claims: &impl Claims,
+    ecu_name: &str,
+    locks: &Locks,
+) -> Result<(), LockDenied> {
+    let ecu_lock = locks.ecu.lock_ro().await;
+    let vehicle_lock = locks.vehicle.lock_ro().await;
+
+    if get_locks(claims, &ecu_lock, Some(ecu_name))
+        .items
+        .is_empty()
+        && get_locks(claims, &vehicle_lock, None).items.is_empty()
+    {
+        return Err(LockDenied::Missing { entity: "ECU" });
+    }
+
+    all_locks_owned(&vehicle_lock, claims).map_err(|_| LockDenied::NotOwner)?;
+    all_locks_owned(&ecu_lock, claims).map_err(|_| LockDenied::NotOwner)
+}
+
 pub(crate) async fn validate_lock(
     claims: &impl Claims,
     ecu_name: &str,
     locks: &Locks,
     include_schema: bool,
 ) -> Option<Response> {
-    let ecu_lock = locks.ecu.lock_ro().await;
-    let ecu_locks = get_locks(claims, &ecu_lock, Some(ecu_name));
-
-    let vehicle_lock = locks.vehicle.lock_ro().await;
-    let vehicle_locks = get_locks(claims, &vehicle_lock, None);
-
-    if ecu_locks.items.is_empty() && vehicle_locks.items.is_empty() {
-        return Some(
+    check_ecu_lock(claims, ecu_name, locks)
+        .await
+        .err()
+        .map(|denied| {
             ErrorWrapper {
-                error: ApiError::Forbidden(Some("Required ECU lock is missing".to_owned())),
+                error: denied.into(),
                 include_schema,
             }
-            .into_response(),
-        );
-    }
-
-    // Validate Vehicle lock is owned
-    if let Err(e) = all_locks_owned(&vehicle_lock, claims) {
-        return Some(
-            ErrorWrapper {
-                error: e,
-                include_schema,
-            }
-            .into_response(),
-        );
-    }
-
-    // Validate ECU lock is owned
-    if let Err(e) = all_locks_owned(&ecu_lock, claims) {
-        return Some(
-            ErrorWrapper {
-                error: e,
-                include_schema,
-            }
-            .into_response(),
-        );
-    }
-
-    if let Err(e) = all_locks_owned(&ecu_lock, claims) {
-        return Some(
-            ErrorWrapper {
-                error: e,
-                include_schema,
-            }
-            .into_response(),
-        );
-    }
-    None
+            .into_response()
+        })
 }
 
-/// Validate that the caller holds a lock on the given **functional group** (or the vehicle lock).
+/// Decides whether `claims` holds the vehicle lock.
 ///
-/// This is the FG-specific counterpart to [`validate_lock`] which checks `locks.ecu`.
-/// It inspects `locks.functional_group` for a lock keyed by `functional_group_name`, and
-/// also accepts a vehicle-level lock owned by the same caller.
+/// The whole-vehicle counterpart to [`check_ecu_lock`]. Unlike the entity
+/// checks, nothing else satisfies it: a vehicle-wide operation is not authorised
+/// by a lock on one ECU.
+///
+/// # Errors
+/// Returns [`LockDenied`] when the caller may not proceed.
+pub async fn check_vehicle_lock(claims: &impl Claims, locks: &Locks) -> Result<(), LockDenied> {
+    let vehicle_lock = locks.vehicle.lock_ro().await;
+
+    if get_locks(claims, &vehicle_lock, None).items.is_empty() {
+        return Err(LockDenied::Missing { entity: "vehicle" });
+    }
+
+    all_locks_owned(&vehicle_lock, claims).map_err(|_| LockDenied::NotOwner)
+}
+
+/// Decides whether `claims` may act on `functional_group_name`.
+///
+/// The functional-group counterpart to [`check_ecu_lock`]: satisfied by a lock
+/// on that group or by the vehicle lock, with every lock in those scopes owned
+/// by the caller.
+///
+/// # Errors
+/// Returns [`LockDenied`] when the caller may not proceed.
+pub async fn check_functional_group_lock(
+    claims: &impl Claims,
+    functional_group_name: &str,
+    locks: &Locks,
+) -> Result<(), LockDenied> {
+    let fg_lock = locks.functional_group.lock_ro().await;
+    let vehicle_lock = locks.vehicle.lock_ro().await;
+
+    if get_locks(claims, &fg_lock, Some(functional_group_name))
+        .items
+        .is_empty()
+        && get_locks(claims, &vehicle_lock, None).items.is_empty()
+    {
+        return Err(LockDenied::Missing {
+            entity: "functional group",
+        });
+    }
+
+    all_locks_owned(&vehicle_lock, claims).map_err(|_| LockDenied::NotOwner)?;
+    all_locks_owned(&fg_lock, claims).map_err(|_| LockDenied::NotOwner)
+}
+
 pub(crate) async fn validate_fg_lock(
     claims: &impl Claims,
     functional_group_name: &str,
     locks: &Locks,
     include_schema: bool,
 ) -> Option<Response> {
-    let fg_lock = locks.functional_group.lock_ro().await;
-    let fg_locks = get_locks(claims, &fg_lock, Some(functional_group_name));
-
-    let vehicle_lock = locks.vehicle.lock_ro().await;
-    let vehicle_locks = get_locks(claims, &vehicle_lock, None);
-
-    if fg_locks.items.is_empty() && vehicle_locks.items.is_empty() {
-        return Some(
+    check_functional_group_lock(claims, functional_group_name, locks)
+        .await
+        .err()
+        .map(|denied| {
             ErrorWrapper {
-                error: ApiError::Forbidden(Some(
-                    "Required functional group lock is missing".to_owned(),
-                )),
+                error: denied.into(),
                 include_schema,
             }
-            .into_response(),
-        );
-    }
-
-    // Validate vehicle lock is owned by the caller (if one exists)
-    if let Err(e) = all_locks_owned(&vehicle_lock, claims) {
-        return Some(
-            ErrorWrapper {
-                error: e,
-                include_schema,
-            }
-            .into_response(),
-        );
-    }
-
-    // Validate functional group lock is owned by the caller
-    if let Err(e) = all_locks_owned(&fg_lock, claims) {
-        return Some(
-            ErrorWrapper {
-                error: e,
-                include_schema,
-            }
-            .into_response(),
-        );
-    }
-
-    None
+            .into_response()
+        })
 }
 
 pub(crate) async fn delete_lock(
@@ -1403,6 +1446,39 @@ mod tests {
     use crate::test_utils::axum_response_into;
 
     #[tokio::test]
+    async fn update_entries_replaces_unlocked_topology() {
+        let locks = Locks::new(vec!["old".to_owned()]);
+
+        locks.update_entries(vec!["new".to_owned()]).await.unwrap();
+
+        assert_eq!(locks.ecu_names().await, ["new"]);
+    }
+
+    #[tokio::test]
+    async fn update_entries_preserves_topology_when_ecu_lock_is_held() {
+        // Ungated rather than `cfg_attr(nightly, ..)`: the lint is stable as of
+        // clippy 1.96, so gating it on nightly would leave it firing on the
+        // toolchain pre-commit uses. `unknown_lints` keeps older ones quiet.
+        #[allow(
+            unknown_lints,
+            clippy::duration_suboptimal_units,
+            reason = "from_mins is not available in Rust 1.88, our MSRV"
+        )]
+        const LOCK_EXPIRATION: Duration = Duration::from_secs(60);
+
+        let (mock_uds, ecu_name, locks) = setup_ecu_lock_test();
+        create_ecu_lock(&mock_uds, &locks, &ecu_name, LOCK_EXPIRATION).await;
+
+        assert!(matches!(
+            locks.update_entries(vec!["new".to_owned()]).await,
+            Err(LockUpdateError::EcuLocksHeld)
+        ));
+        let ecu_names = locks.ecu_names().await;
+        assert!(ecu_names.contains(&ecu_name));
+        assert!(!ecu_names.contains(&"new".to_owned()));
+    }
+
+    #[tokio::test]
     async fn test_ecu_lock_cleanup_calls_reset() {
         let (mock_uds, ecu_name, locks) = setup_ecu_lock_test();
         #[allow(
@@ -1749,5 +1825,24 @@ mod tests {
         expect_ecu_lock_cleanup_multiple(&mut cloned, &ecus);
 
         cloned
+    }
+
+    #[tokio::test]
+    async fn update_entries_reports_an_inconsistent_topology_instead_of_skipping() {
+        // Unreachable through `Locks::new`, but the previous shape returned Ok(())
+        // here - silently leaving stale ECU entries mounted after a reload.
+        let locks = Locks {
+            vehicle: LockType::Vehicle(Arc::new(RwLock::new(None))),
+            ecu: LockType::Vehicle(Arc::new(RwLock::new(None))),
+            functional_group: LockType::FunctionalGroup(Arc::new(RwLock::new(HashMap::default()))),
+        };
+
+        assert!(
+            matches!(
+                locks.update_entries(vec!["new".to_owned()]).await,
+                Err(LockUpdateError::InconsistentTopology("ecu"))
+            ),
+            "a wrong lock variant must be reported, not silently ignored"
+        );
     }
 }

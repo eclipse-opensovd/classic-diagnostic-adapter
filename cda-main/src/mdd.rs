@@ -39,14 +39,14 @@ use crate::{
 pub(crate) const DB_HEALTH_COMPONENT_KEY: &str = "database";
 
 #[derive(Debug, thiserror::Error)]
-pub enum MddLoadingError {
+pub(crate) enum MddLoadingError {
     #[error("Failed to load MDD {path}: {reason}")]
     LoadFailed { path: String, reason: String },
     #[error("Failed to decompress MDD {path}: {reason}")]
     DecompressFailed { path: String, reason: String },
 }
 
-pub const PROTO_LOAD_CONFIG: &[ProtoLoadConfig; 4] = &[
+pub(crate) const PROTO_LOAD_CONFIG: &[ProtoLoadConfig; 4] = &[
     ProtoLoadConfig {
         type_: ChunkType::DiagnosticDescription,
         load_data: true,
@@ -126,7 +126,7 @@ fn get_mdd_files_and_size(files: ReadDir) -> Vec<(PathBuf, u64)> {
     skip(config, mdd_paths, db_health_provider),
     fields(database_count = mdd_paths.len())
 )]
-pub async fn load_databases<S: SecurityPlugin>(
+pub(crate) async fn load_databases<S: SecurityPlugin>(
     config: &Configuration,
     mdd_paths: &[PathBuf],
     db_health_provider: Option<&Arc<dyn HealthProvider>>,
@@ -221,7 +221,7 @@ pub async fn load_databases<S: SecurityPlugin>(
 
 /// Returns paths to MDD files, preferring files found in the CDA storage at `storage_dir`.
 /// Falls back to the configured `database_path` directory if storage is unavailable or empty.
-pub async fn resolve_mdd_paths(storage_dir: &str, database_path: &str) -> Vec<PathBuf> {
+pub(crate) async fn resolve_mdd_paths(storage_dir: &str, database_path: &str) -> Vec<PathBuf> {
     let storage_paths = load_mdd_paths_from_storage(storage_dir).await;
     if let Some(storage_paths) = storage_paths
         && !storage_paths.is_empty()
@@ -297,7 +297,21 @@ async fn load_mdd_paths_from_storage(storage_dir: &str) -> Option<Vec<PathBuf>> 
 /// Seeds the `DiagnosticDatabase` storage collection from `database_path` when the collection
 /// is empty. This copies all `.mdd` files from the filesystem into storage so that the runtime
 /// update plugin has a populated baseline to work with.
-pub async fn seed_storage_from_database_path(storage_dir: &str, database_path: &str) {
+// Nothing calls this: `RuntimeUpdateConfig::init_storage_from_database_path` is
+// documented and settable (the integration harness sets it), but no startup path
+// acts on it. That gap predates this crate split - the function was `pub` before,
+// so it never showed up as unreachable. Kept, with its tests, rather than deleted:
+// wiring it up changes startup behaviour for anyone who set the flag expecting it
+// to work, which is a decision to make on its own.
+// Only unreachable outside tests: the tests below still cover the behaviour.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "init_storage_from_database_path is not honoured yet"
+    )
+)]
+pub(crate) async fn seed_storage_from_database_path(storage_dir: &str, database_path: &str) {
     let mdd_files = match std::fs::read_dir(database_path) {
         Ok(entries) => get_mdd_files_and_size(entries),
         Err(e) => {

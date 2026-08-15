@@ -28,6 +28,7 @@ cda-core = { workspace = true }
 cda-database = { workspace = true }
 cda-sovd = { workspace = true }
 cda-plugin-communication-management = { workspace = true }
+async-trait = { workspace = true }
 sovd-interfaces = { workspace = true }
 cda-tracing = { workspace = true }
 cda-plugin-security = { workspace = true }

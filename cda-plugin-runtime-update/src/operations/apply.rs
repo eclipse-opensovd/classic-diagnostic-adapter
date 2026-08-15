@@ -11,6 +11,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::sync::Arc;
+
 use cda_interfaces::{
     runtime_update_api::{RuntimeFileInspector, RuntimeReloaderPlugin, RuntimeUpdateError},
     storage_api::{CollectionName, Storage, Transaction},
@@ -47,7 +49,7 @@ pub async fn execute_apply<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
     storage: &S,
     reload_handler: &R,
     mdd_decompress: bool,
-    inspector: &dyn RuntimeFileInspector,
+    inspector: &Arc<dyn RuntimeFileInspector>,
 ) -> Result<(), RuntimeUpdateError> {
     let mdd_next =
         try_get_collection(storage, &CollectionName::DiagnosticDatabaseNextUpdate).await?;
@@ -79,8 +81,22 @@ pub async fn execute_apply<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
 
     tx.commit().await?;
 
-    if mdd_next.is_some() {
-        reload_database_if_present(storage, reload_handler, mdd_decompress, inspector).await?;
+    if mdd_next.is_some()
+        && let Err(error) =
+            reload_database_if_present(storage, reload_handler, mdd_decompress, &**inspector).await
+    {
+        return match crate::operations::rollback::execute_rollback(
+            storage,
+            reload_handler,
+            &**inspector,
+        )
+        .await
+        {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(RuntimeUpdateError::ReloadFailed(format!(
+                "Runtime reload failed: {error}; persistent rollback failed: {rollback_error}"
+            ))),
+        };
     }
 
     Ok(())
@@ -124,7 +140,7 @@ mod tests {
             &storage,
             &NoopReloadHandler,
             false,
-            &*crate::test_utils::test_inspector(),
+            &crate::test_utils::test_inspector(),
         )
         .await
         .unwrap();
@@ -166,7 +182,7 @@ mod tests {
             &storage,
             &NoopReloadHandler,
             false,
-            &*crate::test_utils::test_inspector(),
+            &crate::test_utils::test_inspector(),
         )
         .await;
 
@@ -202,7 +218,7 @@ mod tests {
             &storage,
             &NoopReloadHandler,
             false,
-            &*crate::test_utils::test_inspector(),
+            &crate::test_utils::test_inspector(),
         )
         .await
         .unwrap();
@@ -252,7 +268,7 @@ mod tests {
             &storage,
             &handler,
             false,
-            &*crate::test_utils::test_inspector(),
+            &crate::test_utils::test_inspector(),
         )
         .await
         .unwrap();
@@ -277,7 +293,7 @@ mod tests {
             &storage,
             &handler,
             false,
-            &*crate::test_utils::test_inspector(),
+            &crate::test_utils::test_inspector(),
         )
         .await
         .unwrap();
@@ -315,7 +331,7 @@ mod tests {
             &storage,
             &NoopReloadHandler,
             false,
-            &*crate::test_utils::test_inspector(),
+            &crate::test_utils::test_inspector(),
         )
         .await
         .unwrap();
@@ -343,7 +359,7 @@ mod tests {
             &storage,
             &NoopReloadHandler,
             false,
-            &*crate::test_utils::test_inspector(),
+            &crate::test_utils::test_inspector(),
         )
         .await
         .unwrap();
@@ -396,7 +412,7 @@ mod tests {
             &storage,
             &NoopReloadHandler,
             false,
-            &*crate::test_utils::test_inspector(),
+            &crate::test_utils::test_inspector(),
         )
         .await
         .unwrap();

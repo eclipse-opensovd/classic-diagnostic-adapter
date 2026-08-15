@@ -11,12 +11,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+pub use default_runtime_reloader_plugin::DefaultRuntimeReloaderPlugin;
 pub use default_runtime_update_plugin::DefaultRuntimeUpdatePlugin;
 pub use exclusive::{ExclusiveRuntimePlugin, WithExclusiveAccess};
 
 pub mod config;
 pub mod default_runtime_reloader_plugin;
-pub use default_runtime_reloader_plugin::DefaultRuntimeReloaderPlugin;
 pub mod default_runtime_update_plugin;
 pub mod exclusive;
 pub mod operations;
@@ -130,8 +130,8 @@ pub(crate) mod test_utils {
 
     /// Opaque security context for tests.
     ///
-    /// The mock security handler ignores it; it exists so tests exercise the
-    /// same call shape production uses.
+    /// The mock security handler ignores it; it exists so tests exercise the same
+    /// call shape production uses.
     pub fn test_security() -> cda_interfaces::DynamicPlugin {
         Box::new(())
     }
@@ -443,12 +443,12 @@ mod tests {
             Ok("exec-1".to_owned())
         }
 
-        async fn get_execution_status(&self, _execution_id: &str) -> Option<UpdateExecution> {
-            None
-        }
-
         async fn list_executions(&self) -> Vec<UpdateExecution> {
             vec![]
+        }
+
+        async fn get_execution_status(&self, _execution_id: &str) -> Option<UpdateExecution> {
+            None
         }
     }
 

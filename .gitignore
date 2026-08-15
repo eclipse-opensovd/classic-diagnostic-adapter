@@ -45,3 +45,6 @@ mbedtls-4*
 
 # Python virtual environments
 .venv
+
+# Runtime storage written by the in-process integration suite
+integration-tests/collections/

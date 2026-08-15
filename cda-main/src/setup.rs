@@ -28,22 +28,19 @@ use cda_comm_can::CanDiagGateway;
 use cda_comm_doip::DoipDiagGateway;
 use cda_core::EcuManager;
 use cda_interfaces::{
-    HashMap, ShutdownSignal,
+    ShutdownSignal,
     communication_control::{
         ActivationCause, CommunicationAccess, CommunicationInitMode, CommunicationLifecycle,
-        CommunicationVariantDetection, PostUpdateCommunicationMode, VariantDetectionMode,
-        error::CommControlError,
+        CommunicationVariantDetection, DisableCommunication, PostUpdateCommunicationMode,
+        VariantDetectionMode, error::CommControlError,
     },
-    component_slot::{ComponentSlot, ReplaceComponent},
-    health::HealthProvider,
-    http_protection::registry::HttpProtectionRegistry,
+    component_slot::ComponentSlot,
+    http_protection::registry::{HttpProtectionRegistry, HttpRouteMatcher},
 };
 use cda_plugin_communication_management::{
     lifecycle::{
-        CommunicationRuntime,
-        access::CommunicationAccessView,
-        build_communication_runtime,
-        disable::{CommunicationDisableView, DisableCommunication},
+        CommunicationRuntime, access::CommunicationAccessView, build_communication_runtime,
+        disable::CommunicationDisableView,
     },
     plugin::{
         CommunicationPlugin, CommunicationPluginBuilder, default::DefaultCommunicationPluginBuilder,
@@ -59,7 +56,7 @@ use crate::{
     config::configfile::Configuration,
     error::AppError,
     update::{UpdatePluginBuilder, add_runtime_update_routes},
-    vehicle::{UdsManagerType, VehicleData},
+    vehicle::{UdsManagerType, VehicleData, finish_vehicle_components},
 };
 
 // Type alias
@@ -71,30 +68,21 @@ pub(crate) type PreLoadHook = Box<
         + Send,
 >;
 
-/// Runtime context produced during CDA initialization and provided to update-plugin builders.
+pub(crate) type ExtensionHook = Box<
+    dyn FnOnce(crate::extensions::ExtensionContext) -> BoxFuture<'static, Result<(), AppError>>
+        + Send,
+>;
+
+/// Narrow capabilities exposed to runtime-update plugin builders.
 ///
-/// `gateway_replacer` and `uds_manager_replacer` are replace-only: an update plugin can
-/// install a freshly built component, but has no read access, and therefore no operational
-/// authority (no `TransportControl::enable()`, no `UdsEcu` request), over the live gateway
-/// or UDS manager. See `docs/04_adr/06_deferred_initialization.rst` for why that boundary
-/// is type-level rather than a review-enforced convention.
-pub struct CdaRuntime<SP: SecurityPlugin> {
-    pub config: Arc<RwLock<Configuration>>,
-    pub uds_manager_replacer: Arc<dyn ReplaceComponent<UdsManagerType<SP>>>,
-    pub gateway_replacer: Arc<
-        dyn ReplaceComponent<
-            DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
-        >,
-    >,
-    pub dynamic_router: cda_sovd::dynamic_router::DynamicRouter,
-    pub vehicle_route_handle: cda_sovd::RouteHandle,
-    pub lock_provider: Arc<cda_sovd::SovdLockStateProvider>,
-    pub flash_files_path: String,
-    pub components_config: cda_interfaces::datatypes::ComponentsConfig,
-    pub health: Option<HashMap<String, Arc<dyn HealthProvider>>>,
+/// Non-exhaustive: capabilities are added over time, and the context is only ever
+/// constructed by `cda-main`. Plugin builders read the fields they need.
+#[non_exhaustive]
+pub struct UpdatePluginContext {
+    pub reloader: Arc<dyn cda_interfaces::runtime_update_api::RuntimeReloaderPlugin>,
+    pub lock_state: Arc<UpdateLockState>,
     pub storage_dir: String,
     pub mdd_decompress: bool,
-    pub shutdown_signal: ShutdownSignal,
     /// Transport behavior to restore after a runtime database update completes.
     pub post_update_mode: PostUpdateCommunicationMode,
     /// Narrow handle used by update plugins to request activation without
@@ -108,6 +96,37 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
     /// Retry hint surfaced on the HTTP `Retry-After` header while a runtime
     /// update holds communication exclusively.
     pub update_retry_after: Duration,
+    pub update_exempt_routes: Vec<HttpRouteMatcher>,
+}
+
+/// Names a [`LockStateProvider`] trait object as a concrete type.
+///
+/// Not a redundant wrapper: `RuntimeUpdateSecurityPlugin<L, C>` is generic over a
+/// sized `L`, and `Arc<dyn LockStateProvider>` does not itself implement the trait.
+/// This gives implementations something to name for `L` while the application
+/// keeps choosing the provider at runtime.
+///
+/// [`LockStateProvider`]: cda_interfaces::runtime_update_api::LockStateProvider
+pub struct UpdateLockState {
+    inner: Arc<dyn cda_interfaces::runtime_update_api::LockStateProvider>,
+}
+
+impl UpdateLockState {
+    #[must_use]
+    pub fn new(inner: Arc<dyn cda_interfaces::runtime_update_api::LockStateProvider>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait::async_trait]
+impl cda_interfaces::runtime_update_api::LockStateProvider for UpdateLockState {
+    async fn vehicle_lock_owner_id(&self) -> Option<String> {
+        self.inner.vehicle_lock_owner_id().await
+    }
+
+    async fn has_non_vehicle_locks(&self) -> bool {
+        self.inner.has_non_vehicle_locks().await
+    }
 }
 
 /// Adapter that bridges the `RwLock`-wrapped `UdsManager` to the two
@@ -192,6 +211,8 @@ pub struct Setup<
     pub(crate) _phantom: std::marker::PhantomData<(SP, SL)>,
     /// Optional callback run after the webserver starts but before vehicle data is loaded.
     pub(crate) pre_load: Option<PreLoadHook>,
+    /// Extensions run in registration order; empty when none are configured.
+    pub(crate) extensions: Vec<ExtensionHook>,
     /// Optional update-plugin builder. When `None` (or `UPB = ()`) the runtime-update
     /// routes are not registered.
     pub(crate) build_update_plugin: Option<UPB>,
@@ -213,6 +234,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Setup<SP, SL> {
         Self {
             _phantom: std::marker::PhantomData,
             pre_load: None,
+            extensions: Vec::new(),
             build_update_plugin: None,
             build_communication_plugin: DefaultCommunicationPluginBuilder,
             initialize_tracing: true,
@@ -255,12 +277,28 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
         self
     }
 
+    /// Registers an OEM extension after vehicle components and standard routes are ready.
+    ///
+    /// The context exposes only stable route-registration, diagnostic-service and
+    /// health-registration capabilities.
+    ///
+    /// Can be called more than once; extensions run in registration order and each
+    /// receives its own context. The first one to return `Err` aborts startup.
+    #[must_use]
+    pub fn with_extension<F, Fut>(mut self, extension: F) -> Self
+    where
+        F: FnOnce(crate::extensions::ExtensionContext) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), AppError>> + Send + 'static,
+    {
+        self.extensions
+            .push(Box::new(|context| Box::pin(extension(context))));
+        self
+    }
+
     /// Configures a custom runtime update plugin.
     ///
     /// `builder` will be called after vehicle data is loaded and routes are registered. It
-    /// receives the complete [`CdaRuntime`] context so it can access the UDS manager, `DoIP`
-    /// gateway, storage directory, lock provider, and every other piece of infrastructure it
-    /// needs.
+    /// receives an [`UpdatePluginContext`] containing only update capabilities.
     ///
     /// The returned plugin is wrapped in [`ExclusiveRuntimePlugin`] (read/write mutual
     /// exclusion) and mounted on the standard runtime-update HTTP endpoints automatically.
@@ -274,15 +312,16 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
     /// }))
     /// ```
     ///
-    /// [`ExclusiveRuntimePlugin`]: cda_interfaces::runtime_update_api::ExclusiveRuntimePlugin
+    /// [`ExclusiveRuntimePlugin`]: cda_plugin_runtime_update::ExclusiveRuntimePlugin
     /// [`update_plugin_fn`]: crate::update::update_plugin_fn
-    pub fn with_update_plugin<UPB2: UpdatePluginBuilder<SP>>(
+    pub fn with_update_plugin<UPB2: UpdatePluginBuilder>(
         self,
         builder: UPB2,
     ) -> Setup<SP, SL, UPB2, CPB> {
         Setup {
             _phantom: self._phantom,
             pre_load: self.pre_load,
+            extensions: self.extensions,
             build_update_plugin: Some(builder),
             build_communication_plugin: self.build_communication_plugin,
             initialize_tracing: self.initialize_tracing,
@@ -300,6 +339,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
         Setup {
             _phantom: self._phantom,
             pre_load: self.pre_load,
+            extensions: self.extensions,
             build_update_plugin: self.build_update_plugin,
             build_communication_plugin: plugin,
             initialize_tracing: self.initialize_tracing,
@@ -399,24 +439,26 @@ async fn activate_communication_per_init_mode(
 }
 
 /// Builds the caller-supplied update plugin, if any, and mounts its HTTP routes.
-async fn setup_update_plugin<SP, SL, UPB>(
+async fn setup_update_plugin<SL, UPB>(
     ws: &ApplicationState,
     build_update_plugin: Option<UPB>,
-    infra: CdaRuntime<SP>,
-    lock_provider: Arc<cda_sovd::SovdLockStateProvider>,
+    context: UpdatePluginContext,
     upload_body_limit_bytes: usize,
     update_retry_after: Duration,
 ) -> Result<(), AppError>
 where
-    SP: SecurityPlugin,
     SL: SecurityPluginLoader,
-    UPB: UpdatePluginBuilder<SP>,
+    UPB: UpdatePluginBuilder,
 {
     let Some(builder) = build_update_plugin else {
         return Ok(());
     };
 
-    let plugin = builder.build(infra).await?;
+    // The builder owns its error type so implementations need not depend on
+    // `AppError`; surface it verbatim.
+    let plugin = builder.build(context).await.map_err(|error| {
+        AppError::InitializationFailed(format!("Failed to build update plugin: {error}"))
+    })?;
     add_runtime_update_routes::<SL, _>(
         &ws.dynamic_router,
         plugin,
@@ -438,11 +480,12 @@ pub(crate) async fn setup_runtime_routes<SP, SL, UPB, CPB>(
     ws: &ApplicationState,
     build_update_plugin: Option<UPB>,
     communication_plugin: CPB,
+    extensions: Vec<ExtensionHook>,
 ) -> Result<CommunicationRuntime, AppError>
 where
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
-    UPB: UpdatePluginBuilder<SP>,
+    UPB: UpdatePluginBuilder,
     CPB: CommunicationPluginBuilder,
 {
     let flash_files_path = config.flash_files_path.clone();
@@ -459,7 +502,6 @@ where
         cda_sovd::SovdLockStateProvider::new(Arc::clone(&vehicle_data.locks)),
     );
 
-    let shutdown_signal = cda_interfaces::shutdown_signal(ws.shutdown_signal.clone());
     let gateway = vehicle_data.diagnostic_gateway.clone();
     let http_protections = HttpProtectionRegistry::new();
 
@@ -475,7 +517,7 @@ where
     .await?;
     let plugin = Arc::clone(&communication_runtime.plugin);
 
-    let components = crate::vehicle::finish_vehicle_components(
+    let components = finish_vehicle_components(
         vehicle_data.prepared,
         &config,
         Arc::clone(&communication_access),
@@ -505,33 +547,60 @@ where
     )
     .await?;
 
+    // Extensions run in registration order, each with its own context. Routes they
+    // register land after the standard vehicle routes, and survive a later runtime
+    // database update because the diagnostics capability holds the component slot
+    // rather than a snapshot of it.
+    let oem_config = Arc::new(config.oem.clone());
+    for extension in extensions {
+        extension(crate::extensions::ExtensionContext::new(
+            ws.dynamic_router.clone(),
+            uds_manager.clone(),
+            Arc::clone(&vehicle_data.locks),
+            ws.health_state.clone(),
+            Arc::clone(&oem_config),
+        ))
+        .await?;
+    }
+
     activate_communication_per_init_mode(&plugin, config.communication.init_mode).await?;
 
-    let infra = CdaRuntime {
-        config: Arc::new(RwLock::new(config)),
-        dynamic_router: ws.dynamic_router.clone(),
+    let config = Arc::new(RwLock::new(config));
+    let factory = Arc::new(crate::cda_factory::CdaMainVehicleFactory::<SP>::new(
+        vehicle_data.health_providers,
+        Arc::clone(&communication_access),
+    ));
+    let publisher = Arc::new(crate::update::CdaVehicleComponentPublisher::<SP, SL>::new(
+        uds_manager,
+        gateway,
+        ws.dynamic_router.clone(),
         vehicle_route_handle,
         flash_files_path,
         components_config,
-        lock_provider: Arc::clone(&lock_provider),
-        shutdown_signal,
+        Arc::clone(&lock_provider),
+        Arc::clone(&communication_access),
+    ));
+    let reloader = Arc::new(
+        cda_plugin_runtime_update::DefaultRuntimeReloaderPlugin::new(config, factory, publisher),
+    );
+    let context = UpdatePluginContext {
+        reloader,
+        lock_state: Arc::new(UpdateLockState::new(Arc::clone(&lock_provider)
+            as Arc<dyn cda_interfaces::runtime_update_api::LockStateProvider>)),
         post_update_mode,
         communication_access,
         communication_disable,
         http_protections,
         update_retry_after,
-        uds_manager_replacer: uds_manager.replacer(),
-        gateway_replacer: gateway.replacer(),
-        health: vehicle_data.health_providers,
+        update_exempt_routes: cda_sovd::routes_accessible_during_update(),
         storage_dir: runtime_update_config.storage_dir.clone(),
         mdd_decompress,
     };
 
-    setup_update_plugin::<SP, SL, _>(
+    setup_update_plugin::<SL, _>(
         ws,
         build_update_plugin,
-        infra,
-        lock_provider,
+        context,
         runtime_update_config.upload_body_limit_bytes,
         update_retry_after,
     )
@@ -546,7 +615,7 @@ where
 mod tests {
     use cda_interfaces::runtime_update_api::{
         ExecutionMode, FileListOptions, RuntimeFile, RuntimeFileCatalog, RuntimeFileStore,
-        RuntimeFilesUpdatePlugin, RuntimeUpdateError, RuntimeUpdateExecutor, UpdateExecution,
+        RuntimeUpdateError, RuntimeUpdateExecutor, UpdateExecution,
     };
     use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 
@@ -643,7 +712,7 @@ mod tests {
 
     #[test]
     fn documented_public_api_type_checks() {
-        let _: Option<CdaRuntime<DefaultSecurityPluginData>> = None;
+        let _: Option<UpdatePluginContext> = None;
     }
 
     #[test]
@@ -672,9 +741,7 @@ mod tests {
     fn with_update_plugin_stores_builder() {
         // Use `update_plugin_fn` as a convenient closure adapter.
         let builder: UpdatePluginFn<_> =
-            update_plugin_fn(|_infra: CdaRuntime<DefaultSecurityPluginData>| async {
-                Ok(NoOpPlugin)
-            });
+            update_plugin_fn(|_infra: UpdatePluginContext| async { Ok::<_, AppError>(NoOpPlugin) });
 
         let s: Setup<DefaultSecurityPluginData, DefaultSecurityPlugin, _> =
             TestSetup::new().with_update_plugin(builder);
@@ -688,9 +755,7 @@ mod tests {
     #[test]
     fn chaining_preload_then_plugin_retains_both() {
         let builder: UpdatePluginFn<_> =
-            update_plugin_fn(|_infra: CdaRuntime<DefaultSecurityPluginData>| async {
-                Ok(NoOpPlugin)
-            });
+            update_plugin_fn(|_infra: UpdatePluginContext| async { Ok::<_, AppError>(NoOpPlugin) });
 
         let s = TestSetup::new()
             .with_preload(|_| async { Ok(()) })
@@ -706,9 +771,7 @@ mod tests {
     #[test]
     fn chaining_plugin_then_preload_retains_both() {
         let builder: UpdatePluginFn<_> =
-            update_plugin_fn(|_infra: CdaRuntime<DefaultSecurityPluginData>| async {
-                Ok(NoOpPlugin)
-            });
+            update_plugin_fn(|_infra: UpdatePluginContext| async { Ok::<_, AppError>(NoOpPlugin) });
 
         let s = TestSetup::new()
             .with_update_plugin(builder)
@@ -718,6 +781,42 @@ mod tests {
         assert!(
             s.build_update_plugin.is_some(),
             "plugin builder must survive chaining"
+        );
+    }
+
+    #[test]
+    fn setup_without_an_update_plugin_is_accepted_by_the_run_functions() {
+        // The docs say leaving `UPB = ()` mounts no runtime-update routes. That was
+        // previously unreachable: `()` had no `UpdatePluginBuilder` impl, while every
+        // `run_*` bounds `UPB: UpdatePluginBuilder`, so a default `Setup` could not be
+        // passed to any of them. This pins the documented path down.
+        fn accepts<SP, SL, UPB, CPB>(_setup: Setup<SP, SL, UPB, CPB>)
+        where
+            SP: SecurityPlugin,
+            SL: SecurityPluginLoader,
+            UPB: UpdatePluginBuilder,
+            CPB: CommunicationPluginBuilder,
+        {
+        }
+
+        let setup = TestSetup::new();
+        assert!(
+            setup.build_update_plugin.is_none(),
+            "a default Setup must configure no update plugin"
+        );
+        accepts(setup);
+    }
+
+    #[test]
+    fn extensions_compose_instead_of_overwriting() {
+        let s = TestSetup::new()
+            .with_extension(|_context| async { Ok(()) })
+            .with_extension(|_context| async { Ok(()) });
+
+        assert_eq!(
+            s.extensions.len(),
+            2,
+            "a second with_extension must not discard the first"
         );
     }
 }

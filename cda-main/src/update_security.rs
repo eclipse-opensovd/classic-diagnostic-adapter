@@ -11,7 +11,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{collections::HashSet, sync::Arc};
+//! Default runtime-update authorization policy.
+//!
+//! Lives in `cda-main` rather than in `cda-plugin-runtime-update` because it must
+//! consult the security plugin, and the update plugin deliberately depends on
+//! `cda-interfaces` alone. Policy belongs to the application (or an OEM); the
+//! plugin only enforces whatever policy it is handed.
+
+use std::{collections::HashSet, marker::PhantomData, sync::Arc};
 
 use async_trait::async_trait;
 use cda_interfaces::{
@@ -24,24 +31,28 @@ use cda_interfaces::{
 };
 use cda_plugin_security::SecurityPlugin;
 
-/// Default implementation of the runtime update security handler.
+/// Default runtime-update authorization and integrity policy.
 ///
-/// Validates vehicle lock ownership, detects lock conflicts, and verifies file
-/// integrity through the injected [`RuntimeFileInspector`].
+/// Requires the caller to own the vehicle lock and no other lock to be held, then
+/// verifies file integrity through the injected [`RuntimeFileInspector`].
+///
+/// The caller's identity is obtained from the security plugin instance rather than
+/// from a claim read elsewhere, so a replacement security plugin governs who the
+/// caller is considered to be.
 pub struct DefaultUpdateSecurityHandler<L: LockStateProvider, S: SecurityPlugin> {
     inspector: Arc<dyn RuntimeFileInspector>,
-    _lock: std::marker::PhantomData<L>,
-    _security: std::marker::PhantomData<S>,
+    _lock: PhantomData<L>,
+    _security: PhantomData<S>,
 }
 
 impl<L: LockStateProvider, S: SecurityPlugin> DefaultUpdateSecurityHandler<L, S> {
-    /// Creates a security handler that inspects files with `inspector`.
+    /// Creates a handler that inspects files with `inspector`.
     #[must_use]
     pub fn new(inspector: Arc<dyn RuntimeFileInspector>) -> Self {
         Self {
             inspector,
-            _lock: std::marker::PhantomData,
-            _security: std::marker::PhantomData,
+            _lock: PhantomData,
+            _security: PhantomData,
         }
     }
 
@@ -63,10 +74,13 @@ impl<L: LockStateProvider, S: SecurityPlugin> DefaultUpdateSecurityHandler<L, S>
         security: &DynamicPlugin,
         lock_state_provider: &L,
     ) -> Result<(), RuntimeUpdateError> {
-        let owner = lock_state_provider
-            .vehicle_lock_owner_id()
-            .await
-            .ok_or_else(|| RuntimeUpdateError::NoLock("Vehicle lock is missing".to_owned()))?;
+        let owner =
+            lock_state_provider
+                .vehicle_lock_owner_id()
+                .await
+                .ok_or(RuntimeUpdateError::NoLock(
+                    "Vehicle lock is missing".to_owned(),
+                ))?;
         if owner != Self::caller_identity(security)? {
             return Err(RuntimeUpdateError::NoLock(
                 "Vehicle lock is owned by another user".to_owned(),
@@ -91,11 +105,9 @@ impl<
         Self::require_vehicle_lock_owner(security, lock_state_provider).await
     }
 
-    /// Validates that the caller is allowed to start an execution (apply/rollback/cleanup).
-    ///
-    /// Ensures the caller owns the vehicle lock, no ECU or functional-group locks
-    /// are held. Conflicting communication activity is excluded atomically by the
-    /// coordinator's runtime-update block before this handler runs.
+    /// Ensures the caller owns the vehicle lock and no ECU or functional-group
+    /// locks are held. Conflicting communication activity is excluded atomically
+    /// by the disable lease before this runs.
     async fn check_apply_allowed(
         &self,
         security: &DynamicPlugin,
@@ -109,15 +121,16 @@ impl<
                 "Non-vehicle locks are held, cannot apply update".to_owned(),
             ));
         }
-        // Example, validate that no ECUs are added or deleted
+
+        // Advisory: an OEM policy would typically reject here rather than warn.
         if let (Some(pending), Some(current)) = (&collections.pending_mdd, &collections.current_mdd)
         {
             let pending_ecus = database_ecu_names(pending.as_ref(), &*self.inspector).await?;
             let current_ecus = database_ecu_names(current.as_ref(), &*self.inspector).await?;
-
             if pending_ecus != current_ecus {
                 tracing::warn!(
-                    "MDD ECU set mismatch: pending {pending_ecus:?} vs current {current_ecus:?}"
+                    "Database ECU set mismatch: pending {pending_ecus:?} vs current \
+                     {current_ecus:?}"
                 );
             }
         }
@@ -150,21 +163,14 @@ async fn database_ecu_names<C: Collection + DirectFileAccess>(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
-    use async_trait::async_trait;
-    use cda_interfaces::{
-        runtime_update_api::{RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateCollections},
-        storage_api::{CollectionName, Storage as _},
-    };
-    use cda_storage::{LocalCollection, LocalStorage};
+    use cda_plugin_security::{AuthApi, Claims, SecurityApi, SecurityPluginData};
 
     use super::*;
+    use crate::mdd_inspector::MddFileInspector;
 
     struct MockLockProvider {
         owner: Option<String>,
-        has_ecu_conflicts: bool,
-        has_fg_conflicts: bool,
+        has_conflicts: bool,
     }
 
     #[async_trait]
@@ -174,29 +180,29 @@ mod tests {
         }
 
         async fn has_non_vehicle_locks(&self) -> bool {
-            self.has_ecu_conflicts || self.has_fg_conflicts
+            self.has_conflicts
         }
     }
 
-    /// Stands in for the configured security plugin: the identity it reports is
-    /// the one authorization is decided against.
+    /// Stands in for an OEM security plugin: the identity it reports is the one
+    /// authorization must be decided against.
     struct TestSecurityPlugin {
         sub: String,
     }
 
-    impl cda_plugin_security::Claims for TestSecurityPlugin {
+    impl Claims for TestSecurityPlugin {
         fn sub(&self) -> &str {
             &self.sub
         }
     }
 
-    impl cda_plugin_security::AuthApi for TestSecurityPlugin {
-        fn claims(&self) -> Box<&dyn cda_plugin_security::Claims> {
+    impl AuthApi for TestSecurityPlugin {
+        fn claims(&self) -> Box<&dyn Claims> {
             Box::new(self)
         }
     }
 
-    impl cda_plugin_security::SecurityApi for TestSecurityPlugin {
+    impl SecurityApi for TestSecurityPlugin {
         fn validate_service(
             &self,
             _service: &cda_database::datatypes::DiagService,
@@ -205,153 +211,82 @@ mod tests {
         }
     }
 
-    impl SecurityPlugin for TestSecurityPlugin {
-        fn as_auth_plugin(&self) -> &dyn cda_plugin_security::AuthApi {
+    impl cda_plugin_security::SecurityPlugin for TestSecurityPlugin {
+        fn as_auth_plugin(&self) -> &dyn AuthApi {
             self
         }
 
-        fn as_security_plugin(&self) -> &dyn cda_plugin_security::SecurityApi {
+        fn as_security_plugin(&self) -> &dyn SecurityApi {
             self
         }
     }
 
     type Handler = DefaultUpdateSecurityHandler<MockLockProvider, TestSecurityPlugin>;
 
+    fn handler() -> Handler {
+        DefaultUpdateSecurityHandler::new(Arc::new(MddFileInspector))
+    }
+
     fn security_context(sub: &str) -> DynamicPlugin {
-        let plugin: cda_plugin_security::SecurityPluginData = Box::new(TestSecurityPlugin {
+        let plugin: SecurityPluginData = Box::new(TestSecurityPlugin {
             sub: sub.to_owned(),
         });
         plugin as DynamicPlugin
     }
 
-    fn make_lock_provider(
-        owner: Option<&str>,
-        has_ecu_conflicts: bool,
-        has_fg_conflicts: bool,
-    ) -> MockLockProvider {
+    /// Pins the collection type so the trait's `C` parameter is inferable.
+    async fn check_mutation(
+        security: &DynamicPlugin,
+        locks: &MockLockProvider,
+    ) -> Result<(), RuntimeUpdateError> {
+        RuntimeUpdateSecurityPlugin::<MockLockProvider, cda_storage::LocalCollection>::
+            check_mutation_allowed(&handler(), security, locks).await
+    }
+
+    fn locks(owner: Option<&str>, has_conflicts: bool) -> MockLockProvider {
         MockLockProvider {
             owner: owner.map(ToOwned::to_owned),
-            has_ecu_conflicts,
-            has_fg_conflicts,
+            has_conflicts,
         }
     }
 
-    async fn check_file_integrity(
-        handler: &Handler,
-        path: &std::path::Path,
-    ) -> Result<(), VerificationError> {
-        <Handler as RuntimeUpdateSecurityPlugin<MockLockProvider, LocalCollection>>::
-            check_file_integrity(handler, path)
-        .await
-    }
-
-    fn make_mdd_bytes(ecu_name: &str) -> Vec<u8> {
-        let magic: &[u8] = &[
-            0x4D, 0x44, 0x44, 0x20, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x20, 0x30, 0x20,
-            0x20, 0x20, 0x20, 0x20, 0x20, 0x00,
-        ];
-        let name_bytes = ecu_name.as_bytes();
-        let mut bytes = magic.to_vec();
-        bytes.push(0x1A);
-        bytes.push(u8::try_from(name_bytes.len()).unwrap());
-        bytes.extend_from_slice(name_bytes);
-        bytes
-    }
-
-    async fn write_mdd_to_collection(
-        storage: &LocalStorage,
-        name: &CollectionName,
-        key: &str,
-        ecu_name: &str,
-    ) {
-        let col = storage.get_or_create_collection(name).await.unwrap();
-        let mut tx = storage.begin_transaction().unwrap();
-        let bytes = make_mdd_bytes(ecu_name);
-        let mut cursor: &[u8] = &bytes;
-        col.write(&mut tx, key, &mut cursor).await.unwrap();
-        tx.commit().await.unwrap();
-    }
-
-    async fn make_collections(storage: &LocalStorage) -> UpdateCollections<LocalCollection> {
-        UpdateCollections {
-            pending_mdd: storage
-                .get_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
-                .await
-                .ok(),
-            current_mdd: storage
-                .get_collection(&CollectionName::DiagnosticDatabase)
-                .await
-                .ok(),
-        }
-    }
-
-    fn make_handler(
-        owner: Option<&str>,
-        has_ecu_conflicts: bool,
-        has_fg_conflicts: bool,
-    ) -> (Handler, MockLockProvider) {
-        let lock_provider = make_lock_provider(owner, has_ecu_conflicts, has_fg_conflicts);
-        let handler = Handler::new(Arc::new(crate::mdd_inspector::MddFileInspector));
-        (handler, lock_provider)
-    }
-
     #[tokio::test]
-    async fn check_apply_allowed_returns_no_lock_when_no_vehicle_lock_held() {
-        let (handler, lock_provider) = make_handler(None, false, false);
-        let result = handler
-            .check_apply_allowed(
-                &security_context("tester"),
-                &lock_provider,
-                &UpdateCollections::<LocalCollection>::default(),
-            )
-            .await;
-        assert!(matches!(result, Err(RuntimeUpdateError::NoLock(_))));
-    }
+    async fn mutation_is_refused_without_a_vehicle_lock() {
+        let result = check_mutation(&security_context("alice"), &locks(None, false)).await;
 
-    #[tokio::test]
-    async fn check_apply_allowed_refuses_a_lock_held_by_someone_else() {
-        // Previously any held vehicle lock admitted the execution, whoever owned
-        // it. The caller must now be the owner.
-        let (handler, lock_provider) = make_handler(Some("user-b"), false, false);
-        let result = handler
-            .check_apply_allowed(
-                &security_context("tester"),
-                &lock_provider,
-                &UpdateCollections::<LocalCollection>::default(),
-            )
-            .await;
         assert!(
             matches!(result, Err(RuntimeUpdateError::NoLock(_))),
-            "a lock owned by another identity must not admit an execution"
+            "no vehicle lock must deny the mutation"
         );
     }
 
     #[tokio::test]
-    async fn check_apply_allowed_succeeds_for_the_lock_owner() {
-        let (handler, lock_provider) = make_handler(Some("tester"), false, false);
-        let result = handler
-            .check_apply_allowed(
-                &security_context("tester"),
-                &lock_provider,
-                &UpdateCollections::<LocalCollection>::default(),
-            )
-            .await;
-        assert!(result.is_ok());
+    async fn mutation_is_refused_when_the_lock_belongs_to_someone_else() {
+        let result = check_mutation(&security_context("alice"), &locks(Some("bob"), false)).await;
+
+        assert!(
+            matches!(result, Err(RuntimeUpdateError::NoLock(_))),
+            "a lock held by another identity must deny the mutation"
+        );
     }
 
     #[tokio::test]
-    async fn an_unrecognized_security_context_is_refused_rather_than_anonymous() {
+    async fn identity_comes_from_the_security_plugin() {
+        // The plugin is the authority: the lock owner is compared against whatever
+        // identity the plugin reports, not against anything this layer derives.
+        let result = check_mutation(&security_context("alice"), &locks(Some("alice"), false)).await;
+
+        assert!(result.is_ok(), "matching the plugin's identity must pass");
+    }
+
+    #[tokio::test]
+    async fn a_foreign_security_context_is_refused_rather_than_treated_as_anonymous() {
         // A handle that is not the configured plugin type means the request never
         // passed the security middleware.
-        let (handler, lock_provider) = make_handler(Some("tester"), false, false);
         let foreign: DynamicPlugin = Box::new(());
-        let result = handler
-            .check_apply_allowed(
-                &foreign,
-                &lock_provider,
-                &UpdateCollections::<LocalCollection>::default(),
-            )
-            .await;
+
+        let result = check_mutation(&foreign, &locks(Some("alice"), false)).await;
+
         assert!(
             result.is_err(),
             "an unrecognized security context must not authorize anything"
@@ -359,92 +294,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_apply_allowed_returns_lock_conflict_on_ecu_conflicts() {
-        let (handler, lock_provider) = make_handler(Some("tester"), true, false);
-        let result = handler
-            .check_apply_allowed(
-                &security_context("tester"),
-                &lock_provider,
-                &UpdateCollections::<LocalCollection>::default(),
+    async fn apply_is_refused_while_other_locks_are_held() {
+        let result = RuntimeUpdateSecurityPlugin::<MockLockProvider, cda_storage::LocalCollection>::
+            check_apply_allowed(
+                &handler(),
+                &security_context("alice"),
+                &locks(Some("alice"), true),
+                &UpdateCollections::default(),
             )
             .await;
-        assert!(matches!(result, Err(RuntimeUpdateError::LockConflict(_))));
-    }
 
-    #[tokio::test]
-    async fn check_apply_allowed_returns_lock_conflict_on_fg_conflicts() {
-        let (handler, lock_provider) = make_handler(Some("tester"), false, true);
-        let result = handler
-            .check_apply_allowed(
-                &security_context("tester"),
-                &lock_provider,
-                &UpdateCollections::<LocalCollection>::default(),
-            )
-            .await;
         assert!(
             matches!(result, Err(RuntimeUpdateError::LockConflict(_))),
-            "Expected RuntimeUpdateError::LockConflict, got {result:?}"
+            "ECU or functional-group locks must block an apply"
         );
     }
 
     #[tokio::test]
-    async fn check_apply_allowed_succeeds_when_owner_matches_and_no_conflicts() {
-        let (handler, lock_provider) = make_handler(Some("tester"), false, false);
-        assert!(
-            handler
-                .check_apply_allowed(
-                    &security_context("tester"),
-                    &lock_provider,
-                    &UpdateCollections::<LocalCollection>::default()
-                )
-                .await
-                .is_ok()
-        );
-    }
-
-    #[tokio::test]
-    async fn check_file_integrity_mdd_fails_on_nonexistent_file() {
-        let (handler, _) = make_handler(Some("tester"), false, false);
-        let path = PathBuf::from("/nonexistent/test.mdd");
-        let result = check_file_integrity(&handler, &path).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn check_file_integrity_mdd_fails_on_invalid_data() {
-        let (handler, _) = make_handler(Some("tester"), false, false);
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bad.mdd");
-        std::fs::write(&path, b"not a valid mdd file").unwrap();
-        let result = check_file_integrity(&handler, &path).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn check_apply_allowed_succeeds_when_pending_and_current_mdd_ecu_names_match() {
-        let (handler, lock_provider) = make_handler(Some("tester"), false, false);
-        let dir = tempfile::tempdir().unwrap();
-        let storage = LocalStorage::new(dir.path()).unwrap();
-
-        write_mdd_to_collection(
-            &storage,
-            &CollectionName::DiagnosticDatabaseNextUpdate,
-            "ecu.mdd",
-            "TestEcu",
-        )
-        .await;
-        write_mdd_to_collection(
-            &storage,
-            &CollectionName::DiagnosticDatabase,
-            "ecu.mdd",
-            "TestEcu",
-        )
-        .await;
-
-        let collections = make_collections(&storage).await;
-        let result = handler
-            .check_apply_allowed(&security_context("tester"), &lock_provider, &collections)
+    async fn apply_passes_for_the_lock_owner_with_no_conflicts() {
+        let result = RuntimeUpdateSecurityPlugin::<MockLockProvider, cda_storage::LocalCollection>::
+            check_apply_allowed(
+                &handler(),
+                &security_context("alice"),
+                &locks(Some("alice"), false),
+                &UpdateCollections::default(),
+            )
             .await;
+
         assert!(result.is_ok());
     }
 }

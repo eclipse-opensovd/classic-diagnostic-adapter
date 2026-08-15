@@ -68,6 +68,10 @@ pub async fn execute_rollback<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
     tx.commit().await?;
 
     if !mdd_backup_empty {
+        // Deliberately no recovery on failure, unlike `execute_apply`. A rollback is
+        // already the recovery: the only state to "roll back" to would be the update
+        // that prompted it, so retrying towards it would undo the operator's intent.
+        // The error surfaces and the execution is marked Failed.
         reload_database_if_present(storage, reload_handler, false, inspector).await?;
     }
 
@@ -238,6 +242,33 @@ mod tests {
         assert!(
             matches!(result, Err(RuntimeUpdateError::NoBackup)),
             "expected NoBackup when both backup collections are empty, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_reload_during_rollback_surfaces_without_further_recovery() {
+        // Deliberate asymmetry with `execute_apply`, which retries towards the
+        // backup on a failed reload. A rollback is already the recovery, so there
+        // is nothing safe to retry towards: the failure must surface.
+        let (storage, _dir) = make_storage();
+
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabaseBackup,
+            &[("ecu1.mdd", b"backup_data")],
+        )
+        .await;
+
+        let result = execute_rollback(
+            &storage,
+            &crate::test_utils::FailingReloadHandler,
+            &*crate::test_utils::test_inspector(),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "a failed reload during rollback must surface as an error"
         );
     }
 }

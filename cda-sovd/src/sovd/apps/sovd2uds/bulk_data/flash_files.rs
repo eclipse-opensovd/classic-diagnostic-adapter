@@ -25,7 +25,7 @@ use http::StatusCode;
 use regex::Regex;
 
 use crate::sovd::{
-    WebserverState, create_schema,
+    VehicleRequestState, create_schema,
     error::{ApiError, ErrorWrapper},
 };
 
@@ -96,7 +96,7 @@ pub(crate) async fn get<T: UdsEcu + Clone>(
         Query<sovd_interfaces::IncludeSchemaQuery>,
         ApiError,
     >,
-    State(state): State<WebserverState<T>>,
+    State(state): State<VehicleRequestState<T>>,
 ) -> Response {
     let include_schema = query.include_schema;
     let flash_files = &mut state.flash_data.as_ref().write().await;

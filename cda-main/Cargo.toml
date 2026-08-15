@@ -45,6 +45,8 @@ cda-extra = { workspace = true, optional = true }
 cda-plugin-communication-management = { workspace = true }
 cda-plugin-runtime-update = { workspace = true }
 cda-storage = { workspace = true }
+aide = { workspace = true, features = ["axum"] }
+axum = { workspace = true }
 # args
 clap = { workspace = true, features = ["derive", "env"] }
 # config

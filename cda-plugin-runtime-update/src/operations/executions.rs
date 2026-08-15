@@ -78,8 +78,8 @@ where
     // a process-wide HTTP restriction. Running it first would mean any caller who
     // merely authenticates can force a real transport disable/re-enable cycle and
     // a burst of 409s on every other route, purely by being refused a moment
-    // later - a denial of service available to the least privileged caller in the
-    // system.
+    // later - a denial of service available to the least privileged caller in
+    // the system.
     //
     // This is the cheap, side-effect-free half of the decision: identity and
     // vehicle-lock ownership, no file I/O. The authoritative `check_apply_allowed`
@@ -299,7 +299,7 @@ fn spawn_execution<S, R>(
             &*storage,
             &*reload_handler,
             mdd_decompress,
-            &*inspector,
+            &inspector,
         )
         .await;
 
@@ -404,7 +404,7 @@ async fn execute_operation<S, R>(
     storage: &S,
     reload_handler: &R,
     mdd_decompress: bool,
-    inspector: &dyn RuntimeFileInspector,
+    inspector: &Arc<dyn RuntimeFileInspector>,
 ) -> Result<(), RuntimeUpdateError>
 where
     S: Storage + Send + Sync + 'static,
@@ -421,7 +421,8 @@ where
             .await
         }
         ExecutionMode::Rollback => {
-            crate::operations::rollback::execute_rollback(storage, reload_handler, inspector).await
+            crate::operations::rollback::execute_rollback(storage, reload_handler, &**inspector)
+                .await
         }
         ExecutionMode::Cleanup => crate::operations::cleanup::execute_cleanup(storage).await,
     }
@@ -434,16 +435,17 @@ mod tests {
     use cda_interfaces::{
         HashMap,
         communication_control::{
-            CommunicationAccess, PostUpdateCommunicationMode, TransportControl, TransportState,
-            error::CommControlError,
+            CommunicationAccess, DisableCommunication, PostUpdateCommunicationMode,
+            TransportControl, TransportState, error::CommControlError,
         },
         http_protection::registry::{HttpProtectionRegistry, HttpRestrictionGuard},
         runtime_update_api::{ExecutionMode, ExecutionStatus, RuntimeUpdateError, UpdateExecution},
         storage_api::CollectionName,
     };
+    // Test-only: the concrete lifecycle doubles live in the communication plugin,
+    // which is a dev-dependency here.
     use cda_plugin_communication_management::lifecycle::{
-        communication_disable_for_test, disable::DisableCommunication,
-        enabled_communication_access_for_test,
+        communication_disable_for_test, enabled_communication_access_for_test,
     };
     use cda_storage::LocalStorage;
     use tokio::sync::RwLock;
@@ -540,7 +542,7 @@ mod tests {
         communication_disable: Arc<dyn DisableCommunication>,
         communication_access: Arc<dyn CommunicationAccess>,
         http_restriction_manager: HttpProtectionRegistry,
-        inspector: std::sync::Arc<dyn cda_interfaces::runtime_update_api::RuntimeFileInspector>,
+        inspector: Arc<dyn cda_interfaces::runtime_update_api::RuntimeFileInspector>,
         _dir: tempfile::TempDir,
     }
 
