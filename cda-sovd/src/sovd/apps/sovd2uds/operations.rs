@@ -30,7 +30,7 @@ pub(crate) mod runtimefilesupdate {
     };
 
     use crate::sovd::apps::sovd2uds::bulk_data::runtimefiles::{
-        DbUpdateErrorResponse, RuntimeUpdateRouteState,
+        DbUpdateErrorResponse, RuntimeUpdateRouteState, require_mutation_allowed,
     };
 
     const EXECUTIONS_ROUTE: &str =
@@ -57,9 +57,12 @@ pub(crate) mod runtimefilesupdate {
         Secured(sec_plugin): Secured,
         Json(body): Json<ExecutionRequest>,
     ) -> impl IntoResponse {
-        // Starting an execution mutates update state, so the plugin's policy
-        // decides; this layer only renders the verdict.
         let security = sec_plugin as cda_interfaces::DynamicPlugin;
+        if let Err(resp) =
+            require_mutation_allowed(&*route_state.plugin, &security, route_state.retry_after).await
+        {
+            return resp.into_response();
+        }
 
         route_state
             .plugin

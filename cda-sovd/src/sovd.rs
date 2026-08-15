@@ -276,16 +276,17 @@ impl ExecutionStatus for FgServiceExecution {
 
 /// Implementation of [`LockStateProvider`] that reads from the in-memory [`Locks`] state.
 pub struct SovdLockStateProvider {
-    locks: Arc<RwLock<Arc<Locks>>>,
+    /// A plain `Arc`: the pointer is never swapped. `Locks` mutates its own
+    /// entries behind their own locks, so an outer `RwLock` here would guard
+    /// nothing.
+    locks: Arc<Locks>,
 }
 
 impl SovdLockStateProvider {
     /// Creates a new provider wrapping the given shared [`Locks`] state.
     #[must_use]
     pub fn new(locks: Arc<Locks>) -> Self {
-        Self {
-            locks: Arc::new(RwLock::new(locks)),
-        }
+        Self { locks }
     }
 
     /// Updates the ECU and functional-group entries in the current locks in-place,
@@ -297,20 +298,19 @@ impl SovdLockStateProvider {
         &self,
         new_ecu_names: Vec<String>,
     ) -> Result<(), locks::LockUpdateError> {
-        let locks = self.locks.read().await.clone();
-        locks.update_entries(new_ecu_names).await
+        self.locks.update_entries(new_ecu_names).await
     }
 
-    pub async fn current_locks(&self) -> Arc<Locks> {
-        self.locks.read().await.clone()
+    #[must_use]
+    pub fn current_locks(&self) -> Arc<Locks> {
+        Arc::clone(&self.locks)
     }
 }
 
 #[async_trait]
 impl LockStateProvider for SovdLockStateProvider {
     async fn vehicle_lock_owner_id(&self) -> Option<String> {
-        let locks = self.locks.read().await.clone();
-        let vehicle_lock = locks.vehicle.lock_ro().await;
+        let vehicle_lock = self.locks.vehicle.lock_ro().await;
         match &vehicle_lock {
             ReadLock::OptionLock(l) => l.as_ref().map(|l| l.owner().to_owned()),
             ReadLock::HashMapLock(_) => None,
@@ -318,9 +318,8 @@ impl LockStateProvider for SovdLockStateProvider {
     }
 
     async fn has_non_vehicle_locks(&self) -> bool {
-        let locks = self.locks.read().await.clone();
-        let ecu_lock = locks.ecu.lock_ro().await;
-        let fg_lock = locks.functional_group.lock_ro().await;
+        let ecu_lock = self.locks.ecu.lock_ro().await;
+        let fg_lock = self.locks.functional_group.lock_ro().await;
         ecu_lock.is_any_locked() || fg_lock.is_any_locked()
     }
 }
@@ -472,7 +471,7 @@ pub(crate) async fn remove_reserved_execution<E: ExecutionStatus>(
 }
 
 #[derive(Clone)]
-pub(crate) struct WebserverState<T: UdsEcu + Clone> {
+pub(crate) struct VehicleRequestState<T: UdsEcu + Clone> {
     uds: T,
     locks: Arc<Locks>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
@@ -520,7 +519,7 @@ pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: Securi
         path: Some(PathBuf::from(flash_files_path)),
         schema: None,
     }));
-    let state = WebserverState {
+    let state = VehicleRequestState {
         uds: uds.clone(),
         locks,
         flash_data: Arc::clone(&flash_data),
@@ -537,8 +536,8 @@ pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: Securi
 }
 
 async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoader>(
-    state: WebserverState<T>,
-    router: Router<WebserverState<T>>,
+    state: VehicleRequestState<T>,
+    router: Router<VehicleRequestState<T>>,
     functional_group_config: FunctionalDescriptionConfig,
 ) -> Router<T> {
     let router = router.nest_api_service(
@@ -592,7 +591,7 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
 }
 
 async fn get_components<T: UdsEcu + SchemaProvider + Clone>(
-    State(state): State<WebserverState<T>>,
+    State(state): State<VehicleRequestState<T>>,
     WithRejection(Query(query), _): WithRejection<Query<IncludeSchemaQuery>, ApiError>,
 ) -> Response {
     fn ecu_to_resource(ecu: String) -> Resource {
@@ -657,9 +656,9 @@ fn docs_components(op: TransformOperation) -> TransformOperation {
 }
 
 async fn components_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
-    state: WebserverState<T>,
+    state: VehicleRequestState<T>,
     file_manager: &mut HashMap<String, U>,
-) -> Router<WebserverState<T>> {
+) -> Router<VehicleRequestState<T>> {
     let mut router = Router::new().api_route(
         "/vehicle/v15/components",
         get_with(get_components, docs_components),
@@ -684,7 +683,7 @@ async fn components_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + '
 )]
 fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
     ecu_name: &str,
-    state: &WebserverState<T>,
+    state: &VehicleRequestState<T>,
     file_manager: &mut HashMap<String, U>,
 ) -> Result<(String, Router), SovdError> {
     let ecu_lower = ecu_name.to_lowercase();

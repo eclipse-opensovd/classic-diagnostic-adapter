@@ -76,8 +76,7 @@ pub(crate) async fn reload_database_if_present<S: Storage, R: RuntimeReloaderPlu
 
     if decompress {
         for mdd_path in &mdd_paths {
-            // Non-fatal: the applied database is valid either way, just not
-            // rewritten uncompressed.
+            // Non-fatal: the applied database is already valid, just not decompressed.
             if let Err(e) = inspector.decompress_in_place(mdd_path) {
                 tracing::warn!(
                     mdd_file = %mdd_path.display(),

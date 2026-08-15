@@ -36,8 +36,11 @@ use tower_http::{normalize_path::NormalizePathLayer, trace::TraceLayer};
 
 /// Public API surface re-exported from the crate-internal `sovd` module.
 pub use crate::sovd::{
-    SovdLockStateProvider, error::VendorErrorCode, locks::Locks,
-    request_guard::install_http_restriction_guard, static_data::add_static_data_endpoint,
+    SovdLockStateProvider,
+    error::VendorErrorCode,
+    locks::{LockDenied, Locks, check_ecu_lock, check_functional_group_lock, check_vehicle_lock},
+    request_guard::install_http_restriction_guard,
+    static_data::add_static_data_endpoint,
 };
 pub mod dynamic_router;
 mod openapi;
@@ -46,6 +49,12 @@ pub(crate) mod sovd;
 // Consts for HTTP
 pub const SWAGGER_UI_ROUTE: &str = "/swagger-ui";
 pub const OPENAPI_JSON_ROUTE: &str = "/openapi.json";
+
+/// The SOVD API version segment used in every `/vehicle/<version>/...` route.
+///
+/// Exposed so callers that build paths relative to the SOVD tree - notably the OEM
+/// extension namespace in `cda-main` - derive the segment instead of hardcoding it.
+pub const SOVD_API_VERSION: &str = "v15";
 #[derive(Clone)]
 pub struct WebServerConfig {
     pub host: String,

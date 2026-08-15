@@ -29,7 +29,7 @@ use crate::VendorErrorCode;
 /// State shared by every runtime-update route.
 ///
 /// Carries no lock provider: authorization is the update plugin's decision, and
-/// this layer only transports the request and renders the verdict. See
+/// this layer only transports the request and renders the verdict as HTTP. See
 /// [`require_mutation_allowed`].
 pub struct RuntimeUpdateRouteState<P> {
     pub plugin: Arc<P>,

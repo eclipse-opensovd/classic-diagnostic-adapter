@@ -109,6 +109,22 @@ pub struct Configuration {
     pub communication: CommunicationSettings,
     /// Strict-mode validation flags.
     pub strict: StrictConfig,
+    /// Vendor-specific settings, passed through verbatim for embedding
+    /// applications to interpret.
+    ///
+    /// CDA never reads this section. It lets an OEM integration keep its own
+    /// configuration in this file instead of loading a second one; the contents
+    /// are handed to registered extensions via `ExtensionContext::oem_config`.
+    ///
+    /// A named section rather than a catch-all, so an unknown key elsewhere in
+    /// the file stays a typo instead of being silently absorbed.
+    ///
+    /// Excluded from the generated schema and the shipped reference config: the
+    /// contents are the integration's, so CDA has no schema to describe and no
+    /// example worth shipping. `examples/README.md` documents the section.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    #[schemars(skip)]
+    pub oem: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Per-ECU configuration block.
@@ -191,6 +207,7 @@ impl Default for Configuration {
             runtime_update_config: RuntimeUpdateConfig::default(),
             communication: CommunicationSettings::default(),
             strict: StrictConfig::default(),
+            oem: serde_json::Map::new(),
         }
     }
 }
@@ -730,5 +747,56 @@ parameter_validation = true
         let config: Configuration = figment.extract().unwrap();
         assert!(config.strict.parameter_validation());
         assert!(!config.strict.ecu_config());
+    }
+
+    #[tokio::test]
+    async fn oem_section_is_passed_through_verbatim() {
+        let config_str = r#"
+[oem]
+endpoint = "https://vendor.example/api"
+retries = 3
+
+[oem.nested]
+enabled = true
+"#;
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract().unwrap();
+
+        assert_eq!(
+            config
+                .oem
+                .get("endpoint")
+                .and_then(serde_json::Value::as_str),
+            Some("https://vendor.example/api")
+        );
+        assert_eq!(
+            config
+                .oem
+                .get("retries")
+                .and_then(serde_json::Value::as_i64),
+            Some(3)
+        );
+        assert_eq!(
+            config
+                .oem
+                .get("nested")
+                .and_then(|nested| nested.get("enabled"))
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "nested vendor tables must survive the pass-through"
+        );
+    }
+
+    #[tokio::test]
+    async fn oem_section_defaults_to_empty_and_is_optional() {
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string("[strict]\nenabled = false\n"));
+        let config: Configuration = figment.extract().unwrap();
+
+        assert!(
+            config.oem.is_empty(),
+            "a config without an [oem] section must parse with an empty map"
+        );
     }
 }

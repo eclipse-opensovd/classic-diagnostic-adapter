@@ -15,6 +15,7 @@
 //!
 //! [[ dimpl~communication-control-contracts, Communication lifecycle contracts, dimpl, req~dt-deferred-initialization; arch~dt-deferred-initialization ]]
 pub mod access;
+pub mod disable;
 pub mod error;
 pub mod operation;
 // Private: `SwappableGateway` inside is minted only via `ComponentSlot::transport_control`,
@@ -22,8 +23,6 @@ pub mod operation;
 mod swappable_gateway;
 
 use std::time::Duration;
-
-pub mod disable;
 
 pub use access::{CommunicationAccess, CommunicationError, CommunicationGuard, CommunicationState};
 use async_trait::async_trait;
@@ -195,7 +194,7 @@ pub enum VariantDetectionMode {
     /// Nothing settles [`VariantState`](crate::ecumanager::VariantState) *on its
     /// own*, so variant-dependent surfaces (resource listings under an ECU,
     /// request/response schemas) report not-ready until detection is triggered
-    /// explicitly -- which stays available in this mode, and is how a runtime
+    /// explicitly - which stays available in this mode, and is how a runtime
     /// configured this way becomes ready. Intended for deployments whose
     /// communication plugin owns the detection decision itself.
     Never,

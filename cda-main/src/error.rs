@@ -20,7 +20,10 @@ use cda_interfaces::{
 };
 use cda_tracing::TracingSetupError;
 
+/// Non-exhaustive so new variants can be added without breaking embedders
+/// that match on it.
 #[derive(thiserror::Error)]
+#[non_exhaustive]
 pub enum AppError {
     #[error("Initialization failed `{0}`")]
     InitializationFailed(String),

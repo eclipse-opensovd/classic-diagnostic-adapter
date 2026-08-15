@@ -728,11 +728,6 @@ pub mod mock {
         }
 
         #[async_trait]
-        impl crate::Shutdown for UdsEcu {
-            async fn shutdown(&self);
-        }
-
-        #[async_trait]
         impl UdsTransport for UdsEcu {
             type Response = crate::diagservices::mock::MockDiagServiceResponse;
 
@@ -1050,6 +1045,13 @@ pub mod mock {
 
         #[async_trait]
         impl UdsEcu for UdsEcu {}
+
+        // Needed by consumers generic over `Uds: UdsQuery + Shutdown`, such as the
+        // runtime reloader.
+        #[async_trait]
+        impl crate::Shutdown for UdsEcu {
+            async fn shutdown(&self);
+        }
     }
 
     use crate::schema::{SchemaDescription, SchemaProvider};

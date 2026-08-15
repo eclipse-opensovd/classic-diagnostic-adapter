@@ -11,6 +11,35 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Eclipse `OpenSOVD` Classic Diagnostic Adapter.
+//!
+//! # Embedding contract
+//!
+//! Everything this crate exposes is meant to be used. An application that embeds
+//! the library - to add OEM-specific SOVD routes, swap the update plugin, or just
+//! reuse the CLI and configuration handling - builds a binary out of these parts:
+//!
+//! - [`AppArgs`] and [`Command`] - the CLI surface, so an OEM binary accepts the
+//!   same flags as `opensovd-cda` without redeclaring them.
+//! - [`config`] - [`Configuration`](config::configfile::Configuration) and
+//!   [`load_config_with_fallback`](config::load_config_with_fallback), including
+//!   the `[oem]` section reserved for vendor settings.
+//! - [`setup_tracing`], [`shutdown_signal`], [`cda_version`] - the remaining
+//!   pieces of a `main`.
+//! - [`Setup`] and its builder methods, handed to [`run_with_ext`] /
+//!   [`run_with_ext_from_config`].
+//! - [`extensions`] - the capabilities an extension hook receives.
+//! - [`update`] and [`update_security`] - composing a runtime-update plugin from
+//!   a custom storage backend, policy, or database format.
+//! - [`AppError`].
+//!
+//! Construction of the live vehicle (databases, transports, gateway, UDS manager)
+//! is deliberately *not* public. Those signatures name concrete transport types
+//! and change whenever the transport stack does; [`extensions`] exposes the same
+//! capabilities as traits that survive such changes.
+//!
+//! See `docs/03_architecture/05_plugins/04_oem_integration.rst`.
+
 // The `run_with_ext` async state machine grows with every enabled transport;
 // with `--all-features` its layout computation overflows rustc's default
 // query depth (128) on stable 1.97. Default limit otherwise.
@@ -36,19 +65,24 @@ use crate::{
     update::{UpdatePluginBuilder, create_default_update_plugin, update_plugin_fn},
 };
 
-pub mod cda_factory;
 pub mod config;
 pub mod error;
-pub mod mdd;
+pub mod extensions;
 pub mod mdd_inspector;
 pub mod setup;
 pub mod update;
 pub mod update_security;
+
+pub(crate) mod cda_factory;
+pub(crate) mod mdd;
 pub(crate) mod vehicle;
 
 pub use error::AppError;
 pub use setup::Setup;
 
+// mimalloc is applied library-wide on purpose: every process built on
+// `opensovd_cda_lib` is expected to use it, so the choice is made here rather
+// than left to each embedder.
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -208,7 +242,7 @@ pub async fn run_with_ext<SP, SL, UPB, CPB>(
 where
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
-    UPB: UpdatePluginBuilder<SP>,
+    UPB: UpdatePluginBuilder,
     CPB: CommunicationPluginBuilder,
 {
     if let Some(Command::GenerateConfig { output }) = args.command.as_ref() {
@@ -276,7 +310,7 @@ pub async fn run_with_ext_from_config<SP, SL, UPB, CPB>(
 where
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
-    UPB: UpdatePluginBuilder<SP>,
+    UPB: UpdatePluginBuilder,
     CPB: CommunicationPluginBuilder,
 {
     let webserver_state = init_webserver(
@@ -317,6 +351,7 @@ where
         &webserver_state,
         setup.build_update_plugin,
         setup.build_communication_plugin,
+        setup.extensions,
     )
     .await?;
 
@@ -350,8 +385,7 @@ pub async fn run(args: AppArgs) -> Result<(), AppError> {
     >(
         args,
         Setup::new().with_update_plugin(update_plugin_fn(|infra| async move {
-            create_default_update_plugin::<DefaultSecurityPluginData, DefaultSecurityPlugin>(infra)
-                .await
+            create_default_update_plugin::<DefaultSecurityPluginData>(infra).await
         })),
     ))
     .await
@@ -373,11 +407,8 @@ pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
     >(
         config,
         Setup::new().with_update_plugin(update_plugin_fn(
-            |infra: setup::CdaRuntime<DefaultSecurityPluginData>| async move {
-                create_default_update_plugin::<DefaultSecurityPluginData, DefaultSecurityPlugin>(
-                    infra,
-                )
-                .await
+            |infra: setup::UpdatePluginContext| async move {
+                create_default_update_plugin::<DefaultSecurityPluginData>(infra).await
             },
         )),
     ))

@@ -1891,6 +1891,7 @@ name = "integration-tests"
 version = "0.1.0"
 dependencies = [
  "aide",
+ "async-trait",
  "axum",
  "cda-build",
  "cda-comm-doip",
@@ -2449,7 +2450,9 @@ dependencies = [
 name = "opensovd-cda"
 version = "0.1.0"
 dependencies = [
+ "aide",
  "async-trait",
+ "axum",
  "cda-comm-can",
  "cda-comm-doip",
  "cda-comm-uds",
