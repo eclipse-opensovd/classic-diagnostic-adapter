@@ -180,8 +180,12 @@ pub trait RuntimeFileInspector: Send + Sync + 'static {
 /// implementation to integrate custom lock management systems.
 #[async_trait]
 pub trait LockStateProvider: Send + Sync + 'static {
-    /// Returns the `sub` claim of the vehicle lock owner, or `None` if no vehicle lock is held.
-    async fn vehicle_lock_owner_sub(&self) -> Option<String>;
+    /// Returns the identity of the vehicle lock owner, or `None` if no vehicle
+    /// lock is held.
+    ///
+    /// An opaque ownership identity, not a claim: what it is compared against is
+    /// the security plugin's business.
+    async fn vehicle_lock_owner_id(&self) -> Option<String>;
 
     /// Returns `true` if any ECU or functional-group lock is currently held.
     async fn has_non_vehicle_locks(&self) -> bool;

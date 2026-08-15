@@ -64,7 +64,7 @@ impl<L: LockStateProvider, S: SecurityPlugin> DefaultUpdateSecurityHandler<L, S>
         lock_state_provider: &L,
     ) -> Result<(), RuntimeUpdateError> {
         let owner = lock_state_provider
-            .vehicle_lock_owner_sub()
+            .vehicle_lock_owner_id()
             .await
             .ok_or_else(|| RuntimeUpdateError::NoLock("Vehicle lock is missing".to_owned()))?;
         if owner != Self::caller_identity(security)? {
@@ -102,12 +102,8 @@ impl<
         lock_state_provider: &L,
         collections: &UpdateCollections<C>,
     ) -> Result<(), RuntimeUpdateError> {
-        lock_state_provider
-            .vehicle_lock_owner_sub()
-            .await
-            .ok_or(RuntimeUpdateError::NoLock(
-                "No vehicle lock owned".to_owned(),
-            ))?;
+        Self::require_vehicle_lock_owner(security, lock_state_provider).await?;
+
         if lock_state_provider.has_non_vehicle_locks().await {
             return Err(RuntimeUpdateError::LockConflict(
                 "Non-vehicle locks are held, cannot apply update".to_owned(),
@@ -173,7 +169,7 @@ mod tests {
 
     #[async_trait]
     impl LockStateProvider for MockLockProvider {
-        async fn vehicle_lock_owner_sub(&self) -> Option<String> {
+        async fn vehicle_lock_owner_id(&self) -> Option<String> {
             self.owner.clone()
         }
 
@@ -313,8 +309,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_apply_allowed_succeeds_when_vehicle_lock_is_held() {
+    async fn check_apply_allowed_refuses_a_lock_held_by_someone_else() {
+        // Previously any held vehicle lock admitted the execution, whoever owned
+        // it. The caller must now be the owner.
         let (handler, lock_provider) = make_handler(Some("user-b"), false, false);
+        let result = handler
+            .check_apply_allowed(
+                &security_context("tester"),
+                &lock_provider,
+                &UpdateCollections::<LocalCollection>::default(),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(RuntimeUpdateError::NoLock(_))),
+            "a lock owned by another identity must not admit an execution"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_apply_allowed_succeeds_for_the_lock_owner() {
+        let (handler, lock_provider) = make_handler(Some("tester"), false, false);
         let result = handler
             .check_apply_allowed(
                 &security_context("tester"),
@@ -326,8 +340,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unrecognized_security_context_is_refused_rather_than_anonymous() {
+        // A handle that is not the configured plugin type means the request never
+        // passed the security middleware.
+        let (handler, lock_provider) = make_handler(Some("tester"), false, false);
+        let foreign: DynamicPlugin = Box::new(());
+        let result = handler
+            .check_apply_allowed(
+                &foreign,
+                &lock_provider,
+                &UpdateCollections::<LocalCollection>::default(),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "an unrecognized security context must not authorize anything"
+        );
+    }
+
+    #[tokio::test]
     async fn check_apply_allowed_returns_lock_conflict_on_ecu_conflicts() {
-        let (handler, lock_provider) = make_handler(Some("user-a"), true, false);
+        let (handler, lock_provider) = make_handler(Some("tester"), true, false);
         let result = handler
             .check_apply_allowed(
                 &security_context("tester"),
@@ -340,7 +373,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_apply_allowed_returns_lock_conflict_on_fg_conflicts() {
-        let (handler, lock_provider) = make_handler(Some("user-a"), false, true);
+        let (handler, lock_provider) = make_handler(Some("tester"), false, true);
         let result = handler
             .check_apply_allowed(
                 &security_context("tester"),
@@ -356,7 +389,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_apply_allowed_succeeds_when_owner_matches_and_no_conflicts() {
-        let (handler, lock_provider) = make_handler(Some("user-a"), false, false);
+        let (handler, lock_provider) = make_handler(Some("tester"), false, false);
         assert!(
             handler
                 .check_apply_allowed(
@@ -371,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_file_integrity_mdd_fails_on_nonexistent_file() {
-        let (handler, _) = make_handler(Some("user-a"), false, false);
+        let (handler, _) = make_handler(Some("tester"), false, false);
         let path = PathBuf::from("/nonexistent/test.mdd");
         let result = check_file_integrity(&handler, &path).await;
         assert!(result.is_err());
@@ -379,7 +412,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_file_integrity_mdd_fails_on_invalid_data() {
-        let (handler, _) = make_handler(Some("user-a"), false, false);
+        let (handler, _) = make_handler(Some("tester"), false, false);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.mdd");
         std::fs::write(&path, b"not a valid mdd file").unwrap();
@@ -389,7 +422,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_apply_allowed_succeeds_when_pending_and_current_mdd_ecu_names_match() {
-        let (handler, lock_provider) = make_handler(Some("user"), false, false);
+        let (handler, lock_provider) = make_handler(Some("tester"), false, false);
         let dir = tempfile::tempdir().unwrap();
         let storage = LocalStorage::new(dir.path()).unwrap();
 

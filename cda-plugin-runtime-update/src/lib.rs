@@ -149,7 +149,7 @@ pub(crate) mod test_utils {
 
     #[async_trait]
     impl LockStateProvider for MockLockProvider {
-        async fn vehicle_lock_owner_sub(&self) -> Option<String> {
+        async fn vehicle_lock_owner_id(&self) -> Option<String> {
             self.owner.clone()
         }
 
@@ -185,7 +185,7 @@ pub(crate) mod test_utils {
             lock_state_provider: &L,
             _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
         ) -> Result<(), RuntimeUpdateError> {
-            let owner = lock_state_provider.vehicle_lock_owner_sub().await;
+            let owner = lock_state_provider.vehicle_lock_owner_id().await;
             match owner {
                 None => Err(RuntimeUpdateError::NoLock(
                     "No vehicle lock held".to_string(),
