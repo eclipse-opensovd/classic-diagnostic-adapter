@@ -214,9 +214,20 @@ pub trait RuntimeUpdateSecurityPlugin<
     C: Collection + DirectFileAccess + Send + Sync + 'static,
 >: Send + Sync + 'static
 {
-    /// Validates that the caller may mutate the staging area (upload or delete).
+    /// Validates that the caller may change update state at all.
     ///
-    /// Called by the plugin before any file mutation.
+    /// Called before any file mutation (upload, delete), and also as the
+    /// admission check for an execution, *before*
+    /// [`check_apply_allowed`](Self::check_apply_allowed) and before the plugin
+    /// acquires any resource. Starting an execution takes the vehicle transport
+    /// offline and installs a process-wide HTTP restriction, so a caller who
+    /// cannot pass this check must be rejected before either happens -
+    /// otherwise being refused is itself a denial of service.
+    ///
+    /// Implementations must therefore keep this cheap and free of side effects:
+    /// identity and lock ownership, not file parsing. Expensive content checks
+    /// belong in [`check_apply_allowed`](Self::check_apply_allowed), which runs
+    /// once, under those resources.
     ///
     /// # Errors
     /// Return an appropriate [`RuntimeUpdateError`] to deny the mutation.

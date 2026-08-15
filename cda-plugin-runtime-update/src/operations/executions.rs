@@ -72,6 +72,24 @@ where
     T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
     L: LockStateProvider,
 {
+    // Authorize before anything observable happens.
+    //
+    // `acquire_execution_guards` takes the vehicle transport offline and installs
+    // a process-wide HTTP restriction. Running it first would mean any caller who
+    // merely authenticates can force a real transport disable/re-enable cycle and
+    // a burst of 409s on every other route, purely by being refused a moment
+    // later - a denial of service available to the least privileged caller in the
+    // system.
+    //
+    // This is the cheap, side-effect-free half of the decision: identity and
+    // vehicle-lock ownership, no file I/O. The authoritative `check_apply_allowed`
+    // still runs below, under the guards, where lock state and staged content
+    // cannot change underneath it.
+    params
+        .security_handler
+        .check_mutation_allowed(security, params.lock_state_provider)
+        .await?;
+
     let (protection, disable_lease) = acquire_execution_guards(params).await?;
     let collections = match load_update_collections(&**params.storage).await {
         Ok(collections) => collections,
@@ -877,6 +895,143 @@ mod tests {
         assert!(
             matches!(status, ExecutionStatus::Failed(_)),
             "expected Failed after the execution task panicked, got: {status:?}"
+        );
+    }
+
+    /// Transport double that counts transitions, so a test can prove a refused
+    /// execution never touched the vehicle at all.
+    struct CountingTransport {
+        disables: std::sync::atomic::AtomicUsize,
+        state: tokio::sync::Mutex<TransportState>,
+    }
+
+    impl CountingTransport {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                disables: std::sync::atomic::AtomicUsize::new(0),
+                state: tokio::sync::Mutex::new(TransportState::Enabled),
+            })
+        }
+
+        fn disable_count(&self) -> usize {
+            self.disables.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TransportControl for CountingTransport {
+        async fn enable(&self) -> Result<(), CommControlError> {
+            *self.state.lock().await = TransportState::Enabled;
+            Ok(())
+        }
+
+        async fn disable(&self) -> Result<(), CommControlError> {
+            self.disables
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            *self.state.lock().await = TransportState::Disabled;
+            Ok(())
+        }
+
+        async fn state(&self) -> TransportState {
+            *self.state.lock().await
+        }
+    }
+
+    /// Stands in for a request that authenticates but is not the vehicle-lock
+    /// owner: the policy refuses it, and nothing expensive should have happened.
+    struct DenyingSecurityHandler;
+
+    #[async_trait::async_trait]
+    impl<L, C> cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
+        for DenyingSecurityHandler
+    where
+        L: cda_interfaces::runtime_update_api::LockStateProvider,
+        C: cda_interfaces::storage_api::Collection
+            + cda_interfaces::storage_api::DirectFileAccess
+            + Send
+            + Sync
+            + 'static,
+    {
+        async fn check_mutation_allowed(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+            _lock_state_provider: &L,
+        ) -> Result<(), RuntimeUpdateError> {
+            Err(RuntimeUpdateError::NoLock("not the lock owner".to_owned()))
+        }
+
+        async fn check_apply_allowed(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+            _lock_state_provider: &L,
+            _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
+        ) -> Result<(), RuntimeUpdateError> {
+            panic!("check_apply_allowed must not run for a caller that failed the admission check")
+        }
+
+        async fn check_file_integrity(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<(), cda_interfaces::runtime_update_api::VerificationError> {
+            Ok(())
+        }
+    }
+
+    /// An unauthorized execution must be refused before anything observable
+    /// happens.
+    ///
+    /// The guards an execution takes are not bookkeeping: disabling the transport
+    /// drops vehicle communication, and the HTTP protection returns 409 on every
+    /// non-exempt route. Acquiring them before deciding whether the caller is
+    /// allowed hands a denial of service to the least privileged caller that can
+    /// authenticate, since being refused is what triggers the cycle.
+    #[tokio::test]
+    async fn a_refused_execution_never_disables_the_transport() {
+        let f = make_fixture();
+        let transport = CountingTransport::new();
+        let communication_disable =
+            communication_disable_for_test(Arc::<CountingTransport>::clone(&transport), true);
+        let denying = Arc::new(DenyingSecurityHandler);
+        let communication_access = enabled_communication_access_for_test();
+        let params = super::ExecutionParams {
+            communication_access: &communication_access,
+            storage: &f.storage,
+            security_handler: &denying,
+            reload_handler: &f.reload_handler,
+            executions: &f.executions,
+            communication_disable: &communication_disable,
+            http_protections: &f.http_restriction_manager,
+            update_exempt_routes: &[],
+            update_retry_after: Duration::from_secs(1),
+            post_update_mode: PostUpdateCommunicationMode::Enabled,
+            mdd_decompress: false,
+            inspector: &f.inspector,
+            lock_state_provider: &f.lock_provider,
+        };
+
+        let result = super::start_execution(
+            &params,
+            ExecutionMode::Apply,
+            &crate::test_utils::test_security(),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(RuntimeUpdateError::NoLock(_))),
+            "an unauthorized caller must be refused, got: {result:?}"
+        );
+        assert_eq!(
+            transport.disable_count(),
+            0,
+            "a refused execution must not take the vehicle transport offline"
+        );
+        assert!(
+            !f.http_restriction_manager.is_active(),
+            "a refused execution must not install the process-wide HTTP restriction"
+        );
+        assert!(
+            f.executions.read().await.is_empty(),
+            "a refused execution must not be registered"
         );
     }
 }
