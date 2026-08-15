@@ -19,3 +19,5 @@ Plugins
    02_diagnostic_database_update
    03_dlt_logging
    04_vehicle_topology
+   04_oem_integration
+   05_communication_lifecycle
