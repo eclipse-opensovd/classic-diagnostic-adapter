@@ -53,6 +53,28 @@ jobs:
         uses: eclipse-opensovd/dlt-tracing-lib/.github/actions/setup-dlt@main
       - name: Build all features
         run: cargo build --locked --verbose --all-features
+      # The examples stand in for external OEM integrations. They are workspace
+      # members but not default members, so the step above does not build them -
+      # which is what lets this one report a useful error instead of being
+      # shadowed by a generic workspace build failure.
+      - name: Check OEM extension-point examples still build
+        run: |
+          if ! cargo build --locked --all-features \
+            -p example-oem-routes \
+            -p example-oem-security \
+            -p example-oem-storage \
+            -p example-oem-update-policy \
+            -p example-oem-communication \
+            -p example-oem-health; then
+            echo ""
+            echo "::error::An example under examples/ no longer builds. Each one consumes a \
+          public CDA extension point (SOVD routes, security plugin, storage backend, \
+          runtime-update policy, communication plugin, health provider) exactly as an OEM \
+          integration does, so a failure here means this change breaks those integrations. \
+          Either keep the public API compatible, or update the example and note the break in \
+          the PR description."
+            exit 1
+          fi
       - name: Verify generated files are up to date
         run: |
           if ! git diff --exit-code cda-database/src/flatbuf/diagnostic_description.rs cda-database/src/proto/fileformat.rs; then

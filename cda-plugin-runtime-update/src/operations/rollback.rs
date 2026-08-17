@@ -12,7 +12,7 @@
  */
 
 use cda_interfaces::{
-    runtime_update_api::{RuntimeReloaderPlugin, RuntimeUpdateError},
+    runtime_update_api::{RuntimeFileInspector, RuntimeReloaderPlugin, RuntimeUpdateError},
     storage_api::{Collection, CollectionName, Storage, Transaction},
 };
 
@@ -38,6 +38,7 @@ async fn restore_from_backup<S: Storage, C: Collection>(
 pub async fn execute_rollback<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
     storage: &S,
     reload_handler: &R,
+    inspector: &dyn RuntimeFileInspector,
 ) -> Result<(), RuntimeUpdateError> {
     let mdd_backup_col = storage
         .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
@@ -67,7 +68,11 @@ pub async fn execute_rollback<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
     tx.commit().await?;
 
     if !mdd_backup_empty {
-        reload_database_if_present(storage, reload_handler, false).await?;
+        // Deliberately no recovery on failure, unlike `execute_apply`. A rollback is
+        // already the recovery: the only state to "roll back" to would be the update
+        // that prompted it, so retrying towards it would undo the operator's intent.
+        // The error surfaces and the execution is marked Failed.
+        reload_database_if_present(storage, reload_handler, false, inspector).await?;
     }
 
     Ok(())
@@ -105,9 +110,13 @@ mod tests {
         )
         .await;
 
-        execute_rollback(&storage, &NoopReloadHandler)
-            .await
-            .unwrap();
+        execute_rollback(
+            &storage,
+            &NoopReloadHandler,
+            &*crate::test_utils::test_inspector(),
+        )
+        .await
+        .unwrap();
 
         let db_col = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
@@ -141,9 +150,13 @@ mod tests {
         )
         .await;
 
-        execute_rollback(&storage, &NoopReloadHandler)
-            .await
-            .unwrap();
+        execute_rollback(
+            &storage,
+            &NoopReloadHandler,
+            &*crate::test_utils::test_inspector(),
+        )
+        .await
+        .unwrap();
 
         let result = storage
             .get_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
@@ -165,9 +178,13 @@ mod tests {
         )
         .await;
 
-        execute_rollback(&storage, &NoopReloadHandler)
-            .await
-            .unwrap();
+        execute_rollback(
+            &storage,
+            &NoopReloadHandler,
+            &*crate::test_utils::test_inspector(),
+        )
+        .await
+        .unwrap();
 
         let backup_col = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
@@ -180,7 +197,12 @@ mod tests {
     async fn rollback_with_empty_backup_returns_no_backup_error() {
         let (storage, _dir) = make_storage();
 
-        let result = execute_rollback(&storage, &NoopReloadHandler).await;
+        let result = execute_rollback(
+            &storage,
+            &NoopReloadHandler,
+            &*crate::test_utils::test_inspector(),
+        )
+        .await;
         assert!(
             matches!(result, Err(RuntimeUpdateError::NoBackup)),
             "expected NoBackup, got: {result:?}"
@@ -199,7 +221,9 @@ mod tests {
         .await;
 
         let handler = RecordingReloadHandler::new();
-        execute_rollback(&storage, &handler).await.unwrap();
+        execute_rollback(&storage, &handler, &*crate::test_utils::test_inspector())
+            .await
+            .unwrap();
 
         let calls = handler.reload_calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "reload_databases should be called once");
@@ -209,10 +233,42 @@ mod tests {
     async fn rollback_no_backup_returns_error() {
         let (storage, _dir) = make_storage();
 
-        let result = execute_rollback(&storage, &NoopReloadHandler).await;
+        let result = execute_rollback(
+            &storage,
+            &NoopReloadHandler,
+            &*crate::test_utils::test_inspector(),
+        )
+        .await;
         assert!(
             matches!(result, Err(RuntimeUpdateError::NoBackup)),
             "expected NoBackup when both backup collections are empty, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_reload_during_rollback_surfaces_without_further_recovery() {
+        // Deliberate asymmetry with `execute_apply`, which retries towards the
+        // backup on a failed reload. A rollback is already the recovery, so there
+        // is nothing safe to retry towards: the failure must surface.
+        let (storage, _dir) = make_storage();
+
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabaseBackup,
+            &[("ecu1.mdd", b"backup_data")],
+        )
+        .await;
+
+        let result = execute_rollback(
+            &storage,
+            &crate::test_utils::FailingReloadHandler,
+            &*crate::test_utils::test_inspector(),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "a failed reload during rollback must surface as an error"
         );
     }
 }

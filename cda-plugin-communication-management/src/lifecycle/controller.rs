@@ -1053,7 +1053,7 @@ pub mod test_utils {
 
     use crate::lifecycle::{
         CommunicationHandle,
-        disable::{DisableError, DisableLease, DisableReason},
+        disable::{DisableError, DisableReason},
         state::CommunicationStateStore,
         worker,
     };
@@ -1173,8 +1173,14 @@ pub mod test_utils {
 
         #[async_trait::async_trait]
         impl crate::lifecycle::disable::DisableCommunication for Disable {
-            async fn disable(&self, reason: DisableReason) -> Result<DisableLease, DisableError> {
-                self.0.disable(reason).await
+            async fn disable(
+                &self,
+                reason: DisableReason,
+            ) -> Result<Box<dyn cda_interfaces::communication_control::DisableGuard>, DisableError>
+            {
+                self.0.disable(reason).await.map(|lease| {
+                    Box::new(lease) as Box<dyn cda_interfaces::communication_control::DisableGuard>
+                })
             }
         }
 

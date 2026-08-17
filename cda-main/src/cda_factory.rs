@@ -25,14 +25,14 @@ use cda_interfaces::{
 use cda_plugin_security::SecurityPlugin;
 use cda_transport_router::DiagnosticTransportRouter;
 
-use crate::{UdsManagerType, config::configfile::Configuration};
+use crate::{config::configfile::Configuration, vehicle::UdsManagerType};
 
 /// Concrete [`VehicleComponentFactory`] that delegates to
-/// [`crate::create_vehicle_components`].
+/// [`crate::vehicle::create_vehicle_components`].
 ///
 /// Used by [`cda_plugin_runtime_update::default_runtime_reloader_plugin::DefaultRuntimeReloaderPlugin`]
 /// and called every time the diagnostic databases are reloaded.
-pub struct CdaMainVehicleFactory<SP>
+pub(crate) struct CdaMainVehicleFactory<SP>
 where
     SP: SecurityPlugin,
 {
@@ -46,7 +46,7 @@ where
     SP: SecurityPlugin,
 {
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
         communication_access: Arc<dyn CommunicationAccess>,
     ) -> Self {
@@ -82,7 +82,7 @@ where
         >,
         ReloadError,
     > {
-        let crate_components = crate::create_vehicle_components::<SP>(
+        let crate_components = crate::vehicle::create_vehicle_components::<SP>(
             config,
             mdd_paths,
             self.health_providers.as_ref(),

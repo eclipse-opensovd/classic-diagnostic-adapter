@@ -137,9 +137,9 @@ impl HttpProtectionConfig {
     }
 }
 
-impl cda_interfaces::config::ConfigSanity for HttpProtectionConfig {
-    fn validate_sanity(&self) -> Result<(), cda_interfaces::config::ConfigSanityError> {
-        use cda_interfaces::config::ConfigSanityError;
+impl crate::config::ConfigSanity for HttpProtectionConfig {
+    fn validate_sanity(&self) -> Result<(), crate::config::ConfigSanityError> {
+        use crate::config::ConfigSanityError;
 
         if !self.status.is_client_error() && !self.status.is_server_error() {
             return Err(ConfigSanityError::InvalidValue {
@@ -188,9 +188,8 @@ pub(crate) fn http_path_prefix_matches(path: &str, prefix: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::config::ConfigSanity;
-
     use super::*;
+    use crate::config::ConfigSanity;
 
     #[test]
     fn custom_reason_displays_its_value() {

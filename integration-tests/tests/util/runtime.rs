@@ -391,6 +391,7 @@ fn base_test_config(
         },
         communication: CommunicationSettings::default(),
         strict: StrictConfig::default(),
+        oem: serde_json::Map::new(),
     })
 }
 
@@ -518,10 +519,9 @@ pub(crate) fn start_cda(config: Configuration) {
         opensovd_cda_lib::Setup::<DefaultSecurityPluginData, DefaultSecurityPlugin>::new()
             .with_existing_tracing()
             .with_update_plugin(opensovd_cda_lib::update::update_plugin_fn(
-                |infra: opensovd_cda_lib::setup::CdaRuntime<DefaultSecurityPluginData>| async {
+                |infra: opensovd_cda_lib::setup::UpdatePluginContext| async {
                     opensovd_cda_lib::update::create_default_update_plugin::<
                         DefaultSecurityPluginData,
-                        DefaultSecurityPlugin,
                     >(infra)
                     .await
                 },
@@ -533,11 +533,14 @@ pub(crate) fn start_cda(config: Configuration) {
 ///
 /// The shutdown sender is stored in `CDA_SHUTDOWN` so that [`stop_cda`] and
 /// [`restart_cda`] work regardless of which setup was used.
-pub(crate) fn start_cda_with_setup<UPB>(
+pub(crate) fn start_cda_with_setup<UPB, CPB>(
     config: Configuration,
-    setup: opensovd_cda_lib::Setup<DefaultSecurityPluginData, DefaultSecurityPlugin, UPB>,
+    setup: opensovd_cda_lib::Setup<DefaultSecurityPluginData, DefaultSecurityPlugin, UPB, CPB>,
 ) where
-    UPB: UpdatePluginBuilder<DefaultSecurityPluginData> + Send + 'static,
+    UPB: UpdatePluginBuilder + Send + 'static,
+    // Generic over the communication builder too, so a test can inject one. With
+    // `CPB` elided this helper could only ever run the default.
+    CPB: cda_plugin_communication_management::plugin::CommunicationPluginBuilder + Send + 'static,
 {
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
     let setup = setup.with_shutdown_signal(cda_interfaces::shutdown_signal(async move {
@@ -1074,11 +1077,11 @@ async fn cda_is_online(cfg: &ServerConfig) -> bool {
         .is_ok_and(|response| response.status() == StatusCode::NO_CONTENT)
 }
 
-async fn mark_cda_started(config: &Configuration) {
+pub(crate) async fn mark_cda_started(config: &Configuration) {
     *RUNNING_CDA_COMMUNICATION.lock().await = Some(config.communication.clone());
 }
 
-async fn mark_cda_stopped() {
+pub(crate) async fn mark_cda_stopped() {
     *RUNNING_CDA_COMMUNICATION.lock().await = None;
 }
 
@@ -1132,6 +1135,20 @@ fn compose_profiles() -> &'static str {
 pub(crate) fn skip_for_can(test_name: &str, reason: &str) -> bool {
     if use_can() {
         eprintln!("[can] skipping {test_name}: {reason}");
+        return true;
+    }
+    false
+}
+
+/// Guard for tests that must run the CDA in-process; mirrors [`skip_for_can`].
+///
+/// A test that injects a custom [`Setup`](opensovd_cda_lib::Setup) - an OEM
+/// extension, a replacement plugin - has to build the CDA itself. In docker mode
+/// the CDA is a container running the stock `opensovd-cda` binary, so there is
+/// nothing to inject into and the test cannot express what it is testing.
+pub(crate) fn skip_without_in_process_cda(test_name: &str, reason: &str) -> bool {
+    if use_docker() {
+        eprintln!("[docker] skipping {test_name}: {reason}");
         return true;
     }
     false

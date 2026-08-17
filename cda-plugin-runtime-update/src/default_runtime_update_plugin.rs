@@ -15,19 +15,52 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    HashMap,
-    communication_control::{CommunicationAccess, PostUpdateCommunicationMode},
+    DynamicPlugin, HashMap,
+    communication_control::{
+        CommunicationAccess, DisableCommunication, PostUpdateCommunicationMode,
+    },
+    http_protection::registry::{HttpProtectionRegistry, HttpRouteMatcher},
     runtime_update_api::{
-        BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider, RuntimeFilesQuery,
-        RuntimeFilesUpdatePlugin, RuntimeReloaderPlugin, RuntimeUpdateError,
-        RuntimeUpdateSecurityPlugin, UpdateExecution, UploadFile,
+        ExecutionMode, FileListOptions, LockStateProvider, RuntimeFile, RuntimeFileCatalog,
+        RuntimeFileInspector, RuntimeFileStore, RuntimeReloaderPlugin, RuntimeUpdateError,
+        RuntimeUpdateExecutor, RuntimeUpdateSecurityPlugin, UpdateExecution, UploadFile,
     },
     storage_api::Storage,
 };
-use cda_plugin_communication_management::{
-    http_protection::registry::HttpProtectionRegistry, lifecycle::disable::DisableCommunication,
-};
 use tokio::sync::RwLock;
+
+/// Everything [`DefaultRuntimeUpdatePlugin`] needs, as one value.
+///
+/// A struct rather than a long positional argument list: the plugin takes a dozen
+/// collaborators, several of them sharing a type, which makes positional
+/// construction easy to get silently wrong.
+pub struct RuntimeUpdatePluginParts<Store, UpdateSecurityPlugin, Lock> {
+    /// Persistent storage backend for update files.
+    pub storage: Arc<Store>,
+    /// Notified after apply/rollback to hot-reload databases.
+    pub reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
+    /// Validates authorization and file integrity.
+    pub security_handler: Arc<UpdateSecurityPlugin>,
+    /// Provides lock state for security validation.
+    pub lock_provider: Arc<Lock>,
+    /// Format-specific file reads, so the plugin stays format-agnostic.
+    pub file_inspector: Arc<dyn RuntimeFileInspector>,
+    /// Whether to rewrite database files uncompressed after an apply.
+    pub decompress_after_apply: bool,
+    /// Used to acquire exclusive transport disable ownership.
+    pub communication_disable: Arc<dyn DisableCommunication>,
+    /// Used to request the configured post-update communication state, subject
+    /// to `init_mode`.
+    pub communication_access: Arc<dyn CommunicationAccess>,
+    /// Registry the update installs its HTTP protection into.
+    pub http_protections: HttpProtectionRegistry,
+    /// Routes that stay reachable while the update holds its protection.
+    pub update_exempt_routes: Vec<HttpRouteMatcher>,
+    /// `Retry-After` hint while an update owns the protection.
+    pub update_retry_after: Duration,
+    /// Communication state to restore after an update.
+    pub post_update_mode: PostUpdateCommunicationMode,
+}
 
 /// Default implementation of [`RuntimeFilesUpdatePlugin`] with injectable security and storage.
 pub struct DefaultRuntimeUpdatePlugin<
@@ -45,13 +78,16 @@ pub struct DefaultRuntimeUpdatePlugin<
     lock_provider: Arc<Lock>,
     /// Tracking map for in-progress executions: `exec_id` -> `DbUpdateExecution`
     executions: Arc<RwLock<HashMap<String, UpdateExecution>>>,
-    /// If true, call `update_mdd_uncompressed()` after Apply for each MDD file
+    /// If true, rewrite database files uncompressed after Apply
     mdd_decompress: bool,
+    /// Format-specific reads (validate, revision, ECU name, decompress)
+    file_inspector: Arc<dyn RuntimeFileInspector>,
     communication_disable: Arc<dyn DisableCommunication>,
     /// Used to request the configured post-update communication state. Requests
     /// only - `init_mode` still decides whether one is honoured.
     communication_access: Arc<dyn CommunicationAccess>,
     http_protections: HttpProtectionRegistry,
+    update_exempt_routes: Vec<HttpRouteMatcher>,
     update_retry_after: Duration,
     post_update_mode: PostUpdateCommunicationMode,
 }
@@ -62,48 +98,36 @@ impl<
     Lock: LockStateProvider,
 > DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
 {
-    /// Creates a new plugin instance.
+    /// Asks the security handler whether this caller may mutate the staging area.
     ///
-    /// # Arguments
-    /// * `storage` - Persistent storage backend for update files
-    /// * `reload_handler` - Notified after apply/rollback to hot-reload databases
-    /// * `security_handler` - Validates authorization and file integrity
-    /// * `lock_provider` - Provides lock state for security validation
-    /// * `mdd_decompress` - Whether to decompress MDD files after apply
-    /// * `communication_disable` - Used to acquire exclusive transport disable ownership
-    /// * `communication_access` - Used to request the configured post-update
-    ///   communication state, subject to `init_mode`
-    /// * `update_retry_after` - Retry-After duration while an update owns protection
-    /// * `post_update_mode` - Communication state to restore after an update
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "Constructor requires many dependencies for plugin initialization, adding a \
-                  struct of this is pointless, as it is only used once."
-    )]
-    pub fn new(
-        storage: Arc<Store>,
-        reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
-        security_handler: Arc<UpdateSecurityPlugin>,
-        lock_provider: Arc<Lock>,
-        mdd_decompress: bool,
-        communication_disable: Arc<dyn DisableCommunication>,
-        communication_access: Arc<dyn CommunicationAccess>,
-        http_protections: HttpProtectionRegistry,
-        update_retry_after: Duration,
-        post_update_mode: PostUpdateCommunicationMode,
-    ) -> Self {
+    /// Every mutating entry point goes through here, so authorization is decided
+    /// in one place by the configured policy rather than by the HTTP layer.
+    async fn authorize_mutation(&self, security: &DynamicPlugin) -> Result<(), RuntimeUpdateError>
+    where
+        UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    {
+        self.security_handler
+            .check_mutation_allowed(security, &self.lock_provider)
+            .await
+    }
+
+    /// Creates a new plugin instance from its parts.
+    #[must_use]
+    pub fn new(parts: RuntimeUpdatePluginParts<Store, UpdateSecurityPlugin, Lock>) -> Self {
         Self {
-            storage,
-            reloader_plugin,
-            security_handler,
-            lock_provider,
+            storage: parts.storage,
+            reloader_plugin: parts.reloader_plugin,
+            security_handler: parts.security_handler,
+            lock_provider: parts.lock_provider,
             executions: Arc::new(RwLock::new(HashMap::default())),
-            mdd_decompress,
-            communication_disable,
-            communication_access,
-            http_protections,
-            update_retry_after,
-            post_update_mode,
+            mdd_decompress: parts.decompress_after_apply,
+            file_inspector: parts.file_inspector,
+            communication_disable: parts.communication_disable,
+            communication_access: parts.communication_access,
+            http_protections: parts.http_protections,
+            update_exempt_routes: parts.update_exempt_routes,
+            update_retry_after: parts.update_retry_after,
+            post_update_mode: parts.post_update_mode,
         }
     }
 }
@@ -113,49 +137,89 @@ impl<
     Store: Storage + Send + Sync + 'static,
     UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
     Lock: LockStateProvider,
-> RuntimeFilesUpdatePlugin for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
+> RuntimeFileCatalog for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
 {
     async fn list_current(
         &self,
-        query: &RuntimeFilesQuery,
-    ) -> Result<BulkDataList, RuntimeUpdateError> {
-        crate::storage::list_current_files(&*self.storage, query).await
+        options: FileListOptions,
+    ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
+        crate::storage::list_current_files(&*self.storage, options, &*self.file_inspector).await
     }
 
     async fn list_nextupdate(
         &self,
-        query: &RuntimeFilesQuery,
-    ) -> Result<BulkDataList, RuntimeUpdateError> {
-        crate::storage::compute_nextupdate_state(&*self.storage, query).await
+        options: FileListOptions,
+    ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
+        crate::storage::compute_nextupdate_state(&*self.storage, options, &*self.file_inspector)
+            .await
     }
 
     async fn list_backup(
         &self,
-        query: &RuntimeFilesQuery,
-    ) -> Result<BulkDataList, RuntimeUpdateError> {
-        crate::storage::list_backup_files(&*self.storage, query).await
+        options: FileListOptions,
+    ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
+        crate::storage::list_backup_files(&*self.storage, options, &*self.file_inspector).await
+    }
+}
+
+#[async_trait]
+impl<
+    Store: Storage + Send + Sync + 'static,
+    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    Lock: LockStateProvider,
+> RuntimeFileStore for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
+{
+    async fn authorize_mutation(&self, security: &DynamicPlugin) -> Result<(), RuntimeUpdateError> {
+        DefaultRuntimeUpdatePlugin::authorize_mutation(self, security).await
     }
 
     async fn upload(
         &self,
         files: Vec<UploadFile>,
-    ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
+        security: &DynamicPlugin,
+    ) -> Result<Vec<String>, RuntimeUpdateError> {
+        self.authorize_mutation(security).await?;
         crate::storage::upload_files(&*self.storage, &*self.security_handler, files).await
     }
 
-    async fn delete_nextupdate(&self) -> Result<Vec<String>, RuntimeUpdateError> {
+    async fn delete_nextupdate(
+        &self,
+        security: &DynamicPlugin,
+    ) -> Result<Vec<String>, RuntimeUpdateError> {
+        self.authorize_mutation(security).await?;
         crate::storage::delete_all_nextupdate(&*self.storage).await
     }
 
-    async fn delete_nextupdate_by_id(&self, file_id: &str) -> Result<(), RuntimeUpdateError> {
+    async fn delete_nextupdate_by_id(
+        &self,
+        file_id: &str,
+        security: &DynamicPlugin,
+    ) -> Result<(), RuntimeUpdateError> {
+        self.authorize_mutation(security).await?;
         crate::storage::delete_nextupdate_file(&*self.storage, file_id).await
     }
 
-    async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
+    async fn delete_backup(
+        &self,
+        security: &DynamicPlugin,
+    ) -> Result<Vec<String>, RuntimeUpdateError> {
+        self.authorize_mutation(security).await?;
         crate::storage::delete_all_backup(&*self.storage).await
     }
+}
 
-    async fn start_execution(&self, mode: ExecutionMode) -> Result<String, RuntimeUpdateError> {
+#[async_trait]
+impl<
+    Store: Storage + Send + Sync + 'static,
+    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    Lock: LockStateProvider,
+> RuntimeUpdateExecutor for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
+{
+    async fn start_execution(
+        &self,
+        mode: ExecutionMode,
+        security: &DynamicPlugin,
+    ) -> Result<String, RuntimeUpdateError> {
         let params = crate::operations::executions::ExecutionParams {
             storage: &self.storage,
             security_handler: &self.security_handler,
@@ -164,20 +228,22 @@ impl<
             communication_disable: &self.communication_disable,
             communication_access: &self.communication_access,
             http_protections: &self.http_protections,
+            update_exempt_routes: &self.update_exempt_routes,
             update_retry_after: self.update_retry_after,
             post_update_mode: self.post_update_mode.clone(),
             mdd_decompress: self.mdd_decompress,
+            inspector: &self.file_inspector,
             lock_state_provider: &*self.lock_provider,
         };
-        crate::operations::executions::start_execution(&params, mode).await
-    }
-
-    async fn get_execution_status(&self, execution_id: &str) -> Option<UpdateExecution> {
-        crate::operations::executions::get_execution_status(&self.executions, execution_id).await
+        crate::operations::executions::start_execution(&params, mode, security).await
     }
 
     async fn list_executions(&self) -> Vec<UpdateExecution> {
         self.executions.read().await.values().cloned().collect()
+    }
+
+    async fn get_execution_status(&self, execution_id: &str) -> Option<UpdateExecution> {
+        crate::operations::executions::get_execution_status(&self.executions, execution_id).await
     }
 }
 
@@ -186,23 +252,24 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use cda_interfaces::{
-        communication_control::{CommunicationState, PostUpdateCommunicationMode},
+        communication_control::{
+            CommunicationState, DisableCommunication, DisableReason, PostUpdateCommunicationMode,
+        },
+        http_protection::registry::HttpProtectionRegistry,
         runtime_update_api::{
-            ExecutionMode, HashAlgorithm, RuntimeFilesQuery, RuntimeFilesUpdatePlugin,
-            RuntimeUpdateError,
+            ExecutionMode, FileListOptions, HashAlgorithm, RuntimeFileCatalog, RuntimeFileStore,
+            RuntimeUpdateError, RuntimeUpdateExecutor,
         },
         storage_api::CollectionName,
     };
-    use cda_plugin_communication_management::{
-        http_protection::registry::HttpProtectionRegistry,
-        lifecycle::{
-            communication_disable_for_test,
-            disable::{DisableCommunication, DisableReason},
-            enabled_communication_access_for_test,
-        },
+    // Test-only: the concrete lifecycle doubles live in the communication plugin,
+    // which is a dev-dependency here.
+    use cda_plugin_communication_management::lifecycle::{
+        communication_disable_for_test, enabled_communication_access_for_test,
     };
     use cda_storage::LocalStorage;
 
+    use super::RuntimeUpdatePluginParts;
     use crate::{
         DefaultRuntimeUpdatePlugin,
         test_utils::{
@@ -230,21 +297,23 @@ mod tests {
         let http_protections = HttpProtectionRegistry::new();
         let communication_disable = communication_disable_for_test(transport, false);
 
-        let plugin = DefaultRuntimeUpdatePlugin::new(
-            Arc::new(storage),
-            Arc::new(NoopReloadHandler),
-            Arc::new(MockSecurityHandler::new()),
-            Arc::new(MockLockProvider {
+        let plugin = DefaultRuntimeUpdatePlugin::new(RuntimeUpdatePluginParts {
+            storage: Arc::new(storage),
+            reloader_plugin: Arc::new(NoopReloadHandler),
+            security_handler: Arc::new(MockSecurityHandler::new()),
+            lock_provider: Arc::new(MockLockProvider {
                 owner: owner.map(ToOwned::to_owned),
                 has_conflicts,
             }),
-            false,
-            Arc::clone(&communication_disable),
-            enabled_communication_access_for_test(),
+            file_inspector: crate::test_utils::test_inspector(),
+            decompress_after_apply: false,
+            communication_disable: Arc::clone(&communication_disable),
+            communication_access: enabled_communication_access_for_test(),
             http_protections,
-            Duration::from_secs(1),
-            PostUpdateCommunicationMode::Enabled,
-        );
+            update_exempt_routes: Vec::new(),
+            update_retry_after: Duration::from_secs(1),
+            post_update_mode: PostUpdateCommunicationMode::Enabled,
+        });
         (plugin, communication_disable)
     }
 
@@ -252,10 +321,10 @@ mod tests {
     async fn get_current_empty_collection_returns_empty_items() {
         let (storage, _dir) = make_storage();
         let plugin = make_plugin(storage);
-        let query = RuntimeFilesQuery::default();
+        let options = FileListOptions::default();
 
-        let result = plugin.list_current(&query).await.unwrap();
-        assert!(result.items.is_empty());
+        let result = plugin.list_current(options).await.unwrap();
+        assert!(result.is_empty());
     }
 
     #[tokio::test]
@@ -277,18 +346,21 @@ mod tests {
         .await;
         let plugin = make_plugin(storage);
 
-        let query = RuntimeFilesQuery {
-            include_file_size: true,
+        let options = FileListOptions {
+            include_size: true,
             include_hash: Some(HashAlgorithm::Sha256),
-            ..Default::default()
+            include_revision: true,
         };
-        let result = plugin.list_current(&query).await.unwrap();
+        let result = plugin.list_current(options).await.unwrap();
 
-        assert_eq!(result.items.len(), 2);
-        for item in &result.items {
+        assert_eq!(result.len(), 2);
+        for item in &result {
             assert!(item.size.is_some());
             assert!(item.hash.is_some());
-            assert_eq!(item.hash_algorithm, Some(HashAlgorithm::Sha256));
+            assert_eq!(
+                item.hash.as_ref().map(|h| h.algorithm),
+                Some(HashAlgorithm::Sha256)
+            );
         }
     }
 
@@ -318,20 +390,17 @@ mod tests {
         .await;
         let plugin = make_plugin(storage);
 
-        let query = RuntimeFilesQuery {
-            include_file_size: true,
-            ..Default::default()
+        let options = FileListOptions {
+            include_size: true,
+            include_hash: Some(HashAlgorithm::Sha256),
+            include_revision: true,
         };
-        let result = plugin.list_nextupdate(&query).await.unwrap();
+        let result = plugin.list_nextupdate(options).await.unwrap();
 
-        assert_eq!(result.items.len(), 2, "{:#?}", result.items);
-        let existing = result
-            .items
-            .iter()
-            .find(|i| i.id == "existing.mdd")
-            .unwrap();
+        assert_eq!(result.len(), 2, "{result:#?}");
+        let existing = result.iter().find(|i| i.id == "existing.mdd").unwrap();
         assert_eq!(existing.size, Some(11));
-        let added = result.items.iter().find(|i| i.id == "added.mdd").unwrap();
+        let added = result.iter().find(|i| i.id == "added.mdd").unwrap();
         assert_eq!(added.size, Some(9));
     }
 
@@ -339,10 +408,10 @@ mod tests {
     async fn get_backup_empty_returns_empty() {
         let (storage, _dir) = make_storage();
         let plugin = make_plugin(storage);
-        let query = RuntimeFilesQuery::default();
+        let options = FileListOptions::default();
 
-        let result = plugin.list_backup(&query).await.unwrap();
-        assert!(result.items.is_empty());
+        let result = plugin.list_backup(options).await.unwrap();
+        assert!(result.is_empty());
     }
 
     #[tokio::test]
@@ -357,14 +426,15 @@ mod tests {
         .await;
         let plugin = make_plugin(storage);
 
-        let query = RuntimeFilesQuery {
-            include_file_size: true,
-            ..Default::default()
+        let options = FileListOptions {
+            include_size: true,
+            include_hash: Some(HashAlgorithm::Sha256),
+            include_revision: true,
         };
-        let result = plugin.list_backup(&query).await.unwrap();
+        let result = plugin.list_backup(options).await.unwrap();
 
-        assert_eq!(result.items.len(), 1);
-        let Some(item) = result.items.first() else {
+        assert_eq!(result.len(), 1);
+        let Some(item) = result.first() else {
             panic!("expected item")
         };
         assert_eq!(item.id, "old_ecu.mdd");
@@ -383,11 +453,14 @@ mod tests {
         .await;
         let plugin = make_plugin(storage);
 
-        plugin.delete_nextupdate().await.unwrap();
+        plugin
+            .delete_nextupdate(&crate::test_utils::test_security())
+            .await
+            .unwrap();
 
-        let query = RuntimeFilesQuery::default();
-        let result = plugin.list_nextupdate(&query).await.unwrap();
-        assert!(result.items.is_empty());
+        let options = FileListOptions::default();
+        let result = plugin.list_nextupdate(options).await.unwrap();
+        assert!(result.is_empty());
     }
 
     #[tokio::test]
@@ -409,12 +482,15 @@ mod tests {
         .await;
         let plugin = make_plugin(storage);
 
-        plugin.delete_nextupdate_by_id("remove.mdd").await.unwrap();
+        plugin
+            .delete_nextupdate_by_id("remove.mdd", &crate::test_utils::test_security())
+            .await
+            .unwrap();
 
-        let query = RuntimeFilesQuery::default();
-        let result = plugin.list_nextupdate(&query).await.unwrap();
-        assert_eq!(result.items.len(), 1);
-        assert_eq!(result.items.first().unwrap().id, "keep.mdd");
+        let options = FileListOptions::default();
+        let result = plugin.list_nextupdate(options).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.first().unwrap().id, "keep.mdd");
     }
 
     #[tokio::test]
@@ -430,13 +506,13 @@ mod tests {
         let state = make_plugin(storage);
 
         state
-            .delete_nextupdate_by_id("ECU_ALPHA.MDD")
+            .delete_nextupdate_by_id("ECU_ALPHA.MDD", &crate::test_utils::test_security())
             .await
             .unwrap();
 
-        let query = RuntimeFilesQuery::default();
-        let result = state.list_nextupdate(&query).await.unwrap();
-        assert!(result.items.is_empty());
+        let options = FileListOptions::default();
+        let result = state.list_nextupdate(options).await.unwrap();
+        assert!(result.is_empty());
     }
 
     #[tokio::test]
@@ -451,7 +527,9 @@ mod tests {
         .await;
         let state = make_plugin(storage);
 
-        let result = state.delete_nextupdate_by_id("nonexistent.mdd").await;
+        let result = state
+            .delete_nextupdate_by_id("nonexistent.mdd", &crate::test_utils::test_security())
+            .await;
         assert!(matches!(result, Err(RuntimeUpdateError::FileNotFound(_))));
     }
 
@@ -467,11 +545,14 @@ mod tests {
         .await;
         let state = make_plugin(storage);
 
-        state.delete_backup().await.unwrap();
+        state
+            .delete_backup(&crate::test_utils::test_security())
+            .await
+            .unwrap();
 
-        let query = RuntimeFilesQuery::default();
-        let result = state.list_backup(&query).await.unwrap();
-        assert!(result.items.is_empty());
+        let options = FileListOptions::default();
+        let result = state.list_backup(options).await.unwrap();
+        assert!(result.is_empty());
     }
 
     #[tokio::test]
@@ -481,7 +562,9 @@ mod tests {
         let config = make_valid_config();
         let files = make_upload_files(&[("opensovd-cda.toml", &config)]);
 
-        let result = plugin.upload(files).await;
+        let result = plugin
+            .upload(files, &crate::test_utils::test_security())
+            .await;
 
         assert!(matches!(
             result,
@@ -495,7 +578,10 @@ mod tests {
         let files = make_upload_files(&[("bad.txt", b"not an mdd or config")]);
         let plugin = make_plugin(storage);
 
-        let err = plugin.upload(files).await.unwrap_err();
+        let err = plugin
+            .upload(files, &crate::test_utils::test_security())
+            .await
+            .unwrap_err();
 
         assert!(matches!(err, RuntimeUpdateError::InvalidFileType(_)));
     }
@@ -517,7 +603,7 @@ mod tests {
         let plugin = make_plugin(storage);
 
         plugin
-            .start_execution(ExecutionMode::Apply)
+            .start_execution(ExecutionMode::Apply, &crate::test_utils::test_security())
             .await
             .expect("an update must start while communication is deferred");
         assert_eq!(plugin.list_executions().await.len(), 1);
@@ -544,7 +630,9 @@ mod tests {
             .await
             .expect("lease must be granted from a deferred runtime");
 
-        let result = plugin.start_execution(ExecutionMode::Apply).await;
+        let result = plugin
+            .start_execution(ExecutionMode::Apply, &crate::test_utils::test_security())
+            .await;
         assert!(matches!(result, Err(RuntimeUpdateError::ExecutionConflict)));
         assert!(plugin.list_executions().await.is_empty());
 

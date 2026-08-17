@@ -12,6 +12,7 @@
  */
 
 pub mod access;
+pub mod disable;
 pub mod error;
 pub mod operation;
 // Private: `SwappableGateway` inside is minted only via `ComponentSlot::transport_control`,
@@ -22,6 +23,7 @@ use std::time::Duration;
 
 pub use access::{CommunicationAccess, CommunicationError, CommunicationGuard, CommunicationState};
 use async_trait::async_trait;
+pub use disable::{DisableCommunication, DisableError, DisableGuard, DisableReason};
 pub use error::CommControlError;
 pub use operation::{
     ActivationCause, CommunicationOperation, CommunicationOperationFailure, DetectionCause,
@@ -188,7 +190,7 @@ pub enum VariantDetectionMode {
     /// Nothing settles [`VariantState`](crate::ecumanager::VariantState) *on its
     /// own*, so variant-dependent surfaces (resource listings under an ECU,
     /// request/response schemas) report not-ready until detection is triggered
-    /// explicitly -- which stays available in this mode, and is how a runtime
+    /// explicitly - which stays available in this mode, and is how a runtime
     /// configured this way becomes ready. Intended for deployments whose
     /// communication plugin owns the detection decision itself.
     Never,

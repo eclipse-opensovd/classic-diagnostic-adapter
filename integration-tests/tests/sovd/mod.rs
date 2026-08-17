@@ -39,6 +39,7 @@ mod ecu;
 mod faults;
 mod flash_download;
 mod locks;
+mod oem_extensions;
 mod operations;
 mod runtimefiles;
 mod tester_present;

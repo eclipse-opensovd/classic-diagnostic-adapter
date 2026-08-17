@@ -14,20 +14,21 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    HashMap,
-    communication_control::{ActivationCause, CommunicationAccess, PostUpdateCommunicationMode},
+    DynamicPlugin, HashMap,
+    communication_control::{
+        ActivationCause, CommunicationAccess, DisableCommunication, DisableError, DisableGuard,
+        DisableReason, PostUpdateCommunicationMode,
+    },
+    http_protection::registry::{
+        HttpProtectionConfig, HttpProtectionReason, HttpProtectionRegistry, HttpRouteMatcher,
+        HttpStatusCode, OwnedHttpProtection,
+    },
     runtime_update_api::{
-        ExecutionMode, ExecutionStatus, LockStateProvider, RuntimeReloaderPlugin,
-        RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateCollections, UpdateExecution,
+        ExecutionMode, ExecutionStatus, LockStateProvider, RuntimeFileInspector,
+        RuntimeReloaderPlugin, RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateCollections,
+        UpdateExecution,
     },
     storage_api::{CollectionName, Storage},
-};
-use cda_plugin_communication_management::{
-    http_protection::registry::{
-        HttpProtectionConfig, HttpProtectionReason, HttpProtectionRegistry, HttpStatusCode,
-        OwnedHttpProtection,
-    },
-    lifecycle::disable::{DisableCommunication, DisableError, DisableLease, DisableReason},
 };
 use tokio::sync::RwLock;
 
@@ -39,25 +40,31 @@ pub(crate) struct ExecutionParams<'a, S, R: ?Sized, T, L> {
     pub(crate) communication_disable: &'a Arc<dyn DisableCommunication>,
     pub(crate) communication_access: &'a Arc<dyn CommunicationAccess>,
     pub(crate) http_protections: &'a HttpProtectionRegistry,
+    pub(crate) update_exempt_routes: &'a [HttpRouteMatcher],
     pub(crate) update_retry_after: Duration,
     pub(crate) post_update_mode: PostUpdateCommunicationMode,
     pub(crate) mdd_decompress: bool,
+    pub(crate) inspector: &'a Arc<dyn RuntimeFileInspector>,
     pub(crate) lock_state_provider: &'a L,
 }
 
-fn http_protection_config_for_update(retry_after: Duration) -> HttpProtectionConfig {
+fn http_protection_config_for_update(
+    retry_after: Duration,
+    exempt_routes: &[HttpRouteMatcher],
+) -> HttpProtectionConfig {
     HttpProtectionConfig::new(
         HttpProtectionReason::UpdateInProgress,
         HttpStatusCode::CONFLICT,
         "Update in progress",
     )
-    .with_exempt_routes(cda_sovd::routes_accessible_during_update())
+    .with_exempt_routes(exempt_routes.to_vec())
     .with_retry_after(retry_after)
 }
 
 pub(crate) async fn start_execution<S, R, T, L>(
     params: &ExecutionParams<'_, S, R, T, L>,
     mode: ExecutionMode,
+    security: &DynamicPlugin,
 ) -> Result<String, RuntimeUpdateError>
 where
     S: Storage + Send + Sync + 'static,
@@ -65,14 +72,38 @@ where
     T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
     L: LockStateProvider,
 {
+    // Authorize before anything observable happens.
+    //
+    // `acquire_execution_guards` takes the vehicle transport offline and installs
+    // a process-wide HTTP restriction. Running it first would mean any caller who
+    // merely authenticates can force a real transport disable/re-enable cycle and
+    // a burst of 409s on every other route, purely by being refused a moment
+    // later - a denial of service available to the least privileged caller in
+    // the system.
+    //
+    // This is the cheap, side-effect-free half of the decision: identity and
+    // vehicle-lock ownership, no file I/O. The authoritative `check_apply_allowed`
+    // still runs below, under the guards, where lock state and staged content
+    // cannot change underneath it.
+    params
+        .security_handler
+        .check_mutation_allowed(security, params.lock_state_provider)
+        .await?;
+
     let (protection, disable_lease) = acquire_execution_guards(params).await?;
     let collections = match load_update_collections(&**params.storage).await {
         Ok(collections) => collections,
         Err(error) => return Err(reject_execution(error, protection, disable_lease).await),
     };
-    let (protection, disable_lease) =
-        validate_execution_preconditions(params, mode, &collections, protection, disable_lease)
-            .await?;
+    let (protection, disable_lease) = validate_execution_preconditions(
+        params,
+        mode,
+        &collections,
+        protection,
+        disable_lease,
+        security,
+    )
+    .await?;
     let execution_id = register_execution(params.executions, mode).await;
 
     spawn_execution(
@@ -82,6 +113,7 @@ where
         Arc::clone(params.reload_handler),
         Arc::clone(params.executions),
         params.mdd_decompress,
+        Arc::clone(params.inspector),
         params.post_update_mode.clone(),
         Arc::clone(params.communication_access),
         disable_lease,
@@ -93,10 +125,13 @@ where
 
 async fn acquire_execution_guards<S, R: ?Sized, T, L>(
     params: &ExecutionParams<'_, S, R, T, L>,
-) -> Result<(OwnedHttpProtection, DisableLease), RuntimeUpdateError> {
+) -> Result<(OwnedHttpProtection, Box<dyn DisableGuard>), RuntimeUpdateError> {
     let protection = params
         .http_protections
-        .protect(http_protection_config_for_update(params.update_retry_after))
+        .protect(http_protection_config_for_update(
+            params.update_retry_after,
+            params.update_exempt_routes,
+        ))
         .map_err(|error| {
             // The config is built in-process, so this can only be a programming
             // error. Refuse the execution rather than run it unprotected.
@@ -146,8 +181,9 @@ async fn validate_execution_preconditions<S, R, T, L>(
     mode: ExecutionMode,
     collections: &UpdateCollections<S::CollectionHandle>,
     protection: OwnedHttpProtection,
-    disable_lease: DisableLease,
-) -> Result<(OwnedHttpProtection, DisableLease), RuntimeUpdateError>
+    disable_lease: Box<dyn DisableGuard>,
+    security: &DynamicPlugin,
+) -> Result<(OwnedHttpProtection, Box<dyn DisableGuard>), RuntimeUpdateError>
 where
     S: Storage + Send + Sync + 'static,
     R: RuntimeReloaderPlugin + ?Sized,
@@ -156,7 +192,7 @@ where
 {
     if let Err(error) = params
         .security_handler
-        .check_apply_allowed(params.lock_state_provider, collections)
+        .check_apply_allowed(security, params.lock_state_provider, collections)
         .await
     {
         return Err(reject_execution(error, protection, disable_lease).await);
@@ -197,7 +233,7 @@ where
 async fn reject_execution(
     error: RuntimeUpdateError,
     protection: OwnedHttpProtection,
-    disable_lease: DisableLease,
+    disable_lease: Box<dyn DisableGuard>,
 ) -> RuntimeUpdateError {
     // Resume first, drop the update protection second - the same order the
     // completion path in `spawn_execution` uses. Dropping first would open a
@@ -245,9 +281,10 @@ fn spawn_execution<S, R>(
     reload_handler: Arc<R>,
     executions: Arc<RwLock<HashMap<String, UpdateExecution>>>,
     mdd_decompress: bool,
+    inspector: Arc<dyn RuntimeFileInspector>,
     post_update_mode: PostUpdateCommunicationMode,
     communication_access: Arc<dyn CommunicationAccess>,
-    disable_lease: DisableLease,
+    disable_lease: Box<dyn DisableGuard>,
     protection: OwnedHttpProtection,
 ) where
     S: Storage + Send + Sync + 'static,
@@ -257,7 +294,14 @@ fn spawn_execution<S, R>(
     let supervised_execution_id = execution_id.clone();
 
     let handle = cda_interfaces::spawn_named!(&format!("runtime-update-{mode:?}"), async move {
-        let result = execute_operation(mode, &*storage, &*reload_handler, mdd_decompress).await;
+        let result = execute_operation(
+            mode,
+            &*storage,
+            &*reload_handler,
+            mdd_decompress,
+            &inspector,
+        )
+        .await;
 
         if let Err(error) = &result {
             tracing::error!(
@@ -360,6 +404,7 @@ async fn execute_operation<S, R>(
     storage: &S,
     reload_handler: &R,
     mdd_decompress: bool,
+    inspector: &Arc<dyn RuntimeFileInspector>,
 ) -> Result<(), RuntimeUpdateError>
 where
     S: Storage + Send + Sync + 'static,
@@ -367,10 +412,17 @@ where
 {
     match mode {
         ExecutionMode::Apply => {
-            crate::operations::apply::execute_apply(storage, reload_handler, mdd_decompress).await
+            crate::operations::apply::execute_apply(
+                storage,
+                reload_handler,
+                mdd_decompress,
+                inspector,
+            )
+            .await
         }
         ExecutionMode::Rollback => {
-            crate::operations::rollback::execute_rollback(storage, reload_handler).await
+            crate::operations::rollback::execute_rollback(storage, reload_handler, &**inspector)
+                .await
         }
         ExecutionMode::Cleanup => crate::operations::cleanup::execute_cleanup(storage).await,
     }
@@ -383,18 +435,17 @@ mod tests {
     use cda_interfaces::{
         HashMap,
         communication_control::{
-            CommunicationAccess, PostUpdateCommunicationMode, TransportControl, TransportState,
-            error::CommControlError,
+            CommunicationAccess, DisableCommunication, PostUpdateCommunicationMode,
+            TransportControl, TransportState, error::CommControlError,
         },
+        http_protection::registry::{HttpProtectionRegistry, HttpRestrictionGuard},
         runtime_update_api::{ExecutionMode, ExecutionStatus, RuntimeUpdateError, UpdateExecution},
         storage_api::CollectionName,
     };
-    use cda_plugin_communication_management::{
-        http_protection::registry::{HttpProtectionRegistry, HttpRestrictionGuard},
-        lifecycle::{
-            communication_disable_for_test, disable::DisableCommunication,
-            enabled_communication_access_for_test,
-        },
+    // Test-only: the concrete lifecycle doubles live in the communication plugin,
+    // which is a dev-dependency here.
+    use cda_plugin_communication_management::lifecycle::{
+        communication_disable_for_test, enabled_communication_access_for_test,
     };
     use cda_storage::LocalStorage;
     use tokio::sync::RwLock;
@@ -491,6 +542,7 @@ mod tests {
         communication_disable: Arc<dyn DisableCommunication>,
         communication_access: Arc<dyn CommunicationAccess>,
         http_restriction_manager: HttpProtectionRegistry,
+        inspector: Arc<dyn cda_interfaces::runtime_update_api::RuntimeFileInspector>,
         _dir: tempfile::TempDir,
     }
 
@@ -512,9 +564,11 @@ mod tests {
                 executions: &self.executions,
                 communication_disable: &self.communication_disable,
                 http_protections: &self.http_restriction_manager,
+                update_exempt_routes: &[],
                 update_retry_after: Duration::from_secs(1),
                 post_update_mode: PostUpdateCommunicationMode::Enabled,
                 mdd_decompress: false,
+                inspector: &self.inspector,
                 lock_state_provider: &self.lock_provider,
             }
         }
@@ -535,6 +589,7 @@ mod tests {
             communication_disable,
             communication_access: enabled_communication_access_for_test(),
             http_restriction_manager: mgr,
+            inspector: crate::test_utils::test_inspector(),
             _dir: dir,
         }
     }
@@ -571,9 +626,13 @@ mod tests {
         )
         .await;
 
-        let exec_id = super::start_execution(&f.params(), ExecutionMode::Apply)
-            .await
-            .unwrap();
+        let exec_id = super::start_execution(
+            &f.params(),
+            ExecutionMode::Apply,
+            &crate::test_utils::test_security(),
+        )
+        .await
+        .unwrap();
         assert!(!exec_id.is_empty());
 
         let status = super::get_execution_status(&f.executions, &exec_id).await;
@@ -591,9 +650,13 @@ mod tests {
         )
         .await;
 
-        let exec_id = super::start_execution(&f.params(), ExecutionMode::Rollback)
-            .await
-            .unwrap();
+        let exec_id = super::start_execution(
+            &f.params(),
+            ExecutionMode::Rollback,
+            &crate::test_utils::test_security(),
+        )
+        .await
+        .unwrap();
         assert!(!exec_id.is_empty());
     }
 
@@ -605,7 +668,12 @@ mod tests {
         // Apply must be rejected synchronously (i.e. `start_execution` itself returns
         // an error) rather than accepted (202-equivalent execution id) only to fail
         // later inside the spawned task.
-        let result = super::start_execution(&f.params(), ExecutionMode::Apply).await;
+        let result = super::start_execution(
+            &f.params(),
+            ExecutionMode::Apply,
+            &crate::test_utils::test_security(),
+        )
+        .await;
 
         assert!(
             matches!(result, Err(RuntimeUpdateError::NoPendingUpdate)),
@@ -625,9 +693,13 @@ mod tests {
     #[tokio::test]
     async fn start_execution_cleanup_succeeds() {
         let f = make_fixture();
-        let exec_id = super::start_execution(&f.params(), ExecutionMode::Cleanup)
-            .await
-            .unwrap();
+        let exec_id = super::start_execution(
+            &f.params(),
+            ExecutionMode::Cleanup,
+            &crate::test_utils::test_security(),
+        )
+        .await
+        .unwrap();
         assert!(!exec_id.is_empty());
 
         let status = poll_until_terminal(&f.executions, &exec_id).await;
@@ -649,9 +721,13 @@ mod tests {
         let mut f = make_fixture();
         f.communication_disable = communication_disable_for_test(transport, true);
 
-        let exec_id = super::start_execution(&f.params(), ExecutionMode::Cleanup)
-            .await
-            .unwrap();
+        let exec_id = super::start_execution(
+            &f.params(),
+            ExecutionMode::Cleanup,
+            &crate::test_utils::test_security(),
+        )
+        .await
+        .unwrap();
 
         resume.entered().await;
         assert_eq!(
@@ -698,24 +774,36 @@ mod tests {
             );
         }
 
-        let exec_id = super::start_execution(&f.params(), ExecutionMode::Cleanup)
-            .await
-            .unwrap();
+        let exec_id = super::start_execution(
+            &f.params(),
+            ExecutionMode::Cleanup,
+            &crate::test_utils::test_security(),
+        )
+        .await
+        .unwrap();
         assert!(!exec_id.is_empty());
     }
 
     #[tokio::test]
     async fn previous_execution_removed_when_new_one_starts() {
         let f = make_fixture();
-        let first_id = super::start_execution(&f.params(), ExecutionMode::Cleanup)
-            .await
-            .unwrap();
+        let first_id = super::start_execution(
+            &f.params(),
+            ExecutionMode::Cleanup,
+            &crate::test_utils::test_security(),
+        )
+        .await
+        .unwrap();
 
         poll_until_terminal(&f.executions, &first_id).await;
 
-        let _second_id = super::start_execution(&f.params(), ExecutionMode::Cleanup)
-            .await
-            .unwrap();
+        let _second_id = super::start_execution(
+            &f.params(),
+            ExecutionMode::Cleanup,
+            &crate::test_utils::test_security(),
+        )
+        .await
+        .unwrap();
 
         let status = super::get_execution_status(&f.executions, &first_id).await;
         assert!(
@@ -744,15 +832,21 @@ mod tests {
             executions: &f.executions,
             communication_disable: &f.communication_disable,
             http_protections: &f.http_restriction_manager,
+            update_exempt_routes: &[],
             update_retry_after: Duration::from_secs(1),
             post_update_mode: PostUpdateCommunicationMode::Enabled,
             mdd_decompress: false,
+            inspector: &f.inspector,
             lock_state_provider: &f.lock_provider,
         };
 
-        let exec_id = super::start_execution(&params, ExecutionMode::Apply)
-            .await
-            .unwrap();
+        let exec_id = super::start_execution(
+            &params,
+            ExecutionMode::Apply,
+            &crate::test_utils::test_security(),
+        )
+        .await
+        .unwrap();
 
         let status = poll_until_terminal(&f.executions, &exec_id).await;
         assert!(matches!(status, ExecutionStatus::Failed(_)));
@@ -780,15 +874,21 @@ mod tests {
             executions: &f.executions,
             communication_disable: &f.communication_disable,
             http_protections: &f.http_restriction_manager,
+            update_exempt_routes: &[],
             update_retry_after: Duration::from_secs(1),
             post_update_mode: PostUpdateCommunicationMode::Enabled,
             mdd_decompress: false,
+            inspector: &f.inspector,
             lock_state_provider: &f.lock_provider,
         };
 
-        let exec_id = super::start_execution(&params, ExecutionMode::Apply)
-            .await
-            .unwrap();
+        let exec_id = super::start_execution(
+            &params,
+            ExecutionMode::Apply,
+            &crate::test_utils::test_security(),
+        )
+        .await
+        .unwrap();
 
         // Without the supervisor task, this would hang until poll_until_terminal's
         // 5s deadline panics the test - the execution task panicked mid-flight and
@@ -797,6 +897,143 @@ mod tests {
         assert!(
             matches!(status, ExecutionStatus::Failed(_)),
             "expected Failed after the execution task panicked, got: {status:?}"
+        );
+    }
+
+    /// Transport double that counts transitions, so a test can prove a refused
+    /// execution never touched the vehicle at all.
+    struct CountingTransport {
+        disables: std::sync::atomic::AtomicUsize,
+        state: tokio::sync::Mutex<TransportState>,
+    }
+
+    impl CountingTransport {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                disables: std::sync::atomic::AtomicUsize::new(0),
+                state: tokio::sync::Mutex::new(TransportState::Enabled),
+            })
+        }
+
+        fn disable_count(&self) -> usize {
+            self.disables.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TransportControl for CountingTransport {
+        async fn enable(&self) -> Result<(), CommControlError> {
+            *self.state.lock().await = TransportState::Enabled;
+            Ok(())
+        }
+
+        async fn disable(&self) -> Result<(), CommControlError> {
+            self.disables
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            *self.state.lock().await = TransportState::Disabled;
+            Ok(())
+        }
+
+        async fn state(&self) -> TransportState {
+            *self.state.lock().await
+        }
+    }
+
+    /// Stands in for a request that authenticates but is not the vehicle-lock
+    /// owner: the policy refuses it, and nothing expensive should have happened.
+    struct DenyingSecurityHandler;
+
+    #[async_trait::async_trait]
+    impl<L, C> cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
+        for DenyingSecurityHandler
+    where
+        L: cda_interfaces::runtime_update_api::LockStateProvider,
+        C: cda_interfaces::storage_api::Collection
+            + cda_interfaces::storage_api::DirectFileAccess
+            + Send
+            + Sync
+            + 'static,
+    {
+        async fn check_mutation_allowed(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+            _lock_state_provider: &L,
+        ) -> Result<(), RuntimeUpdateError> {
+            Err(RuntimeUpdateError::NoLock("not the lock owner".to_owned()))
+        }
+
+        async fn check_apply_allowed(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+            _lock_state_provider: &L,
+            _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
+        ) -> Result<(), RuntimeUpdateError> {
+            panic!("check_apply_allowed must not run for a caller that failed the admission check")
+        }
+
+        async fn check_file_integrity(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<(), cda_interfaces::runtime_update_api::VerificationError> {
+            Ok(())
+        }
+    }
+
+    /// An unauthorized execution must be refused before anything observable
+    /// happens.
+    ///
+    /// The guards an execution takes are not bookkeeping: disabling the transport
+    /// drops vehicle communication, and the HTTP protection returns 409 on every
+    /// non-exempt route. Acquiring them before deciding whether the caller is
+    /// allowed hands a denial of service to the least privileged caller that can
+    /// authenticate, since being refused is what triggers the cycle.
+    #[tokio::test]
+    async fn a_refused_execution_never_disables_the_transport() {
+        let f = make_fixture();
+        let transport = CountingTransport::new();
+        let communication_disable =
+            communication_disable_for_test(Arc::<CountingTransport>::clone(&transport), true);
+        let denying = Arc::new(DenyingSecurityHandler);
+        let communication_access = enabled_communication_access_for_test();
+        let params = super::ExecutionParams {
+            communication_access: &communication_access,
+            storage: &f.storage,
+            security_handler: &denying,
+            reload_handler: &f.reload_handler,
+            executions: &f.executions,
+            communication_disable: &communication_disable,
+            http_protections: &f.http_restriction_manager,
+            update_exempt_routes: &[],
+            update_retry_after: Duration::from_secs(1),
+            post_update_mode: PostUpdateCommunicationMode::Enabled,
+            mdd_decompress: false,
+            inspector: &f.inspector,
+            lock_state_provider: &f.lock_provider,
+        };
+
+        let result = super::start_execution(
+            &params,
+            ExecutionMode::Apply,
+            &crate::test_utils::test_security(),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(RuntimeUpdateError::NoLock(_))),
+            "an unauthorized caller must be refused, got: {result:?}"
+        );
+        assert_eq!(
+            transport.disable_count(),
+            0,
+            "a refused execution must not take the vehicle transport offline"
+        );
+        assert!(
+            !f.http_restriction_manager.is_active(),
+            "a refused execution must not install the process-wide HTTP restriction"
+        );
+        assert!(
+            f.executions.read().await.is_empty(),
+            "a refused execution must not be registered"
         );
     }
 }

@@ -13,7 +13,7 @@
 
 pub mod sovd2uds {
     pub mod bulk_data {
-        pub use cda_interfaces::runtime_update_api::{
+        pub use crate::runtime_files::{
             BulkDataCreated, BulkDataCreatedList, BulkDataDeleted, BulkDataList,
         };
 
@@ -24,7 +24,7 @@ pub mod sovd2uds {
         }
 
         pub mod runtimefiles {
-            pub use cda_interfaces::runtime_update_api::RuntimeFilesQuery;
+            pub use crate::runtime_files::RuntimeFilesQuery;
         }
     }
 

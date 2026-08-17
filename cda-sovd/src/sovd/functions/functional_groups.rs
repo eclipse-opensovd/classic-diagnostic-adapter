@@ -36,7 +36,7 @@ use uuid::Uuid;
 use crate::{
     create_schema,
     sovd::{
-        FgServiceExecution, WebserverState,
+        FgServiceExecution, VehicleRequestState,
         error::{ApiError, ErrorWrapper, VendorErrorCode, nrc_to_api_error_response},
         field_parse_errors_to_json,
         locks::Locks,
@@ -59,7 +59,7 @@ pub(crate) struct WebserverFgState<T: UdsEcu + Clone> {
 }
 
 pub(crate) async fn create_functional_group_routes<T: UdsEcu + SchemaProvider + Clone>(
-    state: WebserverState<T>,
+    state: VehicleRequestState<T>,
     functional_group_config: FunctionalDescriptionConfig,
 ) -> Router {
     let functions_router = Router::new().api_route(

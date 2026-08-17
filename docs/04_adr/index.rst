@@ -19,3 +19,4 @@ Architecture Decision Records
 .. include:: 04_wal_format.rst
 .. include:: 05_error_handling_library.rst
 .. include:: 06_deferred_initialization.rst
+.. include:: 07_oem_extension_points.rst

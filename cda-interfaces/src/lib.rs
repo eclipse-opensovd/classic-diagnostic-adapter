@@ -43,6 +43,7 @@ pub use schema::*;
 pub mod communication_control;
 pub mod component_slot;
 pub mod config;
+pub mod http_protection;
 pub mod runtime_update_api;
 pub mod storage_api;
 mod transport;

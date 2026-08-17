@@ -22,9 +22,8 @@ use cda_comm_doip::DoipGatewaySetupError;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
     communication_control::CommunicationAccess, datatypes::ComponentsConfig, dlt_ctx,
-    file_manager::FileManager,
+    file_manager::FileManager, http_protection::registry::HttpRouteMatcher,
 };
-use cda_plugin_communication_management::http_protection::registry::HttpRouteMatcher;
 use cda_plugin_security::SecurityPluginLoader;
 use dynamic_router::DynamicRouter;
 pub use dynamic_router::{RouteGroupNotFound, RouteHandle};
@@ -37,8 +36,11 @@ use tower_http::{normalize_path::NormalizePathLayer, trace::TraceLayer};
 
 /// Public API surface re-exported from the crate-internal `sovd` module.
 pub use crate::sovd::{
-    SovdLockStateProvider, error::VendorErrorCode, locks::Locks,
-    request_guard::install_http_restriction_guard, static_data::add_static_data_endpoint,
+    SovdLockStateProvider,
+    error::VendorErrorCode,
+    locks::{LockDenied, Locks, check_ecu_lock, check_functional_group_lock, check_vehicle_lock},
+    request_guard::install_http_restriction_guard,
+    static_data::add_static_data_endpoint,
 };
 pub mod dynamic_router;
 mod openapi;
@@ -47,6 +49,12 @@ pub(crate) mod sovd;
 // Consts for HTTP
 pub const SWAGGER_UI_ROUTE: &str = "/swagger-ui";
 pub const OPENAPI_JSON_ROUTE: &str = "/openapi.json";
+
+/// The SOVD API version segment used in every `/vehicle/<version>/...` route.
+///
+/// Exposed so callers that build paths relative to the SOVD tree - notably the OEM
+/// extension namespace in `cda-main` - derive the segment instead of hardcoding it.
+pub const SOVD_API_VERSION: &str = "v15";
 #[derive(Clone)]
 pub struct WebServerConfig {
     pub host: String,
@@ -185,29 +193,26 @@ where
 /// Mounts the runtime-update HTTP routes onto the dynamic router and returns a handle to them.
 ///
 /// Adds the runtime-file update endpoints to the router.
-pub async fn add_runtime_update_routes<S, P, L>(
+pub async fn add_runtime_update_routes<S, P>(
     dynamic_router: &DynamicRouter,
     plugin: Arc<P>,
-    lock_state: Arc<L>,
     upload_limit: usize,
     retry_after: Duration,
 ) -> RouteHandle
 where
     S: SecurityPluginLoader,
     P: cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin,
-    L: cda_interfaces::runtime_update_api::LockStateProvider,
 {
     let route_state = RuntimeUpdateRouteState {
         plugin,
-        vehicle_lock_states: lock_state,
         retry_after,
     };
-    let bulk_data_router = sovd::apps::sovd2uds::bulk_data::runtimefiles::routes::<S, P, L>(
+    let bulk_data_router = sovd::apps::sovd2uds::bulk_data::runtimefiles::routes::<S, P>(
         route_state.clone(),
         upload_limit,
     );
     let operations_router =
-        sovd::apps::sovd2uds::operations::runtimefilesupdate::routes::<S, P, L>(route_state);
+        sovd::apps::sovd2uds::operations::runtimefilesupdate::routes::<S, P>(route_state);
     let router = bulk_data_router.merge(operations_router);
     let handle = dynamic_router.add_routes(router.into()).await;
     tracing::info!("Runtime update routes added to webserver");
