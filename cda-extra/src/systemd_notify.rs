@@ -17,6 +17,15 @@ use cda_health::{HealthState, Status as HealthStatus};
 use cda_interfaces::spawn_named;
 use tokio::task::JoinHandle;
 
+/// Hard lower bound for the watchdog notification interval. `tokio::time::interval`
+/// panics on a zero-length period, so any computed interval is clamped to this.
+const MIN_NOTIFY_INTERVAL: Duration = Duration::from_millis(1);
+
+/// Lower bound below which a watchdog notification interval is considered a
+/// misconfiguration rather than an intent. Intervals below this still work, but
+/// are warned about once at startup.
+const SANE_MIN_NOTIFY_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Creates a background task that integrates with the systemd watchdog.
 ///
 /// [[ dimpl~system-sd-notify-watchdog-integration, Systemd Watchdog Integration ]]
@@ -74,9 +83,8 @@ where
         }
     });
     tracing::info!(
-        "Systemd detected and watchdog enabled, initialized sd_notify task with interval of {:?} \
-         seconds",
-        interval.as_secs()
+        "Systemd detected and watchdog enabled, initialized sd_notify task with interval of \
+         {interval:?}"
     );
     Some(sd_notify_future)
 }
@@ -87,14 +95,28 @@ where
 ///
 /// Clamped to at least 1ms so a very small (or zero) `WatchdogSec` can never
 /// produce a zero-length interval, which `tokio::time::interval` panics on.
+///
+/// systemd accepts watchdog timeouts down to microsecond resolution, which is a
+/// legal but implausible configuration for the CDA: it would wake the notify task
+/// hundreds or thousands of times per second for no benefit. Such a configuration
+/// is honoured, but warned about once at startup.
 fn watchdog_notify_interval() -> Option<Duration> {
     sd_notify::watchdog_enabled().map(|timeout| {
         // `checked_div` instead of `/` to satisfy clippy::arithmetic_side_effects;
         // the divisor is a non-zero literal, so the fallback can never be taken.
-        timeout
+        let interval = timeout
             .checked_div(2)
             .unwrap_or(timeout)
-            .max(Duration::from_millis(1))
+            .max(MIN_NOTIFY_INTERVAL);
+        if interval < SANE_MIN_NOTIFY_INTERVAL {
+            tracing::warn!(
+                "Systemd watchdog timeout of {timeout:?} results in a notification interval of \
+                 {interval:?}, which will cause considerable system load. Consider configuring a \
+                 WatchdogSec of at least {:?}.",
+                SANE_MIN_NOTIFY_INTERVAL.saturating_mul(2)
+            );
+        }
+        interval
     })
 }
 
