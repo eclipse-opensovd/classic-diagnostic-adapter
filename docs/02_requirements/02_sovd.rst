@@ -573,8 +573,9 @@ three lock scopes.
          - boolean (optional, default ``false``)
          - Whether an existing lock shall be broken/preempted. See :need:`req~sovd-api-lock-priority`.
        * - ``x_sov2uds_isexclusive``
-         - boolean (optional, default ``false``)
-         - Whether the lock is exclusive. See :need:`req~sovd-api-lock-exclusivity`.
+         - boolean (optional, default: configurable)
+         - Whether the lock is exclusive. See :need:`req~sovd-api-lock-exclusivity` and
+           :need:`req~sovd-api-lock-exclusivity-policy`.
        * - any
          - any (optional)
          - Vendor-specific data passed to the vendor specific lock preemption mechanism.
@@ -598,7 +599,8 @@ three lock scopes.
     :status: draft
 
     A lock must be either exclusive or non-exclusive, controlled by the ``x_sovd2uds_isexclusive`` field
-    in the POST/PUT request body (default: ``false``).
+    in the POST/PUT request body. When the field is omitted, the configured default applies
+    (see :need:`req~sovd-api-lock-exclusivity-policy`).
 
     **Exclusive lock** (``x_sovd2uds_isexclusive: true``)
 
@@ -618,6 +620,46 @@ three lock scopes.
 
     Non-exclusive locks allow monitoring or logging clients to continue reading diagnostic
     data while a primary client holds the entity for active diagnostic communication.
+
+
+.. req:: Lock Exclusivity Policy
+    :id: req~sovd-api-lock-exclusivity-policy
+    :links: arch~sovd-api-lock-exclusivity-policy
+    :status: draft
+
+    The CDA must support a global configuration option, ``lock_exclusivity_policy``, that
+    determines the value applied to the ``x_sovd2uds_isexclusive`` field (see
+    :need:`req~sovd-api-lock-exclusivity`) when a lock POST or PUT request omits it. This
+    option is modeled as an enumeration to allow additional exclusivity policies to be
+    introduced in the future without renaming or restructuring the configuration option.
+
+    The following values must be supported:
+
+    .. list-table:: ``lock_exclusivity_policy`` values
+       :header-rows: 1
+       :widths: 25 75
+
+       * - Value
+         - Behavior
+       * - ``exclusive_by_default`` (default)
+         - A lock request that omits ``x_sovd2uds_isexclusive`` is treated as exclusive.
+       * - ``non_exclusive_by_default``
+         - A lock request that omits ``x_sovd2uds_isexclusive`` is treated as
+           non-exclusive.
+
+    This option applies globally across all three lock scopes (vehicle, ECU, and
+    functional group). Requests that explicitly set ``x_sovd2uds_isexclusive`` are
+    unaffected by this option.
+
+    **Rationale**
+
+    Defaulting to exclusive locks favors a safe-by-default posture, preventing accidental
+    concurrent access to a diagnostic entity when a client omits the exclusivity field.
+    Deployments that prefer the non-exclusive default, for example to support monitoring-friendly
+    workflows without requiring every client to set the field explicitly, may set this option to
+    ``non_exclusive_by_default``. Modeling the option as an enumeration keeps the configuration
+    surface future-proof for additional exclusivity policies without introducing further
+    boolean flags.
 
 
 .. req:: Lock Expiration
@@ -718,6 +760,95 @@ three lock scopes.
     ``/functions/functionalgroups/{group-name}/data``,
     ``/functions/functionalgroups/{group-name}/operations``, and
     ``/functions/functionalgroups/{group-name}/modes``.
+
+
+.. req:: Lock Requirement Policy
+    :id: req~sovd-api-lock-requirement-policy
+    :links: arch~sovd-api-lock-requirement-policy
+    :status: draft
+
+    The CDA must support a configurable option, ``lock_requirement_policy``, that
+    determines which categories of requests require an active lock on the target entity.
+    This option is modeled as an enumeration to allow additional requirement policies to be
+    introduced in the future without renaming or restructuring the configuration option.
+
+    The following values must be supported:
+
+    .. list-table:: ``lock_requirement_policy`` values
+       :header-rows: 1
+       :widths: 25 75
+
+       * - Value
+         - Behavior
+       * - ``require_for_write_operations`` (default)
+         - A lock is required only for write endpoints, as defined in the enforcement
+           tables of :need:`req~sovd-api-lock-ecu-enforcement` and
+           :need:`req~sovd-api-lock-fg-enforcement`. Read endpoints remain accessible when
+           no active lock is held on the entity.
+       * - ``require_for_all_operations``
+         - A lock is required for both write and read endpoints. The "No active lock held
+           on the ECU" / "No active lock held on the functional group" row of the
+           enforcement tables in :need:`req~sovd-api-lock-ecu-enforcement` and
+           :need:`req~sovd-api-lock-fg-enforcement` applies to read endpoints as well: such
+           requests must be rejected with **HTTP 409 (Conflict)**. All other rows of those
+           enforcement tables, and all other lock behavior (exclusivity, defunct locks,
+           vehicle lock equivalence), apply identically regardless of the selected value.
+
+    This option applies uniformly to both ECU-scoped and functional-group-scoped
+    communication endpoints.
+
+    **Rationale**
+
+    Some deployments require every diagnostic interaction with an ECU or functional group --
+    including read-only monitoring requests -- to be attributable to an active, identifiable
+    lock owner, for example to satisfy audit or safety-case requirements. Other deployments
+    want unlocked reads to remain possible for monitoring or logging clients. Modeling the
+    option as an enumeration keeps the configuration surface future-proof for additional
+    requirement policies without introducing further boolean flags.
+
+
+.. req:: Lock Acquisition Policy
+    :id: req~sovd-api-lock-acquisition-policy
+    :links: arch~sovd-api-lock-acquisition-policy
+    :status: draft
+
+    The CDA must support a configurable option, ``lock_acquisition_policy``, controlling
+    whether a vehicle lock must already exist before an ECU or functional group lock may be
+    acquired. This option is modeled as an enumeration to allow additional acquisition
+    policies to be introduced in the future without renaming or restructuring the
+    configuration option.
+
+    The following values must be supported:
+
+    .. list-table:: ``lock_acquisition_policy`` values
+       :header-rows: 1
+       :widths: 25 75
+
+       * - Value
+         - Behavior
+       * - ``unrestricted`` (default)
+         - ECU and functional group locks may be acquired independently of whether a vehicle
+           lock exists.
+       * - ``vehicle_lock_required``
+         - An ECU or functional group lock POST request must be rejected with
+           **HTTP 409 (Conflict)** unless an active vehicle lock currently exists, regardless
+           of the identity of the requesting client or the vehicle lock's owner.
+
+    This requirement is independent of, and must not be confused with,
+    :need:`req~sovd-api-lock-vehicle-blocking`: that requirement governs what happens to
+    *other* clients while a vehicle lock is held (blocking their acquisition of child
+    locks), whereas ``lock_acquisition_policy: vehicle_lock_required`` governs whether a
+    vehicle lock must exist *at all*, for any client including the one requesting the child
+    lock, before a child lock acquisition may proceed.
+
+    **Rationale**
+
+    Some deployments require all ECU- and functional-group-level diagnostic locking to occur
+    strictly within the scope of an overarching vehicle-level claim, ensuring no diagnostic
+    entity can be locked in isolation without an active vehicle-wide session already having
+    been established. Modeling the option as an enumeration keeps the configuration surface
+    future-proof for additional acquisition policies (e.g. hierarchical or vendor-specific
+    schemes) without introducing further boolean flags.
 
 
 .. req:: Vehicle Lock Blocks Child Lock Acquisition

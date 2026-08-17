@@ -792,8 +792,9 @@ Locks
          - Whether an existing lock shall be broken/preempted. See
            :need:`arch~sovd-api-lock-priority`.
        * - ``x_sovd2uds_isexclusive``
-         - boolean (optional, default ``false``)
-         - Selects exclusive or non-exclusive enforcement mode.
+         - boolean (optional, default: configurable)
+         - Selects exclusive or non-exclusive enforcement mode. See
+           :need:`arch~sovd-api-lock-exclusivity-policy`.
        * - Other properties
          - any (optional)
          - Passed verbatim to the priority plugin. Shape is vendor-defined.
@@ -814,10 +815,34 @@ Locks
     :status: draft
 
     The ``x_sovd2uds_isexclusive`` boolean from the POST/PUT request body is stored as a field on the
-    lock object. When a request arrives at a communication endpoint the stored flag is
-    read to select the enforcement level applied by
-    :need:`arch~sovd-api-lock-ecu-enforcement` and
+    lock object. If the request body omits the field, the value determined by the
+    configured ``lock_exclusivity_policy`` is substituted before storing it (see
+    :need:`arch~sovd-api-lock-exclusivity-policy`). When a request arrives at a
+    communication endpoint the stored flag is read to select the enforcement level applied
+    by :need:`arch~sovd-api-lock-ecu-enforcement` and
     :need:`arch~sovd-api-lock-fg-enforcement`.
+
+
+.. arch:: Lock Exclusivity Policy
+    :id: arch~sovd-api-lock-exclusivity-policy
+    :status: draft
+
+    The configured ``lock_exclusivity_policy`` selects the value substituted for
+    ``x_sovd2uds_isexclusive`` whenever a lock POST or PUT request body omits that field,
+    before the resulting value is stored on the lock object (see
+    :need:`arch~sovd-api-lock-exclusivity`):
+
+    - ``exclusive_by_default`` (default): the substituted value is ``true``.
+    - ``non_exclusive_by_default``: the substituted value is ``false``.
+
+    The substitution is performed identically for the vehicle, ECU, and functional group
+    lock handlers.
+
+    Being enum-typed, this configuration option is designed to accommodate additional
+    exclusivity policies in the future without changing its name or structure.
+
+    Requests that explicitly include ``x_sovd2uds_isexclusive`` bypass the substitution
+    and use the provided value unchanged.
 
 
 .. arch:: Lock Expiration
@@ -904,6 +929,50 @@ Locks
 
     See also :need:`arch~sovd-api-functional-communication-locks` for the Tester Present
     side-effects associated with acquiring and releasing a functional group lock.
+
+
+.. arch:: Lock Requirement Policy
+    :id: arch~sovd-api-lock-requirement-policy
+    :links: arch~sovd-api-lock-ecu-enforcement, arch~sovd-api-lock-fg-enforcement
+    :status: draft
+
+    The configured ``lock_requirement_policy`` selects a variant of the decision logic
+    used by ``validate_lock`` and ``validate_fg_lock`` (see
+    :need:`arch~sovd-api-lock-ecu-enforcement`):
+
+    - ``require_for_write_operations`` (default): the decision logic is unchanged from
+      :need:`arch~sovd-api-lock-ecu-enforcement` / :need:`arch~sovd-api-lock-fg-enforcement`.
+    - ``require_for_all_operations``: the branch that otherwise allows read operations to
+      proceed when no active lock is held by anyone is replaced with a rejection
+      (HTTP 409, Conflict), for both ECU-scoped and functional-group-scoped endpoints.
+
+    All other branches of the decision logic -- defunct lock pre-check, exclusive/
+    non-exclusive handling while a lock is held by another client, and the vehicle-lock
+    equivalence check -- are unaffected by this option.
+
+    Being enum-typed, this configuration option is designed to accommodate additional
+    requirement policies in the future without changing its name or structure.
+
+
+.. arch:: Lock Acquisition Policy
+    :id: arch~sovd-api-lock-acquisition-policy
+    :status: draft
+
+    The ECU lock POST handler and the functional group lock POST handler each evaluate the
+    configured ``lock_acquisition_policy`` before creating the child lock, in addition to
+    the existing vehicle-lock ownership check described in
+    :need:`arch~sovd-api-lock-vehicle-blocking`.
+
+    - ``unrestricted`` (default): no additional check is performed; behavior is as
+      described in :need:`arch~sovd-api-lock-vehicle-blocking`.
+    - ``vehicle_lock_required``: the handler first checks whether an active vehicle lock
+      currently exists, independent of its owner. If none exists, the request is rejected
+      with HTTP 409 (Conflict) before the vehicle-lock ownership check is evaluated. If a
+      vehicle lock exists, processing continues as normal, including the ownership check
+      from :need:`arch~sovd-api-lock-vehicle-blocking`.
+
+    Being enum-typed, this configuration option is designed to accommodate additional
+    acquisition policies in the future without changing its name or structure.
 
 
 .. arch:: Vehicle Lock Blocks Child Lock Acquisition
