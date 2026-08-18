@@ -14,9 +14,9 @@
 use std::sync::{Arc, atomic::AtomicBool};
 
 use cda_interfaces::{
-    DiagComm, DiagServiceError, EcuGateway, EcuManager, FunctionalDescriptionConfig, HashMap,
-    HashMapExtensions, HashSet, HashSetExtensions, SchemaDescription, SchemaProvider, UdsEcu,
-    UdsEcuDb, datatypes::FaultConfig,
+    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, FunctionalDescriptionConfig,
+    HashMap, HashMapExtensions, HashSet, HashSetExtensions, SchemaDescription, SchemaProvider,
+    UdsEcu, UdsEcuDb, UdsTransport, datatypes::FaultConfig, diagservices::UdsPayloadData,
 };
 use tokio::{
     sync::{Mutex, RwLock, Semaphore, mpsc},
@@ -161,19 +161,118 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         self.state_coordinator.clone()
     }
 
-    /// Abort all background tasks owned by this instance. Idempotent.
-    pub async fn shutdown(&self) {
-        let mut tester_present_tasks = self.tester_present_tasks.write().await;
-        let mut session_reset_tasks = self.session_reset_tasks.write().await;
-        let mut security_reset_tasks = self.security_reset_tasks.write().await;
-        let mut data_transfers = self.data_transfers.lock().await;
-        tester_present_tasks
-            .drain()
-            .map(|(_, tp)| tp.task)
-            .chain(session_reset_tasks.drain().map(|(_, h)| h))
-            .chain(security_reset_tasks.drain().map(|(_, h)| h))
-            .chain(data_transfers.drain().map(|(_, t)| t.task))
-            .for_each(|h| h.abort());
+    /// Send a diagnostic service by its request prefix, looking up the service definition
+    /// in the MDD database and encoding JSON parameters according to the
+    /// service's parameter definitions.
+    ///
+    /// This method resolves the matching service definition(s) from the supplied
+    /// request prefix via
+    /// `lookup_diagcomms_by_request_prefix` (matching against coded constant
+    /// parameters in the MDD database), and sends the first match with the
+    /// provided parameters encoded through `create_uds_payload`.
+    ///
+    /// The `service_bytes` prefix starts with the service ID and may include
+    /// additional bytes. This allows services that
+    /// use coded constant parameters (e.g., specific DID values) to be
+    /// resolved by matching the exact byte sequence.
+    ///
+    /// # Errors
+    /// Returns `DiagServiceError` if the service is not found or if the
+    /// request fails.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // ReadDataByIdentifier DID 0xF190
+    /// uds.send_by_sid(
+    ///     "ECU_NAME",
+    ///     &[0x22, 0xF1, 0x90],               // SID and DID bytes
+    ///     &security_plugin,
+    ///     HashMap::from([("did".into(), json!(0xF190))]),
+    ///     true,
+    /// ).await?;
+    /// ```
+    pub async fn send_by_sid(
+        &self,
+        ecu_name: &str,
+        service_bytes: &[u8],
+        security_plugin: &DynamicPlugin,
+        params: HashMap<String, serde_json::Value>,
+        map_to_json: bool,
+    ) -> Result<<T as cda_interfaces::PayloadDecoder>::Response, DiagServiceError> {
+        // Look up the service definition in the MDD database using the same
+        // approach as lookup_diagcomms_by_request_prefix - matches against
+        // coded constant parameter values in the database.
+        let ecu = self.uds_ecu_db(ecu_name)?;
+        let services = ecu
+            .read()
+            .await
+            .lookup_diagcomms_by_request_prefix(service_bytes)?;
+
+        let diag_comm = services.into_iter().next().ok_or_else(|| {
+            DiagServiceError::NotFound(format!(
+                "No diagnostic service found matching request prefix: {service_bytes:02X?}"
+            ))
+        })?;
+
+        self.send(
+            ecu_name,
+            diag_comm,
+            security_plugin,
+            Some(UdsPayloadData::ParameterMap(params)),
+            map_to_json,
+        )
+        .await
+    }
+
+    /// Send a diagnostic service by its SID and name, looking up the service
+    /// definition via `lookup_service_by_sid_and_name` and encoding JSON
+    /// parameters according to the service's parameter definitions.
+    ///
+    /// This method performs prefix/suffix matching on the service short name
+    /// in the MDD database using the `database_naming_convention` settings.
+    /// The `name` argument is matched against the trimmed short name of all
+    /// services with the given `service_id`.
+    ///
+    ///
+    /// # Errors
+    /// Returns `DiagServiceError` if the service is not found or if the
+    /// request fails.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // PeriodicReadDID matching name "myReadService" with SID 0xBB
+    /// uds.send_by_sid_and_name(
+    ///     "ECU_NAME",
+    ///     0xBB,                              // SID
+    ///     "myReadService",                   // name to match
+    ///     &security_plugin,
+    ///     HashMap::from([("did".into(), json!(0xF190))]),
+    ///     true,
+    /// ).await?;
+    /// ```
+    pub async fn send_by_sid_and_name(
+        &self,
+        ecu_name: &str,
+        service_id: u8,
+        name: &str,
+        security_plugin: &DynamicPlugin,
+        params: HashMap<String, serde_json::Value>,
+        map_to_json: bool,
+    ) -> Result<<T as cda_interfaces::PayloadDecoder>::Response, DiagServiceError> {
+        let ecu = self.uds_ecu_db(ecu_name)?;
+        let diag_comm = ecu
+            .read()
+            .await
+            .lookup_service_by_sid_and_name(service_id, name, None)?;
+
+        self.send(
+            ecu_name,
+            diag_comm,
+            security_plugin,
+            Some(UdsPayloadData::ParameterMap(params)),
+            map_to_json,
+        )
+        .await
     }
 }
 
@@ -192,6 +291,23 @@ impl<S: Clone + EcuGateway, T: UdsEcuDb> Clone for UdsManager<S, T> {
             fault_config: self.fault_config.clone(),
             update_in_progress: Arc::clone(&self.update_in_progress),
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl<S: EcuGateway, T: EcuManager> cda_interfaces::Shutdown for UdsManager<S, T> {
+    async fn shutdown(&self) {
+        let mut tester_present_tasks = self.tester_present_tasks.write().await;
+        let mut session_reset_tasks = self.session_reset_tasks.write().await;
+        let mut security_reset_tasks = self.security_reset_tasks.write().await;
+        let mut data_transfers = self.data_transfers.lock().await;
+        tester_present_tasks
+            .drain()
+            .map(|(_, tp)| tp.task)
+            .chain(session_reset_tasks.drain().map(|(_, h)| h))
+            .chain(security_reset_tasks.drain().map(|(_, h)| h))
+            .chain(data_transfers.drain().map(|(_, t)| t.task))
+            .for_each(|h| h.abort());
     }
 }
 

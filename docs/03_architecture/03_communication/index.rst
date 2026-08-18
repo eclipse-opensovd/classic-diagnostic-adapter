@@ -1,4 +1,4 @@
-.. SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+.. SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
 ..
 .. See the NOTICE file(s) distributed with this work for additional
 .. information regarding copyright ownership.
@@ -12,5 +12,9 @@
 Communication
 =============
 
-.. include:: /03_architecture/03_communication/01_doip_communication.rst
-.. include:: /03_architecture/03_communication/02_uds_communication.rst
+.. toctree::
+   :maxdepth: 2
+
+   01_doip_communication
+   02_can_communication
+   03_uds_communication

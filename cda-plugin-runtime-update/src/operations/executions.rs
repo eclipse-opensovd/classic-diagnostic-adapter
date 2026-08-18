@@ -28,14 +28,14 @@ use std::sync::{
 use cda_interfaces::{
     HashMap,
     runtime_update_api::{
-        ExecutionMode, ExecutionStatus, LockStateProvider, RuntimeFileReloadHandler,
-        RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError, UpdateCollections, UpdateExecution,
+        ExecutionMode, ExecutionStatus, LockStateProvider, RuntimeReloaderPlugin,
+        RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateCollections, UpdateExecution,
     },
     storage_api::{CollectionName, Storage},
 };
 use tokio::sync::RwLock;
 
-pub(crate) struct ExecutionParams<'a, S, R, T, L> {
+pub(crate) struct ExecutionParams<'a, S, R: ?Sized, T, L> {
     pub(crate) storage: &'a Arc<S>,
     pub(crate) security_handler: &'a Arc<T>,
     pub(crate) reload_handler: &'a Arc<R>,
@@ -44,15 +44,14 @@ pub(crate) struct ExecutionParams<'a, S, R, T, L> {
     pub(crate) mdd_decompress: bool,
     pub(crate) lock_state_provider: &'a L,
 }
-
 pub(crate) async fn start_execution<S, R, T, L>(
     params: &ExecutionParams<'_, S, R, T, L>,
     mode: ExecutionMode,
 ) -> Result<String, RuntimeUpdateError>
 where
     S: Storage + Send + Sync + 'static,
-    R: RuntimeFileReloadHandler,
-    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
+    R: RuntimeReloaderPlugin + ?Sized,
+    T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
     L: LockStateProvider,
 {
     params
@@ -66,19 +65,9 @@ where
             .get_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
             .await
             .ok(),
-        pending_config: params
-            .storage
-            .get_collection(&CollectionName::ConfigurationNextUpdate)
-            .await
-            .ok(),
         current_mdd: params
             .storage
             .get_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .ok(),
-        current_config: params
-            .storage
-            .get_collection(&CollectionName::Configuration)
             .await
             .ok(),
     };
@@ -122,10 +111,7 @@ where
     // before spawning the task so that the 404 is returned synchronously instead of
     // 202 being sent with a later Failed status (execute_apply's own check runs
     // inside the spawned task and is too late to affect the HTTP response).
-    if mode == ExecutionMode::Apply
-        && collections.pending_mdd.is_none()
-        && collections.pending_config.is_none()
-    {
+    if mode == ExecutionMode::Apply && collections.pending_mdd.is_none() {
         params.update_in_progress.store(false, Ordering::Release);
         return Err(RuntimeUpdateError::NoPendingUpdate);
     }
@@ -190,7 +176,7 @@ async fn execute_operation<S, R>(
 ) -> Result<(), RuntimeUpdateError>
 where
     S: Storage + Send + Sync + 'static,
-    R: RuntimeFileReloadHandler,
+    R: RuntimeReloaderPlugin + ?Sized,
 {
     match mode {
         ExecutionMode::Apply => {
@@ -329,7 +315,7 @@ mod tests {
     async fn start_execution_apply_with_no_pending_update_rejected_synchronously() {
         let f = make_fixture();
 
-        // Nothing seeded into DiagnosticDatabaseNextUpdate or ConfigurationNextUpdate:
+        // Nothing seeded into DiagnosticDatabaseNextUpdate:
         // Apply must be rejected synchronously (i.e. `start_execution` itself returns
         // an error) rather than accepted (202-equivalent execution id) only to fail
         // later inside the spawned task.

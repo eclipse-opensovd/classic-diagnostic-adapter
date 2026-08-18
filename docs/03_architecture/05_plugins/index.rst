@@ -1,4 +1,4 @@
-.. SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+.. SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
 ..
 .. See the NOTICE file(s) distributed with this work for additional
 .. information regarding copyright ownership.
@@ -12,8 +12,10 @@
 Plugins
 =======
 
-.. include:: /03_architecture/05_plugins/01_content.rst
+.. toctree::
+   :maxdepth: 2
 
-.. include:: /03_architecture/05_plugins/02_diagnostic_database_update.rst
-
-.. include:: /03_architecture/05_plugins/03_dlt_logging.rst
+   01_content
+   02_diagnostic_database_update
+   03_dlt_logging
+   04_vehicle_topology

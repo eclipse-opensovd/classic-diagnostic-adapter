@@ -62,27 +62,17 @@ impl CanEcuConnection {
         let src = self.response_id.to_socket_id()?;
         let dst = self.request_id.to_socket_id()?;
 
-        // Enable TX padding to send 8-byte CAN frames (required by many ECUs).
-        // When configured, also enable ISO-TP mixed addressing with the given
-        // address extension byte for both TX and RX.
-        let (behaviour, ext_address, rx_ext_address) = match self.address_extension {
-            Some(address_extension) => (
-                IsoTpBehaviour::CAN_ISOTP_TX_PADDING
-                    | IsoTpBehaviour::CAN_ISOTP_EXTEND_ADDR
-                    | IsoTpBehaviour::CAN_ISOTP_RX_EXT_ADDR,
-                address_extension,
-                address_extension,
-            ),
-            None => (IsoTpBehaviour::CAN_ISOTP_TX_PADDING, 0, 0),
-        };
+        let mixed_addressing = self.address_extension.is_some();
+        let ext_address = self.address_extension.unwrap_or(0);
+        let behaviour = Self::isotp_behaviour(mixed_addressing);
 
         let isotp_opts = IsoTpOptions::new(
             behaviour,
             Duration::ZERO, // frame_txtime
             ext_address,
-            0x00, // txpad_content (padding byte value)
-            0x00, // rxpad_content
-            rx_ext_address,
+            0x00,        // txpad_content (padding byte value)
+            0x00,        // rxpad_content
+            ext_address, // rx_ext_address, same byte as ext_address on TX
         )
         .ok();
 
@@ -94,6 +84,21 @@ impl CanEcuConnection {
                 ))
             },
         )
+    }
+
+    /// Translates the domain-level mixed-addressing decision into the
+    /// `tokio-socketcan-isotp` crate's `IsoTpBehaviour` flags, keeping that
+    /// crate's bitmask type from leaking into the rest of the module.
+    fn isotp_behaviour(mixed_addressing: bool) -> IsoTpBehaviour {
+        // TX padding to send 8-byte CAN frames is required by many ECUs.
+        let behaviour = IsoTpBehaviour::CAN_ISOTP_TX_PADDING;
+        if mixed_addressing {
+            behaviour
+                | IsoTpBehaviour::CAN_ISOTP_EXTEND_ADDR
+                | IsoTpBehaviour::CAN_ISOTP_RX_EXT_ADDR
+        } else {
+            behaviour
+        }
     }
 
     /// Verifies that an ISO-TP socket can be opened for this connection.
@@ -231,6 +236,26 @@ impl std::fmt::Debug for CanEcuConnection {
 mod tests {
     #[cfg(feature = "can-socketcand")]
     use super::*;
+    use super::{CanEcuConnection, IsoTpBehaviour};
+
+    #[test]
+    fn isotp_behaviour_without_mixed_addressing_only_pads() {
+        assert_eq!(
+            CanEcuConnection::isotp_behaviour(false).bits(),
+            IsoTpBehaviour::CAN_ISOTP_TX_PADDING.bits()
+        );
+    }
+
+    #[test]
+    fn isotp_behaviour_with_mixed_addressing_adds_extended_addr_flags() {
+        assert_eq!(
+            CanEcuConnection::isotp_behaviour(true).bits(),
+            (IsoTpBehaviour::CAN_ISOTP_TX_PADDING
+                | IsoTpBehaviour::CAN_ISOTP_EXTEND_ADDR
+                | IsoTpBehaviour::CAN_ISOTP_RX_EXT_ADDR)
+                .bits()
+        );
+    }
 
     /// End-to-end smoke test: a full request/response round trip using
     /// 29-bit extended IDs (ISO 15765-4 normal fixed addressing) through the

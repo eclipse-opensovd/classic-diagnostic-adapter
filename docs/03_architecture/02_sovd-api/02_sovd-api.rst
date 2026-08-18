@@ -130,7 +130,7 @@ Bulk Data
     .. note::
        IMPORTANT: All calls to the aforementioned endpoints can fail with reasonable HTTP status codes (e.g. 401, 403, 409, 501), depending on the context and state.
 
-    .. uml:: 02_sovd-api/images/bulk_data.puml
+    .. uml:: images/bulk_data.puml
 
 Entities
 ^^^^^^^^
@@ -156,6 +156,9 @@ Entities
 
     - The ECU identifier and name
     - Variant information (name, base variant flag, connectivity state, and logical address)
+    - A ``last_seen`` timestamp of the last successful diagnostic contact with the ECU (see
+      :need:`arch~dt-ecu-states`), if the ECU has ever been contacted (either in the current session, or,
+      when loaded from a persisted ECU list, in a previous session)
     - URI references to the standardized resource collection endpoints: data, operations, configurations, faults, modes, locks, and extension endpoints
 
     The connectivity state of an ECU reflects its current diagnostic reachability and variant detection status:
@@ -166,7 +169,10 @@ Entities
        * - State
          - Description
        * - Online
-         - The ECU is reachable and has a detected variant
+         - The ECU is reachable and has a detected variant. This also covers the internal AssumedOnline
+           state (see :need:`arch~dt-ecu-states`), i.e. an ECU known to have been Online in a previous
+           session (from a persisted ECU list) but not yet contacted in the current session; the
+           ``last_seen`` timestamp allows clients to tell these two cases apart.
        * - Offline
          - The ECU has not been contacted since startup
        * - NotTested
@@ -197,7 +203,7 @@ ECU resource collection
 
     Each ECU entity must provide a standardized resource collection as defined in ISO 17978-3, chapter 5.4.2.
 
-    The resource collection for ECUs is defined in an OpenAPI Specification: :download:`ECU Resource Collection Specification <02_sovd-api/openapi/ecu_resource_collection.yaml>`
+    The resource collection for ECUs is defined in an OpenAPI Specification: :download:`ECU Resource Collection Specification <openapi/ecu_resource_collection.yaml>`
 
 
 SDG/SD Metadata
@@ -309,9 +315,9 @@ Data Resources -- SID 22\ :sub:`16` & 2E\ :sub:`16`
 
     The following diagrams illustrate the message flow for reading and writing data resources:
 
-    .. uml:: 02_sovd-api/images/data_read.puml
+    .. uml:: images/data_read.puml
 
-    .. uml:: 02_sovd-api/images/data_write.puml
+    .. uml:: images/data_write.puml
 
 Categories
 ^^^^^^^^^^
@@ -372,9 +378,9 @@ Configurations -- SID 22\ :sub:`16` & 2E\ :sub:`16`
 
     The following diagrams illustrate the message flow for reading and writing configuration resources:
 
-    .. uml:: 02_sovd-api/images/configuration_read.puml
+    .. uml:: images/configuration_read.puml
 
-    .. uml:: 02_sovd-api/images/configuration_write.puml
+    .. uml:: images/configuration_write.puml
 
     .. note::
        ``x-sovd2uds-serviceAbstract`` is an extension to the standard.
@@ -436,7 +442,7 @@ Operations
     execute the routine with ``POST /operations/{routine-name}/executions`` is executed synchronously
     and will directly return the response from the ECU with HTTP status ``200 OK``.
 
-    .. uml:: 02_sovd-api/images/operation_sync.puml
+    .. uml:: images/operation_sync.puml
 
     .. note::
        Operations without a ``Start`` subfunction can exist in the operations list but will fail
@@ -478,7 +484,7 @@ Operations
     When ``x-sovd2uds-force=true``, the execution is removed from tracking even if the Stop
     request fails or returns a negative response.
 
-    .. uml:: 02_sovd-api/images/operation_async.puml
+    .. uml:: images/operation_async.puml
 
     **Stop Response Data**
 
@@ -550,7 +556,7 @@ Session -- SID 10\ :sub:`16`
 
     See also chapter 7.16 in ISO 17978-3.
 
-    .. uml:: 02_sovd-api/images/session_switch.puml
+    .. uml:: images/session_switch.puml
 
 
 Security -- SID 27\ :sub:`16`
@@ -630,7 +636,7 @@ Security -- SID 27\ :sub:`16`
          - ``Supplier``
          - level substring ``Supplier`` found in short name
 
-    .. uml:: 02_sovd-api/images/security_access.puml
+    .. uml:: images/security_access.puml
 
 
 Authentication -- SID 29\ :sub:`16`
@@ -649,7 +655,7 @@ Authentication -- SID 29\ :sub:`16`
     Diagnostic data descriptions have to specify the used services including the subfunction individually, so the
     request parameters can be converted into UDS payloads.
 
-    .. uml:: 02_sovd-api/images/authentication.puml
+    .. uml:: images/authentication.puml
 
 
 Communication Control -- SID 28\ :sub:`16`
@@ -675,7 +681,7 @@ Communication Control -- SID 28\ :sub:`16`
     .. note::
        Other values are not supported.
 
-    .. uml:: 02_sovd-api/images/communication_control.puml
+    .. uml:: images/communication_control.puml
 
 
 DTC Setting -- SID 85\ :sub:`16`
@@ -696,7 +702,7 @@ DTC Setting -- SID 85\ :sub:`16`
     .. note::
        Other specific extensions to the values are not supported.
 
-    .. uml:: 02_sovd-api/images/dtc_setting.puml
+    .. uml:: images/dtc_setting.puml
 
 
 Faults -- SID 14\ :sub:`16` & 19\ :sub:`16`
@@ -752,7 +758,296 @@ Faults -- SID 14\ :sub:`16` & 19\ :sub:`16`
     Additionally, a special key called ``mask`` is available, which takes a hexadecimal mask as a value
     to allow filtering by the complete status byte. Using other keys together with ``mask`` is not supported.
 
-    .. uml:: 02_sovd-api/images/fault_read.puml
+    .. uml:: images/fault_read.puml
+
+
+Locks
+-----
+
+.. arch:: Lock API
+    :id: arch~sovd-api-lock-api
+    :status: draft
+
+    All three lock scopes share the same CRUD API shape. The scope paths are:
+
+    - Vehicle: ``/locks``
+    - ECU: ``/components/{ecu-name}/locks``
+    - Functional group: ``/functions/functionalgroups/{group-name}/locks``
+
+    **Request fields (POST / PUT)**
+
+    .. list-table::
+       :header-rows: 1
+       :widths: 25 20 55
+
+       * - Field
+         - Type
+         - Description
+       * - ``lock_expiration``
+         - unsigned integer
+         - Duration in seconds from the current time. The absolute expiration instant is
+           computed at request time.
+       * - ``break_lock``
+         - boolean (optional, default ``false``)
+         - Whether an existing lock shall be broken/preempted. See
+           :need:`arch~sovd-api-lock-priority`.
+       * - ``x_sovd2uds_isexclusive``
+         - boolean (optional, default: configurable)
+         - Selects exclusive or non-exclusive enforcement mode. See
+           :need:`arch~sovd-api-lock-exclusivity-policy`.
+       * - Other properties
+         - any (optional)
+         - Passed verbatim to the priority plugin. Shape is vendor-defined.
+
+    **Response fields (POST / PUT)**
+
+    ``id`` (UUID string), ``owned`` (boolean, always ``true`` for the creating client).
+
+    **Response fields (GET /locks/{id})**
+
+    ``lock_expiration`` (ISO 8601 string). For defunct locks: additionally
+    ``x_sovd2uds_broken_by`` (string), ``x_sovd2uds_broken_at`` (ISO 8601 string), and
+    ``x_sovd2uds_current_holder`` (string, the identity of the current lock holder).
+
+
+.. arch:: Lock Exclusivity
+    :id: arch~sovd-api-lock-exclusivity
+    :status: draft
+
+    The ``x_sovd2uds_isexclusive`` boolean from the POST/PUT request body is stored as a field on the
+    lock object. If the request body omits the field, the value determined by the
+    configured ``lock_exclusivity_policy`` is substituted before storing it (see
+    :need:`arch~sovd-api-lock-exclusivity-policy`). When a request arrives at a
+    communication endpoint the stored flag is read to select the enforcement level applied
+    by :need:`arch~sovd-api-lock-ecu-enforcement` and
+    :need:`arch~sovd-api-lock-fg-enforcement`.
+
+
+.. arch:: Lock Exclusivity Policy
+    :id: arch~sovd-api-lock-exclusivity-policy
+    :status: draft
+
+    The configured ``lock_exclusivity_policy`` selects the value substituted for
+    ``x_sovd2uds_isexclusive`` whenever a lock POST or PUT request body omits that field,
+    before the resulting value is stored on the lock object (see
+    :need:`arch~sovd-api-lock-exclusivity`):
+
+    - ``exclusive_by_default`` (default): the substituted value is ``true``.
+    - ``non_exclusive_by_default``: the substituted value is ``false``.
+
+    The substitution is performed identically for the vehicle, ECU, and functional group
+    lock handlers.
+
+    Being enum-typed, this configuration option is designed to accommodate additional
+    exclusivity policies in the future without changing its name or structure.
+
+    Requests that explicitly include ``x_sovd2uds_isexclusive`` bypass the substitution
+    and use the provided value unchanged.
+
+
+.. arch:: Lock Expiration
+    :id: arch~sovd-api-lock-expiration
+    :status: draft
+
+    When a lock is created, a background task is spawned that fires at the computed
+    absolute expiration instant. On firing, the task acquires the write lock on the lock
+    map, confirms the stored lock ID still matches (guarding against a race with an extend
+    or a preemption), invokes the lock's cleanup function, and removes it from the map.
+
+    On ``PUT /locks/{id}`` (extend), the existing background task is aborted and a new one
+    is spawned for the updated instant.
+
+    On explicit ``DELETE /locks/{id}`` the background task is aborted before the cleanup
+    function is called, preventing a double-cleanup.
+
+    Defunct locks retain their original expiration task, but the task only removes the
+    defunct entry from the defunct store without invoking cleanup.
+
+
+.. arch:: ECU Lock Endpoint Enforcement
+    :id: arch~sovd-api-lock-ecu-enforcement
+    :links: arch~sovd-api-lock-exclusivity, arch~sovd-api-lock-defunct-enforcement
+    :status: draft
+
+    A ``validate_lock`` check is applied at the entry of every ECU communication endpoint.
+    The check proceeds as follows:
+
+    .. uml::
+        :caption: ECU Lock Enforcement Decision
+
+        @startuml
+        skinparam backgroundColor #FFFFFF
+        skinparam defaultTextAlignment center
+
+        start
+
+        :Identify caller from JWT claims;
+
+        if (Caller owns a defunct lock\nfor this ECU?) then (yes)
+          :HTTP 409 (Conflict);
+          stop
+        endif
+
+        if (Active lock held by\nanother client?) then (yes)
+          if (Lock is exclusive, or\nwrite operation?) then (yes)
+            :HTTP 423 (Locked);
+            stop
+          else (non-exclusive and read)
+            :Proceed;
+            stop
+          endif
+        else (no active lock by another)
+          if (Caller owns active ECU lock\nor vehicle lock?) then (yes)
+            :Proceed;
+            stop
+          else (no lock held by caller)
+            if (Write operation?) then (yes)
+              :HTTP 409 (Conflict\n- lock required);
+              stop
+            else (read)
+              :Proceed;
+              stop
+            endif
+          endif
+        endif
+
+        @enduml
+
+    The check accepts a vehicle lock owned by the caller as equivalent to owning the ECU
+    lock, granting full write access.
+
+
+.. arch:: Functional Group Lock Endpoint Enforcement
+    :id: arch~sovd-api-lock-fg-enforcement
+    :links: arch~sovd-api-lock-exclusivity, arch~sovd-api-lock-defunct-enforcement
+    :status: draft
+
+    A ``validate_fg_lock`` check is applied at the entry of every functional group
+    communication endpoint. It follows the same decision logic as
+    :need:`arch~sovd-api-lock-ecu-enforcement`, operating on the functional group lock
+    and the functional group endpoints (``/data``, ``/operations``, ``/modes``).
+
+    See also :need:`arch~sovd-api-functional-communication-locks` for the Tester Present
+    side-effects associated with acquiring and releasing a functional group lock.
+
+
+.. arch:: Lock Requirement Policy
+    :id: arch~sovd-api-lock-requirement-policy
+    :links: arch~sovd-api-lock-ecu-enforcement, arch~sovd-api-lock-fg-enforcement
+    :status: draft
+
+    The configured ``lock_requirement_policy`` selects a variant of the decision logic
+    used by ``validate_lock`` and ``validate_fg_lock`` (see
+    :need:`arch~sovd-api-lock-ecu-enforcement`):
+
+    - ``require_for_write_operations`` (default): the decision logic is unchanged from
+      :need:`arch~sovd-api-lock-ecu-enforcement` / :need:`arch~sovd-api-lock-fg-enforcement`.
+    - ``require_for_all_operations``: the branch that otherwise allows read operations to
+      proceed when no active lock is held by anyone is replaced with a rejection
+      (HTTP 409, Conflict), for both ECU-scoped and functional-group-scoped endpoints.
+
+    All other branches of the decision logic -- defunct lock pre-check, exclusive/
+    non-exclusive handling while a lock is held by another client, and the vehicle-lock
+    equivalence check -- are unaffected by this option.
+
+    Being enum-typed, this configuration option is designed to accommodate additional
+    requirement policies in the future without changing its name or structure.
+
+
+.. arch:: Lock Acquisition Policy
+    :id: arch~sovd-api-lock-acquisition-policy
+    :status: draft
+
+    The ECU lock POST handler and the functional group lock POST handler each evaluate the
+    configured ``lock_acquisition_policy`` before creating the child lock, in addition to
+    the existing vehicle-lock ownership check described in
+    :need:`arch~sovd-api-lock-vehicle-blocking`.
+
+    - ``unrestricted`` (default): no additional check is performed; behavior is as
+      described in :need:`arch~sovd-api-lock-vehicle-blocking`.
+    - ``vehicle_lock_required``: the handler first checks whether an active vehicle lock
+      currently exists, independent of its owner. If none exists, the request is rejected
+      with HTTP 409 (Conflict) before the vehicle-lock ownership check is evaluated. If a
+      vehicle lock exists, processing continues as normal, including the ownership check
+      from :need:`arch~sovd-api-lock-vehicle-blocking`.
+
+    Being enum-typed, this configuration option is designed to accommodate additional
+    acquisition policies in the future without changing its name or structure.
+
+
+.. arch:: Vehicle Lock Blocks Child Lock Acquisition
+    :id: arch~sovd-api-lock-vehicle-blocking
+    :status: draft
+
+    The ECU lock POST handler and the functional group lock POST handler each check for an
+    active vehicle lock before creating the child lock. If a vehicle lock is present and
+    owned by a different client the request is rejected with HTTP 409.
+
+    If the vehicle lock is held by the same caller, or if no vehicle lock is held, the
+    child lock creation proceeds normally.
+
+
+.. arch:: Lock Priority Mechanism Interface
+    :id: arch~sovd-api-lock-priority
+    :links: arch~sovd-api-lock-defunct
+    :status: draft
+
+    When a lock POST request arrives and a lock is already held by a different client, the
+    priority mechanism -- if one is registered -- is invoked before returning HTTP 409.
+
+    **Mechanism input**
+
+    - JWT claims of the requesting client
+    - The identity of the current lock holder, as well as the original properties
+      (TODO: probably better to send all locks to mechanism and let mechanism handle it?)
+
+    **Mechanism output**
+
+    - ``granted: bool`` -- whether the requesting client has sufficient priority to preempt
+    - ``broken_by: String`` -- the identity string to record in the defunct lock's
+      ``x_sovd2uds_broken_by`` field (typically the requesting client's JWT ``sub``, but
+      the exact value is determined by the plugin)
+
+    If ``granted`` is ``true``, the existing lock is transitioned to defunct state (see
+    :need:`arch~sovd-api-lock-defunct`) and a new lock is created for the requesting
+    client. If no mechanism is registered the handler returns HTTP 409 as normal.
+
+
+.. arch:: Defunct Lock Lifecycle
+    :id: arch~sovd-api-lock-defunct
+    :status: draft
+
+    When preemption is granted by the priority mechanism:
+
+    1. The current active lock is marked defunct: a ``defunct`` flag is set on the lock
+       object along with ``broken_by`` (string returned by the mechanism) and ``broken_at``
+       (current UTC timestamp).
+    2. The defunct lock is moved from the active lock slot to a separate per-entity defunct
+       store. The active slot is now free for the new lock.
+    3. The defunct lock's original expiration task is **not** aborted. When it fires it
+       removes the defunct entry from the defunct store without invoking any cleanup
+       function.
+    4. A new lock is created for the preempting client and placed in the active slot with
+       its own expiration task and cleanup function.
+
+    ``GET /locks`` returns both the active lock and any defunct locks for the entity.
+    Defunct lock entries carry ``x_sovd2uds_broken_by``, ``x_sovd2uds_broken_at``, and
+    ``x_sovd2uds_current_holder`` in addition to the standard fields.
+
+
+.. arch:: HTTP 409 for Preempted Clients
+    :id: arch~sovd-api-lock-defunct-enforcement
+    :status: draft
+
+    The ``validate_lock`` and ``validate_fg_lock`` checks are extended with a pre-check
+    that runs before the existing ownership and exclusivity evaluation:
+
+    1. Look up the defunct store for the target entity.
+    2. If any defunct lock in that store is owned by the calling client, return HTTP 409
+       immediately.
+
+    This pre-check takes precedence over the HTTP 409 or HTTP 423 that would otherwise be
+    returned for a missing or non-owned active lock.
 
 
 Generic Service
@@ -774,7 +1069,7 @@ Generic Service
     raw UDS request payload (e.g. ``22 F1 90``) and is responsible for evaluating whether the authenticated
     client is authorized to send that specific UDS command to the target ECU.
 
-    .. uml:: 02_sovd-api/images/generic_service.puml
+    .. uml:: images/generic_service.puml
 
 
 Version Endpoint
@@ -843,7 +1138,7 @@ Version Endpoint
     Both endpoint types are available immediately after the HTTP server starts and do not require
     any ECU communication.
 
-    .. uml:: 02_sovd-api/images/version_registration.puml
+    .. uml:: images/version_registration.puml
 
     .. note:: The current implementation only registers ``/data/version`` and ``/apps/sovd2uds/data/version``
 

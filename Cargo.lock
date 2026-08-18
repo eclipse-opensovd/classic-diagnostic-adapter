@@ -380,7 +380,10 @@ dependencies = [
 name = "cda-comm-can"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "cda-interfaces",
+ "cda-transport-router",
+ "futures",
  "hex",
  "schemars",
  "serde",
@@ -396,6 +399,7 @@ dependencies = [
 name = "cda-comm-doip"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "cda-interfaces",
  "doip-codec",
  "doip-definitions",
@@ -510,6 +514,7 @@ dependencies = [
  "bytes",
  "cda-build",
  "foldhash",
+ "futures",
  "hex",
  "mockall",
  "parking_lot",
@@ -532,12 +537,13 @@ dependencies = [
  "bytes",
  "cda-database",
  "cda-interfaces",
+ "cda-plugin-security",
+ "cda-sovd",
  "cda-storage",
  "schemars",
  "serde",
  "serde_json",
  "sha2",
- "sovd-interfaces",
  "tempfile",
  "thiserror 2.0.17",
  "tokio",
@@ -576,10 +582,9 @@ dependencies = [
  "axum-extra",
  "bytes",
  "cda-build",
+ "cda-comm-doip",
  "cda-interfaces",
- "cda-plugin-runtime-update",
  "cda-plugin-security",
- "cda-tracing",
  "chrono",
  "http",
  "indexmap",
@@ -639,6 +644,16 @@ dependencies = [
  "tracing-dlt",
  "tracing-opentelemetry",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "cda-transport-router"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cda-interfaces",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2434,6 +2449,7 @@ dependencies = [
  "cda-sovd",
  "cda-storage",
  "cda-tracing",
+ "cda-transport-router",
  "chrono",
  "clap",
  "figment",
@@ -3205,9 +3221,9 @@ dependencies = [
 
 [[package]]
 name = "rkyv"
-version = "0.8.16"
+version = "0.8.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73389e0c99e664f919275ab5b5b0471391fe9a8de61e1dff9b1eaf56a90f16e3"
+checksum = "815cc8a37159a463064825246cadb07961e25cd9885908606f6d08a98d8f8874"
 dependencies = [
  "bytecheck",
  "bytes",
@@ -3224,9 +3240,9 @@ dependencies = [
 
 [[package]]
 name = "rkyv_derive"
-version = "0.8.16"
+version = "0.8.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d2ed0b54125315fb36bd021e82d314d1c126548f871634b483f46b31d13cac6"
+checksum = "c0ed1a78a1b19d184b0daa629dd9a024573173ec7d485b287cb369fb3607cc1c"
 dependencies = [
  "proc-macro2",
  "quote",

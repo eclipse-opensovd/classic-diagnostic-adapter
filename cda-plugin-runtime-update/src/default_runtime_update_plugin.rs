@@ -26,29 +26,29 @@ use async_trait::async_trait;
 use cda_interfaces::{
     HashMap,
     runtime_update_api::{
-        BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider,
-        RuntimeFileReloadHandler, RuntimeFilesQuery, RuntimeFilesUpdatePlugin,
-        RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError, UpdateExecution, UploadFile,
+        BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider, RuntimeFilesQuery,
+        RuntimeFilesUpdatePlugin, RuntimeReloaderPlugin, RuntimeUpdateError,
+        RuntimeUpdateSecurityPlugin, UpdateExecution, UploadFile,
     },
     storage_api::Storage,
 };
 use tokio::sync::RwLock;
 
 /// Default implementation of [`RuntimeFilesUpdatePlugin`] with injectable security and storage.
-pub struct DefaultRuntimeFilesUpdatePlugin<
-    S: Storage,
-    R: RuntimeFileReloadHandler,
-    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
-    L: LockStateProvider,
+///
+pub struct DefaultRuntimeUpdatePlugin<
+    Store: Storage,
+    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    Lock: LockStateProvider,
 > {
     /// Access to the persistent storage layer (all mutations go through this)
-    storage: Arc<S>,
+    storage: Arc<Store>,
     /// Hot-reload notification handler
-    reload_handler: Arc<R>,
+    reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
     /// Security and file integrity handler
-    security_handler: Arc<T>,
+    security_handler: Arc<UpdateSecurityPlugin>,
     /// Lock state provider passed to security checks
-    lock_provider: Arc<L>,
+    lock_provider: Arc<Lock>,
     /// Tracking map for in-progress executions: `exec_id` -> `DbUpdateExecution`
     executions: Arc<RwLock<HashMap<String, UpdateExecution>>>,
     /// If true, call `update_mdd_uncompressed()` after Apply for each MDD file
@@ -60,11 +60,10 @@ pub struct DefaultRuntimeFilesUpdatePlugin<
 }
 
 impl<
-    S: Storage,
-    R: RuntimeFileReloadHandler,
-    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
-    L: LockStateProvider,
-> DefaultRuntimeFilesUpdatePlugin<S, R, T, L>
+    Store: Storage,
+    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    Lock: LockStateProvider,
+> DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
 {
     /// Creates a new plugin instance.
     ///
@@ -76,16 +75,16 @@ impl<
     /// * `mdd_decompress` - Whether to decompress MDD files after apply
     /// * `update_in_progress` - Shared flag read by other components to gate operations
     pub fn new(
-        storage: Arc<S>,
-        reload_handler: Arc<R>,
-        security_handler: Arc<T>,
-        lock_provider: Arc<L>,
+        storage: Arc<Store>,
+        reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
+        security_handler: Arc<UpdateSecurityPlugin>,
+        lock_provider: Arc<Lock>,
         mdd_decompress: bool,
         update_in_progress: Arc<AtomicBool>,
     ) -> Self {
         Self {
             storage,
-            reload_handler,
+            reloader_plugin,
             security_handler,
             lock_provider,
             executions: Arc::new(RwLock::new(HashMap::default())),
@@ -97,11 +96,10 @@ impl<
 
 #[async_trait]
 impl<
-    S: Storage + Send + Sync + 'static,
-    R: RuntimeFileReloadHandler,
-    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
-    L: LockStateProvider,
-> RuntimeFilesUpdatePlugin for DefaultRuntimeFilesUpdatePlugin<S, R, T, L>
+    Store: Storage + Send + Sync + 'static,
+    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    Lock: LockStateProvider,
+> RuntimeFilesUpdatePlugin for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
 {
     async fn list_current(
         &self,
@@ -147,7 +145,7 @@ impl<
         let params = crate::operations::executions::ExecutionParams {
             storage: &self.storage,
             security_handler: &self.security_handler,
-            reload_handler: &self.reload_handler,
+            reload_handler: &self.reloader_plugin,
             executions: &self.executions,
             update_in_progress: &self.update_in_progress,
             mdd_decompress: self.mdd_decompress,
@@ -179,21 +177,16 @@ mod tests {
     use cda_storage::LocalStorage;
 
     use crate::{
-        DefaultRuntimeFilesUpdatePlugin,
+        DefaultRuntimeUpdatePlugin,
         test_utils::{
             MockLockProvider, MockSecurityHandler, NoopReloadHandler, make_storage,
-            make_upload_files, make_valid_config, make_valid_mdd, write_test_file,
+            make_upload_files, make_valid_config, write_test_file,
         },
     };
 
     fn make_plugin(
         storage: LocalStorage,
-    ) -> DefaultRuntimeFilesUpdatePlugin<
-        LocalStorage,
-        NoopReloadHandler,
-        MockSecurityHandler,
-        MockLockProvider,
-    > {
+    ) -> DefaultRuntimeUpdatePlugin<LocalStorage, MockSecurityHandler, MockLockProvider> {
         make_state_with_lock(storage, Some("test-user"), false)
     }
 
@@ -201,13 +194,8 @@ mod tests {
         storage: LocalStorage,
         owner: Option<&str>,
         has_conflicts: bool,
-    ) -> DefaultRuntimeFilesUpdatePlugin<
-        LocalStorage,
-        NoopReloadHandler,
-        MockSecurityHandler,
-        MockLockProvider,
-    > {
-        DefaultRuntimeFilesUpdatePlugin::new(
+    ) -> DefaultRuntimeUpdatePlugin<LocalStorage, MockSecurityHandler, MockLockProvider> {
+        DefaultRuntimeUpdatePlugin::new(
             Arc::new(storage),
             Arc::new(NoopReloadHandler),
             Arc::new(MockSecurityHandler::new()),
@@ -344,20 +332,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_nextupdate_clears_both_collections() {
+    async fn delete_nextupdate_clears_mdd_collection() {
         let (storage, _dir) = make_storage();
         write_test_file(
             &storage,
             &CollectionName::DiagnosticDatabaseNextUpdate,
             "ecu.mdd",
             b"data",
-        )
-        .await;
-        write_test_file(
-            &storage,
-            &CollectionName::ConfigurationNextUpdate,
-            "cfg.toml",
-            b"[cfg]",
         )
         .await;
         let plugin = make_plugin(storage);
@@ -436,20 +417,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_backup_clears_both_backup_collections() {
+    async fn delete_backup_clears_mdd_backup_collection() {
         let (storage, _dir) = make_storage();
         write_test_file(
             &storage,
             &CollectionName::DiagnosticDatabaseBackup,
             "ecu.mdd",
             b"backup",
-        )
-        .await;
-        write_test_file(
-            &storage,
-            &CollectionName::ConfigurationBackup,
-            "cfg.toml",
-            b"[bak]",
         )
         .await;
         let state = make_plugin(storage);
@@ -462,19 +436,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_mdd_and_config_delegates_to_storage() {
+    async fn upload_rejects_config_files() {
         let (storage, _dir) = make_storage();
         let plugin = make_plugin(storage);
-        let mdd = make_valid_mdd("ComboECU");
         let config = make_valid_config();
-        let files = make_upload_files(&[("combo.mdd", &mdd), ("opensovd-cda.toml", &config)]);
+        let files = make_upload_files(&[("opensovd-cda.toml", &config)]);
 
-        let result = plugin.upload(files).await.unwrap();
+        let result = plugin.upload(files).await;
 
-        assert_eq!(result.items.len(), 2);
-        let ids: Vec<&str> = result.items.iter().map(|f| f.id.as_str()).collect();
-        assert!(ids.contains(&"combo.mdd"));
-        assert!(ids.contains(&"opensovd-cda.toml"));
+        assert!(matches!(
+            result,
+            Err(RuntimeUpdateError::InvalidFileType(_))
+        ));
     }
 
     #[tokio::test]

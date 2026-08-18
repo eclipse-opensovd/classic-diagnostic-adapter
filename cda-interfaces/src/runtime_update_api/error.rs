@@ -28,8 +28,6 @@ pub enum RuntimeUpdateError {
     StorageError(CdaStorageError),
     #[error("Invalid MDD file: {0}")]
     InvalidMddFile(String),
-    #[error("Invalid config file: {0}")]
-    InvalidConfig(String),
     #[error("Invalid file type: {0}")]
     InvalidFileType(String),
     #[error("Validation failed: {0}")]
