@@ -468,7 +468,7 @@ pub(crate) mod security {
             .into_response();
         }
 
-        let payload = if let Some(key) = key {
+        let (seed_payload, key_payload) = if let Some(key) = key {
             let mut data = HashMap::new();
             let Ok(value) = serde_json::to_value(&key) else {
                 return ErrorWrapper {
@@ -490,17 +490,20 @@ pub(crate) mod security {
             };
 
             data.insert(param_name, value);
-            let payload = UdsPayloadData::ParameterMap(data);
-            Some(payload)
+            (None, Some(UdsPayloadData::ParameterMap(data)))
         } else {
-            None
+            let seed_payload = request_body
+                .parameters
+                .map(|p| UdsPayloadData::ParameterMap(p.into_iter().collect()));
+            (seed_payload, None)
         };
 
         match uds
             .set_ecu_security_access(
                 &ecu_name,
                 &level,
-                payload,
+                key_payload,
+                seed_payload,
                 &(security_plugin as DynamicPlugin),
                 request_body.mode_expiration.map(Duration::from_secs),
             )

@@ -138,6 +138,7 @@ pub trait UdsSecurity: UdsTransport {
         ecu_name: &str,
         level: &str,
         authentication_data: Option<UdsPayloadData>,
+        request_seed_data: Option<UdsPayloadData>,
         security_plugin: &DynamicPlugin,
         expiration: Option<Duration>,
     ) -> Result<(SecurityAccess, Self::Response), DiagServiceError>;
@@ -724,6 +725,7 @@ pub mod mock {
                 ecu_name: &str,
                 level: &str,
                 authentication_data: Option<UdsPayloadData>,
+                request_seed_data: Option<UdsPayloadData>,
                 security_plugin: &DynamicPlugin,
                 expiration: Option<Duration>,
             ) -> Result<(SecurityAccess, <MockUdsEcu as UdsTransport>::Response), DiagServiceError>;
