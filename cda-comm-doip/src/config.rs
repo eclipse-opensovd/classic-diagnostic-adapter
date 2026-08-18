@@ -123,6 +123,8 @@ impl ConfigSanity for DoipConfig {
 #[cfg(test)]
 mod tests {
     use cda_interfaces::config::ConfigSanity;
+    
+    #[cfg(feature = "doip")]
     use doip_definitions::header::ProtocolVersion;
 
     use super::DoipConfig;
@@ -154,6 +156,7 @@ mod tests {
         assert!(config.validate_sanity().is_err());
     }
 
+    #[cfg(feature = "doip")]
     #[test]
     fn protocol_version_from_u8() {
         let v2: u8 = 0x02;

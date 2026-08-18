@@ -13,6 +13,13 @@
 # This enables CAN communication while keeping DoIP disabled.
 # Requires a binary built with the `can` cargo feature, e.g.
 #   CDA_CONFIG_FILE=opensovd-cda-can.toml cargo run -p opensovd-cda --features can
+#
+# To also drop the DoIP transport and its dependency tree (doip-definitions,
+# doip-codec, socket2, tokio-util codec/net, futures, TLS backends) from the
+# binary, disable the default features and pick the pieces you need:
+#   cargo run -p opensovd-cda --no-default-features \
+#     --features health,config-optional,can-socketcand \
+#     -- --config opensovd-cda-can.toml
 
 flash_files_path = "./flash"
 

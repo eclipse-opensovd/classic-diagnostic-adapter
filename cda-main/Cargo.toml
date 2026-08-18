@@ -84,14 +84,16 @@ tempfile = { workspace = true }
 chrono = { workspace = true }
 
 [features]
-default = ["health", "openssl", "config-optional"]
+default = ["health", "doip", "openssl", "config-optional"]
 tokio-tracing = ["cda-interfaces/tokio-tracing", "cda-tracing/tokio-tracing"]
-openssl = ["cda-comm-doip/openssl"]
+doip = ["cda-comm-doip/doip"]
+
+openssl = ["doip", "cda-comm-doip/openssl"]
 openssl-vendored = [
   "openssl",
   "cda-comm-doip/openssl-vendored",
 ]
-mbedtls = ["cda-comm-doip/mbedtls"]
+mbedtls = ["doip", "cda-comm-doip/mbedtls"]
 can = ["cda-comm-can/can"]
 # Userspace ISO-TP over raw CAN (`rawcan:<ifname>` interface scheme):
 # vcan suffices, no can_isotp kernel module needed.

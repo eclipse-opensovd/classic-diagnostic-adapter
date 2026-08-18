@@ -205,6 +205,17 @@ impl Configuration {
             });
         }
 
+        #[cfg(not(feature = "doip"))]
+        if self.doip.enabled {
+            return Err(ConfigSanityError::InvalidValue {
+                field: "doip.enabled".to_owned(),
+                reason: "doip.enabled = true, but this binary was built without DoIP support. \
+                         Rebuild with `--features doip` (or default features) or set \
+                         doip.enabled = false."
+                    .to_owned(),
+            });
+        }
+
         if !self.doip.enabled && self.can.is_none() {
             return Err(ConfigSanityError::InvalidValue {
                 field: "doip.enabled".to_owned(),
@@ -349,6 +360,8 @@ description_database = "teapot"
         let figment = Figment::from(Serialized::defaults(Configuration::default()))
             .merge(Toml::string(config_str));
         let config: Configuration = figment.extract()?;
+
+        #[cfg(feature = "doip")]
         config.validate_sanity().map_err(|err| err.to_string())?;
         assert_eq!(
             config
@@ -415,6 +428,9 @@ description_database = "teapot"
     async fn can_section_parses_and_sanity_depends_on_feature()
     -> Result<(), Box<dyn std::error::Error>> {
         let config_str = r#"
+[doip]
+enabled = false
+
 [can]
 interface = "vcan0"
 "#;
@@ -452,6 +468,9 @@ interface = "vcan0"
         ) -> Result<Configuration, Box<dyn std::error::Error>> {
             let config_str = format!(
                 r#"
+[doip]
+enabled = false
+
 [can]
 interface = "vcan0"
 {mappings}"#
