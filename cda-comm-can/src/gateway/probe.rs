@@ -192,34 +192,50 @@ impl CanDiagGateway {
     /// A list of ECU names that responded to a probe.
     #[tracing::instrument(skip_all, fields(dlt_context = dlt_ctx!("CAN")))]
     pub async fn discover_ecus(&self) -> Vec<String> {
-        let mut discovered = Vec::new();
+        let futures: Vec<_> = self
+            .connections
+            .iter()
+            .map(|(ecu_name, conn)| {
+                let logical_addr = self.logical_address_for_ecu(ecu_name);
 
-        for (ecu_name, conn) in self.connections.iter() {
-            let logical_addr = self.logical_address_for_ecu(ecu_name);
-
-            match self.probe_connection(conn, logical_addr).await {
-                Ok(()) => {
-                    tracing::info!(
-                        ecu = %conn.ecu_name,
-                        logical_addr = logical_addr,
-                        network_addr = %conn.network_address(),
-                        "ECU discovered on CAN"
-                    );
-                    self.discovered_ecus.write().await.insert(ecu_name.clone());
-                    // Push the lowercase map key, not `conn.ecu_name`: for
+                async move {
+                    let result = self.probe_connection(conn, logical_addr).await;
+                    match &result {
+                        Ok(()) => tracing::info!(
+                            ecu = %conn.ecu_name,
+                            logical_addr = logical_addr,
+                            network_addr = %conn.network_address(),
+                            "ECU discovered on CAN"
+                        ),
+                        Err(e) => tracing::debug!(
+                            ecu = %conn.ecu_name,
+                            logical_addr = logical_addr,
+                            error = %e,
+                            "ECU not responding on CAN"
+                        ),
+                    }
+                    // Return the lowercase map key, not `conn.ecu_name`: for
                     // ECUs from [[can.ecu_mappings]] the latter carries the
                     // config-file casing, which the variant-detection
                     // consumer would not find in its lowercase-keyed ECU map.
-                    discovered.push(ecu_name.clone());
+                    (ecu_name.clone(), result)
                 }
-                Err(e) => {
-                    tracing::debug!(
-                        ecu = %conn.ecu_name,
-                        logical_addr = logical_addr,
-                        error = %e,
-                        "ECU not responding on CAN"
-                    );
-                    self.discovered_ecus.write().await.remove(ecu_name);
+            })
+            .collect();
+
+        let results = futures::future::join_all(futures).await;
+
+        let mut discovered = Vec::new();
+        let mut cache = self.discovered_ecus.write().await;
+
+        for (ecu_name, result) in results {
+            match result {
+                Ok(()) => {
+                    cache.insert(ecu_name.clone());
+                    discovered.push(ecu_name);
+                }
+                Err(_) => {
+                    cache.remove(&ecu_name);
                 }
             }
         }
@@ -230,8 +246,15 @@ impl CanDiagGateway {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    #[cfg(feature = "can-socketcand")]
+    use cda_interfaces::CanId;
+
     use super::*;
     use crate::config::CanProbeConfig;
+    #[cfg(feature = "can-socketcand")]
+    use crate::gateway::connection::CanEcuConnection;
 
     #[test]
     fn default_probe_sequence_starts_with_tester_present() {
@@ -270,5 +293,59 @@ mod tests {
         };
         // An empty probe sequence would make discovery a silent no-op.
         assert!(CanDiagGateway::build_probe_sequence(&config).is_err());
+    }
+
+    /// Each address has no responder, so all probes must time out together
+    /// rather than one after another.
+    #[cfg(feature = "can-socketcand")]
+    #[tokio::test]
+    async fn discovery_probes_unresponsive_ecus_concurrently() {
+        const INTERFACE: &str = "socketcand:127.0.0.1:29536:vcan0";
+        const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+
+        let mut gateway = CanDiagGateway::test_instance(
+            vec![
+                (
+                    "missing-1",
+                    CanEcuConnection::new(
+                        "missing-1".to_owned(),
+                        INTERFACE.to_owned(),
+                        CanId::try_from(0x600).unwrap(),
+                        CanId::try_from(0x608).unwrap(),
+                    ),
+                ),
+                (
+                    "missing-2",
+                    CanEcuConnection::new(
+                        "missing-2".to_owned(),
+                        INTERFACE.to_owned(),
+                        CanId::try_from(0x610).unwrap(),
+                        CanId::try_from(0x618).unwrap(),
+                    ),
+                ),
+                (
+                    "missing-3",
+                    CanEcuConnection::new(
+                        "missing-3".to_owned(),
+                        INTERFACE.to_owned(),
+                        CanId::try_from(0x620).unwrap(),
+                        CanId::try_from(0x628).unwrap(),
+                    ),
+                ),
+            ],
+            vec![],
+        );
+        gateway.probe_timeout = PROBE_TIMEOUT;
+
+        let start = std::time::Instant::now();
+        assert_eq!(
+            gateway.discover_ecus().await,
+            [] as [std::string::String; 0]
+        );
+        assert!(
+            start.elapsed() < PROBE_TIMEOUT * 2,
+            "three probes should complete near one timeout, not three: {:?}",
+            start.elapsed()
+        );
     }
 }

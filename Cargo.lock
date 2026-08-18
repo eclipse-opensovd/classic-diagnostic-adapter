@@ -383,6 +383,7 @@ dependencies = [
  "async-trait",
  "cda-interfaces",
  "cda-transport-router",
+ "futures",
  "hex",
  "schemars",
  "serde",

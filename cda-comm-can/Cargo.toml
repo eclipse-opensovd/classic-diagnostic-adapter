@@ -36,6 +36,8 @@ tokio = { workspace = true, features = ["rt", "time", "sync", "io-util"] }
 tokio-util = { workspace = true }
 # logging & tracing
 tracing = { workspace = true }
+# futures
+futures = { workspace = true }
 # utilities
 hex = { workspace = true }
 schemars = { workspace = true }
