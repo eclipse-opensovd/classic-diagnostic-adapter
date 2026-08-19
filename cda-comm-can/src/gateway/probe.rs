@@ -312,6 +312,7 @@ mod tests {
                         INTERFACE.to_owned(),
                         CanId::try_from(0x600).unwrap(),
                         CanId::try_from(0x608).unwrap(),
+                        None,
                     ),
                 ),
                 (
@@ -321,6 +322,7 @@ mod tests {
                         INTERFACE.to_owned(),
                         CanId::try_from(0x610).unwrap(),
                         CanId::try_from(0x618).unwrap(),
+                        None,
                     ),
                 ),
                 (
@@ -330,6 +332,7 @@ mod tests {
                         INTERFACE.to_owned(),
                         CanId::try_from(0x620).unwrap(),
                         CanId::try_from(0x628).unwrap(),
+                        None,
                     ),
                 ),
             ],

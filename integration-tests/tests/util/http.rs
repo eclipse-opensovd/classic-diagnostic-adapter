@@ -17,6 +17,7 @@ use http::HeaderMap;
 use opensovd_cda_lib::config::configfile::Configuration;
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
+use tokio::time::{Instant as TokioInstant, sleep_until};
 
 use crate::util::TestingError;
 
@@ -194,63 +195,91 @@ pub(crate) async fn send_request(
     headers: Option<&HeaderMap>,
     url: reqwest::Url,
 ) -> Result<Response, TestingError> {
-    let client = reqwest::Client::new();
-    let mut request_builder = client.request(method, url.clone()).header(
-        reqwest::header::CONTENT_TYPE,
-        mime::APPLICATION_JSON.essence_str(),
-    );
+    let deadline = TokioInstant::now()
+        .checked_add(max_db_update_wait())
+        .unwrap_or_else(TokioInstant::now);
 
-    if let Some(json_data) = data {
-        request_builder = request_builder.body(json_data.to_string());
-    }
+    loop {
+        let client = reqwest::Client::new();
+        let mut request_builder = client.request(method.clone(), url.clone()).header(
+            reqwest::header::CONTENT_TYPE,
+            mime::APPLICATION_JSON.essence_str(),
+        );
 
-    if let Some(header_map) = headers {
-        request_builder = header_map
-            .iter()
-            .fold(request_builder, |builder, (key, value)| {
-                builder.header(key, value)
+        if let Some(json_data) = data {
+            request_builder = request_builder.body(json_data.to_string());
+        }
+
+        if let Some(header_map) = headers {
+            request_builder = header_map
+                .iter()
+                .fold(request_builder, |builder, (key, value)| {
+                    builder.header(key, value)
+                });
+        }
+
+        let req_response = request_builder
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|_| TestingError::Timeout(format!("Fetching {url} timed out")))?;
+        let header_map = req_response.headers().clone();
+        let status = req_response.status();
+        let body = if status == StatusCode::NO_CONTENT {
+            None
+        } else {
+            Some(
+                req_response
+                    .text()
+                    .await
+                    .map_err(|_| TestingError::UnexpectedResponse {
+                        expected: expected_status,
+                        actual: status,
+                        body: None,
+                        message: "Failed to get text from response".to_owned(),
+                        url: url.to_string(),
+                    })?,
+            )
+        };
+
+        if status == StatusCode::CONFLICT
+            && let Some(body_text) = &body
+            && is_db_update_in_progress(body_text)
+            && TokioInstant::now() < deadline
+        {
+            // Sleep until the fixed deadline to avoid drift from repeated sleeps
+            sleep_until(deadline).await;
+            continue;
+        }
+
+        if status != expected_status {
+            return Err(TestingError::UnexpectedResponse {
+                expected: expected_status,
+                actual: status,
+                body,
+                message: "Expected status does not match".to_owned(),
+                url: url.to_string(),
             });
-    }
+        }
 
-    let req_response = request_builder
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|_| TestingError::Timeout(format!("Fetching {url} timed out")))?;
-    let header_map = req_response.headers().clone();
-    let status = req_response.status();
-    let body = if status == StatusCode::NO_CONTENT {
-        None
-    } else {
-        Some(
-            req_response
-                .text()
-                .await
-                .map_err(|_| TestingError::UnexpectedResponse {
-                    expected: expected_status,
-                    actual: status,
-                    body: None,
-                    message: "Failed to get text from response".to_owned(),
-                    url: url.to_string(),
-                })?,
-        )
-    };
-
-    if status != expected_status {
-        return Err(TestingError::UnexpectedResponse {
-            expected: expected_status,
-            actual: status,
-            body,
-            message: "Expected status does not match".to_owned(),
-            url: url.to_string(),
+        return Ok(Response {
+            status,
+            body: body.clone(),
+            header_map,
         });
     }
+}
 
-    Ok(Response {
-        status,
-        body: body.clone(),
-        header_map,
-    })
+fn max_db_update_wait() -> Duration {
+    std::env::var("TEST_DB_UPDATE_WAIT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map_or_else(|| Duration::from_secs(30), Duration::from_secs)
+}
+
+fn is_db_update_in_progress(body_text: &str) -> bool {
+    body_text.contains("\"error_code\":\"update-process-in-progress\"")
+        || body_text.contains("Database update in progress")
 }
 
 impl QueryParams {
