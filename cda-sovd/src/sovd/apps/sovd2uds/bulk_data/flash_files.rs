@@ -46,12 +46,43 @@ async fn process_directory(
         relative_sub_dir: Option<&PathBuf>,
     ) -> Vec<sovd_interfaces::sovd2uds::BulkDataDescriptor> {
         std::fs::read_dir(dir)
+            .inspect_err(|e| {
+                tracing::warn!(
+                    dir = %dir.display(),
+                    error = %e,
+                    "Failed to read directory while listing flash files"
+                );
+            })
             .into_iter()
-            .flat_map(|entries| entries.filter_map(Result::ok))
+            .flat_map(|entries| {
+                entries.filter_map(|entry| {
+                    entry
+                        .inspect_err(|e| {
+                            tracing::warn!(
+                                dir = %dir.display(),
+                                error = %e,
+                                "Failed to read directory entry while listing flash files"
+                            );
+                        })
+                        .ok()
+                })
+            })
             .filter_map(|entry| {
-                let file_type = entry.file_type().ok()?;
+                let file_type = entry.file_type().ok().or_else(|| {
+                    tracing::warn!(
+                        path = %entry.path().display(),
+                        "Failed to determine file type of directory entry, skipping"
+                    );
+                    None
+                })?;
                 if file_type.is_file() {
-                    let metadata = entry.metadata().ok()?;
+                    let metadata = entry.metadata().ok().or_else(|| {
+                        tracing::warn!(
+                            path = %entry.path().display(),
+                            "Failed to read metadata of file, skipping"
+                        );
+                        None
+                    })?;
                     let file_name = relative_sub_dir.as_ref().map_or_else(
                         || entry.file_name().to_string_lossy().to_string(),
                         |rel| rel.join(entry.file_name()).to_string_lossy().to_string(),
@@ -74,6 +105,10 @@ async fn process_directory(
                         new_relative_sub_dir.push(entry.file_name());
                         Some(process(&path, Some(&new_relative_sub_dir)))
                     } else {
+                        tracing::warn!(
+                            path = %path.display(),
+                            "Failed to read subdirectory while listing flash files, skipping"
+                        );
                         None
                     }
                 } else {
