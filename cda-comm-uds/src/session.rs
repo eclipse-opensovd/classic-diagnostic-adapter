@@ -120,6 +120,14 @@ impl<S: EcuGateway, T: EcuManager> UdsSession for UdsManager<S, T> {
             .await?;
         match result.response_type() {
             DiagServiceResponseType::Positive => {
+                ecu_diag_service
+                    .read()
+                    .await
+                    .set_service_state(
+                        cda_interfaces::service_ids::SESSION_CONTROL,
+                        session.to_owned(),
+                    )
+                    .await;
                 self.start_reset_task(ecu_name, expiration, ResetType::Session)
                     .await;
 
@@ -165,5 +173,69 @@ impl<S: EcuGateway, T: EcuManager> UdsSession for UdsManager<S, T> {
                 "Session reset negative response".to_owned(),
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cda_interfaces::{EcuStateManager, diagservices::DiagServiceResponseType, service_ids};
+    use tokio::sync::RwLock;
+
+    use crate::test_helpers::TestEcuDb;
+
+    #[tokio::test]
+    async fn positive_response_updates_session_control_state() {
+        let ecu_diag_service = RwLock::new(TestEcuDb::new());
+        let session = "programming";
+
+        match DiagServiceResponseType::Positive {
+            DiagServiceResponseType::Positive => {
+                ecu_diag_service
+                    .read()
+                    .await
+                    .set_service_state(service_ids::SESSION_CONTROL, session.to_owned())
+                    .await;
+            }
+            DiagServiceResponseType::Negative => {}
+        }
+
+        assert_eq!(
+            ecu_diag_service
+                .read()
+                .await
+                .get_service_state(service_ids::SESSION_CONTROL)
+                .await,
+            Some("programming".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn negative_response_does_not_update_session_control_state() {
+        let ecu_diag_service = RwLock::new(TestEcuDb::new());
+        ecu_diag_service
+            .read()
+            .await
+            .set_service_state(service_ids::SESSION_CONTROL, "default".to_owned())
+            .await;
+
+        match DiagServiceResponseType::Negative {
+            DiagServiceResponseType::Positive => {
+                ecu_diag_service
+                    .read()
+                    .await
+                    .set_service_state(service_ids::SESSION_CONTROL, "programming".to_owned())
+                    .await;
+            }
+            DiagServiceResponseType::Negative => {}
+        }
+
+        assert_eq!(
+            ecu_diag_service
+                .read()
+                .await
+                .get_service_state(service_ids::SESSION_CONTROL)
+                .await,
+            Some("default".to_owned())
+        );
     }
 }
