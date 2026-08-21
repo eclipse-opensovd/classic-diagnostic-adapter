@@ -19,7 +19,7 @@ use std::{
 use cda_interfaces::{
     Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState,
     PayloadDecoder, PendingNrc, ServicePayload, TransmissionParameters, TransportResponse,
-    UdsTransport, UdsVariant, VariantDetection, VariantState,
+    UdsTransport, VariantDetection, VariantState,
     datatypes::RetryPolicy,
     diagservices::{DiagServiceResponse, UdsPayloadData},
     dlt_ctx, service_ids,
@@ -75,7 +75,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                     variant_state = ?status.variant_state,
                     "Triggering variant detection before send"
                 );
-                if let Err(e) = self.detect_variant(ecu_name).await {
+                if let Err(e) = self.detect_variant_if_needed(ecu_name).await {
                     tracing::warn!(
                         ecu_name,
                         error = %e,

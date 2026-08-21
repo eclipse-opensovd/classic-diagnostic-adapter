@@ -20,7 +20,37 @@ use cda_interfaces::{
 };
 use tokio::sync::RwLock;
 
-use crate::UdsManager;
+use crate::{UdsManager, coordinator::EcuCoordinatorHandle, transport::needs_variant_detection};
+
+#[derive(Clone, Copy)]
+enum DetectionTrigger {
+    Forced,
+    IfNeeded,
+}
+
+enum DetectionPermit {
+    Skip,
+    Run(Option<tokio::sync::OwnedMutexGuard<()>>),
+}
+
+async fn claim_detection(
+    lock_handle: Option<&EcuCoordinatorHandle>,
+    state_handle: Option<&EcuCoordinatorHandle>,
+    trigger: DetectionTrigger,
+) -> DetectionPermit {
+    let Some(lock_handle) = lock_handle else {
+        return DetectionPermit::Run(None);
+    };
+    let Some(guard) = lock_handle.begin_detection().await else {
+        return DetectionPermit::Skip;
+    };
+    if matches!(trigger, DetectionTrigger::IfNeeded)
+        && state_handle.is_some_and(|handle| !needs_variant_detection(&handle.ecu_status()))
+    {
+        return DetectionPermit::Skip;
+    }
+    DetectionPermit::Run(Some(guard))
+}
 
 /// Result of evaluating every member of a duplicate group against one set of
 /// detection responses.
@@ -37,6 +67,77 @@ enum GroupDetectionResult {
 }
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
+    pub(crate) async fn detect_variant_if_needed(
+        &self,
+        ecu_name: &str,
+    ) -> Result<(), DiagServiceError> {
+        self.detect_variant_with_trigger(ecu_name, DetectionTrigger::IfNeeded)
+            .await
+    }
+
+    async fn detect_variant_with_trigger(
+        &self,
+        ecu_name: &str,
+        trigger: DetectionTrigger,
+    ) -> Result<(), DiagServiceError> {
+        let ecu = self.uds_ecu_db(ecu_name)?;
+
+        // A queued automatic trigger may become obsolete while an earlier
+        // detection runs. Re-check state only after claiming the slot so a
+        // successful run suppresses another detection request.
+        let group_representative = self.duplicate_group_representative(ecu_name).await;
+        let DetectionPermit::Run(_detection_guard) = claim_detection(
+            self.state_coordinator.get_handle(&group_representative),
+            self.state_coordinator.get_handle(ecu_name),
+            trigger,
+        )
+        .await
+        else {
+            tracing::debug!(ecu_name, "Variant detection trigger obsolete, skipping");
+            return Ok(());
+        };
+
+        let service_responses = self.gather_detection_responses(ecu_name, ecu).await?;
+
+        // No responses gathered -> the ECU (and thus its whole duplicate
+        // group, which shares the physical node) is unreachable.
+        if service_responses.is_empty() {
+            return self.mark_group_unreachable(ecu).await;
+        }
+
+        let Some(mut duplicated_ecus) = ecu
+            .read()
+            .await
+            .duplicating_ecu_names()
+            .cloned()
+            .filter(|d| !d.is_empty())
+        else {
+            // No duplicated ECUs, proceed with normal variant detection
+            return ecu
+                .write()
+                .await
+                .detect_variant(service_responses)
+                .await
+                .map_err(|e| {
+                    DiagServiceError::VariantDetectionError(format!(
+                        "Failed to detect variant: {e:?}"
+                    ))
+                });
+        };
+
+        // Detect variants for all duplicated ECUs; the group verdict decides
+        // each member's final state.
+        duplicated_ecus.insert(ecu_name.to_owned());
+        let detection_result = self
+            .evaluate_duplicate_group(&duplicated_ecus, &service_responses)
+            .await;
+        tracing::debug!(?detection_result, "ECU variant detection result");
+        self.apply_group_result(&detection_result, &duplicated_ecus)
+            .await;
+
+        Ok(())
+    }
+
     #[tracing::instrument(skip_all,
         fields(dlt_context = dlt_ctx!("UDS"))
     )]
@@ -77,7 +178,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                         cda_interfaces::util::tokio_ext::sleep_for(OFFLINE_VERDICT_RETRY_DELAY)
                             .await;
                     }
-                    match vd.detect_variant(&ecu_name).await {
+                    match vd.detect_variant_if_needed(&ecu_name).await {
                         Ok(()) => {
                             tracing::trace!("Variant detection successful");
                         }
@@ -335,65 +436,8 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
         )
     )]
     async fn detect_variant(&self, ecu_name: &str) -> Result<(), DiagServiceError> {
-        let ecu = self.uds_ecu_db(ecu_name)?;
-
-        // Serialize detections per duplicate group and coalesce trigger
-        // bursts (a detection writes the state of every group member, so
-        // callers claim the group representative's slot); see
-        // [`crate::coordinator::EcuCoordinatorHandle::begin_detection`].
-        // All callers (boot, reconnect, pre-send guard) funnel through here.
-        let group_representative = self.duplicate_group_representative(ecu_name).await;
-        let mut _detection_guard = None;
-        if let Some(handle) = self.state_coordinator.get_handle(&group_representative) {
-            _detection_guard = handle.begin_detection().await;
-            if _detection_guard.is_none() {
-                tracing::debug!(
-                    ecu_name,
-                    "Variant detection superseded by a newer trigger, skipping"
-                );
-                return Ok(());
-            }
-        }
-
-        let service_responses = self.gather_detection_responses(ecu_name, ecu).await?;
-
-        // No responses gathered -> the ECU (and thus its whole duplicate
-        // group, which shares the physical node) is unreachable.
-        if service_responses.is_empty() {
-            return self.mark_group_unreachable(ecu).await;
-        }
-
-        let Some(mut duplicated_ecus) = ecu
-            .read()
+        self.detect_variant_with_trigger(ecu_name, DetectionTrigger::Forced)
             .await
-            .duplicating_ecu_names()
-            .cloned()
-            .filter(|d| !d.is_empty())
-        else {
-            // No duplicated ECUs, proceed with normal variant detection
-            return ecu
-                .write()
-                .await
-                .detect_variant(service_responses)
-                .await
-                .map_err(|e| {
-                    DiagServiceError::VariantDetectionError(format!(
-                        "Failed to detect variant: {e:?}"
-                    ))
-                });
-        };
-
-        // Detect variants for all duplicated ECUs; the group verdict decides
-        // each member's final state.
-        duplicated_ecus.insert(ecu_name.to_owned());
-        let detection_result = self
-            .evaluate_duplicate_group(&duplicated_ecus, &service_responses)
-            .await;
-        tracing::debug!(?detection_result, "ECU variant detection result");
-        self.apply_group_result(&detection_result, &duplicated_ecus)
-            .await;
-
-        Ok(())
     }
 
     async fn get_ecu_state(&self, ecu_name: &str) -> Result<EcuState, DiagServiceError> {
@@ -451,5 +495,122 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
         let ecu = self.uds_ecu_db(ecu_name)?;
         let logical_address = ecu.read().await.logical_address();
         Ok(logical_address)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cda_interfaces::{Connectivity, VariantState};
+
+    use super::{DetectionPermit, DetectionTrigger, claim_detection};
+    use crate::coordinator::EcuCoordinatorHandle;
+
+    #[tokio::test]
+    async fn queued_automatic_detection_is_skipped_after_success() {
+        let handle = EcuCoordinatorHandle::spawn("TestECU".to_owned());
+        let in_flight = handle.begin_detection().await.expect("first entrant");
+
+        let queued_handle = handle.clone();
+        let queued = tokio::spawn(async move {
+            claim_detection(
+                Some(&queued_handle),
+                Some(&queued_handle),
+                DetectionTrigger::IfNeeded,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+
+        {
+            let mut state = handle.state.ecu_state.write().unwrap();
+            state.connectivity = Connectivity::Online;
+            state.variant_state = VariantState::Detected {
+                name: "MyVariant".to_owned(),
+                is_base_variant: false,
+                is_fallback: false,
+            };
+        }
+        drop(in_flight);
+
+        assert!(
+            matches!(queued.await.expect("queued trigger"), DetectionPermit::Skip),
+            "successful detection must suppress queued automatic trigger"
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_automatic_detection_runs_when_still_needed() {
+        let handle = EcuCoordinatorHandle::spawn("TestECU".to_owned());
+        let in_flight = handle.begin_detection().await.expect("first entrant");
+
+        let queued_handle = handle.clone();
+        let queued = tokio::spawn(async move {
+            claim_detection(
+                Some(&queued_handle),
+                Some(&queued_handle),
+                DetectionTrigger::IfNeeded,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        drop(in_flight);
+
+        assert!(
+            matches!(
+                queued.await.expect("queued trigger"),
+                DetectionPermit::Run(Some(_))
+            ),
+            "unresolved state must permit queued automatic trigger"
+        );
+    }
+
+    #[tokio::test]
+    async fn forced_detection_runs_when_state_is_healthy() {
+        let handle = EcuCoordinatorHandle::spawn("TestECU".to_owned());
+        {
+            let mut state = handle.state.ecu_state.write().unwrap();
+            state.connectivity = Connectivity::Online;
+            state.variant_state = VariantState::Detected {
+                name: "MyVariant".to_owned(),
+                is_base_variant: false,
+                is_fallback: false,
+            };
+        }
+
+        assert!(
+            matches!(
+                claim_detection(Some(&handle), Some(&handle), DetectionTrigger::Forced).await,
+                DetectionPermit::Run(Some(_))
+            ),
+            "explicit detection must not be suppressed by healthy state"
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_detection_checks_triggering_duplicate_state() {
+        let representative = EcuCoordinatorHandle::spawn("Representative".to_owned());
+        let duplicate = EcuCoordinatorHandle::spawn("Duplicate".to_owned());
+        {
+            let mut state = representative.state.ecu_state.write().unwrap();
+            state.connectivity = Connectivity::Online;
+            state.variant_state = VariantState::Detected {
+                name: "MyVariant".to_owned(),
+                is_base_variant: false,
+                is_fallback: false,
+            };
+        }
+
+        assert!(
+            matches!(
+                claim_detection(
+                    Some(&representative),
+                    Some(&duplicate),
+                    DetectionTrigger::IfNeeded
+                )
+                .await,
+                DetectionPermit::Run(Some(_))
+            ),
+            "triggering duplicate still needs detection"
+        );
     }
 }
