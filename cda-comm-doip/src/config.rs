@@ -123,7 +123,6 @@ impl ConfigSanity for DoipConfig {
 #[cfg(test)]
 mod tests {
     use cda_interfaces::config::ConfigSanity;
-    
     #[cfg(feature = "doip")]
     use doip_definitions::header::ProtocolVersion;
 

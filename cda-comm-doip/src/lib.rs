@@ -30,8 +30,6 @@ pub use error::{ConnectionError, DoipGatewaySetupError};
 // / `doip-codec` / `socket2` / `futures` / `tokio-util` is compiled only with
 // the `doip` feature.
 #[cfg(feature = "doip")]
-pub mod socket;
-#[cfg(feature = "doip")]
 mod connection_receiver;
 #[cfg(feature = "doip")]
 mod connection_sender;
@@ -40,26 +38,24 @@ mod connections;
 #[cfg(feature = "doip")]
 mod ecu_connection;
 #[cfg(feature = "doip")]
-mod vir_vam;
-#[cfg(feature = "doip")]
 mod gateway;
-
 #[cfg(feature = "doip")]
-pub use gateway::{DoipDiagGateway, create_udp_vir_socket};
-
+pub mod socket;
+#[cfg(feature = "doip")]
+mod vir_vam;
 
 #[cfg(feature = "doip")]
 pub(crate) use gateway::{
     DiagnosticResponse, DiscoveredGateway, DoipConnection, DoipEcu, DoipGatewayState,
     DoipTransportConfig, EcuTimeouts, GatewayConnectionConfig, GatewayDoipConfig, GatewaySetup,
 };
-
+#[cfg(feature = "doip")]
+pub use gateway::{DoipDiagGateway, create_udp_vir_socket};
 
 #[cfg(not(feature = "doip"))]
 mod stub;
 #[cfg(not(feature = "doip"))]
 pub use stub::{DoipDiagGateway, create_udp_vir_socket};
-
 
 #[cfg(not(feature = "doip"))]
 pub mod socket {

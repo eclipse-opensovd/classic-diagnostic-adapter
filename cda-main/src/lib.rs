@@ -809,8 +809,7 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     if doip_config.enabled {
         return Err(AppError::ConfigurationError {
             message: "doip.enabled = true, but this binary was built without DoIP support. \
-                      Rebuild with `--features doip` (or default features) or set \
-                      doip.enabled = false."
+                      Rebuild with `--features doip` or set doip.enabled = false."
                 .to_owned(),
             source: None,
         });

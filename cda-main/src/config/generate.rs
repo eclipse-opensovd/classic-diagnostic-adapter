@@ -675,7 +675,7 @@ mod tests {
                 .merge(Toml::string(&reference))
                 .extract()
                 .expect("generated reference config should be parseable as a valid Configuration");
-                
+
         #[cfg(feature = "doip")]
         config
             .validate_sanity()
