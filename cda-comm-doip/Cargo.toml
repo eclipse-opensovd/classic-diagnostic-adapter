@@ -30,36 +30,53 @@ cda-interfaces = { workspace = true }
 # external
 async-trait = { workspace = true }
 thiserror = { workspace = true }
-# DoIP
-doip-definitions = { workspace = true }
-doip-codec = { workspace = true }
-# tls
+
+# For `CAN` only, CDA build does not interact with `DoIP` protocol crates.
+doip-definitions = { workspace = true, optional = true }
+doip-codec = { workspace = true, optional = true }
+
+# tls - only meaningful together with the DoIP transport.
 openssl = { workspace = true, optional = true }
 tokio-openssl = { workspace = true, optional = true }
+mbedtls-rs = { workspace = true, optional = true }
 
+# Always compiled: needed by `config`, `error`, and the feature-off stubs.
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-socket2 = { workspace = true, features = ["all"] }
-#tokio
+# tokio
 tokio = { workspace = true, features = ["time", "fs", "sync", "rt", "macros"] }
-tokio-util = { workspace = true, features = ["codec", "net"] }
-# futures
-futures = { workspace = true }
 # logging & tracing
 tracing = { workspace = true }
 
-mbedtls-rs = { workspace = true, optional = true }
+# Used by the `DoIP` socket / gateway implementation.
+socket2 = { workspace = true, features = ["all"], optional = true }
+tokio-util = { workspace = true, features = ["codec", "net"], optional = true }
+futures = { workspace = true, optional = true }
 
 [features]
 default = []
+# Compile the actual DoIP transport (socket, gateway state, connection
+# handling, vehicle-identification listener). Without this feature the crate
+# only exposes `config`, `error`, and uninhabited stubs of `DoipDiagGateway`,
+# `socket::DoIPUdpSocket`, and `create_udp_vir_socket`, so downstream code
+# (cda-main, cda-sovd, integration-tests) compiles unchanged and no DoIP
+# dependency is pulled in.
+doip = [
+  "dep:doip-definitions",
+  "dep:doip-codec",
+  "dep:socket2",
+  "dep:tokio-util",
+  "dep:futures",
+]
 # EXPERIMENTAL
 # This feature enable experimental support for mbedtls TLS.
 # The mbedtls crate used is NOT security reviewed - use at your own discretion.
-# mbedtls cannot be combined with openssl feature
-mbedtls = ["dep:mbedtls-rs"]
-# enable openssl TLS - if enabled together with mbedtls openssl will be prefered!
+# mbedtls cannot be combined with openssl feature.
+# TLS is only meaningful together with the DoIP transport.
+mbedtls = ["doip", "dep:mbedtls-rs"]
+# enable openssl TLS - if enabled together with mbedtls openssl will be preferred!
 # This allows to still use `--all-features` when running clippy for example.
-openssl = ["dep:openssl", "dep:tokio-openssl"]
+openssl = ["doip", "dep:openssl", "dep:tokio-openssl"]
 openssl-vendored = ["openssl", "openssl/vendored"]
 dlt-tracing = ["cda-interfaces/dlt-tracing"]
 

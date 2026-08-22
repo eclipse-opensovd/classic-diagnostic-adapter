@@ -781,6 +781,12 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
         })
         .unwrap_or_default();
 
+    // `mut` is unused when both `doip` and `can` are disabled at compile time
+    #[allow(
+        unused_mut,
+        reason = "with_doip / with_can are feature-gated; a build with neither leaves the router \
+                  empty"
+    )]
     let mut gateway =
         DiagnosticTransportRouter::<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>::new(
             transport_overrides,
@@ -799,6 +805,17 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
         });
     }
 
+    #[cfg(not(feature = "doip"))]
+    if doip_config.enabled {
+        return Err(AppError::ConfigurationError {
+            message: "doip.enabled = true, but this binary was built without DoIP support. \
+                      Rebuild with `--features doip` or set doip.enabled = false."
+                .to_owned(),
+            source: None,
+        });
+    }
+
+    #[cfg(feature = "doip")]
     if let Some(doip) = init_doip_gateway(
         &databases,
         doip_config,
@@ -811,6 +828,20 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     .await?
     {
         gateway = gateway.with_doip(doip);
+    }
+
+    #[cfg(not(feature = "doip"))]
+    {
+        let _ = (
+            &databases,
+            &variant_detection,
+            connectivity_handler,
+            shutdown_signal,
+            reusable_doip_socket,
+        );
+        if let Some(provider) = doip_health_provider {
+            provider.set_status(cda_health::Status::Up).await;
+        }
     }
 
     #[cfg(feature = "can")]
@@ -827,6 +858,7 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
 /// at all) the health provider is marked `Up` immediately so readiness
 /// (/health/ready) does not wait forever on an intentionally disabled
 /// transport.
+#[cfg(feature = "doip")]
 async fn init_doip_gateway<S: SecurityPlugin>(
     databases: &Arc<DatabaseMap<S>>,
     doip_config: &DoipConfig,
@@ -881,6 +913,7 @@ async fn init_doip_gateway<S: SecurityPlugin>(
 }
 
 /// Reuses the transport resource supplied by a previous runtime or creates the initial resource.
+#[cfg(feature = "doip")]
 fn reuse_or_create_transport_resource<T, E>(
     reusable_resource: Option<Arc<Mutex<T>>>,
     create: impl FnOnce() -> Result<T, E>,

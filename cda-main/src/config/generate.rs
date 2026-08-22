@@ -675,9 +675,13 @@ mod tests {
                 .merge(Toml::string(&reference))
                 .extract()
                 .expect("generated reference config should be parseable as a valid Configuration");
+
+        #[cfg(feature = "doip")]
         config
             .validate_sanity()
             .expect("parsed reference config should pass sanity validation");
+        #[cfg(not(feature = "doip"))]
+        let _ = config;
     }
 
     /// The committed CAN example config must stay loadable through the real
