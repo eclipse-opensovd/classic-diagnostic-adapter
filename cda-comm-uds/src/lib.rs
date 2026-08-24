@@ -315,39 +315,6 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         )
         .await
     }
-
-    /// Aborts all running tester-present tasks and saves their types in the
-    /// snapshot so they can be restarted after communication is re-enabled.
-    ///
-    /// Called by the [`CommunicationLifecycle::deinitialize`] hook before the
-    /// transport goes down.
-    pub async fn snapshot_and_abort_tester_present(&self) {
-        let mut tasks = self.tester_present_tasks.write().await;
-        let snapshot: Vec<TesterPresentType> = tasks.values().map(|tp| tp.type_.clone()).collect();
-        if !snapshot.is_empty() {
-            tracing::debug!(
-                count = snapshot.len(),
-                "Communication disabling; aborting tester-present tasks and saving snapshot"
-            );
-        }
-        let handles: Vec<_> = tasks.drain().map(|(_, tp)| tp.task).collect();
-        drop(tasks);
-        for handle in handles {
-            handle.abort();
-            let _ = handle.await;
-        }
-        *self.tester_present_snapshot.lock().await = snapshot;
-    }
-
-    /// Takes the snapshot saved by [`snapshot_and_abort_tester_present`],
-    /// leaving it empty, and returns the types to be restarted.
-    ///
-    /// Called from [`UdsManager::restart_tester_present_snapshot`],
-    /// which the [`CommunicationLifecycle::initialize`] hook runs after
-    /// communication is re-enabled.
-    pub async fn take_tester_present_snapshot(&self) -> Vec<TesterPresentType> {
-        std::mem::take(&mut *self.tester_present_snapshot.lock().await)
-    }
 }
 
 impl<S: Clone + EcuGateway, T: UdsEcuDb> Clone for UdsManager<S, T> {
