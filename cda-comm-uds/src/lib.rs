@@ -56,6 +56,13 @@ use types::{EcuDataTransfer, EcuIdentifier};
 type VariantDetectionListener =
     Arc<Mutex<Option<(CancellationToken, JoinHandle<VariantDetectionReceiver>)>>>;
 
+enum ReceiverRetention {
+    /// Keep the receiver when the listener may be restarted later.
+    Keep,
+    /// Discard the receiver when the listener will not be restarted.
+    Discard,
+}
+
 pub struct UdsManager<S: EcuGateway, T: UdsEcuDb> {
     ecus: Arc<HashMap<String, RwLock<T>>>,
     gateway: S,
@@ -166,30 +173,19 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         }
     }
 
-    /// Cancels the variant-detection listener and awaits the receiver it hands
-    /// back.
+    /// Stops the listener, then either drops its receiver or drains and retains
+    /// it for reuse. Reuse preserves the channel held by long-lived senders.
     ///
-    /// `retain_receiver` controls what happens to that receiver:
-    ///
-    /// - `true` (used by [`CommunicationLifecycle::deinitialize`]): the
-    ///   receiver is drained of stale triggers and stored back in
-    ///   [`Self::variant_detection_receiver`] so the next initialization can
-    ///   resume reading from it. This is required rather than just building a
-    ///   fresh channel on reactivation: the `Sender` side is cloned out once at startup to
-    ///   long-lived components (e.g. `EcuStateCoordinator`) and is never
-    ///   replaced, so the original receiver is the only thing that can still
-    ///   observe messages sent through those clones.
-    /// - `false` (used by [`cda_interfaces::Shutdown::shutdown`]): the
-    ///   receiver is simply dropped, since shutdown is permanent and there is
-    ///   no future `initialize()` to resume into.
-    async fn stop_variant_detection_listener(&self, retain_receiver: bool) {
+    /// `receiver_retention` determines whether the receiver is kept for the
+    /// next initialization or discarded permanently.
+    async fn stop_variant_detection_listener(&self, receiver_retention: ReceiverRetention) {
         let Some((cancel_token, listener)) = self.variant_detection_listener.lock().await.take()
         else {
             return;
         };
         cancel_token.cancel();
         match listener.await {
-            Ok(mut receiver) if retain_receiver => {
+            Ok(mut receiver) if matches!(receiver_retention, ReceiverRetention::Keep) => {
                 while receiver.try_recv().is_ok() {}
                 *self.variant_detection_receiver.lock().await = Some(receiver);
             }
@@ -379,7 +375,8 @@ impl<S: Clone + EcuGateway, T: UdsEcuDb> Clone for UdsManager<S, T> {
 #[async_trait::async_trait]
 impl<S: EcuGateway, T: EcuManager> cda_interfaces::Shutdown for UdsManager<S, T> {
     async fn shutdown(&self) {
-        self.stop_variant_detection_listener(false).await;
+        self.stop_variant_detection_listener(ReceiverRetention::Discard)
+            .await;
         let mut tester_present_tasks = self.tester_present_tasks.write().await;
         let mut session_reset_tasks = self.session_reset_tasks.write().await;
         let mut security_reset_tasks = self.security_reset_tasks.write().await;

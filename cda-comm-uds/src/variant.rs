@@ -26,7 +26,10 @@ use cda_interfaces::{
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use crate::{UdsManager, coordinator::EcuCoordinatorHandle, transport::needs_variant_detection};
+use crate::{
+    ReceiverRetention, UdsManager, coordinator::EcuCoordinatorHandle,
+    transport::needs_variant_detection,
+};
 
 #[derive(Clone, Copy)]
 enum DetectionTrigger {
@@ -625,7 +628,8 @@ impl<S: EcuGateway, T: EcuManager> CommunicationLifecycle for UdsManager<S, T> {
 
     async fn deinitialize(&self) {
         self.snapshot_and_abort_tester_present().await;
-        self.stop_variant_detection_listener(true).await;
+        self.stop_variant_detection_listener(ReceiverRetention::Keep)
+            .await;
     }
 }
 
