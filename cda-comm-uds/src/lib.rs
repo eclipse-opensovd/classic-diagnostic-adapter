@@ -15,11 +15,9 @@ use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, FunctionalDescriptionConfig,
-    HashMap, HashMapExtensions, HashSet, HashSetExtensions, SchemaDescription, SchemaProvider,
-    TesterPresentType, UdsEcu, UdsEcuDb, UdsTransport, VariantDetectionReceiver,
-    communication_control::{
-        ActivationCause, CommunicationAccess, CommunicationGuard, error::CommControlError,
-    },
+    HashMap, HashMapExtensions, SchemaDescription, SchemaProvider, TesterPresentType, UdsEcu,
+    UdsEcuDb, UdsTransport, VariantDetectionReceiver,
+    communication_control::{ActivationCause, CommunicationAccess, CommunicationGuard},
     datatypes::FaultConfig,
     diagservices::UdsPayloadData,
 };
@@ -52,9 +50,9 @@ use types::{EcuDataTransfer, EcuIdentifier};
 
 /// The running variant-detection listener task, with the token that cancels it.
 ///
-/// The task hands the receiver back when canceled, so a later
-/// [`UdsManager::start_variant_detection_listener`] can resume reading from the
-/// same channel rather than losing queued discoveries.
+/// The task hands the receiver back when canceled, so the next communication
+/// initialization can resume reading from the same channel rather than losing
+/// queued discoveries.
 type VariantDetectionListener =
     Arc<Mutex<Option<(CancellationToken, JoinHandle<VariantDetectionReceiver>)>>>;
 
@@ -72,9 +70,9 @@ pub struct UdsManager<S: EcuGateway, T: UdsEcuDb> {
     communication_access: Arc<dyn CommunicationAccess>,
     /// Configured retry hint surfaced on [`DiagServiceError::CommunicationNotReady`].
     communication_retry_after: Duration,
-    /// Held until [`UdsManager::start_variant_detection_listener`] takes it
-    /// from the initializer chain. Deferred rather than spawned in [`UdsManager::new`]
-    /// so no VAM-triggered detection work runs before an authorized activation;
+    /// Held until communication initialization starts the listener. Deferred
+    /// rather than spawned in [`UdsManager::new`] so no VAM-triggered detection
+    /// work runs before an authorized activation.
     variant_detection_receiver: Arc<Mutex<Option<VariantDetectionReceiver>>>,
     variant_detection_listener: VariantDetectionListener,
     /// Tester-present types that were running at the last `deinitialize()` call,
@@ -90,22 +88,17 @@ impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
             .ok_or_else(|| DiagServiceError::NotFound(format!("ECU {ecu_name} not found")))
     }
 
-    /// Requires diagnostic communication to already be enabled before
-    /// sending a UDS request. When it is not, this fires a non-blocking
-    /// activation request (on demand, when `init_mode` allows it) and
-    /// returns [`DiagServiceError::CommunicationNotReady`] immediately,
-    /// rather than awaiting the full activation sequence inline, which can
-    /// take seconds due to variant detection, and would otherwise turn the
-    /// first diagnostic request into a long hang instead of a fast "not
-    /// ready, retry" response. The returned guard must be held for the
-    /// duration of the send so a concurrent disable cannot tear down the
-    /// transport underneath it.
+    /// Requires diagnostic communication to be enabled before sending a UDS
+    /// request. Otherwise, requests activation when permitted by `init_mode`
+    /// and immediately returns [`DiagServiceError::CommunicationNotReady`].
     ///
-    /// Must never be called from the variant-detection path ([`UdsManager::detect_variant`]
-    /// and everything it reaches, i.e. [`UdsManager::send_without_variant_guard`]:
-    /// detection runs as part of *becoming* enabled, before the state
-    /// reaches `Enabled`, so gating it here would deadlock activation
-    /// against itself.
+    /// The returned guard must be held for the duration of the send.
+    ///
+    /// # Constraints
+    ///
+    /// Must not be called from [`UdsManager::detect_variant`] or anything it
+    /// invokes, including [`UdsManager::send_without_variant_guard`], because
+    /// variant detection runs before communication reaches the enabled state.
     ///
     /// # Errors
     ///
@@ -170,89 +163,16 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         }
     }
 
-    /// Takes ownership of the variant-detection-trigger receiver and spawns
-    /// the task that drains it, dispatching spontaneous VAM-discovery
-    /// triggers (arriving after startup) to [`Self::start_variant_detection_for_ecus`].
-    ///
-    /// Deliberately **not** spawned in [`Self::new`]: doing so would run
-    /// detection-triggering work before any authorized activation. Called
-    /// once from [`CommunicationLifecycle::initialize`] before the initial
-    /// sweep runs. The initial discovery burst during
-    /// `transport_control.enable()` simply buffers in the channel until then
-    /// (bounded by the channel's capacity; see the caller), since the first
-    /// full sweep does not depend on this listener at all.
-    ///
-    /// The receiver is returned by the previous listener when communication is
-    /// disabled, allowing a new listener to be started on reactivation.
-    pub(crate) async fn start_variant_detection_listener(&self) -> Result<(), CommControlError> {
-        let Some(mut variant_detection_receiver) =
-            self.variant_detection_receiver.lock().await.take()
-        else {
-            return Ok(());
-        };
-
-        let vd_uds_clone = self.clone();
-        let cancel = CancellationToken::new();
-        let task_cancel = cancel.clone();
-        let listener = cda_interfaces::spawn_named!("variant-detection-receiver", async move {
-            loop {
-                let ecus = tokio::select! {
-                    biased; // prefer cancellation over variant detection
-                    () = task_cancel.cancelled() => break,
-                    ecus = variant_detection_receiver.recv() => {
-                        let Some(ecus) = ecus else { break };
-                        ecus.into_ecus()
-                    }
-                };
-                let mut processed_duplicates = HashSet::new();
-                let mut deduplicated_ecus = Vec::new();
-
-                for ecu_name in ecus {
-                    if processed_duplicates.contains(&ecu_name) {
-                        continue;
-                    }
-
-                    if let Some(ecu) = vd_uds_clone.ecus.get(&ecu_name) {
-                        let ecu_read = ecu.read().await;
-                        if let Some(duplicates) = ecu_read.duplicating_ecu_names() {
-                            processed_duplicates.extend(duplicates.iter().cloned());
-                        }
-                        deduplicated_ecus.push(ecu_name);
-                    } else {
-                        // A silent drop here once masked a casing mismatch
-                        // between a transport's discovery names and the
-                        // lowercase-keyed ECU map, leaving discovered ECUs
-                        // NotTested until their first request.
-                        tracing::warn!(
-                            ecu_name,
-                            "Variant detection trigger for unknown ECU dropped"
-                        );
-                    }
-                }
-
-                tokio::select! {
-                    () = task_cancel.cancelled() => break,
-                    () = vd_uds_clone.start_variant_detection_for_ecus(deduplicated_ecus) => {}
-                }
-            }
-            variant_detection_receiver
-        });
-        *self.variant_detection_listener.lock().await = Some((cancel, listener));
-
-        Ok(())
-    }
-
-    /// Cancels the listener task spawned by [`Self::start_variant_detection_listener`]
-    /// and awaits it for the `mpsc::Receiver` it hands back.
+    /// Cancels the variant-detection listener and awaits the receiver it hands
+    /// back.
     ///
     /// `retain_receiver` controls what happens to that receiver:
     ///
     /// - `true` (used by [`CommunicationLifecycle::deinitialize`]): the
     ///   receiver is drained of stale triggers and stored back in
-    ///   [`Self::variant_detection_receiver`] so the next
-    ///   [`Self::start_variant_detection_listener`] call can resume reading
-    ///   from it. This is required rather than just building a fresh channel
-    ///   on reactivation: the `Sender` side is cloned out once at startup to
+    ///   [`Self::variant_detection_receiver`] so the next initialization can
+    ///   resume reading from it. This is required rather than just building a
+    ///   fresh channel on reactivation: the `Sender` side is cloned out once at startup to
     ///   long-lived components (e.g. `EcuStateCoordinator`) and is never
     ///   replaced, so the original receiver is the only thing that can still
     ///   observe messages sent through those clones.
