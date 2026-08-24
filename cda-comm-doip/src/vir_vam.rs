@@ -15,13 +15,13 @@ use std::{future::Future, sync::Arc, time::Duration};
 
 use cda_interfaces::{
     DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, HashMap,
-    HashMapExtensions, dlt_ctx,
+    HashMapExtensions, VariantDetectionRequest, VariantDetectionSender, dlt_ctx,
 };
 use doip_definitions::{
     header::PayloadType,
     payload::{DoipPayload, VehicleIdentificationRequest},
 };
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     ConnectionTasks, DiscoveredGateway, DoipGatewaySetupError, DoipGatewayState,
@@ -109,7 +109,7 @@ pub(crate) async fn listen_for_vams<T, F>(
     netmask: u32,
     state: DoipGatewayState<T>,
     connection_tasks: Arc<ConnectionTasks>,
-    variant_detection: mpsc::Sender<Vec<String>>,
+    variant_detection: VariantDetectionSender,
     connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     mut shutdown_signal: futures::future::Shared<F>,
 ) -> tokio::task::JoinHandle<()>
@@ -126,7 +126,7 @@ where
 
     #[derive(Clone)]
     struct VamNotifications {
-        variant_detection: mpsc::Sender<Vec<String>>,
+        variant_detection: VariantDetectionSender,
         connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     }
 
@@ -226,11 +226,14 @@ where
     )]
     async fn send_variant_detection(
         gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
-        variant_detection: &mpsc::Sender<Vec<String>>,
+        variant_detection: &VariantDetectionSender,
         logical_address: u16,
     ) {
         if let Some(ecus) = gateway_ecu_name_map.get(&logical_address) {
-            if let Err(e) = variant_detection.send(ecus.clone()).await {
+            if let Err(e) = variant_detection
+                .send(VariantDetectionRequest::new(ecus.clone()))
+                .await
+            {
                 tracing::warn!(
                     error = ?e,
                     "Failed to send variant detection request"

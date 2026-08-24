@@ -16,7 +16,7 @@ use std::{sync::Arc, time::Duration};
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, FunctionalDescriptionConfig,
     HashMap, HashMapExtensions, HashSet, HashSetExtensions, SchemaDescription, SchemaProvider,
-    TesterPresentType, UdsEcu, UdsEcuDb, UdsTransport,
+    TesterPresentType, UdsEcu, UdsEcuDb, UdsTransport, VariantDetectionReceiver,
     communication_control::{
         ActivationCause, CommunicationAccess, CommunicationGuard, error::CommControlError,
     },
@@ -24,7 +24,7 @@ use cda_interfaces::{
     diagservices::UdsPayloadData,
 };
 use tokio::{
-    sync::{Mutex, RwLock, Semaphore, mpsc},
+    sync::{Mutex, RwLock, Semaphore},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -49,10 +49,6 @@ mod test_helpers;
 pub use state_coordinator::EcuStateCoordinator;
 pub use types::TesterPresentTask;
 use types::{EcuDataTransfer, EcuIdentifier};
-
-/// Channel over which the `DoIP` layer forwards spontaneous VAM discoveries to
-/// the variant-detection listener.
-type VariantDetectionReceiver = mpsc::Receiver<Vec<String>>;
 
 /// The running variant-detection listener task, with the token that cancels it.
 ///
@@ -146,7 +142,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     pub fn new(
         gateway: S,
         ecus: Arc<HashMap<String, RwLock<T>>>,
-        variant_detection_receiver: mpsc::Receiver<Vec<String>>,
+        variant_detection_receiver: VariantDetectionReceiver,
         state_coordinator: EcuStateCoordinator,
         functional_description_config: &FunctionalDescriptionConfig,
         fault_config: FaultConfig,
@@ -205,7 +201,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                     () = task_cancel.cancelled() => break,
                     ecus = variant_detection_receiver.recv() => {
                         let Some(ecus) = ecus else { break };
-                        ecus
+                        ecus.into_ecus()
                     }
                 };
                 let mut processed_duplicates = HashSet::new();

@@ -29,9 +29,9 @@ use cda_core::EcuManager;
 use cda_database::FileManager;
 use cda_interfaces::{
     EcuConnectivityHandler, EcuRuntimeState, FunctionalDescriptionConfig, HashMap,
-    HashMapExtensions, TransportType, communication_control::CommunicationAccess,
-    component_slot::ComponentSlot, config::ConfigSanity, datatypes::FaultConfig, dlt_ctx,
-    health::HealthProvider,
+    HashMapExtensions, TransportType, VariantDetectionReceiver, VariantDetectionSender,
+    communication_control::CommunicationAccess, component_slot::ComponentSlot,
+    config::ConfigSanity, datatypes::FaultConfig, dlt_ctx, health::HealthProvider,
 };
 use cda_plugin_communication_management::plugin::CommunicationPluginBuilder;
 use cda_plugin_security::{
@@ -628,7 +628,7 @@ pub struct TransportConfigs<'a> {
 pub fn create_uds_manager<S: SecurityPlugin>(
     gateway: DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>,
     databases: Arc<HashMap<String, RwLock<EcuManager<S>>>>,
-    variant_detection_receiver: mpsc::Receiver<Vec<String>>,
+    variant_detection_receiver: VariantDetectionReceiver,
     state_coordinator: EcuStateCoordinator,
     functional_description_config: &FunctionalDescriptionConfig,
     fault_config: FaultConfig,
@@ -708,7 +708,7 @@ struct PreparedVehicleComponents<S: SecurityPlugin> {
     databases: Arc<DatabaseMap<S>>,
     file_managers: FileManagerMap,
     diagnostic_gateway: DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>,
-    variant_detection_rx: mpsc::Receiver<Vec<String>>,
+    variant_detection_rx: VariantDetectionReceiver,
     state_coordinator: EcuStateCoordinator,
 }
 
@@ -725,6 +725,8 @@ async fn prepare_vehicle_components<S: SecurityPlugin>(
     let (databases, file_managers) = load_databases::<S>(config, mdd_paths, db_provider).await?;
 
     let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
+    let variant_detection_tx = VariantDetectionSender::new(variant_detection_tx);
+    let variant_detection_rx = VariantDetectionReceiver::new(variant_detection_rx);
     let databases = Arc::new(databases);
 
     let runtime_states = build_runtime_states(&databases).await;
@@ -806,7 +808,7 @@ pub(crate) fn finish_vehicle_components<S: SecurityPlugin>(
 pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     databases: Arc<DatabaseMap<S>>,
     transports: TransportConfigs<'_>,
-    variant_detection: mpsc::Sender<Vec<String>>,
+    variant_detection: VariantDetectionSender,
     connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     doip_health_provider: Option<&Arc<dyn HealthProvider>>,
 ) -> Result<DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>, AppError> {
@@ -880,7 +882,7 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
 async fn init_doip_gateway<S: SecurityPlugin>(
     databases: &Arc<DatabaseMap<S>>,
     doip_config: &DoipConfig,
-    variant_detection: mpsc::Sender<Vec<String>>,
+    variant_detection: VariantDetectionSender,
     connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     doip_health_provider: Option<&Arc<dyn HealthProvider>>,
 ) -> Result<Option<DoipDiagGateway<EcuManager<S>>>, AppError> {
@@ -925,7 +927,7 @@ async fn init_doip_gateway<S: SecurityPlugin>(
 async fn init_can_gateway<S: SecurityPlugin>(
     databases: &Arc<DatabaseMap<S>>,
     can_cfg: &CanConfig,
-    variant_detection: mpsc::Sender<Vec<String>>,
+    variant_detection: VariantDetectionSender,
 ) -> Result<CanDiagGateway, AppError> {
     match CanDiagGateway::new(can_cfg, databases, variant_detection).await {
         Ok(c) => {

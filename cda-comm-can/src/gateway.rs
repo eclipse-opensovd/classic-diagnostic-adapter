@@ -30,7 +30,8 @@ use async_trait::async_trait;
 use cda_interfaces::{
     CanComParamProvider, CanId, DiagServiceError, EcuAddresses, FunctionalTransport, HashMap,
     NetworkTopology, PhysicalTransport, RouteStatus, ServicePayload, Shutdown,
-    TransmissionParameters, TransportProbe, TransportResponse,
+    TransmissionParameters, TransportProbe, TransportResponse, VariantDetectionRequest,
+    VariantDetectionSender,
     communication_control::{
         GatewayLifecycle, TransportControl, TransportState, error::CommControlError,
     },
@@ -85,7 +86,7 @@ pub struct CanDiagGateway {
     /// Configured keepalive interval; zero disables keepalive.
     keepalive_interval: Duration,
     /// Notifies variant detection after discovery and rediscovery.
-    variant_detection: mpsc::Sender<Vec<String>>,
+    variant_detection: VariantDetectionSender,
     /// Shared restartable lifecycle state and retained task configuration.
     lifecycle: Arc<GatewayLifecycle<CanGatewayOperation>>,
 }
@@ -126,7 +127,7 @@ impl CanDiagGateway {
     pub async fn new<T: EcuAddresses + CanComParamProvider>(
         config: &CanConfig,
         ecus: &HashMap<String, RwLock<T>>,
-        variant_detection: mpsc::Sender<Vec<String>>,
+        variant_detection: VariantDetectionSender,
     ) -> Result<Self, CanGatewaySetupError> {
         tracing::info!("Initializing CanDiagGateway");
 
@@ -782,7 +783,10 @@ impl TransportControl for CanDiagGateway {
         }
 
         if !discovered.is_empty()
-            && let Err(error) = self.variant_detection.send(discovered).await
+            && let Err(error) = self
+                .variant_detection
+                .send(VariantDetectionRequest::new(discovered))
+                .await
         {
             self.lifecycle
                 .coordinator
@@ -891,7 +895,7 @@ impl CanDiagGateway {
             probe_sequence: Arc::new(vec![ProbeRequest::tester_present()]),
             functional_id: CanId::try_from(0x7DF).expect("valid test CAN ID"),
             keepalive_interval: Duration::ZERO,
-            variant_detection: mpsc::channel(1).0,
+            variant_detection: VariantDetectionSender::new(mpsc::channel(1).0),
             lifecycle: Arc::new(GatewayLifecycle::new(TransportState::Enabled)),
         }
     }

@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use cda_interfaces::{
     DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, FunctionalTransport,
     HashMap, HashMapExtensions, NetworkTopology, PhysicalTransport, RouteStatus, ServicePayload,
-    TransmissionParameters, TransportProbe, TransportResponse,
+    TransmissionParameters, TransportProbe, TransportResponse, VariantDetectionSender,
     communication_control::{
         GatewayLifecycle, TransportControl, TransportState, error::CommControlError,
     },
@@ -176,7 +176,7 @@ impl<T: EcuAddresses + DoipComParams> Clone for DoipGatewayState<T> {
 pub struct DoipDiagGateway<T: EcuAddresses + DoipComParams> {
     state: DoipGatewayState<T>,
     config: DoipConfig,
-    variant_detection: mpsc::Sender<Vec<String>>,
+    variant_detection: VariantDetectionSender,
     connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     lifecycle: Arc<GatewayLifecycle<DoipGatewayOperation>>,
 }
@@ -335,7 +335,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     pub async fn new(
         doip_config: &DoipConfig,
         ecus: Arc<HashMap<String, RwLock<T>>>,
-        variant_detection: mpsc::Sender<Vec<String>>,
+        variant_detection: VariantDetectionSender,
         connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     ) -> Result<Self, DoipGatewaySetupError> {
         Ok(Self {
@@ -1307,6 +1307,7 @@ async fn try_send_transport_response(
 mod tests {
     use std::{net::UdpSocket, sync::Arc, time::Duration};
 
+    use cda_interfaces::VariantDetectionSender;
     use cda_interfaces::{
         DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, HashMap,
         HashMapExtensions, PendingNrc, PhysicalTransport, ServicePayload, TransmissionParameters,
@@ -1444,7 +1445,7 @@ mod tests {
         DoipDiagGateway {
             state,
             config: DoipConfig::default(),
-            variant_detection: mpsc::channel(1).0,
+            variant_detection: VariantDetectionSender::new(mpsc::channel(1).0),
             connectivity_handler: Arc::new(TestConnectivityHandler),
             lifecycle: Arc::new(GatewayLifecycle::new(TransportState::Enabled)),
         }
@@ -1459,7 +1460,7 @@ mod tests {
         let gateway = DoipDiagGateway::<TestEcu>::new(
             &DoipConfig::default(),
             Arc::new(HashMap::new()),
-            mpsc::channel(1).0,
+            VariantDetectionSender::new(mpsc::channel(1).0),
             Arc::new(TestConnectivityHandler),
         )
         .await
