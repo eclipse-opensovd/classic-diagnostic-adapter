@@ -120,9 +120,6 @@ Vehicle Topology Plugin
         @enduml
 
 
-Reset with Persisted List Control
-----------------------------------
-
 .. arch:: Vehicle Topology Plugin - Reset with Persisted List Control
     :id: arch~plugin-vehicle-topology-reset-persistence
     :status: draft
