@@ -119,12 +119,12 @@ impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
         }
         self.communication_access
             .request_activate(ActivationCause::DiagnosticRequest);
-        Err(self.communication_not_ready("Communication is not currently enabled"))
+        Err(self.build_communication_not_ready_err("Communication is not currently enabled"))
     }
 
     /// Builds a [`DiagServiceError::CommunicationNotReady`] carrying this
     /// manager's configured retry hint.
-    pub(crate) fn communication_not_ready(&self, message: impl Into<String>) -> DiagServiceError {
+    pub(crate) fn build_communication_not_ready_err(&self, message: impl Into<String>) -> DiagServiceError {
         DiagServiceError::CommunicationNotReady {
             message: message.into(),
             retry_after: self.communication_retry_after,

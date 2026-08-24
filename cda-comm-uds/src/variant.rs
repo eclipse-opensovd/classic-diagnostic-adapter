@@ -152,17 +152,17 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         if !detection_in_flight {
             self.communication_access
                 .request_activate(ActivationCause::DiagnosticRequest);
-            return Err(self.communication_not_ready("Communication is not currently enabled"));
+            return Err(self.build_communication_not_ready_err("Communication is not currently enabled"));
         }
 
         if self.communication_access.variant_detection() == VariantDetectionMode::Never {
-            return Err(self.communication_not_ready(
+            return Err(self.build_communication_not_ready_err(
                 "Variant detection is not running automatically; awaiting an explicit detection trigger",
             ));
         }
 
         if *variant_state.borrow() == VariantState::NotTested {
-            Err(self.communication_not_ready("Variant detection has not concluded"))
+            Err(self.build_communication_not_ready_err("Variant detection has not concluded"))
         } else {
             Ok(ecu)
         }
