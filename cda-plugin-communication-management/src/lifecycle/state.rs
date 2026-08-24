@@ -35,17 +35,6 @@ use super::{disable::DisableOwner, guard::CommunicationGuardId};
 pub(crate) type EnablingResultReceiver =
     tokio::sync::watch::Receiver<Option<Result<CommunicationState, CommunicationOperationFailure>>>;
 
-/// Sender half of the enabling-result watch channel.
-///
-/// Stored in [`CommunicationStateData`] for the duration of one enabling
-/// attempt. [`tokio::sync::watch::Sender::same_channel`] gives free
-/// channel-identity comparison: a panic-recovery finalizer that holds a clone
-/// of this sender can verify, under the state lock, that its channel is still
-/// the current one before writing an error state. See
-/// [`CommunicationStateData::is_current_attempt`].
-pub(crate) type EnablingAttemptSender =
-    tokio::sync::watch::Sender<Option<Result<CommunicationState, CommunicationOperationFailure>>>;
-
 /// Resolves the detection mode to publish for a resolved detector.
 ///
 /// A missing registration reads the same to consumers as a disabled policy: in
@@ -75,19 +64,6 @@ pub(crate) struct CommunicationStateData {
     /// themselves. Whether they join or claim is decided by
     /// [`transition::decide`](crate::lifecycle::transition::decide).
     pub(crate) enabling_result: Option<EnablingResultReceiver>,
-    /// Attempt identity for the current in-flight enabling operation.
-    ///
-    /// The sender half of the same watch channel as `enabling_result`.
-    /// A second clone is kept by the finalizer path in
-    /// [`fail_closed_enabling_attempt`](crate::lifecycle::controller::CommunicationHandle::fail_closed_enabling_attempt)
-    /// to detect whether it still belongs to the current attempt before
-    /// writing an error state. The check uses
-    /// [`tokio::sync::watch::Sender::same_channel`], which compares the
-    /// underlying shared state by pointer without any additional allocation.
-    ///
-    /// Cleared together with `enabling_result` once the operation finalizes,
-    /// so any surviving finalizer clone finds `None` here and skips the write.
-    pub(crate) enabling_attempt: Option<EnablingAttemptSender>,
     /// Set while an explicit whole-vehicle re-detection is running against an
     /// already-live transport, so concurrent callers join it instead of racing
     /// a second sweep. `None` whenever no detection is in flight.
@@ -109,10 +85,6 @@ pub(crate) struct CommunicationStateData {
     /// joined by different requests and must not be conflated, or a `Detect`
     /// would observe an enabling operation's outcome as its own.
     pub(crate) detection_in_flight: Option<EnablingResultReceiver>,
-    /// Attempt identity for the current in-flight re-detection, mirroring
-    /// [`Self::enabling_attempt`] for the detection slot. Cleared together with
-    /// `detection_in_flight`.
-    pub(crate) detection_attempt: Option<EnablingAttemptSender>,
     /// The configured detection policy, fixed for the process lifetime.
     pub(crate) configured_variant_detection: VariantDetectionMode,
     /// The registered whole-vehicle variant detector, or `None` while none has
@@ -182,37 +154,6 @@ impl CommunicationStateData {
         self.variant_detector.as_ref().map(Arc::clone)
     }
 
-    /// Returns `true` if `attempt` is the sender for the current in-flight
-    /// enabling operation.
-    ///
-    /// Used by the panic-recovery finalizer in
-    /// [`fail_closed_enabling_attempt`](crate::lifecycle::controller::CommunicationHandle::fail_closed_enabling_attempt)
-    /// to ensure a stale finalizer cannot clobber a newer attempt that was
-    /// claimed for the same operation shape before the finalizer ran.
-    ///
-    /// The check delegates to [`tokio::sync::watch::Sender::same_channel`],
-    /// which compares the underlying shared state by pointer. Each
-    /// `watch::channel` call allocates a fresh shared state object, so two
-    /// senders from different spawns never compare equal. No extra allocation
-    /// is needed beyond the sender the spawned task already holds.
-    pub(crate) fn is_current_attempt(&self, attempt: &EnablingAttemptSender) -> bool {
-        self.enabling_attempt
-            .as_ref()
-            .is_some_and(|stored| stored.same_channel(attempt))
-    }
-
-    /// The detection counterpart of [`Self::is_current_attempt`], guarding the
-    /// detection slot against the same stale-finalizer clobber.
-    ///
-    /// A separate slot needs a separate check: a re-detection and an enabling
-    /// operation are tracked independently, so one's finalizer must never
-    /// decide anything about the other's.
-    pub(crate) fn is_current_detection_attempt(&self, attempt: &EnablingAttemptSender) -> bool {
-        self.detection_attempt
-            .as_ref()
-            .is_some_and(|stored| stored.same_channel(attempt))
-    }
-
     /// Publishes the final state for a completed enabling operation
     /// and clears the enabling-result slot.
     ///
@@ -239,7 +180,6 @@ impl CommunicationStateData {
             Err(failure) => CommunicationState::Error(failure.clone()),
         };
         self.enabling_result = None;
-        self.enabling_attempt = None;
         result
     }
 }
@@ -269,9 +209,7 @@ impl CommunicationStateStore {
                 active_guards: HashSet::default(),
                 disable_owner: None,
                 enabling_result: None,
-                enabling_attempt: None,
                 detection_in_flight: None,
-                detection_attempt: None,
                 configured_variant_detection,
                 variant_detector: None,
                 variant_detection: VariantDetectionMode::Never,

@@ -35,9 +35,7 @@ use tokio::{
 use super::{
     disable::{DisableError, DisableLease, DisableLeaseId, DisableOwner, DisableReason},
     guard::ActiveGuard,
-    state::{
-        CommunicationStateStore, EnablingAttemptSender, EnablingResultReceiver, detection_mode,
-    },
+    state::{CommunicationStateStore, EnablingResultReceiver, detection_mode},
     transition::{self, LifecycleDecision, LifecycleRequest},
     worker::{self, LifecycleCommand, WorkerSender},
 };
@@ -59,14 +57,12 @@ enum ClaimOutcome {
     LeaseHeld(CommunicationState),
     /// An operation was claimed (or joined); await the receiver for the result.
     ///
-    /// The [`EnablingAttemptSender`] clone uniquely identifies this
-    /// enabling attempt via
-    /// [`watch::Sender::same_channel`]. The caller must pass it
+    /// The receiver also identifies the attempt via
+    /// [`watch::Receiver::same_channel`]. The caller passes it
     /// to [`fail_closed_enabling_attempt`](CommunicationHandle::fail_closed_enabling_attempt)
     /// if the channel closes before a result is published, so that a stale
-    /// panic-recovery finalizer cannot clobber a newer attempt that was
-    /// claimed for the same operation shape.
-    Pending(EnablingResultReceiver, EnablingAttemptSender),
+    /// finalizer cannot clobber a newer attempt.
+    Pending(EnablingResultReceiver),
 }
 
 /// The capability a [`CommunicationPlugin`] implementation uses to actually
@@ -362,12 +358,12 @@ impl CommunicationHandle {
         request: LifecycleRequest,
     ) -> Result<CommunicationState, CommunicationOperationFailure> {
         let operation = request.operation();
-        let (mut rx, attempt) = match self.claim_or_join(request) {
+        let mut rx = match self.claim_or_join(request) {
             ClaimOutcome::Settled(result) => return result,
             ClaimOutcome::LeaseHeld(_) => {
                 return Err(CommunicationOperationFailure::DisableLeaseHeld { operation });
             }
-            ClaimOutcome::Pending(rx, attempt) => (rx, attempt),
+            ClaimOutcome::Pending(rx) => rx,
         };
 
         loop {
@@ -375,7 +371,7 @@ impl CommunicationHandle {
                 return result;
             }
             if rx.changed().await.is_err() {
-                return Err(self.fail_closed_enabling_attempt(operation, &attempt));
+                return Err(self.fail_closed_enabling_attempt(operation, &rx));
             }
         }
     }
@@ -385,7 +381,7 @@ impl CommunicationHandle {
             ClaimOutcome::Settled(Ok(settled)) => settled,
             ClaimOutcome::Settled(Err(failure)) => CommunicationState::Error(failure),
             ClaimOutcome::LeaseHeld(current) => current,
-            ClaimOutcome::Pending(_, _) => self.state(),
+            ClaimOutcome::Pending(_) => self.state(),
         }
     }
 
@@ -447,28 +443,13 @@ impl CommunicationHandle {
         requested: CommunicationOperation,
     ) -> ClaimOutcome {
         match state.enabling_result.as_ref() {
-            Some(rx) if rx.has_changed().is_ok() => {
-                // Clone the stored sender so the joiner gets the same
-                // attempt identity as the original claimer.  `same_channel`
-                // will match all clones from the same spawn until
-                // publish_enabling_result clears enabling_attempt.
-                //
-                // Fallback to a fresh channel (which can never match anything
-                // stored) only if enabling_attempt is unexpectedly absent;
-                // that path should be unreachable while the channel is live.
-                let attempt = state
-                    .enabling_attempt
-                    .clone()
-                    .unwrap_or_else(|| watch::channel(None).0);
-                ClaimOutcome::Pending(rx.clone(), attempt)
-            }
+            Some(rx) if rx.has_changed().is_ok() => ClaimOutcome::Pending(rx.clone()),
             Some(_) => {
                 let failure = CommunicationOperationFailure::WorkerUnavailable {
                     operation: in_flight,
                 };
                 state.state = CommunicationState::Error(failure.clone());
                 state.enabling_result = None;
-                state.enabling_attempt = None;
                 ClaimOutcome::Settled(Err(failure))
             }
             // `Enabling` without a result slot only happens once shutdown has
@@ -490,19 +471,8 @@ impl CommunicationHandle {
             .then(|| state.variant_detector())
             .flatten();
 
-        // Two clones of the sender serve as attempt-identity tokens. The
-        // task retains the original `tx`; one clone is stored in state so the
-        // finalizer path can call `same_channel` under the lock; the other is
-        // returned to the caller for the same check if the channel closes
-        // before a result is published. No extra allocation is needed:
-        // `watch::Sender` already shares the underlying state through an
-        // internal reference count.
-        let attempt_for_state = tx.clone();
-        let attempt_for_caller = tx.clone();
-
         state.state = CommunicationState::Enabling(operation);
         state.enabling_result = Some(rx.clone());
-        state.enabling_attempt = Some(attempt_for_state);
         state.variant_detection = detection_mode(detector.as_ref());
 
         let handle = self.clone();
@@ -514,7 +484,7 @@ impl CommunicationHandle {
                 let _ = tx.send(Some(result));
             }
         );
-        ClaimOutcome::Pending(rx, attempt_for_caller)
+        ClaimOutcome::Pending(rx)
     }
 
     /// Claims the detection slot, deliberately leaving `state.state` alone.
@@ -530,13 +500,9 @@ impl CommunicationHandle {
         let (tx, rx) = watch::channel(None);
         let detector = state.variant_detector();
 
-        let attempt_for_state = tx.clone();
-        let attempt_for_caller = tx.clone();
-
         // Note what is *not* written here: `state.state`. The runtime is
         // `Enabled` before this call, throughout the sweep, and after it.
         state.detection_in_flight = Some(rx.clone());
-        state.detection_attempt = Some(attempt_for_state);
         state.variant_detection = detection_mode(detector.as_ref());
 
         let handle = self.clone();
@@ -545,7 +511,7 @@ impl CommunicationHandle {
             let result = handle.finish_detection(result);
             let _ = tx.send(Some(result));
         });
-        ClaimOutcome::Pending(rx, attempt_for_caller)
+        ClaimOutcome::Pending(rx)
     }
 
     /// Joins the re-detection already in flight.
@@ -557,15 +523,13 @@ impl CommunicationHandle {
     fn join_detection(
         state: &mut std::sync::MutexGuard<'_, super::state::CommunicationStateData>,
     ) -> ClaimOutcome {
-        let joined = state
+        if let Some(rx) = state
             .detection_in_flight
             .as_ref()
             .filter(|rx| rx.has_changed().is_ok())
             .cloned()
-            .zip(state.detection_attempt.clone());
-
-        if let Some((rx, attempt)) = joined {
-            return ClaimOutcome::Pending(rx, attempt);
+        {
+            return ClaimOutcome::Pending(rx);
         }
 
         // Either the sender died without ever publishing, or the slot is unset
@@ -574,7 +538,6 @@ impl CommunicationHandle {
         // fresh sweep instead of joining a dead one forever, and fail closed
         // rather than panicking so a future routing mistake is a refusal.
         state.detection_in_flight = None;
-        state.detection_attempt = None;
         state.variant_detection = VariantDetectionMode::Never;
         ClaimOutcome::Settled(Err(CommunicationOperationFailure::WorkerUnavailable {
             operation: CommunicationOperation::Detect,
@@ -645,7 +608,6 @@ impl CommunicationHandle {
             });
         }
         state.detection_in_flight = None;
-        state.detection_attempt = None;
         if result.is_err() {
             state.variant_detection = VariantDetectionMode::Never;
         }
@@ -656,46 +618,36 @@ impl CommunicationHandle {
     /// when the watch channel closes before a result was published (the spawned
     /// task panicked without sending).
     ///
-    /// The `attempt` token must be a clone of the
-    /// [`EnablingAttemptSender`] captured when the caller joined or
-    /// claimed the operation. The state write is skipped unless `attempt`
-    /// still identifies the current in-flight attempt via
-    /// [`watch::Sender::same_channel`], preventing a stale
-    /// panic-recovery finalizer from clobbering a newer claim for the same
-    /// operation shape.
-    ///
-    /// # Attempt-clobber race (why the token is required)
-    ///
-    /// Without the token, matching only on `Enabling(operation) == operation`
-    /// is insufficient: if the panic-recovery path runs after a new attempt
-    /// for the same operation has already been claimed, both the old and new
-    /// state both carry `Enabling(operation)` and the stale finalizer would
-    /// silently overwrite the newer claim, breaking the single-in-flight
-    /// invariant.
+    /// The failed receiver identifies its attempt. State is changed only when
+    /// the current slot belongs to the same channel, preventing a stale
+    /// finalizer from clobbering a newer attempt.
     fn fail_closed_enabling_attempt(
         &self,
         operation: CommunicationOperation,
-        attempt: &EnablingAttemptSender,
+        failed: &EnablingResultReceiver,
     ) -> CommunicationOperationFailure {
         let failure = CommunicationOperationFailure::WorkerUnavailable { operation };
         let mut state = self.state.lock();
         // A re-detection publishes no lifecycle state, not even a failed one:
         // it changed nothing physical, so `Enabled` is still the truth.
-        // Releasing its slot is all that is needed for the next caller to claim
-        // a fresh sweep - and the same attempt-identity check applies, so a
-        // stale finalizer cannot clear a newer sweep's slot.
         if operation == CommunicationOperation::Detect {
-            if state.is_current_detection_attempt(attempt) {
+            if state
+                .detection_in_flight
+                .as_ref()
+                .is_some_and(|current| current.same_channel(failed))
+            {
                 state.detection_in_flight = None;
-                state.detection_attempt = None;
                 state.variant_detection = VariantDetectionMode::Never;
             }
             return failure;
         }
-        if state.is_current_attempt(attempt) {
+        if state
+            .enabling_result
+            .as_ref()
+            .is_some_and(|current| current.same_channel(failed))
+        {
             state.state = CommunicationState::Error(failure.clone());
             state.enabling_result = None;
-            state.enabling_attempt = None;
         }
         failure
     }
@@ -945,7 +897,6 @@ impl CommunicationHandle {
             state.disable_owner = None;
             state.enabling_result = None;
             state.detection_in_flight = None;
-            state.detection_attempt = None;
             state.state =
                 CommunicationState::Error(CommunicationOperationFailure::WorkerUnavailable {
                     operation,
