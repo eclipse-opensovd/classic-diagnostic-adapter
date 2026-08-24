@@ -24,7 +24,7 @@ use cda_interfaces::{
 };
 use strum::IntoEnumIterator;
 
-use crate::UdsManager;
+use crate::{UdsManager, transport::CommunicationReadiness};
 
 /// Record number requesting all records/all memory (ISO 14229-1).
 const DTC_RECORD_NUMBER_ALL: u8 = 0xFF;
@@ -681,7 +681,13 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         };
 
         match self
-            .send_with_raw_payload(ecu_name, service_payload, None, true)
+            .send_with_raw_payload(
+                ecu_name,
+                service_payload,
+                None,
+                true,
+                CommunicationReadiness::Enforce,
+            )
             .await?
         {
             None => Err(DiagServiceError::NoResponse(

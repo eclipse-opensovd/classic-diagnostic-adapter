@@ -42,6 +42,14 @@ use crate::{UdsEcuDb, UdsManager, types::UdsParameters};
 /// the next attempt proceeds anyway and a warning is logged.
 const RETRY_TEARDOWN_GRACE: Duration = Duration::from_millis(500);
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CommunicationReadiness {
+    /// Require communication to be enabled for the send.
+    Enforce,
+    /// Send without checking communication readiness.
+    AssumeReady,
+}
+
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     #[tracing::instrument(
         skip(self, service, payload),
@@ -103,12 +111,17 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             payload,
             map_to_json,
             timeout,
+            CommunicationReadiness::Enforce,
         )
         .await
     }
 
     /// Inner send path that skips the variant detection guard.
     /// Used by `detect_variant` to avoid infinite recursion.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Arguments mirror the public send path plus variant-detection readiness"
+    )]
     pub(crate) async fn send_without_variant_guard(
         &self,
         ecu_name: &str,
@@ -117,6 +130,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         payload: Option<UdsPayloadData>,
         map_to_json: bool,
         timeout: Option<Duration>,
+        communication_readiness: CommunicationReadiness,
     ) -> Result<<T as PayloadDecoder>::Response, DiagServiceError> {
         let start = Instant::now();
         tracing::debug!(
@@ -143,7 +157,13 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         let expect_response = !payload.is_suppress_positive_response();
 
         let response = self
-            .send_with_raw_payload(ecu_name, payload.clone(), timeout, expect_response)
+            .send_with_raw_payload(
+                ecu_name,
+                payload.clone(),
+                timeout,
+                expect_response,
+                communication_readiness,
+            )
             .await;
         let response_after = start.elapsed().saturating_sub(payload_build_after);
 
@@ -203,18 +223,20 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
             payload_size = payload.data.len(),
             dlt_context = dlt_ctx!("UDS"))
     )]
-    /// Sends the raw payload to the ecu.
-    /// This does **not** call [`Self::require_communication_ready`] because it's
-    /// part of the variant detection call chain
-    /// (see docstring of [`Self::require_communication_ready`] for details).
-    /// Caller must make sure on their own that communication is ready.
+    /// Sends the raw payload to the ECU.
     pub(crate) async fn send_with_raw_payload(
         &self,
         ecu_name: &str,
         payload: ServicePayload,
         timeout: Option<Duration>,
         expect_response: bool,
+        communication_readiness: CommunicationReadiness,
     ) -> Result<Option<ServicePayload>, DiagServiceError> {
+        let _communication_guard = match communication_readiness {
+            CommunicationReadiness::Enforce => Some(self.require_communication_ready()?),
+            CommunicationReadiness::AssumeReady => None,
+        };
+
         // todo: do we need to ensure that we do not send here
         // when we have an ongoing data transfer as well?
         let start = std::time::Instant::now();
@@ -659,7 +681,13 @@ impl<S: EcuGateway, T: EcuManager> UdsTransport for UdsManager<S, T> {
         let expect_response = !payload.is_suppress_positive_response();
 
         match self
-            .send_with_raw_payload(ecu_name, payload, timeout, expect_response)
+            .send_with_raw_payload(
+                ecu_name,
+                payload,
+                timeout,
+                expect_response,
+                CommunicationReadiness::Enforce,
+            )
             .await?
         {
             Some(response) => Ok(response.data),
@@ -909,7 +937,7 @@ mod send_tests {
     use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
     use tokio::sync::{Mutex, RwLock, mpsc};
 
-    use super::RETRY_TEARDOWN_GRACE;
+    use super::{CommunicationReadiness, RETRY_TEARDOWN_GRACE};
     use crate::{
         UdsEcuDb, UdsManager, state_coordinator::EcuStateCoordinator, test_helpers::TestEcuDb,
     };
@@ -1334,7 +1362,26 @@ mod send_tests {
         }
     }
 
-    // Tests
+    #[tokio::test]
+    async fn send_with_raw_payload_enforces_communication_readiness() {
+        let manager = make_manager(make_gateway());
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
+
+        let result = manager
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::Enforce,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DiagServiceError::CommunicationNotReady { .. })
+        ));
+    }
 
     #[tokio::test]
     async fn test_send_with_raw_payload_positive_response() {
@@ -1343,7 +1390,13 @@ mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -1369,7 +1422,13 @@ mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, false)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                false,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -1403,7 +1462,13 @@ mod send_tests {
         let expect_response = !payload.is_suppress_positive_response();
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, expect_response)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                expect_response,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok(), "expected Ok(None), got {result:?}");
@@ -1422,7 +1487,13 @@ mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("NonExistent", payload, None, true)
+            .send_with_raw_payload(
+                "NonExistent",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_err());
@@ -1447,7 +1518,13 @@ mod send_tests {
         };
 
         let result = manager
-            .send_with_raw_payload("TestECU", empty_payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                empty_payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_err());
@@ -1466,7 +1543,13 @@ mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_err());
@@ -1491,7 +1574,13 @@ mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, Some(Duration::from_millis(50)), true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                Some(Duration::from_millis(50)),
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_err());
@@ -1546,7 +1635,13 @@ mod send_tests {
         let payload = make_test_payload(service_ids::READ_DATA_BY_IDENTIFIER, &[0xF1, 0x90]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(
@@ -1582,7 +1677,13 @@ mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(
@@ -1629,7 +1730,13 @@ mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok(), "Expected eventual success, got {result:?}");
@@ -1697,7 +1804,13 @@ mod send_tests {
 
         let start = std::time::Instant::now();
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
         let elapsed = start.elapsed();
 
@@ -1765,7 +1878,13 @@ mod send_tests {
 
         let result = tokio::time::timeout(
             Duration::from_millis(200),
-            manager.send_with_raw_payload("TestECU", payload, None, true),
+            manager.send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            ),
         )
         .await;
 
@@ -1816,7 +1935,13 @@ mod send_tests {
         // (this is exactly what `send_without_variant_guard` does when
         // called from `gather_detection_responses` post-fix).
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
         let elapsed = start.elapsed();
 
@@ -1868,7 +1993,13 @@ mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -1917,7 +2048,13 @@ mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -1961,7 +2098,13 @@ mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -1996,7 +2139,13 @@ mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -2019,7 +2168,13 @@ mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, Some(Duration::from_secs(1)), true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                Some(Duration::from_secs(1)),
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -2062,7 +2217,13 @@ mod send_tests {
         };
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -2091,7 +2252,13 @@ mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_err());
@@ -2142,7 +2309,13 @@ mod send_tests {
         let payload = make_test_payload(service_ids::READ_DATA_BY_IDENTIFIER, &[0xF1, 0x90]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -2205,7 +2378,13 @@ mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(
@@ -2248,7 +2427,13 @@ mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
         let start = Instant::now();
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
         let elapsed = start.elapsed();
 

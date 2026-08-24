@@ -19,7 +19,7 @@ use cda_interfaces::{
 };
 use tokio::time::{MissedTickBehavior, interval as tokio_interval};
 
-use crate::{UdsManager, types::TesterPresentTask};
+use crate::{UdsManager, transport::CommunicationReadiness, types::TesterPresentTask};
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     /// Start or stop a tester present task for a single ECU.
@@ -160,7 +160,13 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         };
 
         match self
-            .send_with_raw_payload(&control_msg.ecu, payload, None, false)
+            .send_with_raw_payload(
+                &control_msg.ecu,
+                payload,
+                None,
+                false,
+                CommunicationReadiness::Enforce,
+            )
             .await
         {
             Ok(_) => Ok(()),

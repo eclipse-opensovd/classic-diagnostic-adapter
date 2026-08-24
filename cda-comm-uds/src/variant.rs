@@ -11,6 +11,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Variant detection uses two communication hooks. [`CommunicationLifecycle`]
+//! manages the transport-bound VAM listener and tester-present tasks;
+//! [`CommunicationVariantDetection`] runs the whole-vehicle sweep afterward.
+//!
+//! This keeps the listener aligned with transport availability and gives it a
+//! matching teardown, including when the sweep finds nothing.
+
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -27,8 +34,9 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    ReceiverRetention, UdsManager, coordinator::EcuCoordinatorHandle,
-    transport::needs_variant_detection,
+    ReceiverRetention, UdsManager,
+    coordinator::EcuCoordinatorHandle,
+    transport::{CommunicationReadiness, needs_variant_detection},
 };
 
 #[derive(Clone, Copy)]
@@ -137,6 +145,12 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         Ok(())
     }
 
+    /// Ensures variant detection has concluded for `ecu_name` before serving
+    /// variant-dependent content.
+    ///
+    /// Returns the ECU database handle when ready. If communication or variant
+    /// detection is not ready, requests activation when needed and returns
+    /// [`DiagServiceError::CommunicationNotReady`] so the caller can retry.
     pub(crate) async fn uds_ecu_variant_detection_concluded(
         &self,
         ecu_name: &str,
@@ -179,11 +193,6 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         fields(dlt_context = dlt_ctx!("UDS"))
     )]
     pub(crate) async fn start_variant_detection_for_ecus(&self, ecus: Vec<String>) {
-        // Most callers are the discovery listener, fed by a transport's own
-        // topology discovery (CAN probe, DoIP VAM) independently of
-        // `variant_detection`. Skip the automatic detect_variant here so
-        // `Never` holds; discovery/connectivity still proceeds, and an
-        // explicit per-ECU trigger still settles these ECUs.
         if self.communication_access.variant_detection() == VariantDetectionMode::Never {
             return;
         }
@@ -372,6 +381,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                     // same, correctly configured comparam as every other UDS
                     // send (see `send_with_raw_payload`'s `rx_timeout`).
                     None,
+                    CommunicationReadiness::AssumeReady,
                 )
                 .await
             {
@@ -556,19 +566,6 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
     }
 }
 
-/// Transport-coupled half: the spontaneous VAM-discovery listener and the
-/// tester-present pause/resume around it.
-///
-/// The listener deliberately does *not* sweep for variants. It follows the
-/// transport, it must run whenever the transport is up, including for an
-/// enable that detects nothing and it has a matching teardown, which the
-/// sweep does not. Sweeping lives in the [`CommunicationVariantDetection`] impl below.
-///
-/// Tester-present tasks are paused here too: they poll a transport that
-/// [`deinitialize`](CommunicationLifecycle::deinitialize) is about to tear
-/// down, so they are aborted and snapshotted before that happens, and
-/// restarted from the snapshot once [`initialize`](CommunicationLifecycle::initialize)
-/// has brought the transport back up.
 #[async_trait::async_trait]
 impl<S: EcuGateway, T: EcuManager> CommunicationLifecycle for UdsManager<S, T> {
     fn name(&self) -> &'static str {
@@ -633,10 +630,6 @@ impl<S: EcuGateway, T: EcuManager> CommunicationLifecycle for UdsManager<S, T> {
     }
 }
 
-/// Detection half: the whole-vehicle sweep.
-///
-/// Runs after every lifecycle hook has initialized, so the listener above is
-/// already draining by the time the sweep starts.
 #[async_trait::async_trait]
 impl<S: EcuGateway, T: EcuManager> CommunicationVariantDetection for UdsManager<S, T> {
     fn name(&self) -> &'static str {
