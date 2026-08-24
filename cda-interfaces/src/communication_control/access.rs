@@ -13,13 +13,14 @@
 
 //! The narrow, diagnostic-use communication contract.
 //!
+//! [[ dimpl~communication-control-access, Capability-limited diagnostic communication access, dimpl, req~dt-deferred-initialization; arch~dt-deferred-initialization ]]
+//!
 //! [`CommunicationAccess`], [`CommunicationGuard`], [`CommunicationState`], and
 //! [`CommunicationError`] are defined here, alongside [`super::operation`]'s
 //! [`ActivationCause`](super::operation::ActivationCause), rather than in the
 //! default communication plugin's crate, so a diagnostic transport crate (or
 //! any replacement communication plugin) can depend on the contract without
 //! coupling to that crate's implementation.
-
 use std::time::Duration;
 
 use super::{

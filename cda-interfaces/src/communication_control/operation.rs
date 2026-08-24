@@ -13,6 +13,8 @@
 
 //! Authoritative communication lifecycle operations and failures.
 //!
+//! [[ dimpl~communication-control-operations, Authoritative communication lifecycle operations, dimpl, req~dt-deferred-initialization; arch~dt-deferred-initialization ]]
+//!
 //! Part of the narrow communication-access contract (with
 //! [`super::access`]): defined here, rather than in the default
 //! communication plugin implementation, so a diagnostic transport crate - or

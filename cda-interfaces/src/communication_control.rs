@@ -11,6 +11,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Shared contracts for managed diagnostic communication lifecycle control.
+//!
+//! [[ dimpl~communication-control-contracts, Communication lifecycle contracts, dimpl, req~dt-deferred-initialization; arch~dt-deferred-initialization ]]
 pub mod access;
 pub mod error;
 pub mod operation;
