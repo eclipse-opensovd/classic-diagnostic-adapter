@@ -113,6 +113,7 @@ impl From<DoipGatewaySetupError> for AppError {
                 ),
                 source: None,
             },
+            DoipGatewaySetupError::InvalidState(_) => Self::RuntimeError(value.to_string()),
         }
     }
 }

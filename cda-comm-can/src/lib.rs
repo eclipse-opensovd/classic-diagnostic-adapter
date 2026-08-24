@@ -33,6 +33,15 @@ pub mod config;
 // enabled.
 #[cfg(feature = "can")]
 mod gateway;
+#[cfg(not(feature = "can"))]
+use async_trait::async_trait;
+#[cfg(not(feature = "can"))]
+use cda_interfaces::{
+    DiagServiceError, EcuAddresses, FunctionalTransport, HashMap, NetworkTopology,
+    PhysicalTransport, RouteStatus, ServicePayload, Shutdown, TransmissionParameters,
+    TransportProbe, TransportResponse,
+    communication_control::{TransportControl, TransportState, error::CommControlError},
+};
 #[cfg(feature = "can")]
 pub use gateway::{CanDiagGateway, error};
 
@@ -49,34 +58,34 @@ pub struct CanDiagGateway {
 }
 
 #[cfg(not(feature = "can"))]
-impl cda_interfaces::PhysicalTransport for CanDiagGateway {
+impl PhysicalTransport for CanDiagGateway {
     async fn send(
         &self,
-        _transmission_params: cda_interfaces::TransmissionParameters,
-        _message: cda_interfaces::ServicePayload,
+        _transmission_params: TransmissionParameters,
+        _message: ServicePayload,
         _response_sender: tokio::sync::mpsc::Sender<
-            Result<Option<cda_interfaces::TransportResponse>, cda_interfaces::DiagServiceError>,
+            Result<Option<TransportResponse>, DiagServiceError>,
         >,
         _expect_uds_reply: bool,
-    ) -> Result<tokio::task::JoinHandle<()>, cda_interfaces::DiagServiceError> {
-        Err(cda_interfaces::DiagServiceError::EcuOffline(
+    ) -> Result<tokio::task::JoinHandle<()>, DiagServiceError> {
+        Err(DiagServiceError::EcuOffline(
             "CAN support is not enabled. Compile with the `can` feature.".to_owned(),
         ))
     }
 
-    async fn ecu_online<E: cda_interfaces::EcuAddresses>(
+    async fn ecu_online<E: EcuAddresses>(
         &self,
         _ecu_name: &str,
         _ecu_db: &tokio::sync::RwLock<E>,
-    ) -> Result<(), cda_interfaces::DiagServiceError> {
-        Err(cda_interfaces::DiagServiceError::EcuOffline(
+    ) -> Result<(), DiagServiceError> {
+        Err(DiagServiceError::EcuOffline(
             "CAN support is not enabled. Compile with the `can` feature.".to_owned(),
         ))
     }
 }
 
 #[cfg(not(feature = "can"))]
-impl cda_interfaces::NetworkTopology for CanDiagGateway {
+impl NetworkTopology for CanDiagGateway {
     async fn get_gateway_network_address(&self, _logical_address: u16) -> Option<String> {
         None
     }
@@ -87,22 +96,16 @@ impl cda_interfaces::NetworkTopology for CanDiagGateway {
 }
 
 #[cfg(not(feature = "can"))]
-impl cda_interfaces::FunctionalTransport for CanDiagGateway {
+impl FunctionalTransport for CanDiagGateway {
     async fn send_functional(
         &self,
-        _transmission_params: cda_interfaces::TransmissionParameters,
-        _message: cda_interfaces::ServicePayload,
-        _expected_ecu_logical_addrs: cda_interfaces::HashMap<u16, String>,
+        _transmission_params: TransmissionParameters,
+        _message: ServicePayload,
+        _expected_ecu_logical_addrs: HashMap<u16, String>,
         _timeout: std::time::Duration,
         _expect_positive_response: bool,
-    ) -> Result<
-        cda_interfaces::HashMap<
-            String,
-            Result<cda_interfaces::ServicePayload, cda_interfaces::DiagServiceError>,
-        >,
-        cda_interfaces::DiagServiceError,
-    > {
-        Err(cda_interfaces::DiagServiceError::RequestNotSupported(
+    ) -> Result<HashMap<String, Result<ServicePayload, DiagServiceError>>, DiagServiceError> {
+        Err(DiagServiceError::RequestNotSupported(
             "CAN functional addressing is not available because CAN support is disabled."
                 .to_owned(),
         ))
@@ -110,11 +113,9 @@ impl cda_interfaces::FunctionalTransport for CanDiagGateway {
 }
 
 #[cfg(not(feature = "can"))]
-#[async_trait::async_trait]
-impl cda_interfaces::communication_control::TransportControl for CanDiagGateway {
-    async fn enable(
-        &self,
-    ) -> Result<(), cda_interfaces::communication_control::error::CommControlError> {
+#[async_trait]
+impl TransportControl for CanDiagGateway {
+    async fn enable(&self) -> Result<(), CommControlError> {
         #[allow(
             clippy::used_underscore_binding,
             reason = "Type is unconstructable, this match is unreachable"
@@ -122,9 +123,7 @@ impl cda_interfaces::communication_control::TransportControl for CanDiagGateway 
         match self._unconstructable {}
     }
 
-    async fn disable(
-        &self,
-    ) -> Result<(), cda_interfaces::communication_control::error::CommControlError> {
+    async fn disable(&self) -> Result<(), CommControlError> {
         #[allow(
             clippy::used_underscore_binding,
             reason = "Type is unconstructable, this match is unreachable"
@@ -132,7 +131,7 @@ impl cda_interfaces::communication_control::TransportControl for CanDiagGateway 
         match self._unconstructable {}
     }
 
-    async fn state(&self) -> cda_interfaces::communication_control::TransportState {
+    async fn state(&self) -> TransportState {
         #[allow(
             clippy::used_underscore_binding,
             reason = "Type is unconstructable, this match is unreachable"
@@ -142,9 +141,9 @@ impl cda_interfaces::communication_control::TransportControl for CanDiagGateway 
 }
 
 #[cfg(not(feature = "can"))]
-impl cda_interfaces::TransportProbe for CanDiagGateway {
-    async fn route_status(&self, _ecu_name: &str) -> cda_interfaces::RouteStatus {
-        cda_interfaces::RouteStatus::NotConfigured
+impl TransportProbe for CanDiagGateway {
+    async fn route_status(&self, _ecu_name: &str) -> RouteStatus {
+        RouteStatus::NotConfigured
     }
 
     async fn probe_ecu(&self, _ecu_name: &str) -> bool {
@@ -153,8 +152,8 @@ impl cda_interfaces::TransportProbe for CanDiagGateway {
 }
 
 #[cfg(not(feature = "can"))]
-#[async_trait::async_trait]
-impl cda_interfaces::Shutdown for CanDiagGateway {
+#[async_trait]
+impl Shutdown for CanDiagGateway {
     async fn shutdown(&self) {}
 }
 
@@ -171,8 +170,8 @@ mod transport_routing_tests {
     use async_trait::async_trait;
     use cda_interfaces::{
         CanId, DiagServiceError, EcuAddresses, FunctionalTransport, HashMap, NetworkTopology,
-        PhysicalTransport, RouteStatus, ServicePayload, TransmissionParameters, TransportProbe,
-        TransportType,
+        PhysicalTransport, RouteStatus, ServicePayload, Shutdown, TransmissionParameters,
+        TransportProbe, TransportResponse, TransportType,
         communication_control::{TransportControl, TransportState, error::CommControlError},
     };
     use cda_transport_router::DiagnosticTransportRouter;
@@ -219,9 +218,7 @@ mod transport_routing_tests {
             &self,
             _transmission_params: TransmissionParameters,
             _message: ServicePayload,
-            _response_sender: mpsc::Sender<
-                Result<Option<cda_interfaces::TransportResponse>, DiagServiceError>,
-            >,
+            _response_sender: mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
             _expect_uds_reply: bool,
         ) -> impl Future<Output = Result<tokio::task::JoinHandle<()>, DiagServiceError>> + Send
         {
@@ -288,7 +285,7 @@ mod transport_routing_tests {
     }
 
     #[async_trait]
-    impl cda_interfaces::Shutdown for DoipStub {
+    impl Shutdown for DoipStub {
         async fn shutdown(&self) {
             self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
             self.communication_active.store(false, Ordering::Release);

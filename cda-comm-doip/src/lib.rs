@@ -155,6 +155,7 @@ impl Drop for ConnectionTasks {
         // Best effort cleanup, we cannot await the tasks in
         // here. A user should call 'shutdown' instead of relying on this.
         for task in self.0.get_mut().drain(..) {
+            tracing::warn!("DoIP connection tasks dropped without `shutdown`, aborting tasks");
             task.abort();
         }
     }
@@ -190,13 +191,36 @@ struct DoipGatewayOperation {
 
 impl Drop for DoipGatewayOperation {
     fn drop(&mut self) {
+        if self.cancel.is_some() || self.vam_listener.is_some() || self.connection_tasks.is_some() {
+            tracing::warn!("DoIP gateway operation dropped without `shutdown`, aborting tasks");
+        }
+        self.take_and_abort();
+    }
+}
+
+impl DoipGatewayOperation {
+    fn take_and_abort(&mut self) -> (Option<JoinHandle<()>>, Option<Arc<ConnectionTasks>>) {
         if let Some(cancel) = self.cancel.take() {
             cancel.cancel();
         }
-        if let Some(listener) = self.vam_listener.take() {
+        let listener = self.vam_listener.take();
+        if let Some(listener) = &listener {
             listener.abort();
         }
-        self.connection_tasks.take();
+        (listener, self.connection_tasks.take())
+    }
+
+    async fn shutdown(&mut self) {
+        let (listener, connection_tasks) = self.take_and_abort();
+        if let Some(listener) = listener
+            && let Err(error) = listener.await
+            && !error.is_cancelled()
+        {
+            tracing::error!(%error, "DoIP VAM listener failed during shutdown");
+        }
+        if let Some(connection_tasks) = connection_tasks {
+            connection_tasks.shutdown().await;
+        }
     }
 }
 
@@ -339,7 +363,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             || operation.connection_tasks.is_some()
             || socket_guard.is_some()
         {
-            return Err(DoipGatewaySetupError::InvalidConfiguration(
+            return Err(DoipGatewaySetupError::InvalidState(
                 "DoIP communication is already running".to_string(),
             ));
         }
@@ -360,17 +384,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         operation.cancel = Some(cancel.clone());
         operation.connection_tasks = Some(Arc::clone(&connection_tasks));
 
-        // Lazy socket creation: `DoipDiagGateway::new` never binds a socket
-        // (see its doc comment); this is the sole place the UDP socket is
-        // created and bound, reached only from an authorized `enable()`. Every
-        // gateway owns its socket, bound here and dropped again by `stop()`,
-        // and the guard above refuses an enable that still holds one - so this
-        // always binds a fresh socket and never reuses a live one.
-        //
-        // TODO(persistence-init-mode): with a persisted ECU-to-gateway
-        // topology, an authorized trigger may reconnect a single known gateway
-        // instead of re-discovering the whole vehicle, which is where that
-        // narrower bring-up would branch. See ADR-006.
+        // TODO(persistence-init-mode): Implement as described in req~dt-ecu-list-persistence
         let socket = socket_guard.insert(create_udp_vir_socket(
             &config.tester_address,
             config.gateway_port,
@@ -439,20 +453,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     }
 
     async fn stop(&self, operation: &mut DoipGatewayOperation) {
-        if let Some(cancel) = operation.cancel.take() {
-            cancel.cancel();
-        }
-        if let Some(listener) = operation.vam_listener.take() {
-            listener.abort();
-            if let Err(error) = listener.await
-                && !error.is_cancelled()
-            {
-                tracing::error!(%error, "DoIP VAM listener failed during shutdown");
-            }
-        }
-        if let Some(connection_tasks) = operation.connection_tasks.take() {
-            connection_tasks.shutdown().await;
-        }
+        operation.shutdown().await;
         self.state.socket.lock().await.take();
         self.state.doip_connections.write().await.clear();
         self.state
