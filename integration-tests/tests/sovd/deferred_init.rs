@@ -101,10 +101,9 @@ async fn start_deferred(
 /// Stops the normal CDA, then starts a `Disabled`-mode CDA.
 ///
 /// `Disabled` is the third `init_mode`, and unlike `OnDemand` above it is a
-/// strict authorization boundary rather than a slower on-demand path:
-/// ordinary activation (startup, diagnostic requests) is rejected outright,
-/// with zero vehicle-network activity, until an explicit
-/// `trigger_detection()` call authorizes it (see ADR-006). Prefer
+/// policy rather than a slower on-demand path: the default plugin rejects
+/// activation from startup and diagnostic requests, and `trigger_detection()`
+/// does not enable a down transport (see ADR-006). Prefer
 /// [`with_disabled_cda`] over calling this directly: it pairs the start with
 /// the restore that subsequent tests depend on.
 async fn start_disabled(runtime: &crate::util::runtime::TestRuntime) -> Result<(), TestingError> {

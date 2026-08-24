@@ -135,7 +135,7 @@ impl<Operation: Default> GatewayLifecycle<Operation> {
     }
 }
 
-/// Controls when diagnostic transport gateway creation begins.
+/// Controls when diagnostic transport network activation begins.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
@@ -157,9 +157,10 @@ pub enum CommunicationInitMode {
     /// This is a *plugin policy* value, not a framework invariant: the
     /// lifecycle framework never inspects `init_mode` to decide whether an
     /// operation is authorized. The default plugin implements this mode by
-    /// rejecting `activate()`/`request_activate()` while still honoring an
-    /// explicit `CommunicationPlugin::trigger_detection()`; a replacement
-    /// plugin may draw the line elsewhere.
+    /// rejecting `activate()`/`request_activate()`. Its explicit
+    /// `CommunicationPlugin::trigger_detection()` can re-detect only while
+    /// communication is already enabled; a custom startup-selected plugin may
+    /// implement a different policy.
     Disabled,
 }
 
@@ -238,17 +239,17 @@ pub const DEFAULT_DEFERRED_RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// Transport initialization and runtime settings.
 ///
-/// Controls when gateway creation begins, how transport behaves after
+/// Controls when diagnostic transport network activation begins, how transport behaves after
 /// database updates, and retry behavior for deferred initialization.
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 pub struct CommunicationSettings {
-    /// Controls when gateway creation and ECU communication begins:
+    /// Controls when diagnostic transport network activation begins:
     /// - "Always": whole-vehicle communication initializes eagerly at startup (default).
     /// - "OnDemand": HTTP/SOVD starts first; the first qualifying ECU diagnostic
     ///   request, or an explicit `activate()` call, triggers initialization.
-    /// - "Disabled": HTTP/SOVD starts first; ordinary activation is rejected and no
-    ///   vehicle-network activity occurs until an explicit `trigger_detection()`
-    ///   call authorizes it.
+    /// - "Disabled": HTTP/SOVD starts first; the default communication plugin
+    ///   provides no activation path. `trigger_detection()` can only re-detect an
+    ///   already-live transport and does not activate communication.
     pub init_mode: CommunicationInitMode,
     /// Controls whether enabling communication also runs whole-vehicle variant
     /// detection. Independent of `init_mode`, which decides *when* communication

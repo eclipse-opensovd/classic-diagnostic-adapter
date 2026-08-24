@@ -426,13 +426,13 @@
 # The value (in seconds) for the HTTP `Retry-After` header returned when a
 # diagnostic request arrives while initialization is still pending.
 # deferred_retry_after_seconds = 30
-# Controls when gateway creation and ECU communication begins:
+# Controls when diagnostic transport network activation begins:
 # - "Always": whole-vehicle communication initializes eagerly at startup (default).
 # - "OnDemand": HTTP/SOVD starts first; the first qualifying ECU diagnostic
 #   request, or an explicit `activate()` call, triggers initialization.
-# - "Disabled": HTTP/SOVD starts first; ordinary activation is rejected and no
-#   vehicle-network activity occurs until an explicit `trigger_detection()`
-#   call authorizes it.
+# - "Disabled": HTTP/SOVD starts first; the default communication plugin
+#   provides no activation path. `trigger_detection()` can only re-detect an
+#   already-live transport and does not activate communication.
 # init_mode = "Always"
 # Controls transport behavior after a runtime database update:
 # - "Enabled": resume the transport the update displaced, requesting

@@ -381,8 +381,8 @@ where
 /// `Always` initializes whole-vehicle communication eagerly at startup and propagates failure
 /// according to existing application-start semantics. `OnDemand` and `Disabled` keep
 /// communication uninitialized; HTTP/SOVD is already available via the routes registered
-/// beforehand, and later authorized triggers (explicit `activate()`, a qualifying ECU
-/// request, or `trigger_detection()`) initialize it.
+/// beforehand. In `OnDemand`, explicit `activate()` or a qualifying ECU request initializes
+/// communication. The default plugin provides no activation path in `Disabled`.
 async fn activate_communication_per_init_mode(
     plugin: &Arc<dyn CommunicationPlugin>,
     init_mode: CommunicationInitMode,
