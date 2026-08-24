@@ -20,7 +20,7 @@ pub use crate::http_protection::{
         HttpMethod, HttpProtectionConfig, HttpProtectionReason, HttpProtectionScope,
         HttpRouteMatcher, HttpStatusCode,
     },
-    evaluator::{HttpRestrictionDecision, HttpRestrictionDenial, HttpRestrictionGuard},
+    evaluator::{HttpRestrictionDenial, HttpRestrictionGuard},
     owned::OwnedHttpProtection,
 };
 use crate::{
@@ -127,12 +127,12 @@ impl HttpRestrictionGuard for HttpProtectionRegistry {
         !std_ext::lock_read(&self.restrictions).is_empty()
     }
 
-    fn evaluate(&self, path: &str, method: &http::Method) -> HttpRestrictionDecision {
+    fn evaluate(&self, path: &str, method: &http::Method) -> Result<(), HttpRestrictionDenial> {
         let Some(config) = self.find_matching_restriction(path, method) else {
-            return HttpRestrictionDecision::Pass;
+            return Ok(());
         };
 
-        HttpRestrictionDecision::Deny(HttpRestrictionDenial {
+        Err(HttpRestrictionDenial {
             reason: config.reason,
             status: config.status,
             message: config.message,
@@ -178,11 +178,9 @@ mod tests {
             .protect(config(StatusCode::SERVICE_UNAVAILABLE))
             .unwrap();
 
-        let HttpRestrictionDecision::Deny(denial) =
-            registry.evaluate("/vehicle/v15", &http::Method::GET)
-        else {
-            panic!("request should be denied");
-        };
+        let denial = registry
+            .evaluate("/vehicle/v15", &http::Method::GET)
+            .expect_err("request should be denied");
         assert_eq!(denial.status, StatusCode::CONFLICT);
         assert_eq!(
             denial.reason,
@@ -201,17 +199,18 @@ mod tests {
             )
             .expect("Adding http protection should work");
 
-        assert!(matches!(
-            registry.evaluate("/vehicle/v15", &http::Method::GET),
-            HttpRestrictionDecision::Deny(_)
-        ));
+        assert!(
+            registry
+                .evaluate("/vehicle/v15", &http::Method::GET)
+                .is_err()
+        );
         assert!(matches!(
             registry.evaluate("/vehicle-extra", &http::Method::GET),
-            HttpRestrictionDecision::Pass
+            Ok(())
         ));
         assert!(matches!(
             registry.evaluate("/vehicle", &http::Method::POST),
-            HttpRestrictionDecision::Pass
+            Ok(())
         ));
     }
 
@@ -230,7 +229,7 @@ mod tests {
         assert!(!registry.is_active());
         assert!(matches!(
             registry.evaluate("/vehicle/v15", &http::Method::GET),
-            HttpRestrictionDecision::Pass
+            Ok(())
         ));
     }
 }

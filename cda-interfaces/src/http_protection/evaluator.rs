@@ -11,18 +11,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Synchronous HTTP request guard trait and decision types.
+//! Synchronous HTTP request guard trait and denial type.
 
 use std::time::Duration;
-
-/// Outcome of evaluating an HTTP request against the active restriction state.
-#[derive(Debug)]
-pub enum HttpRestrictionDecision {
-    /// The request may proceed.
-    Pass,
-    /// The request is denied with structured information for the response.
-    Deny(HttpRestrictionDenial),
-}
 
 /// HTTP response information for a denied request.
 ///
@@ -51,5 +42,8 @@ pub trait HttpRestrictionGuard: Send + Sync + 'static {
     fn is_active(&self) -> bool;
 
     /// Evaluates whether the given path and method may proceed.
-    fn evaluate(&self, path: &str, method: &http::Method) -> HttpRestrictionDecision;
+    ///
+    /// # Errors
+    /// Returns [`HttpRestrictionDenial`] when the request is denied.
+    fn evaluate(&self, path: &str, method: &http::Method) -> Result<(), HttpRestrictionDenial>;
 }

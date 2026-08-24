@@ -40,7 +40,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use cda_interfaces::http_protection::registry::{
-    HttpProtectionReason, HttpRestrictionDecision, HttpRestrictionDenial, HttpRestrictionGuard,
+    HttpProtectionReason, HttpRestrictionDenial, HttpRestrictionGuard,
 };
 use sovd_interfaces::error::ErrorCode;
 use tower::{Layer, Service};
@@ -110,10 +110,8 @@ where
             }
 
             match guard.evaluate(request.uri().path(), request.method()) {
-                HttpRestrictionDecision::Pass => inner.call(request).await,
-                HttpRestrictionDecision::Deny(denial) => {
-                    Ok(http_restriction_denial_to_sovd_response(denial))
-                }
+                Ok(()) => inner.call(request).await,
+                Err(denial) => Ok(http_restriction_denial_to_sovd_response(denial)),
             }
         })
     }
@@ -187,8 +185,8 @@ mod tests {
 
     use axum::{Router, body::Body, http::header::RETRY_AFTER, routing::get};
     use cda_interfaces::http_protection::registry::{
-        HttpProtectionConfig, HttpProtectionReason, HttpProtectionRegistry,
-        HttpRestrictionDecision, HttpRestrictionDenial, HttpRestrictionGuard,
+        HttpProtectionConfig, HttpProtectionReason, HttpProtectionRegistry, HttpRestrictionDenial,
+        HttpRestrictionGuard,
     };
     use http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -213,8 +211,12 @@ mod tests {
             self.active.load(Ordering::Acquire)
         }
 
-        fn evaluate(&self, _path: &str, _method: &http::Method) -> HttpRestrictionDecision {
-            HttpRestrictionDecision::Pass
+        fn evaluate(
+            &self,
+            _path: &str,
+            _method: &http::Method,
+        ) -> Result<(), HttpRestrictionDenial> {
+            Ok(())
         }
     }
 
@@ -226,7 +228,11 @@ mod tests {
             false
         }
 
-        fn evaluate(&self, _path: &str, _method: &http::Method) -> HttpRestrictionDecision {
+        fn evaluate(
+            &self,
+            _path: &str,
+            _method: &http::Method,
+        ) -> Result<(), HttpRestrictionDenial> {
             panic!("inactive guards must not be evaluated");
         }
     }
@@ -243,8 +249,12 @@ mod tests {
             true
         }
 
-        fn evaluate(&self, _path: &str, _method: &http::Method) -> HttpRestrictionDecision {
-            HttpRestrictionDecision::Deny(HttpRestrictionDenial {
+        fn evaluate(
+            &self,
+            _path: &str,
+            _method: &http::Method,
+        ) -> Result<(), HttpRestrictionDenial> {
+            Err(HttpRestrictionDenial {
                 reason: self.reason.clone(),
                 status: self.status,
                 message: "denied by test guard".to_owned(),
