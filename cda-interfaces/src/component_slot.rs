@@ -27,7 +27,7 @@ use crate::Shutdown;
 /// for the slot's inner lock, so a holder cannot drive, query, or otherwise
 /// operate the component it replaces.
 #[async_trait]
-pub trait ReplaceComponent<T>: Send + Sync + 'static {
+pub trait ReplaceComponent<T: Shutdown>: Send + Sync + 'static {
     /// Atomically installs `replacement` into the slot, then shuts down the
     /// component it displaced.
     ///
@@ -59,11 +59,11 @@ pub trait ReplaceComponent<T>: Send + Sync + 'static {
 /// `mem::replace` itself, dropping it before awaiting `shutdown()` on the
 /// displaced component - so a pending replacement cannot stall reads for
 /// longer than the swap itself.
-pub struct ComponentSlot<T> {
+pub struct ComponentSlot<T: Shutdown> {
     component: Arc<RwLock<T>>,
 }
 
-impl<T> ComponentSlot<T> {
+impl<T: Shutdown> ComponentSlot<T> {
     /// Creates a new slot owning `component`.
     #[must_use]
     pub fn new(component: T) -> Self {
@@ -78,7 +78,7 @@ impl<T> ComponentSlot<T> {
     }
 }
 
-impl<T> Clone for ComponentSlot<T> {
+impl<T: Shutdown> Clone for ComponentSlot<T> {
     fn clone(&self) -> Self {
         Self {
             component: Arc::clone(&self.component),
@@ -195,14 +195,21 @@ mod tests {
     /// succeeds if `replace()` has already released the write guard before
     /// awaiting `shutdown()` - proving the guard discipline the module promises.
     struct ReentrantComponent {
-        slot: ComponentSlot<u32>,
+        slot: ComponentSlot<ReadableComponent>,
         reentry_observed_value: Arc<AtomicUsize>,
+    }
+
+    struct ReadableComponent(u32);
+
+    #[async_trait]
+    impl Shutdown for ReadableComponent {
+        async fn shutdown(&self) {}
     }
 
     #[async_trait]
     impl Shutdown for ReentrantComponent {
         async fn shutdown(&self) {
-            let value = *self.slot.read().await;
+            let value = self.slot.read().await.0;
             self.reentry_observed_value
                 .store(value as usize, Ordering::SeqCst);
         }
@@ -210,7 +217,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_runs_after_write_guard_is_released() {
-        let inner_slot = ComponentSlot::new(42u32);
+        let inner_slot = ComponentSlot::new(ReadableComponent(42));
         let reentry_observed_value = Arc::new(AtomicUsize::new(0));
         let outer_slot = ComponentSlot::new(ReentrantComponent {
             slot: inner_slot.clone(),

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::{CommControlError, TransportControl, TransportState};
-use crate::component_slot::ComponentSlot;
+use crate::{Shutdown, component_slot::ComponentSlot};
 
 /// [`TransportControl`] proxy over a hot-swappable gateway slot, delegating every
 /// call to whatever gateway [`ComponentSlot`] currently holds.
@@ -37,11 +37,11 @@ use crate::component_slot::ComponentSlot;
 /// control call; it can delay a read by the time of the `mem::replace`
 /// itself, since `replace()` drops the write guard before awaiting
 /// `shutdown()` on the displaced gateway.
-struct SwappableGateway<G> {
+struct SwappableGateway<G: Shutdown> {
     slot: ComponentSlot<G>,
 }
 
-impl<G: TransportControl> ComponentSlot<G> {
+impl<G: TransportControl + Shutdown> ComponentSlot<G> {
     /// Mints a [`TransportControl`] view over this slot. See [`SwappableGateway`].
     #[must_use]
     pub fn transport_control(&self) -> Arc<dyn TransportControl> {
@@ -50,7 +50,7 @@ impl<G: TransportControl> ComponentSlot<G> {
 }
 
 #[async_trait]
-impl<G: TransportControl> TransportControl for SwappableGateway<G> {
+impl<G: TransportControl + Shutdown> TransportControl for SwappableGateway<G> {
     async fn enable(&self) -> Result<(), CommControlError> {
         let gateway = self.slot.read().await;
         gateway.enable().await
