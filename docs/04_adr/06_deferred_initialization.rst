@@ -59,6 +59,16 @@ components for diagnostics. HTTP restrictions use independent owned records,
 not a shared global flag, so one owner cannot remove another owner's
 restriction.
 
+The configured post-update communication mode names the requested end state,
+regardless of the communication state before the update. ``Enabled`` requests
+activation after the update, while ``Deferred`` leaves communication down until
+activation is requested separately. Releasing the update's exclusive disable
+lease only restores the state displaced by that lease; the runtime update does
+not activate communication directly. Instead, it submits the configured request
+through the communication authority. The selected plugin remains free to reject
+activation according to its policy: the default plugin honors the request in
+``Always`` and ``OnDemand`` modes, while ``Disabled`` leaves communication down.
+
 Configuration, databases, network-inert communication
 objects, and routes are prepared at startup. This keeps route topology and
 dependency wiring independent of runtime communication state while preserving

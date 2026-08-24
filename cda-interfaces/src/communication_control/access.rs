@@ -30,8 +30,10 @@ use super::{
 
 /// Authoritative communication lifecycle state.
 ///
-/// This type retains the structured failure in [`CommunicationState::Error`].
-/// Use it when callers need the complete current state or failure details.
+/// [`CommunicationState::Enabling`] identifies the lifecycle operation in
+/// progress, while [`CommunicationState::Error`] retains the structured failure
+/// from the latest lifecycle operation. Use this type when callers need the
+/// complete current state or failure details.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommunicationState {
     /// Communication has not been enabled, the state is not owned and can be enabled by anyone.
@@ -59,7 +61,7 @@ pub enum CommunicationState {
 /// Error returned by communication guard acquisition.
 ///
 /// This is a minimal enum containing only the states that can prevent
-/// guard acquisition. Lifecycle operation failures are reported via
+/// guard acquisition. Lifecycle operation failures should be reported via
 /// the `Result` returned by a communication plugin's `enable()` and
 /// `DisableLease::release()`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -116,14 +118,6 @@ impl CommunicationGuard {
 /// disabled during an important operation, i.e. flash transfer, and to bring
 /// communication up on demand for a diagnostic operation without granting the
 /// operation any broader lifecycle authority.
-///
-/// Deliberately synchronous only: a caller behind this narrow view requests
-/// activation non-blocking via [`request_activate`](Self::request_activate)
-/// and checks [`state`](Self::state)/awaits its own readiness signal (see
-/// `cda-sovd`'s variant-readiness gate) rather than awaiting a full activation
-/// sequence inline, which can take seconds due to variant detection. It can
-/// never reach a communication plugin's explicit-only `trigger_detection`,
-/// the path that bypasses `init_mode`.
 pub trait CommunicationAccess: Send + Sync + 'static {
     /// Returns the authoritative lifecycle state.
     fn state(&self) -> CommunicationState;
@@ -136,8 +130,9 @@ pub trait CommunicationAccess: Send + Sync + 'static {
     /// Returns an error when communication is not enabled.
     fn acquire(&self) -> Result<CommunicationGuard, CommunicationError>;
 
-    /// Non-blocking activation request, can be used in line with an SOVD request,
-    /// to prevent blocking the reply.
+    /// Requests activation without blocking.
+    ///
+    /// Callers must check [`state`](Self::state) before using communication.
     fn request_activate(&self, cause: ActivationCause) -> CommunicationState;
 
     /// Returns the retry hint for requests deferred while communication starts.

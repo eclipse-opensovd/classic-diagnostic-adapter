@@ -204,26 +204,8 @@ pub enum VariantDetectionMode {
 /// unavailable for its duration regardless; this decides only what happens to
 /// the lease once the update finishes.
 ///
-/// This names the intended *end state*, not what the update happened to
-/// displace. A lease is granted from deferred communication as well as from
-/// enabled communication - an update needs no transport - so an update may
-/// well start with communication already down, and [`Enabled`](Self::Enabled)
-/// still means "have communication up afterward".
-///
-/// Reaching that end state is a *request*, never an activation the update
-/// performs itself: releasing the lease only restores what the lease took
-/// away, and the configured state is then asked for through
-/// `CommunicationAccess`, leaving the communication plugin's `init_mode` the
-/// final word (see ADR-006). Under `Always`/`OnDemand` the request is honored
-/// and communication comes up; under `Disabled` it is a no-op and
-/// communication stays down, because no post-update preference may override
-/// that authorization boundary.
-/// Other communication plugins may handle this decision differently.
-///
-/// There is deliberately no third "restore whatever it was before" value: the
-/// lease already restores what it displaced, so such a value would only
-/// describe declining to ask - which is exactly
-/// [`Deferred`](Self::Deferred).
+/// See ADR-006, "Decision"
+/// (`docs/04_adr/06_deferred_initialization.rst`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum PostUpdateCommunicationMode {
     /// After update, have communication up: resume the transport the update
@@ -296,7 +278,7 @@ impl Default for CommunicationSettings {
 ///
 /// # Layered implementations
 ///
-/// The production call chain is:
+/// The intended call chain is:
 ///
 /// ```text
 /// CommunicationHandle -> SwappableGateway -> DiagnosticTransportRouter -> Gateways
@@ -309,33 +291,17 @@ pub trait TransportControl: Send + Sync + 'static {
     /// Start the diagnostic transport sequence.
     /// This must be idempotent.
     ///
-    /// Implementations serialize `enable`/`disable` against each other for
-    /// the whole call, typically behind a single operation mutex - including
-    /// slow phases such as a multi-second VIR announcement window or a probe
-    /// sweep. There is no cancellation path into an in-flight `enable`: a
-    /// concurrent `disable` blocks until it completes rather than aborting
-    /// it.
-    ///
-    /// In the current production wiring this is not a reachable race: the
-    /// sole caller, `cda-plugin-communication-management`'s
-    /// lifecycle worker, processes every command - including `Disable` and
-    /// `Shutdown` - sequentially in one loop, so `disable` is never actually
-    /// invoked while `enable` is still running on the same instance; a
-    /// shutdown racing a stuck `enable` instead waits behind it at the
-    /// worker's command queue. Bounded shutdown latency (interrupting a
-    /// command already in flight, transport-level or otherwise) needs a
-    /// cancellable unit of work at that layer and is tracked separately via
-    /// #490 - threading cancellation through individual `TransportControl`
-    /// implementations would not, on its own, be reachable from any current
-    /// caller.
+    /// Implementations must prevent concurrent `enable` and `disable` calls
+    /// from racing. For example, they may serialize the complete operations
+    /// behind a single mutex, or `disable` may cancel an in-flight `enable`
+    /// before tearing down any resources it created.
     async fn enable(&self) -> Result<(), CommControlError>;
 
     /// Tear down all connections and disable transport.
     /// This must be idempotent.
     ///
-    /// See [`enable`](Self::enable): this blocks until any in-flight `enable`
-    /// on the same instance completes, it cannot interrupt it - see that
-    /// method's doc comment for why this is not a reachable race today.
+    /// Implementations must prevent this operation from racing with
+    /// [`enable`](Self::enable); see that method for one possible strategy.
     async fn disable(&self) -> Result<(), CommControlError>;
 
     /// Returns the current communication state of **this** layer's tracker.

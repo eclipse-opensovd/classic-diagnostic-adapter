@@ -74,25 +74,14 @@ pub enum DetectionCause {
 ///
 /// # Stages run only on a transition
 ///
-/// Every row above describes what an operation runs **when it actually claims
-/// a transition**. An operation that finds nothing to do runs no stages at all:
-/// `Enable` and `EnableAndDetect` requested from
-/// [`Enabled`](super::access::CommunicationState::Enabled) report success
-/// without touching the transport, the hooks, *or* the detector.
-///
-/// So `EnableAndDetect` is not an "ensure detected" request. Reaching
-/// `Enabled` - by any route - means the detector will not run again, including
-/// when the runtime was brought up by a plain `Enable` and nothing has ever
-/// settled a variant. A caller that needs detection against an already-live
-/// transport must ask for it separately, with [`Detect`](Self::Detect) via a
-/// communication plugin's `redetect`-shaped operation.
-///
-/// This is deliberate: re-detecting on every request that merely needs
-/// communication available would re-sweep the whole vehicle on each inbound
-/// diagnostic call. Note also that no operation here can *guarantee* a settled
-/// variant - detection concludes per ECU and asynchronously, so `VariantState`
-/// remains the readiness signal (see ADR-006 and
-/// [`CommunicationState::Enabled`](super::access::CommunicationState::Enabled)).
+/// Every row above applies only when the operation claims a transition. From
+/// [`Enabled`](super::access::CommunicationState::Enabled), `Enable` and
+/// `EnableAndDetect` succeed without running any stage; detection against an
+/// already-live transport requires a separate [`Detect`](Self::Detect).
+/// `VariantState` remains the readiness signal because detection settles per ECU
+/// and asynchronously. The default implementation documents the detailed
+/// rationale in its
+/// [transition matrix](../../../cda-plugin-communication-management/src/lifecycle/transition.rs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommunicationOperation {
     /// Activate physical transport and run lifecycle hooks, but *not* variant
