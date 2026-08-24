@@ -15,7 +15,8 @@ Plugins
 .. toctree::
    :maxdepth: 2
 
-   01_content
-   02_diagnostic_database_update
-   03_dlt_logging
-   04_vehicle_topology
+   01_about
+   02_security
+   03_diagnostic_database_update
+   04_dlt_logging
+   05_vehicle_topology
