@@ -65,45 +65,25 @@ impl DisableLeaseId {
     }
 }
 
-/// Who currently owns exclusive disable, and what releasing that ownership
-/// means.
+/// Exclusive disable owner and the state restored when its lease is released.
 ///
-/// All three travel together because they are decided together, in the one
-/// locked read that claims the transition. Keeping the resume shape beside the
-/// id rather than in separate fields makes it impossible for a later disable
-/// generation to inherit the previous one's.
+/// These values are captured atomically when the lease is granted so each
+/// disable generation restores only the state it displaced.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DisableOwner {
     pub(crate) id: DisableLeaseId,
-    /// Whether the transport was up when this lease was granted.
+    /// Whether the transport was enabled when this lease was granted.
     ///
-    /// A lease may be taken from `Disabled` as well as from `Enabled`: an
-    /// exclusive disable is *mutual exclusion over the runtime*, and a
-    /// consumer that needs it (a runtime update swapping databases) needs no
-    /// transport at all. From `Disabled` there is simply nothing to take down,
-    /// and correspondingly nothing to bring back up - so `release()` returns
-    /// to plain `Disabled` rather than activating.
-    ///
-    /// That asymmetry is what keeps the lease from becoming an activation
-    /// path: releasing must never enable a runtime the releaser did not find
-    /// enabled, or a consumer holding only `DisableCommunication` could start
-    /// vehicle communication that `init_mode` never authorized.
+    /// If false, releasing the lease returns to `Disabled` without activating
+    /// communication.
     pub(crate) resumes_transport: bool,
-    /// Whether the runtime this lease displaced was one that settles variants,
-    /// and so whether resuming it runs the detection stage.
+    /// Whether resuming the displaced runtime runs variant detection.
     ///
-    /// Captured from the *effective*
+    /// Captured from the effective
     /// [`variant_detection`](crate::lifecycle::state::CommunicationStateData::variant_detection)
-    /// in the same read that grants the lease, for the same reason as
-    /// [`resumes_transport`](Self::resumes_transport): a release restores what
-    /// it displaced, and neither the releaser nor the passage of time gets a
-    /// say. Runtime update releases the lease, but whether a runtime detects is
-    /// the communication plugin's decision.
-    ///
-    /// This is faithful only because a variant detector is registered during
-    /// setup, before any activation can be claimed (see ADR-006): the effective
-    /// mode then reflects the operation's own shape rather than a missing
-    /// registration.
+    /// when the lease is granted. Variant detector registration completes
+    /// before activation (see ADR-006), so this value reflects the displaced
+    /// runtime's mode.
     pub(crate) resume_detects: bool,
 }
 
