@@ -625,23 +625,12 @@ impl CommunicationHandle {
         self.state.lock().publish_enabling_result(result, operation)
     }
 
-    /// Publishes the outcome of a completed re-detection: clears the detection
-    /// slot and hands the result back to the caller unchanged.
+    /// Completes an explicit detection on already-enabled communication without
+    /// changing the lifecycle state: clears the detection slot and returns the
+    /// result unchanged.
     ///
-    /// Deliberately **not** [`publish_enabling_result`](super::state::CommunicationStateData::publish_enabling_result).
-    /// That function's only failure exit is `Error(_)`, which every consumer
-    /// reads as "the transport is not up" - true for the enabling failures it
-    /// is written for, false for a re-detection, which brings nothing up and
-    /// tears nothing down. Routing detection through it would strand a live
-    /// runtime in `Error`, where `decide` admits a recovery activation that
-    /// re-runs `initialize()` on already-initialized hooks, and `disable()` is
-    /// refused outright.
-    ///
-    /// On failure the effective detection mode drops to `Never`: nothing is now
-    /// going to settle any ECU's variant, which is exactly what that field
-    /// reports, and it lets the readiness gate answer "awaiting an explicit
-    /// detection trigger" immediately instead of advertising a sweep that is
-    /// never coming.
+    /// On failure, resets the effective detection mode because no sweep remains
+    /// in progress.
     fn finish_detection(
         &self,
         result: Result<CommunicationState, CommunicationOperationFailure>,
