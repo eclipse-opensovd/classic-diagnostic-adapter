@@ -1307,11 +1307,10 @@ async fn try_send_transport_response(
 mod tests {
     use std::{net::UdpSocket, sync::Arc, time::Duration};
 
-    use cda_interfaces::VariantDetectionSender;
     use cda_interfaces::{
         DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, HashMap,
         HashMapExtensions, PendingNrc, PhysicalTransport, ServicePayload, TransmissionParameters,
-        TransportResponse, UDS_ID_RESPONSE_BITMASK,
+        TransportResponse, UDS_ID_RESPONSE_BITMASK, VariantDetectionSender,
         communication_control::{GatewayLifecycle, TransportState},
         nrc, service_ids,
     };

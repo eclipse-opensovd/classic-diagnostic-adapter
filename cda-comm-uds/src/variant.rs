@@ -16,7 +16,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState, HashMap,
-    HashMapExtensions, PayloadDecoder, UdsVariant, VariantState,
+    HashMapExtensions, HashSet, HashSetExtensions, PayloadDecoder, UdsVariant, VariantState,
     communication_control::{
         ActivationCause, CommunicationLifecycle, CommunicationState, CommunicationVariantDetection,
         VariantDetectionMode, error::CommControlError,
@@ -24,6 +24,7 @@ use cda_interfaces::{
     dlt_ctx,
 };
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use crate::{UdsManager, coordinator::EcuCoordinatorHandle, transport::needs_variant_detection};
 
@@ -152,12 +153,15 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         if !detection_in_flight {
             self.communication_access
                 .request_activate(ActivationCause::DiagnosticRequest);
-            return Err(self.build_communication_not_ready_err("Communication is not currently enabled"));
+            return Err(
+                self.build_communication_not_ready_err("Communication is not currently enabled")
+            );
         }
 
         if self.communication_access.variant_detection() == VariantDetectionMode::Never {
             return Err(self.build_communication_not_ready_err(
-                "Variant detection is not running automatically; awaiting an explicit detection trigger",
+                "Variant detection is not running automatically; awaiting an explicit detection \
+                 trigger",
             ));
         }
 
@@ -569,7 +573,52 @@ impl<S: EcuGateway, T: EcuManager> CommunicationLifecycle for UdsManager<S, T> {
     }
 
     async fn initialize(&self) -> Result<(), CommControlError> {
-        self.start_variant_detection_listener().await?;
+        // Start the variant-detection listener if it is not already running.
+        if let Some(mut receiver) = self.variant_detection_receiver.lock().await.take() {
+            let uds_manager = self.clone();
+            let cancel = CancellationToken::new();
+            let task_cancel = cancel.clone();
+            let listener = cda_interfaces::spawn_named!("variant-detection-receiver", async move {
+                loop {
+                    let ecus = tokio::select! {
+                        biased; // prefer cancellation over variant detection
+                        () = task_cancel.cancelled() => break,
+                        ecus = receiver.recv() => {
+                            let Some(ecus) = ecus else { break };
+                            ecus.into_ecus()
+                        }
+                    };
+                    let mut processed_duplicates = HashSet::new();
+                    let mut deduplicated_ecus = Vec::new();
+
+                    for ecu_name in ecus {
+                        if processed_duplicates.contains(&ecu_name) {
+                            continue;
+                        }
+
+                        if let Some(ecu) = uds_manager.ecus.get(&ecu_name) {
+                            let ecu_read = ecu.read().await;
+                            if let Some(duplicates) = ecu_read.duplicating_ecu_names() {
+                                processed_duplicates.extend(duplicates.iter().cloned());
+                            }
+                            deduplicated_ecus.push(ecu_name);
+                        } else {
+                            tracing::warn!(
+                                ecu_name,
+                                "Variant detection trigger for unknown ECU dropped"
+                            );
+                        }
+                    }
+
+                    tokio::select! {
+                        () = task_cancel.cancelled() => break,
+                        () = uds_manager.start_variant_detection_for_ecus(deduplicated_ecus) => {}
+                    }
+                }
+                receiver
+            });
+            *self.variant_detection_listener.lock().await = Some((cancel, listener));
+        }
         self.restart_tester_present_snapshot().await;
         Ok(())
     }

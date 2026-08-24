@@ -249,7 +249,9 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
         // For example, this makes sure that the communication cannot be shut down
         // and prevents flash transfers from being started.
         let communication_guard = self.communication_access.acquire().map_err(|error| {
-            self.build_communication_not_ready_err(format!("Diagnostic communication unavailable: {error}"))
+            self.build_communication_not_ready_err(format!(
+                "Diagnostic communication unavailable: {error}"
+            ))
         })?;
 
         // Atomic check-and-insert: the entry is resolved under a single mutex hold,

@@ -117,7 +117,10 @@ impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
 
     /// Builds a [`DiagServiceError::CommunicationNotReady`] carrying this
     /// manager's configured retry hint.
-    pub(crate) fn build_communication_not_ready_err(&self, message: impl Into<String>) -> DiagServiceError {
+    pub(crate) fn build_communication_not_ready_err(
+        &self,
+        message: impl Into<String>,
+    ) -> DiagServiceError {
         DiagServiceError::CommunicationNotReady {
             message: message.into(),
             retry_after: self.communication_retry_after,
