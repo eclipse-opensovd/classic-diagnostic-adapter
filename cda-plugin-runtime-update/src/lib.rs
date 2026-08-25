@@ -11,15 +11,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+pub use default_runtime_reloader_plugin::DefaultRuntimeReloaderPlugin;
 pub use default_runtime_update_plugin::DefaultRuntimeUpdatePlugin;
-pub use security::DefaultUpdateSecurityHandler;
+pub use exclusive::{ExclusiveRuntimePlugin, WithExclusiveAccess};
 
 pub mod config;
 pub mod default_runtime_reloader_plugin;
-pub use default_runtime_reloader_plugin::{DefaultReloadContext, RuntimeReloaderConfig};
 pub mod default_runtime_update_plugin;
+pub mod exclusive;
 pub mod operations;
-pub mod security;
 pub mod storage;
 
 /// Shared test utilities for the runtime update plugin tests.
@@ -86,6 +86,62 @@ pub(crate) mod test_utils {
         Ok(())
     }
 
+    /// Test file inspector backed by the real MDD reader.
+    ///
+    /// `cda-database` is a dev-dependency, so tests keep exercising genuine MDD
+    /// parsing (revision extraction, malformed-file rejection) even though the
+    /// plugin itself no longer depends on the format.
+    pub struct TestMddInspector;
+
+    impl cda_interfaces::runtime_update_api::RuntimeFileInspector for TestMddInspector {
+        fn validate(&self, path: &std::path::Path) -> Result<(), VerificationError> {
+            let path_str = path
+                .to_str()
+                .ok_or_else(|| VerificationError("non-UTF-8 path".to_owned()))?;
+            cda_database::mmap_and_decode_mdd(path_str)
+                .map_err(|error| VerificationError(format!("{error}")))?;
+            Ok(())
+        }
+
+        fn ecu_name(&self, path: &std::path::Path) -> Result<String, RuntimeUpdateError> {
+            let path_str = path
+                .to_str()
+                .ok_or_else(|| RuntimeUpdateError::ValidationFailed("non-UTF-8 path".to_owned()))?;
+            cda_database::mmap_and_decode_mdd(path_str)
+                .map(|mdd| mdd.ecu_name)
+                .map_err(|error| RuntimeUpdateError::ValidationFailed(format!("{error}")))
+        }
+
+        fn revision(&self, path: &std::path::Path) -> Option<String> {
+            cda_database::mmap_and_decode_mdd(path.to_str()?)
+                .ok()
+                .and_then(|mdd| mdd.revision)
+        }
+
+        fn decompress_in_place(&self, path: &std::path::Path) -> Result<(), RuntimeUpdateError> {
+            let path_str = path
+                .to_str()
+                .ok_or_else(|| RuntimeUpdateError::ValidationFailed("non-UTF-8 path".to_owned()))?;
+            cda_database::update_mdd_uncompressed(path_str)
+                .map(|_| ())
+                .map_err(|error| RuntimeUpdateError::ValidationFailed(format!("{error}")))
+        }
+    }
+
+    /// Opaque security context for tests.
+    ///
+    /// The mock security handler ignores it; it exists so tests exercise the same
+    /// call shape production uses.
+    pub fn test_security() -> cda_interfaces::DynamicPlugin {
+        Box::new(())
+    }
+
+    /// Shared inspector handle for tests.
+    pub fn test_inspector()
+    -> std::sync::Arc<dyn cda_interfaces::runtime_update_api::RuntimeFileInspector> {
+        std::sync::Arc::new(TestMddInspector)
+    }
+
     pub struct MockLockProvider {
         pub owner: Option<String>,
         pub has_conflicts: bool,
@@ -93,7 +149,7 @@ pub(crate) mod test_utils {
 
     #[async_trait]
     impl LockStateProvider for MockLockProvider {
-        async fn vehicle_lock_owner_sub(&self) -> Option<String> {
+        async fn vehicle_lock_owner_id(&self) -> Option<String> {
             self.owner.clone()
         }
 
@@ -115,12 +171,21 @@ pub(crate) mod test_utils {
         cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
         for MockSecurityHandler
     {
+        async fn check_mutation_allowed(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+            _lock_state_provider: &L,
+        ) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+
         async fn check_apply_allowed(
             &self,
+            _security: &cda_interfaces::DynamicPlugin,
             lock_state_provider: &L,
             _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
         ) -> Result<(), RuntimeUpdateError> {
-            let owner = lock_state_provider.vehicle_lock_owner_sub().await;
+            let owner = lock_state_provider.vehicle_lock_owner_id().await;
             match owner {
                 None => Err(RuntimeUpdateError::NoLock(
                     "No vehicle lock held".to_string(),
@@ -274,9 +339,8 @@ mod tests {
 
     use async_trait::async_trait;
     use cda_interfaces::runtime_update_api::{
-        BulkDataCreatedList, BulkDataList, ExclusiveRuntimePlugin, ExecutionMode,
-        RuntimeFilesQuery, RuntimeFilesUpdatePlugin, RuntimeUpdateError, UpdateExecution,
-        UploadFile,
+        ExecutionMode, FileListOptions, RuntimeFile, RuntimeFileCatalog, RuntimeFileStore,
+        RuntimeUpdateError, RuntimeUpdateExecutor, UpdateExecution, UploadFile,
     };
     use tokio::sync::{Barrier, Notify};
 
@@ -289,50 +353,52 @@ mod tests {
         concurrent_writes: Arc<AtomicUsize>,
     }
 
-    type PluginHandle = ExclusiveRuntimePlugin<DelayPlugin>;
+    type PluginHandle = crate::exclusive::ExclusiveRuntimePlugin<DelayPlugin>;
     type Counter = Arc<AtomicUsize>;
     type Notifier = Arc<Notify>;
 
     #[async_trait]
-    impl RuntimeFilesUpdatePlugin for DelayPlugin {
+    impl RuntimeFileCatalog for DelayPlugin {
         async fn list_current(
             &self,
-            _query: &RuntimeFilesQuery,
-        ) -> Result<BulkDataList, RuntimeUpdateError> {
+            _options: FileListOptions,
+        ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
             self.concurrent_reads.fetch_add(1, Ordering::SeqCst);
             self.read_barrier.wait().await;
             self.read_notify.notified().await;
             self.concurrent_reads.fetch_sub(1, Ordering::SeqCst);
-            Ok(BulkDataList {
-                items: vec![],
-                schema: None,
-            })
+            Ok(Vec::new())
         }
 
         async fn list_nextupdate(
             &self,
-            _query: &RuntimeFilesQuery,
-        ) -> Result<BulkDataList, RuntimeUpdateError> {
-            Ok(BulkDataList {
-                items: vec![],
-                schema: None,
-            })
+            _options: FileListOptions,
+        ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
+            Ok(Vec::new())
         }
 
         async fn list_backup(
             &self,
-            _query: &RuntimeFilesQuery,
-        ) -> Result<BulkDataList, RuntimeUpdateError> {
-            Ok(BulkDataList {
-                items: vec![],
-                schema: None,
-            })
+            _options: FileListOptions,
+        ) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeFileStore for DelayPlugin {
+        async fn authorize_mutation(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+        ) -> Result<(), RuntimeUpdateError> {
+            Ok(())
         }
 
         async fn upload(
             &self,
             _files: Vec<UploadFile>,
-        ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
+            _security: &cda_interfaces::DynamicPlugin,
+        ) -> Result<Vec<String>, RuntimeUpdateError> {
             self.concurrent_writes.fetch_add(1, Ordering::SeqCst);
             self.write_barrier.wait().await;
             self.write_notify.notified().await;
@@ -340,7 +406,10 @@ mod tests {
             Ok(<_>::default())
         }
 
-        async fn delete_nextupdate(&self) -> Result<Vec<String>, RuntimeUpdateError> {
+        async fn delete_nextupdate(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+        ) -> Result<Vec<String>, RuntimeUpdateError> {
             self.concurrent_writes.fetch_add(1, Ordering::SeqCst);
             self.write_barrier.wait().await;
             self.write_notify.notified().await;
@@ -348,27 +417,38 @@ mod tests {
             Ok(vec![])
         }
 
-        async fn delete_nextupdate_by_id(&self, _file_id: &str) -> Result<(), RuntimeUpdateError> {
+        async fn delete_nextupdate_by_id(
+            &self,
+            _file_id: &str,
+            _security: &cda_interfaces::DynamicPlugin,
+        ) -> Result<(), RuntimeUpdateError> {
             Ok(())
         }
 
-        async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
+        async fn delete_backup(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+        ) -> Result<Vec<String>, RuntimeUpdateError> {
             Ok(vec![])
         }
+    }
 
+    #[async_trait]
+    impl RuntimeUpdateExecutor for DelayPlugin {
         async fn start_execution(
             &self,
             _mode: ExecutionMode,
+            _security: &cda_interfaces::DynamicPlugin,
         ) -> Result<String, RuntimeUpdateError> {
             Ok("exec-1".to_owned())
         }
 
-        async fn get_execution_status(&self, _execution_id: &str) -> Option<UpdateExecution> {
-            None
-        }
-
         async fn list_executions(&self) -> Vec<UpdateExecution> {
             vec![]
+        }
+
+        async fn get_execution_status(&self, _execution_id: &str) -> Option<UpdateExecution> {
+            None
         }
     }
 
@@ -389,7 +469,7 @@ mod tests {
             concurrent_writes: Arc::clone(&concurrent_writes),
         };
         (
-            plugin.with_exclusive_access(),
+            crate::exclusive::WithExclusiveAccess::with_exclusive_access(plugin),
             concurrent_reads,
             concurrent_writes,
             read_notify,
@@ -402,12 +482,10 @@ mod tests {
         let (plugin, concurrent_reads, _, read_notify, _) = make_plugin(2, 1);
         let plugin = Arc::new(plugin);
         let p1 = Arc::clone(&plugin);
-        let t1 =
-            tokio::spawn(async move { p1.list_current(&<RuntimeFilesQuery>::default()).await });
+        let t1 = tokio::spawn(async move { p1.list_current(FileListOptions::default()).await });
 
         let p2 = Arc::clone(&plugin);
-        let t2 =
-            tokio::spawn(async move { p2.list_current(&<RuntimeFilesQuery>::default()).await });
+        let t2 = tokio::spawn(async move { p2.list_current(FileListOptions::default()).await });
 
         // Both tasks will reach the barrier and wait, proving they run concurrently.
         // Once both hit the barrier they proceed to notified() - at that point
@@ -433,7 +511,10 @@ mod tests {
         let plugin = Arc::new(plugin);
 
         let p1 = Arc::clone(&plugin);
-        let t1 = tokio::spawn(async move { p1.delete_nextupdate().await });
+        let t1 = tokio::spawn(async move {
+            p1.delete_nextupdate(&crate::test_utils::test_security())
+                .await
+        });
 
         // Yield until the first write is inside the lock
         for _ in 0..20 {
@@ -446,7 +527,10 @@ mod tests {
 
         // Second write should block on the lock
         let p2 = Arc::clone(&plugin);
-        let t2 = tokio::spawn(async move { p2.upload(vec![]).await });
+        let t2 =
+            tokio::spawn(
+                async move { p2.upload(vec![], &crate::test_utils::test_security()).await },
+            );
 
         // Yield and verify second write has NOT entered
         for _ in 0..20 {
@@ -478,11 +562,14 @@ mod tests {
             concurrent_reads: Arc::clone(&concurrent_reads),
             concurrent_writes: Arc::clone(&concurrent_writes),
         };
-        let plugin = Arc::new(plugin.with_exclusive_access());
+        let plugin = Arc::new(crate::exclusive::WithExclusiveAccess::with_exclusive_access(plugin));
 
         // Start a write that will hold the lock
         let p1 = Arc::clone(&plugin);
-        let t1 = tokio::spawn(async move { p1.upload(vec![]).await });
+        let t1 =
+            tokio::spawn(
+                async move { p1.upload(vec![], &crate::test_utils::test_security()).await },
+            );
 
         for _ in 0..20 {
             if concurrent_writes.load(Ordering::SeqCst) == 1 {
@@ -494,8 +581,7 @@ mod tests {
 
         // Start a read - it should be blocked by the write lock
         let p2 = Arc::clone(&plugin);
-        let t2 =
-            tokio::spawn(async move { p2.list_current(&<RuntimeFilesQuery>::default()).await });
+        let t2 = tokio::spawn(async move { p2.list_current(FileListOptions::default()).await });
 
         for _ in 0..20 {
             tokio::task::yield_now().await;

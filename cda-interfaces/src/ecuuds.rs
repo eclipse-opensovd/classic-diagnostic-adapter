@@ -80,6 +80,45 @@ pub trait UdsTransport: Send + Sync + 'static {
         payload: Vec<u8>,
         timeout: Option<Duration>,
     ) -> Result<Vec<u8>, DiagServiceError>;
+
+    /// Send the service matching `service_bytes`, a request prefix.
+    ///
+    /// Resolves the service by matching the byte sequence against coded constant
+    /// parameters in the database, so a service selected by a specific DID or
+    /// subfunction can be addressed without knowing its database short name.
+    /// The prefix starts with the service ID and may include further bytes.
+    ///
+    /// On the trait rather than the concrete manager because it is one of the two
+    /// ways to address a service, and an integration holding `dyn UdsEcu` needs
+    /// both.
+    ///
+    /// # Errors
+    /// Returns `DiagServiceError` if no service matches or the request fails.
+    async fn send_by_sid(
+        &self,
+        ecu_name: &str,
+        service_bytes: &[u8],
+        security_plugin: &DynamicPlugin,
+        params: HashMap<String, serde_json::Value>,
+        map_to_json: bool,
+    ) -> Result<Self::Response, DiagServiceError>;
+
+    /// Send the service identified by `service_id` and its database short name.
+    ///
+    /// The other addressing mode: used when the service is known by name in the
+    /// database rather than by an exact request prefix.
+    ///
+    /// # Errors
+    /// Returns `DiagServiceError` if the service is not found or the request fails.
+    async fn send_by_sid_and_name(
+        &self,
+        ecu_name: &str,
+        service_id: u8,
+        name: &str,
+        security_plugin: &DynamicPlugin,
+        params: HashMap<String, serde_json::Value>,
+        map_to_json: bool,
+    ) -> Result<Self::Response, DiagServiceError>;
 }
 
 /// UDS session management interface.
@@ -716,6 +755,25 @@ pub mod mock {
                 payload: Vec<u8>,
                 timeout: Option<Duration>,
             ) -> Result<Vec<u8>, DiagServiceError>;
+
+            async fn send_by_sid(
+                &self,
+                ecu_name: &str,
+                service_bytes: &[u8],
+                security_plugin: &DynamicPlugin,
+                params: HashMap<String, serde_json::Value>,
+                map_to_json: bool,
+            ) -> Result<crate::diagservices::mock::MockDiagServiceResponse, DiagServiceError>;
+
+            async fn send_by_sid_and_name(
+                &self,
+                ecu_name: &str,
+                service_id: u8,
+                name: &str,
+                security_plugin: &DynamicPlugin,
+                params: HashMap<String, serde_json::Value>,
+                map_to_json: bool,
+            ) -> Result<crate::diagservices::mock::MockDiagServiceResponse, DiagServiceError>;
         }
 
         #[async_trait]
@@ -987,6 +1045,13 @@ pub mod mock {
 
         #[async_trait]
         impl UdsEcu for UdsEcu {}
+
+        // Needed by consumers generic over `Uds: UdsQuery + Shutdown`, such as the
+        // runtime reloader.
+        #[async_trait]
+        impl crate::Shutdown for UdsEcu {
+            async fn shutdown(&self);
+        }
     }
 
     use crate::schema::{SchemaDescription, SchemaProvider};

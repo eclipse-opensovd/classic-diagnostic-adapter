@@ -98,8 +98,6 @@ Safety Plugins
 - Diagnostic session safety checks
 - Emergency shutdown procedures
 
-Custom Endpoint Plugins
-^^^^^^^^^^^^^^^^^^^^^^^
-- Vendor-specific API extensions
-- Additional data formats and protocols
-- Integration with external systems
+.. note:: Custom endpoint plugins (vendor-specific API extensions) are no longer a
+   future extension - they are implemented by the versioned OEM extension surface.
+   See :need:`arch~oem-library-integration`.

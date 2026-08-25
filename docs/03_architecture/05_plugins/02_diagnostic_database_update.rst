@@ -88,7 +88,7 @@ Diagnostic Database Update Plugin
 
     .. note:: The following query parameters must be supported for the GET endpoints:
 
-       - ``x-sovd2uds-include-hash`` (string, default: not present -- supported is only sha256) - to include file hashes of the files
+       - ``x-sovd2uds-include-hash`` (string, default: not present - supported is only sha256) - to include file hashes of the files
        - ``x-sovd2uds-include-file-size`` (boolean, default: false) - to include file sizes of the files
        - ``x-sovd2uds-include-revision`` (boolean, default: false) - to include the revision inside the files
        - ``created-after`` and ``created-before`` (string:date-time) are accepted for ISO 17978-3 compatibility but do not currently filter results.
@@ -123,13 +123,33 @@ Diagnostic Database Update Plugin
 
     Applications embedding CDA can replace the complete runtime update implementation at startup.
     Implement ``cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin`` and pass a builder
-    to ``Setup::with_update_plugin``. The builder receives ``CdaRuntime``, which exposes the live
-    configuration, lock provider, storage directory, update guard, and reload-related
-    infrastructure required by an implementation. The UDS manager and `DoIP` gateway are exposed
-    only as replace-only capabilities (``gateway_replacer``, ``uds_manager_replacer``, typed
-    ``ReplaceComponent<_>``): an implementation can install a freshly built replacement, but has
-    no read access to the live component and therefore cannot drive UDS requests or enable
+    to ``Setup::with_update_plugin``. The builder receives ``UpdatePluginContext``, which carries
+    only update capabilities: the reloader, lock state, storage directory, HTTP-protection
+    registry, and the narrow communication access/disable handles.
+
+    It exposes neither the live UDS manager nor the `DoIP` gateway, in any form. Replacing them
+    is not the plugin's job: after an apply, the plugin calls ``RuntimeReloaderPlugin``, which
+    builds a new component generation through ``VehicleComponentFactory`` and installs it through
+    ``VehicleComponentPublisher``. An update plugin therefore cannot drive UDS requests or enable
     transport directly. See ``docs/04_adr/06_deferred_initialization.rst`` for the rationale.
+
+    **Swapping only part of the implementation**
+
+    Replacing the whole plugin is rarely necessary. ``create_update_plugin_with`` keeps the
+    standard staging/apply/rollback logic while substituting any of its collaborators:
+
+    * a custom ``Storage`` backend (database-backed, cloud, encrypted),
+    * a custom ``RuntimeUpdateSecurityPlugin`` authorization and integrity policy,
+    * a custom ``RuntimeFileInspector`` for a database format other than MDD.
+
+    **Security decisions belong to the security plugin**
+
+    ``RuntimeUpdateSecurityPlugin`` receives the live per-request security plugin as a
+    ``DynamicPlugin`` and is expected to ask it, rather than deriving a decision from a claim it
+    reads itself - a downstream plugin may apply additional checks that such a shortcut would
+    skip. The HTTP layer transports the plugin and renders its verdict; it does not decide.
+    ``authorize_mutation`` exists so a transport can reject an unauthorized request before
+    reading a large body, without making the decision itself.
 
     The ``update_plugin_fn`` helper adapts an async closure without requiring a separate builder
     type:
@@ -140,8 +160,8 @@ Diagnostic Database Update Plugin
        use opensovd_cda_lib::update::update_plugin_fn;
 
        let setup = Setup::<MySecurityPlugin, MySecurityLoader>::new()
-           .with_update_plugin(update_plugin_fn(|runtime| async move {
-               Ok(MyRuntimeUpdatePlugin::new(runtime))
+           .with_update_plugin(update_plugin_fn(|context| async move {
+               Ok::<_, MyError>(MyRuntimeUpdatePlugin::new(context))
            }));
 
        run_with_ext_from_config(config, setup).await?;

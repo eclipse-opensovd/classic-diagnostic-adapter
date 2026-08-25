@@ -21,7 +21,7 @@ pub(crate) mod runtimefilesupdate {
     };
     use cda_interfaces::{
         http_protection::registry::{HttpMethod, HttpRouteMatcher},
-        runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin},
+        runtime_update_api::RuntimeFilesUpdatePlugin,
     };
     use cda_plugin_security::Secured;
     use opensovd_axum_extra::ExtractHost;
@@ -30,7 +30,7 @@ pub(crate) mod runtimefilesupdate {
     };
 
     use crate::sovd::apps::sovd2uds::bulk_data::runtimefiles::{
-        DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock,
+        DbUpdateErrorResponse, RuntimeUpdateRouteState, require_mutation_allowed,
     };
 
     const EXECUTIONS_ROUTE: &str =
@@ -38,8 +38,8 @@ pub(crate) mod runtimefilesupdate {
     const EXECUTIONS_ID_ROUTE: &str =
         "/vehicle/v15/apps/sovd2uds/operations/runtimefilesupdate/executions/{id}";
 
-    pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
-        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
+    pub(crate) async fn get<P: RuntimeFilesUpdatePlugin>(
+        State(route_state): State<RuntimeUpdateRouteState<P>>,
     ) -> impl IntoResponse {
         let items = route_state
             .plugin
@@ -51,26 +51,22 @@ pub(crate) mod runtimefilesupdate {
         (StatusCode::OK, Json(ExecutionListResponse { items })).into_response()
     }
 
-    pub(crate) async fn post<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
-        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
+    pub(crate) async fn post<P: RuntimeFilesUpdatePlugin>(
+        State(route_state): State<RuntimeUpdateRouteState<P>>,
         UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
         Secured(sec_plugin): Secured,
         Json(body): Json<ExecutionRequest>,
     ) -> impl IntoResponse {
-        let claims = sec_plugin.as_auth_plugin().claims();
-        if let Err(resp) = require_vehicle_lock(
-            &*route_state.vehicle_lock_states,
-            *claims,
-            route_state.retry_after,
-        )
-        .await
+        let security = sec_plugin as cda_interfaces::DynamicPlugin;
+        if let Err(resp) =
+            require_mutation_allowed(&*route_state.plugin, &security, route_state.retry_after).await
         {
             return resp.into_response();
         }
 
         route_state
             .plugin
-            .start_execution(body.parameters.mode)
+            .start_execution(body.parameters.mode, &security)
             .await
             .map_or_else(
                 |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),
@@ -94,15 +90,15 @@ pub(crate) mod runtimefilesupdate {
             response::IntoResponse,
         };
         use axum_extra::extract::WithRejection;
-        use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
+        use cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin;
         use sovd_interfaces::apps::sovd2uds::operations::runtimefilesupdate::ExecutionResponse;
 
         use crate::sovd::{
             apps::sovd2uds::bulk_data::runtimefiles::RuntimeUpdateRouteState, error::ApiError,
         };
 
-        pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
-            State(route_state): State<RuntimeUpdateRouteState<P, L>>,
+        pub(crate) async fn get<P: RuntimeFilesUpdatePlugin>(
+            State(route_state): State<RuntimeUpdateRouteState<P>>,
             Path(id): Path<String>,
             WithRejection(Query(query), _): WithRejection<
                 Query<sovd_interfaces::IncludeSchemaQuery>,
@@ -122,19 +118,15 @@ pub(crate) mod runtimefilesupdate {
         }
     }
 
-    pub fn routes<
-        S: cda_plugin_security::SecurityPluginLoader,
-        P: RuntimeFilesUpdatePlugin,
-        L: LockStateProvider,
-    >(
-        state: RuntimeUpdateRouteState<P, L>,
+    pub fn routes<S: cda_plugin_security::SecurityPluginLoader, P: RuntimeFilesUpdatePlugin>(
+        state: RuntimeUpdateRouteState<P>,
     ) -> axum::Router {
         axum::Router::new()
             .route(
                 EXECUTIONS_ROUTE,
-                axum::routing::get(get::<P, L>).post(post::<P, L>),
+                axum::routing::get(get::<P>).post(post::<P>),
             )
-            .route(EXECUTIONS_ID_ROUTE, axum::routing::get(id::get::<P, L>))
+            .route(EXECUTIONS_ID_ROUTE, axum::routing::get(id::get::<P>))
             .layer(axum::middleware::from_fn(
                 cda_plugin_security::security_plugin_middleware::<S>,
             ))

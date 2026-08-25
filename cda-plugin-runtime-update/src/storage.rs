@@ -15,9 +15,8 @@ use std::{fmt::Write, sync::Arc};
 
 use cda_interfaces::{
     runtime_update_api::{
-        BulkDataCreated, BulkDataCreatedList, BulkDataDescriptor, BulkDataList, HashAlgorithm,
-        LockStateProvider, RuntimeFilesQuery, RuntimeUpdateError, RuntimeUpdateSecurityPlugin,
-        UploadFile,
+        FileHash, FileListOptions, HashAlgorithm, LockStateProvider, RuntimeFile,
+        RuntimeFileInspector, RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UploadFile,
     },
     storage_api::{
         Collection, CollectionName, DirectFileAccess, RandomAccessData, Storage, StorageError,
@@ -78,24 +77,21 @@ pub(crate) fn compute_sha256(data: &impl RandomAccessData) -> Result<String, Run
 /// Lists all files in a collection, optionally enriching each item with size and hash metadata.
 pub(crate) async fn list_collection_files(
     collection: &(impl Collection + DirectFileAccess),
-    query: &RuntimeFilesQuery,
-) -> Result<BulkDataList, RuntimeUpdateError> {
+    options: FileListOptions,
+    inspector: &dyn RuntimeFileInspector,
+) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
     let keys = collection.list().await?;
     let mut items = Vec::with_capacity(keys.len());
 
     for key in &keys {
-        let mut item = BulkDataDescriptor {
+        let mut item = RuntimeFile {
             id: key.clone(),
-            mimetype: "application/octet-stream".to_owned(),
-            name: Some(key.clone()),
             size: None,
             hash: None,
-            hash_algorithm: None,
-            origin_path: None,
             revision: None,
         };
 
-        if query.include_file_size {
+        if options.include_size {
             match collection.metadata(key).await {
                 Ok(meta) => item.size = Some(meta.data_size),
                 Err(StorageError::KeyNotFound(_)) => {
@@ -109,59 +105,50 @@ pub(crate) async fn list_collection_files(
             }
         }
 
-        if let Some(hash) = query.include_hash {
+        if let Some(algorithm) = options.include_hash {
             let data = collection.read(key).await?;
-            match hash {
-                HashAlgorithm::Sha256 => {
-                    let hash = compute_sha256(&*data)?;
-                    item.hash = Some(hash);
-                    item.hash_algorithm = Some(HashAlgorithm::Sha256);
-                }
-            }
+            let value = match algorithm {
+                HashAlgorithm::Sha256 => compute_sha256(&*data)?,
+            };
+            item.hash = Some(FileHash { algorithm, value });
         }
 
-        if query.include_revision {
-            let path = collection.file_path(key)?;
-            let path_str = path.to_str().ok_or_else(|| {
-                RuntimeUpdateError::StorageError(StorageError::Other(format!(
-                    "file path for key '{key}' is not valid UTF-8"
-                )))
-            })?;
-            item.revision = cda_database::mmap_and_decode_mdd(path_str)
-                .ok()
-                .and_then(|mdd| mdd.revision);
+        if options.include_revision {
+            item.revision = inspector.revision(&collection.file_path(key)?);
         }
 
         items.push(item);
     }
 
-    Ok(BulkDataList {
-        items,
-        schema: None,
-    })
+    Ok(items)
 }
 
 pub(crate) async fn list_current_files(
     storage: &impl Storage,
-    query: &RuntimeFilesQuery,
-) -> Result<BulkDataList, RuntimeUpdateError> {
-    let items = get_collection_items(storage, &CollectionName::DiagnosticDatabase, query).await?;
-    Ok(BulkDataList {
-        items,
-        schema: None,
-    })
+    options: FileListOptions,
+    inspector: &dyn RuntimeFileInspector,
+) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
+    get_collection_items(
+        storage,
+        &CollectionName::DiagnosticDatabase,
+        options,
+        inspector,
+    )
+    .await
 }
 
 pub(crate) async fn list_backup_files(
     storage: &impl Storage,
-    query: &RuntimeFilesQuery,
-) -> Result<BulkDataList, RuntimeUpdateError> {
-    let items =
-        get_collection_items(storage, &CollectionName::DiagnosticDatabaseBackup, query).await?;
-    Ok(BulkDataList {
-        items,
-        schema: None,
-    })
+    options: FileListOptions,
+    inspector: &dyn RuntimeFileInspector,
+) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
+    get_collection_items(
+        storage,
+        &CollectionName::DiagnosticDatabaseBackup,
+        options,
+        inspector,
+    )
+    .await
 }
 
 /// Remove a file from the next-update snapshot for the relevant collection.
@@ -292,22 +279,21 @@ pub(crate) async fn delete_all_backup(
 /// Returns [`RuntimeUpdateError`] if storage operations fail when reading collections.
 pub async fn compute_nextupdate_state(
     storage: &impl Storage,
-    query: &RuntimeFilesQuery,
-) -> Result<BulkDataList, RuntimeUpdateError> {
+    options: FileListOptions,
+    inspector: &dyn RuntimeFileInspector,
+) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
     let mdd_items = get_nextupdate_or_current_items(
         storage,
         &CollectionName::DiagnosticDatabaseNextUpdate,
         &CollectionName::DiagnosticDatabase,
-        query,
+        options,
+        inspector,
     )
     .await?;
     let mut items = mdd_items;
     items.sort_by(|a, b| a.id.cmp(&b.id));
 
-    Ok(BulkDataList {
-        items,
-        schema: None,
-    })
+    Ok(items)
 }
 
 /// Returns the items of `next_collection` if it exists, otherwise falls back to the items of
@@ -319,12 +305,13 @@ async fn get_nextupdate_or_current_items(
     storage: &impl Storage,
     next_collection: &CollectionName,
     current_collection: &CollectionName,
-    query: &RuntimeFilesQuery,
-) -> Result<Vec<BulkDataDescriptor>, RuntimeUpdateError> {
+    options: FileListOptions,
+    inspector: &dyn RuntimeFileInspector,
+) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
     match storage.get_collection(next_collection).await {
-        Ok(collection) => Ok(list_collection_files(&*collection, query).await?.items),
+        Ok(collection) => list_collection_files(&*collection, options, inspector).await,
         Err(StorageError::CollectionNotFound(_)) => {
-            get_collection_items(storage, current_collection, query).await
+            get_collection_items(storage, current_collection, options, inspector).await
         }
         Err(e) => Err(RuntimeUpdateError::from(e)),
     }
@@ -346,8 +333,8 @@ pub(crate) async fn upload_files<
     storage: &S,
     security_handler: &T,
     files: Vec<UploadFile>,
-) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
-    let mut result = BulkDataCreatedList::default();
+) -> Result<Vec<String>, RuntimeUpdateError> {
+    let mut created = Vec::new();
 
     if let Some(file) = files.iter().find(|file| {
         std::path::Path::new(&file.filename)
@@ -403,13 +390,13 @@ pub(crate) async fn upload_files<
                 )
                 .await?;
 
-                result.items.push(BulkDataCreated { id: key });
+                created.push(key);
             }
             _ => return Err(RuntimeUpdateError::InvalidFileType(file.filename.clone())),
         }
     }
 
-    Ok(result)
+    Ok(created)
 }
 
 async fn check_file_integrity_and_roll_back_on_error<
@@ -472,13 +459,11 @@ async fn check_file_integrity_and_roll_back_on_error<
 async fn get_collection_items(
     storage: &impl Storage,
     name: &CollectionName,
-    query: &RuntimeFilesQuery,
-) -> Result<Vec<BulkDataDescriptor>, RuntimeUpdateError> {
+    options: FileListOptions,
+    inspector: &dyn RuntimeFileInspector,
+) -> Result<Vec<RuntimeFile>, RuntimeUpdateError> {
     match storage.get_collection(name).await {
-        Ok(collection) => {
-            let list = list_collection_files(&*collection, query).await?;
-            Ok(list.items)
-        }
+        Ok(collection) => list_collection_files(&*collection, options, inspector).await,
         Err(StorageError::CollectionNotFound(_)) => Ok(vec![]),
         Err(e) => Err(RuntimeUpdateError::from(e)),
     }
@@ -489,9 +474,7 @@ mod tests {
     use std::sync::Mutex;
 
     use cda_interfaces::{
-        runtime_update_api::{
-            BulkDataCreatedList, HashAlgorithm, RuntimeFilesQuery, RuntimeUpdateError, UploadFile,
-        },
+        runtime_update_api::{FileListOptions, HashAlgorithm, RuntimeUpdateError, UploadFile},
         storage_api::{Collection, CollectionName, RandomAccessData, Storage, StorageError},
     };
     use cda_storage::LocalStorage;
@@ -506,7 +489,7 @@ mod tests {
     async fn upload<S: cda_interfaces::storage_api::Storage + 'static>(
         storage: &S,
         files: Vec<UploadFile>,
-    ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
+    ) -> Result<Vec<String>, RuntimeUpdateError> {
         upload_files::<S, MockSecurityHandler, MockLockProvider>(
             storage,
             &MockSecurityHandler::new(),
@@ -534,8 +517,17 @@ mod tests {
     > cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
         for RejectingSecurityHandler
     {
+        async fn check_mutation_allowed(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+            _lock_state_provider: &L,
+        ) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+
         async fn check_apply_allowed(
             &self,
+            _security: &cda_interfaces::DynamicPlugin,
             _lock_state_provider: &L,
             _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
         ) -> Result<(), cda_interfaces::runtime_update_api::RuntimeUpdateError> {
@@ -560,7 +552,7 @@ mod tests {
         storage: &S,
         files: Vec<cda_interfaces::runtime_update_api::UploadFile>,
         reject_kind: RejectKind,
-    ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
+    ) -> Result<Vec<String>, RuntimeUpdateError> {
         upload_files::<S, RejectingSecurityHandler, MockLockProvider>(
             storage,
             &RejectingSecurityHandler {
@@ -586,8 +578,17 @@ mod tests {
     > cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
         for RejectingByNameSecurityHandler
     {
+        async fn check_mutation_allowed(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+            _lock_state_provider: &L,
+        ) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+
         async fn check_apply_allowed(
             &self,
+            _security: &cda_interfaces::DynamicPlugin,
             _lock_state_provider: &L,
             _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
         ) -> Result<(), cda_interfaces::runtime_update_api::RuntimeUpdateError> {
@@ -611,7 +612,7 @@ mod tests {
         storage: &S,
         files: Vec<cda_interfaces::runtime_update_api::UploadFile>,
         reject_filename: &'static str,
-    ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
+    ) -> Result<Vec<String>, RuntimeUpdateError> {
         upload_files::<S, RejectingByNameSecurityHandler, MockLockProvider>(
             storage,
             &RejectingByNameSecurityHandler { reject_filename },
@@ -730,10 +731,13 @@ mod tests {
             .await
             .unwrap();
 
-        let query = RuntimeFilesQuery::default();
-        let result = list_collection_files(&*collection, &query).await.unwrap();
+        let options = FileListOptions::default();
+        let result =
+            list_collection_files(&*collection, options, &*crate::test_utils::test_inspector())
+                .await
+                .unwrap();
 
-        assert!(result.items.is_empty());
+        assert!(result.is_empty());
     }
 
     #[tokio::test]
@@ -747,11 +751,14 @@ mod tests {
         write_test_file_to_collection(&storage, &*collection, "alpha.mdd", b"alpha content").await;
         write_test_file_to_collection(&storage, &*collection, "beta.mdd", b"beta content").await;
 
-        let query = RuntimeFilesQuery::default();
-        let result = list_collection_files(&*collection, &query).await.unwrap();
+        let options = FileListOptions::default();
+        let result =
+            list_collection_files(&*collection, options, &*crate::test_utils::test_inspector())
+                .await
+                .unwrap();
 
-        assert_eq!(result.items.len(), 2);
-        let mut ids: Vec<&str> = result.items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(result.len(), 2);
+        let mut ids: Vec<&str> = result.iter().map(|i| i.id.as_str()).collect();
         ids.sort_unstable();
         assert_eq!(ids, vec!["alpha.mdd", "beta.mdd"]);
     }
@@ -768,14 +775,17 @@ mod tests {
         assert_eq!(data.len(), 20);
         write_test_file_to_collection(&storage, &*collection, "sized.mdd", data).await;
 
-        let query = RuntimeFilesQuery {
-            include_file_size: true,
-            ..Default::default()
+        let options = FileListOptions {
+            include_size: true,
+            ..FileListOptions::default()
         };
-        let result = list_collection_files(&*collection, &query).await.unwrap();
+        let result =
+            list_collection_files(&*collection, options, &*crate::test_utils::test_inspector())
+                .await
+                .unwrap();
 
-        assert_eq!(result.items.len(), 1);
-        let item = result.items.first().unwrap();
+        assert_eq!(result.len(), 1);
+        let item = result.first().unwrap();
         assert_eq!(item.id, "sized.mdd");
         assert_eq!(item.size, Some(20));
     }
@@ -790,17 +800,23 @@ mod tests {
 
         write_test_file_to_collection(&storage, &*collection, "hashed.mdd", b"hello world").await;
 
-        let query = RuntimeFilesQuery {
+        let options = FileListOptions {
             include_hash: Some(HashAlgorithm::Sha256),
-            ..Default::default()
+            ..FileListOptions::default()
         };
-        let result = list_collection_files(&*collection, &query).await.unwrap();
+        let result =
+            list_collection_files(&*collection, options, &*crate::test_utils::test_inspector())
+                .await
+                .unwrap();
 
-        assert_eq!(result.items.len(), 1);
-        let item = result.items.first().unwrap();
-        assert_eq!(item.hash_algorithm, Some(HashAlgorithm::Sha256));
+        assert_eq!(result.len(), 1);
+        let item = result.first().unwrap();
         assert_eq!(
-            item.hash.as_deref(),
+            item.hash.as_ref().map(|h| h.algorithm),
+            Some(HashAlgorithm::Sha256)
+        );
+        assert_eq!(
+            item.hash.as_ref().map(|h| h.value.as_str()),
             Some("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9")
         );
     }
@@ -815,22 +831,19 @@ mod tests {
 
         write_test_file_to_collection(&storage, &*collection, "plain.mdd", b"some data").await;
 
-        let query = RuntimeFilesQuery::default();
-        let result = list_collection_files(&*collection, &query).await.unwrap();
+        let options = FileListOptions::default();
+        let result =
+            list_collection_files(&*collection, options, &*crate::test_utils::test_inspector())
+                .await
+                .unwrap();
 
-        assert_eq!(result.items.len(), 1);
-        let item = result.items.first().unwrap();
+        assert_eq!(result.len(), 1);
+        let item = result.first().unwrap();
         assert_eq!(item.id, "plain.mdd");
         assert!(item.hash.is_none());
-        assert!(item.hash_algorithm.is_none());
         assert!(item.size.is_none());
         assert!(item.revision.is_none());
-
-        let json = serde_json::to_string(&item).unwrap();
-        assert_eq!(
-            json,
-            r#"{"id":"plain.mdd","mimetype":"application/octet-stream","name":"plain.mdd"}"#
-        );
+        // The JSON shape is asserted in `sovd-interfaces`, which owns the wire type.
     }
 
     #[tokio::test]
@@ -844,21 +857,24 @@ mod tests {
         let mdd = make_valid_mdd_with_revision("FullECU", "v1.2.3");
         write_test_file_to_collection(&storage, &*collection, "full.mdd", &mdd).await;
 
-        let query = RuntimeFilesQuery {
-            include_schema: false,
+        let options = FileListOptions {
             include_hash: Some(HashAlgorithm::Sha256),
-            include_file_size: true,
+            include_size: true,
             include_revision: true,
-            created_after: None,
-            created_before: None,
         };
-        let result = list_collection_files(&*collection, &query).await.unwrap();
+        let result =
+            list_collection_files(&*collection, options, &*crate::test_utils::test_inspector())
+                .await
+                .unwrap();
 
-        assert_eq!(result.items.len(), 1);
-        let item = result.items.first().unwrap();
+        assert_eq!(result.len(), 1);
+        let item = result.first().unwrap();
         assert_eq!(item.id, "full.mdd");
         assert!(item.hash.is_some());
-        assert_eq!(item.hash_algorithm, Some(HashAlgorithm::Sha256));
+        assert_eq!(
+            item.hash.as_ref().map(|h| h.algorithm),
+            Some(HashAlgorithm::Sha256)
+        );
         assert_eq!(item.size, Some(mdd.len() as u64));
         assert_eq!(item.revision, Some("v1.2.3".to_owned()));
     }
@@ -874,13 +890,16 @@ mod tests {
         let mdd = make_valid_mdd_with_revision("RevECU", "rev-42");
         write_test_file_to_collection(&storage, &*collection, "rev.mdd", &mdd).await;
 
-        let query = RuntimeFilesQuery {
+        let options = FileListOptions {
             include_revision: true,
-            ..RuntimeFilesQuery::default()
+            ..FileListOptions::default()
         };
-        let result = list_collection_files(&*collection, &query).await.unwrap();
+        let result =
+            list_collection_files(&*collection, options, &*crate::test_utils::test_inspector())
+                .await
+                .unwrap();
 
-        let item = result.items.first().unwrap();
+        let item = result.first().unwrap();
         assert_eq!(item.revision, Some("rev-42".to_owned()));
     }
 
@@ -895,13 +914,16 @@ mod tests {
         let mdd = make_valid_mdd("NoRevECU");
         write_test_file_to_collection(&storage, &*collection, "norev.mdd", &mdd).await;
 
-        let query = RuntimeFilesQuery {
+        let options = FileListOptions {
             include_revision: true,
-            ..RuntimeFilesQuery::default()
+            ..FileListOptions::default()
         };
-        let result = list_collection_files(&*collection, &query).await.unwrap();
+        let result =
+            list_collection_files(&*collection, options, &*crate::test_utils::test_inspector())
+                .await
+                .unwrap();
 
-        let item = result.items.first().unwrap();
+        let item = result.first().unwrap();
         assert!(item.revision.is_none());
     }
 
@@ -993,11 +1015,14 @@ mod tests {
     #[tokio::test]
     async fn empty_nextupdate_and_empty_current_returns_empty() {
         let (storage, _dir) = make_storage();
-        let query = RuntimeFilesQuery::default();
+        let options = FileListOptions::default();
 
-        let result = compute_nextupdate_state(&storage, &query).await.unwrap();
+        let result =
+            compute_nextupdate_state(&storage, options, &*crate::test_utils::test_inspector())
+                .await
+                .unwrap();
 
-        assert!(result.items.is_empty());
+        assert!(result.is_empty());
     }
 
     #[tokio::test]
@@ -1011,10 +1036,13 @@ mod tests {
         write_test_file_by_name(&storage, &*collection, "alpha.mdd", b"alpha content").await;
         write_test_file_by_name(&storage, &*collection, "beta.mdd", b"beta content").await;
 
-        let query = RuntimeFilesQuery::default();
-        let result = compute_nextupdate_state(&storage, &query).await.unwrap();
+        let options = FileListOptions::default();
+        let result =
+            compute_nextupdate_state(&storage, options, &*crate::test_utils::test_inspector())
+                .await
+                .unwrap();
 
-        let mut ids: Vec<_> = result.items.iter().map(|i| i.id.clone()).collect();
+        let mut ids: Vec<_> = result.iter().map(|i| i.id.clone()).collect();
         ids.sort();
         assert_eq!(
             ids,
@@ -1040,15 +1068,18 @@ mod tests {
             .unwrap();
         write_test_file_by_name(&storage, &*pending, "alpha.mdd", b"new alpha").await;
 
-        let query = RuntimeFilesQuery {
-            include_file_size: true,
-            ..Default::default()
+        let options = FileListOptions {
+            include_size: true,
+            ..FileListOptions::default()
         };
-        let result = compute_nextupdate_state(&storage, &query).await.unwrap();
+        let result =
+            compute_nextupdate_state(&storage, options, &*crate::test_utils::test_inspector())
+                .await
+                .unwrap();
 
         // NextUpdate exists -> only NextUpdate content is shown (snapshot model)
-        assert_eq!(result.items.len(), 1);
-        let alpha = result.items.iter().find(|i| i.id == "alpha.mdd").unwrap();
+        assert_eq!(result.len(), 1);
+        let alpha = result.iter().find(|i| i.id == "alpha.mdd").unwrap();
         assert_eq!(alpha.size, Some(9));
     }
 
@@ -1068,12 +1099,15 @@ mod tests {
             .unwrap();
         write_test_file_by_name(&storage, &*pending, "new_file.mdd", b"brand new").await;
 
-        let query = RuntimeFilesQuery::default();
-        let result = compute_nextupdate_state(&storage, &query).await.unwrap();
+        let options = FileListOptions::default();
+        let result =
+            compute_nextupdate_state(&storage, options, &*crate::test_utils::test_inspector())
+                .await
+                .unwrap();
 
         // NextUpdate exists -> only NextUpdate content is shown (snapshot model)
-        assert_eq!(result.items.len(), 1);
-        let Some(item) = result.items.first() else {
+        assert_eq!(result.len(), 1);
+        let Some(item) = result.first() else {
             panic!("expected item")
         };
         assert_eq!(item.id, "new_file.mdd");
@@ -1095,19 +1129,25 @@ mod tests {
             .unwrap();
         write_test_file_by_name(&storage, &*pending, "file.mdd", b"updated content").await;
 
-        let query = RuntimeFilesQuery {
+        let options = FileListOptions {
             include_hash: Some(HashAlgorithm::Sha256),
-            ..Default::default()
+            ..FileListOptions::default()
         };
-        let result = compute_nextupdate_state(&storage, &query).await.unwrap();
+        let result =
+            compute_nextupdate_state(&storage, options, &*crate::test_utils::test_inspector())
+                .await
+                .unwrap();
 
-        assert_eq!(result.items.len(), 1);
-        let Some(item) = result.items.first() else {
+        assert_eq!(result.len(), 1);
+        let Some(item) = result.first() else {
             panic!("expected item")
         };
         assert_eq!(item.id, "file.mdd");
         let expected_hash = format!("{:x}", Sha256::digest(b"updated content"));
-        assert_eq!(item.hash.as_deref(), Some(expected_hash.as_str()));
+        assert_eq!(
+            item.hash.as_ref().map(|h| h.value.as_str()),
+            Some(expected_hash.as_str())
+        );
     }
 
     #[tokio::test]
@@ -1124,10 +1164,12 @@ mod tests {
             .await
             .unwrap();
 
-        let query = RuntimeFilesQuery::default();
-        let result = compute_nextupdate_state(&storage, &query).await.unwrap();
+        let options = FileListOptions::default();
+        let result =
+            compute_nextupdate_state(&storage, options, &*crate::test_utils::test_inspector())
+                .await
+                .unwrap();
         let mdd_ids: Vec<&str> = result
-            .items
             .iter()
             .filter(|i| {
                 std::path::Path::new(&i.id)
@@ -1156,9 +1198,12 @@ mod tests {
             .await
             .expect("delete should succeed by initializing NextUpdate from current first");
 
-        let query = RuntimeFilesQuery::default();
-        let result = compute_nextupdate_state(&storage, &query).await.unwrap();
-        let ids: Vec<&str> = result.items.iter().map(|i| i.id.as_str()).collect();
+        let options = FileListOptions::default();
+        let result =
+            compute_nextupdate_state(&storage, options, &*crate::test_utils::test_inspector())
+                .await
+                .unwrap();
+        let ids: Vec<&str> = result.iter().map(|i| i.id.as_str()).collect();
         assert!(
             !ids.contains(&"ecu1.mdd"),
             "deleted file must not appear in next-update state"
@@ -1216,8 +1261,8 @@ mod tests {
         let files = make_upload_files(&[("test.mdd", &mdd)]);
 
         let result = upload(&storage, files).await.unwrap();
-        assert_eq!(result.items.len(), 1);
-        assert_eq!(result.items.first().unwrap().id, "test.mdd");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.first().unwrap(), "test.mdd");
     }
 
     #[tokio::test]
@@ -1228,8 +1273,8 @@ mod tests {
 
         let result = upload(&storage, files).await.unwrap();
 
-        assert_eq!(result.items.len(), 1);
-        assert_eq!(result.items.first().unwrap().id, "ecu_alpha.mdd");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.first().unwrap(), "ecu_alpha.mdd");
 
         let col = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
@@ -1253,8 +1298,8 @@ mod tests {
 
         let result = upload(&storage, files).await.unwrap();
 
-        assert_eq!(result.items.len(), 3);
-        let ids: Vec<&str> = result.items.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(result.len(), 3);
+        let ids: Vec<&str> = result.iter().map(String::as_str).collect();
         assert!(ids.contains(&"alpha.mdd"));
         assert!(ids.contains(&"beta.mdd"));
         assert!(ids.contains(&"gamma.mdd"));
@@ -1278,7 +1323,7 @@ mod tests {
 
         let result = upload(&storage, files).await.unwrap();
 
-        assert_eq!(result.items.first().unwrap().id, "myfile_v2.mdd");
+        assert_eq!(result.first().unwrap(), "myfile_v2.mdd");
     }
 
     #[tokio::test]
@@ -1289,8 +1334,8 @@ mod tests {
 
         let result = upload(&storage, files).await.unwrap();
 
-        assert_eq!(result.items.len(), 1);
-        assert_eq!(result.items.first().unwrap().id, "real.mdd");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.first().unwrap(), "real.mdd");
     }
 
     #[tokio::test]
@@ -1351,8 +1396,8 @@ mod tests {
         let files = make_upload_files(&[("fresh.mdd", &mdd)]);
         let result = upload(&storage, files).await.unwrap();
 
-        assert_eq!(result.items.len(), 1);
-        assert_eq!(result.items.first().unwrap().id, "fresh.mdd");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.first().unwrap(), "fresh.mdd");
         let col = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
             .await

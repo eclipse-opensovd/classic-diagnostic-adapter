@@ -22,7 +22,8 @@
 //! - [`cda_interfaces::communication_control::operation`]: lifecycle operation types and outcomes
 //! - [`lifecycle::controller::build_communication_runtime`]: startup wiring
 //!
-//! [`http_protection`] manages HTTP-layer protection records and middleware.
+//! HTTP-layer protection records live in `cda_interfaces::http_protection`, so
+//! owners such as the runtime-update plugin need not depend on this crate.
 //!
 //! [`plugin::default`] provides [`plugin::default::DefaultCommunicationPlugin`]:
 //! the default implementation that applies `[communication] init_mode` policy

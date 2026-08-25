@@ -553,8 +553,6 @@ dependencies = [
  "cda-database",
  "cda-interfaces",
  "cda-plugin-communication-management",
- "cda-plugin-security",
- "cda-sovd",
  "cda-storage",
  "schemars",
  "serde",
@@ -1202,6 +1200,92 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "example-oem-communication"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cda-interfaces",
+ "cda-plugin-communication-management",
+ "cda-plugin-security",
+ "clap",
+ "opensovd-cda",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "example-oem-health"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cda-interfaces",
+ "cda-plugin-security",
+ "clap",
+ "opensovd-cda",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "example-oem-routes"
+version = "0.1.0"
+dependencies = [
+ "aide",
+ "axum",
+ "cda-interfaces",
+ "cda-plugin-security",
+ "clap",
+ "opensovd-cda",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "example-oem-security"
+version = "0.1.0"
+dependencies = [
+ "aide",
+ "async-trait",
+ "axum",
+ "bytes",
+ "cda-database",
+ "cda-interfaces",
+ "cda-plugin-security",
+ "clap",
+ "opensovd-cda",
+ "tokio",
+]
+
+[[package]]
+name = "example-oem-storage"
+version = "0.1.0"
+dependencies = [
+ "cda-interfaces",
+ "cda-plugin-security",
+ "cda-storage",
+ "clap",
+ "opensovd-cda",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "example-oem-update-policy"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cda-interfaces",
+ "cda-plugin-security",
+ "cda-storage",
+ "clap",
+ "opensovd-cda",
+ "tokio",
 ]
 
 [[package]]
@@ -1893,6 +1977,7 @@ name = "integration-tests"
 version = "0.1.0"
 dependencies = [
  "aide",
+ "async-trait",
  "axum",
  "cda-build",
  "cda-comm-doip",
@@ -2451,7 +2536,9 @@ dependencies = [
 name = "opensovd-cda"
 version = "0.1.0"
 dependencies = [
+ "aide",
  "async-trait",
+ "axum",
  "cda-comm-can",
  "cda-comm-doip",
  "cda-comm-uds",

@@ -11,8 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::sync::Arc;
+
 use cda_interfaces::{
-    runtime_update_api::{RuntimeReloaderPlugin, RuntimeUpdateError},
+    runtime_update_api::{RuntimeFileInspector, RuntimeReloaderPlugin, RuntimeUpdateError},
     storage_api::{CollectionName, Storage, Transaction},
 };
 
@@ -47,6 +49,7 @@ pub async fn execute_apply<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
     storage: &S,
     reload_handler: &R,
     mdd_decompress: bool,
+    inspector: &Arc<dyn RuntimeFileInspector>,
 ) -> Result<(), RuntimeUpdateError> {
     let mdd_next =
         try_get_collection(storage, &CollectionName::DiagnosticDatabaseNextUpdate).await?;
@@ -78,8 +81,22 @@ pub async fn execute_apply<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
 
     tx.commit().await?;
 
-    if mdd_next.is_some() {
-        reload_database_if_present(storage, reload_handler, mdd_decompress).await?;
+    if mdd_next.is_some()
+        && let Err(error) =
+            reload_database_if_present(storage, reload_handler, mdd_decompress, &**inspector).await
+    {
+        return match crate::operations::rollback::execute_rollback(
+            storage,
+            reload_handler,
+            &**inspector,
+        )
+        .await
+        {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(RuntimeUpdateError::ReloadFailed(format!(
+                "Runtime reload failed: {error}; persistent rollback failed: {rollback_error}"
+            ))),
+        };
     }
 
     Ok(())
@@ -119,9 +136,14 @@ mod tests {
         )
         .await;
 
-        execute_apply(&storage, &NoopReloadHandler, false)
-            .await
-            .unwrap();
+        execute_apply(
+            &storage,
+            &NoopReloadHandler,
+            false,
+            &crate::test_utils::test_inspector(),
+        )
+        .await
+        .unwrap();
 
         // Current should have new data
         let db_col = storage
@@ -156,7 +178,13 @@ mod tests {
     async fn apply_empty_nextupdate_returns_no_pending_update() {
         let (storage, _dir) = make_storage();
 
-        let result = execute_apply(&storage, &NoopReloadHandler, false).await;
+        let result = execute_apply(
+            &storage,
+            &NoopReloadHandler,
+            false,
+            &crate::test_utils::test_inspector(),
+        )
+        .await;
 
         assert!(
             matches!(result, Err(RuntimeUpdateError::NoPendingUpdate)),
@@ -186,9 +214,14 @@ mod tests {
         )
         .await;
 
-        execute_apply(&storage, &NoopReloadHandler, false)
-            .await
-            .unwrap();
+        execute_apply(
+            &storage,
+            &NoopReloadHandler,
+            false,
+            &crate::test_utils::test_inspector(),
+        )
+        .await
+        .unwrap();
 
         // Current should have all new files
         let db_col = storage
@@ -231,7 +264,14 @@ mod tests {
         .await;
 
         let handler = RecordingReloadHandler::new();
-        execute_apply(&storage, &handler, false).await.unwrap();
+        execute_apply(
+            &storage,
+            &handler,
+            false,
+            &crate::test_utils::test_inspector(),
+        )
+        .await
+        .unwrap();
 
         let calls = handler.reload_calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "reload_databases should be called once");
@@ -249,7 +289,14 @@ mod tests {
         .await;
 
         let handler = RecordingReloadHandler::new();
-        execute_apply(&storage, &handler, false).await.unwrap();
+        execute_apply(
+            &storage,
+            &handler,
+            false,
+            &crate::test_utils::test_inspector(),
+        )
+        .await
+        .unwrap();
 
         let expected_path = dir
             .path()
@@ -280,9 +327,14 @@ mod tests {
         .await;
 
         // mdd_decompress=false, should work fine
-        execute_apply(&storage, &NoopReloadHandler, false)
-            .await
-            .unwrap();
+        execute_apply(
+            &storage,
+            &NoopReloadHandler,
+            false,
+            &crate::test_utils::test_inspector(),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -303,9 +355,14 @@ mod tests {
             .await
             .unwrap();
 
-        execute_apply(&storage, &NoopReloadHandler, false)
-            .await
-            .unwrap();
+        execute_apply(
+            &storage,
+            &NoopReloadHandler,
+            false,
+            &crate::test_utils::test_inspector(),
+        )
+        .await
+        .unwrap();
 
         // DiagnosticDatabase should now be empty (snapshot swap from empty NextUpdate)
         let db_col = storage
@@ -351,9 +408,14 @@ mod tests {
         )
         .await;
 
-        execute_apply(&storage, &NoopReloadHandler, false)
-            .await
-            .unwrap();
+        execute_apply(
+            &storage,
+            &NoopReloadHandler,
+            false,
+            &crate::test_utils::test_inspector(),
+        )
+        .await
+        .unwrap();
 
         let db_col = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
