@@ -55,7 +55,10 @@ impl DisableCommunication for CommunicationDisableView {
     }
 }
 
-/// Private identity used to prevent stale leases from resuming after a later disable.
+/// Identity used to prevent stale leases from resuming after a later disable.
+///
+/// This is a newtype rather than a `uuid::Uuid` type alias so the UUID remains
+/// an implementation detail of the lifecycle state machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DisableLeaseId(uuid::Uuid);
 

@@ -29,7 +29,17 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Identifier for a registered HTTP request restriction.
+///
+/// This is a newtype rather than a `uuid::Uuid` type alias so the UUID remains
+/// an implementation detail of the registry.
 pub(crate) struct HttpRequestRestrictionId(uuid::Uuid);
+
+impl HttpRequestRestrictionId {
+    pub(crate) fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
 
 struct HttpRequestRestriction {
     id: HttpRequestRestrictionId,
@@ -81,7 +91,7 @@ impl HttpProtectionRegistry {
     }
 
     fn create(&self, config: HttpProtectionConfig) -> HttpRequestRestrictionId {
-        let id = HttpRequestRestrictionId(uuid::Uuid::new_v4());
+        let id = HttpRequestRestrictionId::new();
         std_ext::lock_write(&self.restrictions).push(HttpRequestRestriction { id, config });
         id
     }
