@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_interfaces::storage_api::{Collection, CollectionName, Storage};
+use cda_interfaces::storage_api::{Collection, CollectionName, ReadableStream, Storage};
 
 /// Seeds a storage collection from an iterator of `(key, data)` pairs when the collection is
 /// empty.  No-op if the collection is already populated or the iterator yields no items.
@@ -20,7 +20,7 @@ use cda_interfaces::storage_api::{Collection, CollectionName, Storage};
 pub async fn seed_storage_collection_if_empty(
     storage: &impl Storage,
     collection_name: &CollectionName,
-    entries: impl IntoIterator<Item = (String, Vec<u8>)>,
+    entries: impl IntoIterator<Item = (String, impl ReadableStream)>,
 ) -> Option<usize> {
     let collection = match storage.get_or_create_collection(collection_name).await {
         Ok(c) => c,
@@ -59,9 +59,8 @@ pub async fn seed_storage_collection_if_empty(
     };
 
     let mut count = 0usize;
-    for (key, data) in entries {
-        let mut cursor = std::io::Cursor::new(data);
-        if let Err(e) = collection.write(&mut tx, &key, &mut cursor).await {
+    for (key, mut data) in entries {
+        if let Err(e) = collection.write(&mut tx, &key, &mut data).await {
             tracing::warn!(key, collection = %collection_name, error = %e, "Failed to write entry to storage, skipping");
             continue;
         }

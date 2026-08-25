@@ -299,27 +299,26 @@ async fn load_mdd_paths_from_storage(storage_dir: &str) -> Option<Vec<PathBuf>> 
 /// is empty. This copies the passed file paths into storage so that the runtime
 /// update plugin has a populated baseline to work with.
 pub async fn seed_storage_if_empty_from_mdd_files(storage_dir: &str, mdd_files: &[PathBuf]) {
-    let entries: Vec<(String, Vec<u8>)> = mdd_files
-        .iter()
-        .filter_map(|path| {
-            let key = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(str::to_lowercase)
-                .unwrap_or_default();
-            if key.is_empty() {
-                return None;
-            }
-            match std::fs::read(path) {
-                Ok(data) => Some((key, data)),
-                Err(e) => {
-                    tracing::warn!(path = %path.display(),
-                    error = %e, "Failed to read MDD file for seeding, skipping");
-                    None
+    let mut seed_entries = vec![];
+
+    for path in mdd_files {
+        let key = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_lowercase)
+            .unwrap_or_default();
+
+        if key.is_empty() {
+            tracing::warn!(path = %path.display(), "Unable to determine filename of MDD file as key for seeding. Skipping.");
+        } else {
+            match tokio::fs::File::open(path).await {
+                Ok(file) => seed_entries.push((key, file)),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), error = %error, "Failed to open MDD file for seeding. Skipping.");
                 }
             }
-        })
-        .collect();
+        }
+    }
 
     let storage = match cda_storage::LocalStorage::new(storage_dir) {
         Ok(s) => s,
@@ -332,7 +331,7 @@ pub async fn seed_storage_if_empty_from_mdd_files(storage_dir: &str, mdd_files: 
     if let Some(count) = cda_storage::storage_seed::seed_storage_collection_if_empty(
         &storage,
         &CollectionName::DiagnosticDatabase,
-        entries,
+        seed_entries,
     )
     .await
     {
