@@ -33,13 +33,13 @@ impl<S: SecurityPlugin> cda_interfaces::UdsComParams for EcuManager<S> {
     fn tester_present_addr_mode(self) -> AddressingMode {
         self.tester_present_addr_mode.clone()
     }
-    fn tester_present_response_expected(self) -> bool {
+    fn tester_present_response_expected(&self) -> bool {
         self.tester_present_response_expected
     }
     fn tester_present_send_type(self) -> TesterPresentSendType {
         self.tester_present_send_type.clone()
     }
-    fn tester_present_message(self) -> Vec<u8> {
+    fn tester_present_message(&self) -> Vec<u8> {
         self.tester_present_message.clone()
     }
     fn tester_present_exp_pos_resp(self) -> Vec<u8> {
