@@ -274,7 +274,9 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                     ecu_name = %ecu_name,
                     "Skip variant detection for functional description"
                 );
-                continue;
+                // No `continue`: the ECU is still scheduled below to pick up the
+                // offline-verdict retries. Without them a transient
+                // unreachability here is never re-checked.
             }
             if let Err(DiagServiceError::EcuOffline(_)) =
                 self.gateway.ecu_online(ecu_name, db).await
@@ -644,15 +646,18 @@ impl<S: EcuGateway, T: EcuManager> CommunicationVariantDetection for UdsManager<
 #[cfg(test)]
 mod tests {
     use cda_interfaces::{Connectivity, VariantState};
+    use tokio::{sync::OwnedMutexGuard, task::JoinHandle};
 
     use super::{DetectionPermit, DetectionTrigger, claim_detection};
     use crate::coordinator::EcuCoordinatorHandle;
 
-    #[tokio::test]
-    async fn queued_automatic_detection_is_skipped_after_success() {
+    async fn queue_automatic_detection() -> (
+        EcuCoordinatorHandle,
+        OwnedMutexGuard<()>,
+        JoinHandle<DetectionPermit>,
+    ) {
         let handle = EcuCoordinatorHandle::spawn("TestECU".to_owned());
         let in_flight = handle.begin_detection().await.expect("first entrant");
-
         let queued_handle = handle.clone();
         let queued = tokio::spawn(async move {
             claim_detection(
@@ -663,6 +668,12 @@ mod tests {
             .await
         });
         tokio::task::yield_now().await;
+        (handle, in_flight, queued)
+    }
+
+    #[tokio::test]
+    async fn queued_automatic_detection_is_skipped_after_success() {
+        let (handle, in_flight, queued) = queue_automatic_detection().await;
 
         {
             let mut state = handle.state.ecu_state.write().unwrap();
@@ -683,19 +694,7 @@ mod tests {
 
     #[tokio::test]
     async fn queued_automatic_detection_runs_when_still_needed() {
-        let handle = EcuCoordinatorHandle::spawn("TestECU".to_owned());
-        let in_flight = handle.begin_detection().await.expect("first entrant");
-
-        let queued_handle = handle.clone();
-        let queued = tokio::spawn(async move {
-            claim_detection(
-                Some(&queued_handle),
-                Some(&queued_handle),
-                DetectionTrigger::IfNeeded,
-            )
-            .await
-        });
-        tokio::task::yield_now().await;
+        let (_, in_flight, queued) = queue_automatic_detection().await;
         drop(in_flight);
 
         assert!(
