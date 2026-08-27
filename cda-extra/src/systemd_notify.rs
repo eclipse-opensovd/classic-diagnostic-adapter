@@ -102,7 +102,6 @@ where
 /// is honoured, but warned about once at startup.
 fn watchdog_notify_interval() -> Option<Duration> {
     sd_notify::watchdog_enabled().map(|timeout| {
-        // `checked_div` instead of `/` to satisfy clippy::arithmetic_side_effects;
         // the divisor is a non-zero literal, so the fallback can never be taken.
         let interval = timeout
             .checked_div(2)
