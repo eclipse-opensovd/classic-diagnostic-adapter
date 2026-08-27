@@ -24,15 +24,61 @@ The plugin system API must support the following use-cases.
 
 .. _requirements-plugins-security:
 
-Security
---------
+Security Plugin
+----------------
 
-A SOVD security plugin must be able to:
+.. req:: Security Plugin - Authentication
+    :id: req~plugin-security-authentication
+    :links: arch~plugin-security-core-traits
+    :status: draft
 
-* Validate and verify the JWT token from incoming HTTP Requests
-* Utilize additional headers from the request
-* Reject the incoming request
-* Enhance the SOVD-request-context with data, this context can then be used in other addons
+    A SOVD security plugin must be able to:
+
+    * Validate and verify the JWT token from incoming HTTP requests
+    * Utilize additional headers from the request
+    * Reject the incoming request
+    * Enhance the SOVD-request-context with data, this context can then be used in other addons
+
+
+.. req:: Security Plugin - Service Validation
+    :id: req~plugin-security-validate-service
+    :links: arch~plugin-security-validate-service
+    :status: draft
+
+    A SOVD security plugin must be able to validate a resolved diagnostic service request against
+    security policy before it is executed, and reject it if it is not allowed.
+
+
+.. req:: Security Plugin - Request Send Authorization
+    :id: req~plugin-security-validate-request-send
+    :links: arch~plugin-security-validate-request-send
+    :status: draft
+
+    A security plugin must be able to authorize, immediately before transmission, whether a fully
+    resolved UDS request (addressed to a single ECU or sent functionally/broadcast to multiple ECUs)
+    is currently allowed to be sent.
+
+    This determination must be customizable by the vendor, since it may depend on proprietary,
+    vendor-specific state that is not known to the CDA core (e.g. state obtained through a
+    vendor-specific API external to the CDA).
+
+    To make this determination, the plugin must be given:
+
+    * The authentication token/credentials of the caller that triggered the request.
+    * The current holder of the relevant lock (vehicle, functional group, or ECU/component lock,
+      see :need:`req~sovd-api-lock-api`), if any.
+
+    If the plugin rejects the request, the request must not be transmitted to the ECU, and the
+    rejection must be reported as a distinct "request not allowed" outcome, separate from the
+    outcome of :need:`req~plugin-security-validate-service`.
+
+    **Rationale**
+
+    Some vendors require diagnostic requests to be gated on state that only the vendor's own systems
+    can evaluate (e.g. vehicle safety state, proprietary lock/ownership state). Since this state is
+    not standardized, the decision must be delegated to a vendor-provided plugin implementation rather
+    than being hard-coded in the CDA core.
+
 
 Paths
 -----
@@ -46,10 +92,8 @@ A SOVD plugin must be able to:
 UDS
 ---
 
-An UDS plugin must be able to:
-
-* Intercept UDS requests before they are sent to the ECU
-* Intercept UDS responses
+An UDS plugin must be able to intercept UDS requests before they are sent to the ECU
+(see :need:`req~plugin-security-validate-request-send`) and intercept UDS responses.
 
 DoIP
 ----
