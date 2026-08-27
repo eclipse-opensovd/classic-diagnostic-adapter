@@ -246,7 +246,7 @@ pub async fn resolve_mdd_paths(storage_dir: &str, database_dir: &str) -> Vec<Pat
                 vec![]
             }
         };
-        seed_storage_if_empty_from_mdd_files(storage_dir, &mdd_files).await;
+        seed_storage_if_nonexistent_from_mdd_files(storage_dir, &mdd_files).await;
         mdd_files
     }
 }
@@ -296,9 +296,9 @@ async fn load_mdd_paths_from_storage(storage_dir: &str) -> Option<Vec<PathBuf>> 
 }
 
 /// Seeds the `DiagnosticDatabase` storage collection from `mdd_files` when the collection
-/// is empty. This copies the passed file paths into storage so that the runtime
+/// does not exist. This copies the passed file paths into storage so that the runtime
 /// update plugin has a populated baseline to work with.
-pub async fn seed_storage_if_empty_from_mdd_files(storage_dir: &str, mdd_files: &[PathBuf]) {
+pub async fn seed_storage_if_nonexistent_from_mdd_files(storage_dir: &str, mdd_files: &[PathBuf]) {
     let mut seed_entries = vec![];
 
     for path in mdd_files {
@@ -328,7 +328,7 @@ pub async fn seed_storage_if_empty_from_mdd_files(storage_dir: &str, mdd_files: 
         }
     };
 
-    if let Some(count) = cda_storage::storage_seed::seed_storage_collection_if_empty(
+    if let Some(count) = cda_storage::storage_seed::seed_storage_collection_if_nonexistent(
         &storage,
         &CollectionName::DiagnosticDatabase,
         seed_entries,
@@ -693,13 +693,13 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn seed_copies_mdd_files_into_empty_storage() {
+    async fn seed_copies_mdd_files_into_nonexistent_storage() {
         let fixture = Fixture::new_with_mdd_files(&[
             ("ecu_a.mdd", b"MDD_CONTENT_A"),
             ("ecu_b.mdd", b"MDD_CONTENT_B"),
         ]);
 
-        seed_storage_if_empty_from_mdd_files(
+        seed_storage_if_nonexistent_from_mdd_files(
             fixture.storage_dir.path().to_str().unwrap(),
             &fixture.mdd_files,
         )
@@ -735,7 +735,7 @@ mod tests {
         tx.commit().await.unwrap();
         drop(storage);
 
-        seed_storage_if_empty_from_mdd_files(
+        seed_storage_if_nonexistent_from_mdd_files(
             fixture.storage_dir.path().to_str().unwrap(),
             &fixture.mdd_files,
         )
@@ -755,7 +755,7 @@ mod tests {
     async fn seed_handles_no_database_files() {
         let fixture = Fixture::new_with_mdd_files(&[]);
 
-        seed_storage_if_empty_from_mdd_files(
+        seed_storage_if_nonexistent_from_mdd_files(
             fixture.storage_dir.path().to_str().unwrap(),
             &fixture.mdd_files,
         )
@@ -773,7 +773,7 @@ mod tests {
     async fn seed_lowercases_mdd_filenames_as_keys() {
         let fixture = Fixture::new_with_mdd_files(&[("ECU_UPPER.mdd", b"UPPER_DATA")]);
 
-        seed_storage_if_empty_from_mdd_files(
+        seed_storage_if_nonexistent_from_mdd_files(
             fixture.storage_dir.path().to_str().unwrap(),
             &fixture.mdd_files,
         )
@@ -793,7 +793,7 @@ mod tests {
         let original_data = b"MDD_BINARY_PAYLOAD_1234567890";
         let fixture = Fixture::new_with_mdd_files(&[("FLXC1000.mdd", original_data)]);
 
-        seed_storage_if_empty_from_mdd_files(
+        seed_storage_if_nonexistent_from_mdd_files(
             fixture.storage_dir.path().to_str().unwrap(),
             &fixture.mdd_files,
         )
@@ -841,7 +841,7 @@ mod tests {
         let storage_str = fixture.storage_dir.path().to_str().unwrap();
         let db_str = fixture.db_dir.path().to_str().unwrap();
 
-        seed_storage_if_empty_from_mdd_files(storage_str, &fixture.mdd_files).await;
+        seed_storage_if_nonexistent_from_mdd_files(storage_str, &fixture.mdd_files).await;
         let paths = resolve_mdd_paths(storage_str, db_str).await;
 
         assert_eq!(paths.len(), 2, "Expected 2 MDD paths from storage");
@@ -857,10 +857,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_mdd_paths_falls_back_when_storage_empty() {
+    async fn resolve_mdd_paths_falls_back_when_storage_nonexistent() {
         let fixture = Fixture::new_with_mdd_files(&[("ECU.mdd", b"DATA")]);
 
-        // Do NOT seed - storage remains empty.
+        // Do NOT seed - storage remains nonexistent.
         let paths = resolve_mdd_paths(
             fixture.storage_dir.path().to_str().unwrap(),
             fixture.db_dir.path().to_str().unwrap(),
@@ -872,7 +872,7 @@ mod tests {
         assert_eq!(paths.len(), 1, "Expected 1 MDD path from fallback");
         assert!(
             first.starts_with(fixture.db_dir.path()),
-            "Path should come from database dir when storage is empty: {}",
+            "Path should come from database dir when storage is nonexistent: {}",
             first.display()
         );
     }
