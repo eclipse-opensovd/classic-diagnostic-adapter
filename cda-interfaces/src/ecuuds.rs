@@ -31,6 +31,7 @@ pub struct FlashTransferStartParams<'a> {
     pub file_path: &'a str,
     pub offset: u64,
     pub length: u64,
+    pub owner: String,
     pub transfer_meta_data: DataTransferMetaData,
 }
 
@@ -214,7 +215,10 @@ pub trait UdsDataTransfer {
         &self,
         ecu_name: &str,
         id: &str,
+        owner: &str,
     ) -> Result<(), DiagServiceError>;
+    /// Abort and remove any flash transfer for the given ECU.
+    async fn ecu_flash_transfer_abort(&self, ecu_name: &str);
     /// Fetch all flash transfers for the given ECU.
     /// # Errors
     /// * `DiagServiceError::NotFound`
@@ -764,7 +768,9 @@ pub mod mock {
                 &self,
                 ecu_name: &str,
                 id: &str,
+                owner: &str,
             ) -> Result<(), DiagServiceError>;
+            async fn ecu_flash_transfer_abort(&self, ecu_name: &str);
             async fn ecu_flash_transfer_status(
                 &self,
                 ecu_name: &str,
