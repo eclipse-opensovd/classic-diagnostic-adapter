@@ -11,49 +11,51 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_interfaces::storage_api::{Collection, CollectionName, ReadableStream, Storage};
+use cda_interfaces::storage_api::{
+    Collection, CollectionName, ReadableStream, Storage, StorageError,
+};
 
-/// Seeds a storage collection from an iterator of `(key, data)` pairs when the collection is
-/// empty.  No-op if the collection is already populated or the iterator yields no items.
+/// Seeds a storage collection from an iterator of `(key, data)` pairs when the collection does
+/// not exist yet. No-op if the collection already exists.
 ///
 /// Returns the number of entries written, or `None` when seeding was skipped.
-pub async fn seed_storage_collection_if_empty(
+pub async fn seed_storage_collection_if_nonexistent(
     storage: &impl Storage,
     collection_name: &CollectionName,
     entries: impl IntoIterator<Item = (String, impl ReadableStream)>,
 ) -> Option<usize> {
-    let collection = match storage.get_or_create_collection(collection_name).await {
-        Ok(c) => c,
+    let mut tx = match storage.begin_transaction() {
+        Ok(tx) => tx,
         Err(e) => {
-            tracing::warn!(
-                collection = %collection_name,
-                error = %e,
-                "Cannot access collection, skipping seed"
-            );
+            tracing::warn!(error = %e, "Cannot begin transaction for seeding");
             return None;
         }
     };
 
-    match collection.is_empty().await {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::debug!(collection = %collection_name, "Collection already populated, skipping seed");
+    match storage.get_collection(collection_name).await {
+        Err(StorageError::CollectionNotFound(_)) => {} // continue
+        Ok(_) => {
+            tracing::debug!(collection = %collection_name, "Collection already exists, skipping seed.");
             return None;
         }
-        Err(e) => {
+        Err(error) => {
             tracing::warn!(
                 collection = %collection_name,
-                error = %e,
+                error = %error,
                 "Failed to check collection, skipping seed"
             );
             return None;
         }
     }
 
-    let mut tx = match storage.begin_transaction() {
-        Ok(tx) => tx,
-        Err(e) => {
-            tracing::warn!(error = %e, "Cannot begin transaction for seeding");
+    let collection = match storage.create_collection(&mut tx, collection_name).await {
+        Ok(collection) => collection,
+        Err(source) => {
+            tracing::warn!(
+                collection = %collection_name,
+                error = %source,
+                "Cannot create collection, skipping seed"
+            );
             return None;
         }
     };
