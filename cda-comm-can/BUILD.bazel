@@ -25,8 +25,15 @@ workspace_rust_library(
     ],
     crate_name = "cda_comm_can",
     crate_root = "src/lib.rs",
+    crate_features = select({
+        "//:can_enabled": ["can"],
+        "//conditions:default": [],
+    }),
     visibility = ["//cda-main:__pkg__"],
     deps = [
         "//cda-interfaces:cda_interfaces",
-    ],
+    ] + select({
+        "//:can_enabled": ["@can_crates//:tokio-socketcan-isotp"],
+        "//conditions:default": [],
+    }),
 )

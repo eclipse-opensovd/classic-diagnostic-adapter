@@ -44,6 +44,8 @@ jobs:
         run: bazel build //:cda_mbedtls
       - name: Build reference binary
         run: bazel build //:opensovd-cda
+      - name: Build reference binary with CAN
+        run: bazel build --config=can //:opensovd-cda
       - name: Query targets
         run: bazel query //...
       - name: Verify mbedTLS graph excludes OpenSSL

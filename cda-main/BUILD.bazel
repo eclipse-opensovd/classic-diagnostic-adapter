@@ -9,7 +9,14 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars")
 load("//bazel:rust_crate.bzl", "workspace_rust_binary", "workspace_rust_library")
+
+cargo_toml_env_vars(
+    name = "cargo_env",
+    src = "Cargo.toml",
+    workspace = "//:Cargo.toml",
+)
 
 workspace_rust_library(
     name = "opensovd_cda_lib",
@@ -33,19 +40,23 @@ workspace_rust_library(
     ],
     crate_name = "opensovd_cda_lib",
     crate_root = "src/lib.rs",
+    crate_features = [
+        "config-optional",
+        "health",
+        "mbedtls",
+    ] + select({
+        "//:can_enabled": ["can"],
+        "//conditions:default": [],
+    }),
     proc_macro_crate_deps = ["async-trait"],
     rustc_env = {
-        "BUILD_DATE": "1970-01-01T00:00:00Z",
         "CARGO_MANIFEST_DIR": "cda-main",
-        "CARGO_PKG_NAME": "opensovd-cda",
-        "CARGO_PKG_VERSION": "0.1.0",
-        "GIT_COMMIT_HASH": "unknown",
     },
-    rustc_flags = [
-        "--cfg=feature=\"config-optional\"",
-        "--cfg=feature=\"health\"",
-        "--cfg=feature=\"mbedtls\"",
+    rustc_env_files = [
+        ":cargo_env",
+        "//bazel:build_metadata.env",
     ],
+    stamp = -1,
     visibility = ["//visibility:public"],
     deps = [
         "//cda-comm-can:cda_comm_can",

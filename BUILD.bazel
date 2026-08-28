@@ -14,6 +14,12 @@ exports_files([
     "Cargo.toml",
 ])
 
+config_setting(
+    name = "can_enabled",
+    define_values = {"can": "true"},
+    visibility = ["//visibility:public"],
+)
+
 alias(
     name = "cda_mbedtls",
     actual = "//cda-main:opensovd_cda_lib",

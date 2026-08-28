@@ -9,7 +9,14 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars")
 load("//bazel:rust_crate.bzl", "workspace_rust_library")
+
+cargo_toml_env_vars(
+    name = "cargo_env",
+    src = "Cargo.toml",
+    workspace = "//:Cargo.toml",
+)
 
 workspace_rust_library(
     name = "cda_tracing",
@@ -33,10 +40,7 @@ workspace_rust_library(
     ],
     crate_name = "cda_tracing",
     crate_root = "src/lib.rs",
-    rustc_env = {
-        "CARGO_PKG_NAME": "cda-tracing",
-        "CARGO_PKG_VERSION": "0.1.0",
-    },
+    rustc_env_files = [":cargo_env"],
     visibility = [
         "//cda-main:__pkg__",
         "//cda-sovd:__pkg__",

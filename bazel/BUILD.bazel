@@ -10,6 +10,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 exports_files([
+    "build_metadata.env",
     "check_mbedtls_revision.py",
     "rust_crate.bzl",
 ])
