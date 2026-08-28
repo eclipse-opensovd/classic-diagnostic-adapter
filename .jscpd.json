@@ -2,6 +2,7 @@
   "ignore": [
     "**/target/**",
     "**/.git/**",
+    "**/.github/**",
     "**/*.lock",
     "cda-database/src/flatbuf/**",
     "cda-database/src/proto/**"

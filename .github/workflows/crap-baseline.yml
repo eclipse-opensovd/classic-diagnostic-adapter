@@ -23,7 +23,7 @@ jobs:
   update:
     # only run on success and do not run in forks
     if: github.event.workflow_run.conclusion == 'success' && github.repository_owner == 'eclipse-opensovd'
-    uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap-baseline.yml@07140bdd84f20b66fd4aff58a83c5148deec388c
+    uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap-baseline.yml@febc566231f4ff6fafec78c91078e381666120f9
     with:
       run-id: ${{ github.event.workflow_run.id }}
       rust-version: "1.88.0"
