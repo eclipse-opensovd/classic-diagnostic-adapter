@@ -997,12 +997,11 @@ pub(crate) async fn restart_cda(config: &Configuration) -> Result<(), TestingErr
     mark_cda_stopped().await;
     if use_docker() {
         write_config_toml(&test_container_dir()?, config.clone())?;
-        // Stop first for a clean restart with the new config. `docker compose
-        // stop` is safe even if the container does not exist.
-        let _ = docker_compose_stop("cda");
-        // `--no-deps`: the `cda` service depends_on a healthy ecu-sim, so
-        // without it compose would restart a sim a test stopped on purpose.
-        docker_compose_up(Some("cda".to_owned()), true)?;
+        // Restart atomically so the container restart policy cannot race a
+        // separate stop/up sequence and leave CDA unavailable.
+        // `--no-deps` prevents restarting an ECU sim a test stopped on purpose.
+        // The restarted process reloads the bind-mounted configuration.
+        docker_compose_restart("cda")?;
     } else {
         // `stop_cda` only fails when nothing is running.
         stop_cda().await.ok();
@@ -1100,6 +1099,25 @@ async fn mark_cda_started(config: &Configuration) {
 
 async fn mark_cda_stopped() {
     *RUNNING_CDA_COMMUNICATION.lock().await = None;
+}
+
+fn docker_compose_restart(container: &str) -> Result<(), TestingError> {
+    let test_container_dir = test_container_dir()?;
+    let mut cmd = std::process::Command::new("docker");
+    cmd.arg("compose");
+    if coverage_mode() {
+        append_coverage_compose_files(&mut cmd);
+    }
+    let status = cmd
+        .arg("restart")
+        .arg("--no-deps")
+        .arg(container)
+        .current_dir(&test_container_dir)
+        .status()
+        .map_err(|e| {
+            TestingError::ProcessFailed(format!("Failed to restart docker compose: {e}"))
+        })?;
+    check_command_success(status, "docker compose restart failed")
 }
 
 fn docker_compose_stop(container: &str) -> Result<(), TestingError> {
