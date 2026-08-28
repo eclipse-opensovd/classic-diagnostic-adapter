@@ -14,18 +14,27 @@
 use quote::quote;
 use syn::{Ident, Lifetime, Path, Type, visit::Visit, visit_mut::VisitMut};
 
-/// Assigns one generated lifetime to every elided reference in a type.
-struct NameElidedLifetimes<'a> {
-    lifetime: &'a Lifetime,
-}
+/// Returns `true` if any typed parameter in the signature contains a reference.
+pub(crate) fn has_borrowed_input(
+    inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
+) -> bool {
+    struct ContainsReference(bool);
 
-impl VisitMut for NameElidedLifetimes<'_> {
-    fn visit_type_reference_mut(&mut self, reference: &mut syn::TypeReference) {
-        if reference.lifetime.is_none() {
-            reference.lifetime = Some(self.lifetime.clone());
+    impl<'ast> Visit<'ast> for ContainsReference {
+        fn visit_type_reference(&mut self, reference: &'ast syn::TypeReference) {
+            self.0 = true;
+            syn::visit::visit_type_reference(self, reference);
         }
-        syn::visit_mut::visit_type_reference_mut(self, reference);
     }
+
+    inputs.iter().any(|arg| match arg {
+        syn::FnArg::Typed(pat_type) => {
+            let mut v = ContainsReference(false);
+            v.visit_type(&pat_type.ty);
+            v.0
+        }
+        syn::FnArg::Receiver(_) => false,
+    })
 }
 
 /// Visitor that checks whether a type mentions any given type or const generic.
@@ -33,21 +42,9 @@ impl VisitMut for NameElidedLifetimes<'_> {
 /// A path counts when its first segment matches a generic parameter. This
 /// covers plain uses (`S`), associated types (`S::Assoc`), and const parameters
 /// (`N`); generics shadow outer items with the same name in the signature.
-struct MentionsGenerics<'a> {
+pub(crate) struct MentionsGenerics<'a> {
     generics: &'a [Ident],
     found: bool,
-}
-
-/// Visitor that checks whether a type contains a reference.
-struct ContainsReference {
-    found: bool,
-}
-
-impl<'ast> Visit<'ast> for ContainsReference {
-    fn visit_type_reference(&mut self, reference: &'ast syn::TypeReference) {
-        self.found = true;
-        syn::visit::visit_type_reference(self, reference);
-    }
 }
 
 impl<'ast> Visit<'ast> for MentionsGenerics<'_> {
@@ -62,26 +59,41 @@ impl<'ast> Visit<'ast> for MentionsGenerics<'_> {
     }
 }
 
-pub(crate) fn mentions_generics(ty: &Type, generics: &[Ident]) -> bool {
-    let mut visitor = MentionsGenerics {
-        generics,
-        found: false,
-    };
-    visitor.visit_type(ty);
-    visitor.found
+impl MentionsGenerics<'_> {
+    /// Returns `true` if the type mentions any of the given generic parameters.
+    pub(crate) fn check(ty: &Type, generics: &[Ident]) -> bool {
+        let mut visitor = MentionsGenerics {
+            generics,
+            found: false,
+        };
+        visitor.visit_type(ty);
+        visitor.found
+    }
 }
 
-pub(crate) fn contains_reference(ty: &Type) -> bool {
-    let mut visitor = ContainsReference { found: false };
-    visitor.visit_type(ty);
-    visitor.found
-}
-
+/// Assigns one generated lifetime to every elided reference in a type.
+///
 /// Names elided reference lifetimes so they can appear inside a boxed future.
-pub(crate) fn with_lifetime(ty: &Type, lifetime: &Lifetime) -> Type {
-    let mut ty = ty.clone();
-    NameElidedLifetimes { lifetime }.visit_type_mut(&mut ty);
-    ty
+pub(crate) struct NameElidedLifetimes<'a> {
+    lifetime: &'a Lifetime,
+}
+
+impl VisitMut for NameElidedLifetimes<'_> {
+    fn visit_type_reference_mut(&mut self, reference: &mut syn::TypeReference) {
+        if reference.lifetime.is_none() {
+            reference.lifetime = Some(self.lifetime.clone());
+        }
+        syn::visit_mut::visit_type_reference_mut(self, reference);
+    }
+}
+
+impl NameElidedLifetimes<'_> {
+    /// Returns a copy of `ty` with every elided lifetime replaced by `lifetime`.
+    pub(crate) fn apply(ty: &Type, lifetime: &Lifetime) -> Type {
+        let mut ty = ty.clone();
+        NameElidedLifetimes { lifetime }.visit_type_mut(&mut ty);
+        ty
+    }
 }
 
 /// Extracts a plain identifier from a typed function parameter.

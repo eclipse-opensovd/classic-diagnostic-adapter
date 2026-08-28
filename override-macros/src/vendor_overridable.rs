@@ -20,7 +20,7 @@ use syn::{
 };
 
 use crate::shared::{
-    contains_reference, hook_ident_for, mentions_generics, param_ident, with_lifetime,
+    MentionsGenerics, NameElidedLifetimes, has_borrowed_input, hook_ident_for, param_ident,
 };
 
 /// Parses `name = <ident>` from `vendor_overridable` arguments.
@@ -79,7 +79,7 @@ fn build_hook_params(
         let ty = &pat_type.ty;
         fallback_call_args.push(quote! { #ident });
 
-        if mentions_generics(ty, generic_idents) {
+        if MentionsGenerics::check(ty, generic_idents) {
             match ty.as_ref() {
                 Type::Reference(reference) if reference.mutability.is_none() => {
                     any_erased = true;
@@ -114,7 +114,7 @@ fn build_hook_params(
         } else {
             let hook_ty = async_lifetime.map_or_else(
                 || ty.as_ref().clone(),
-                |lifetime| with_lifetime(ty, lifetime),
+                |lifetime| NameElidedLifetimes::apply(ty, lifetime),
             );
             hook_param_types.push(quote! { #hook_ty });
             hook_call_args.push(quote! { #ident });
@@ -138,7 +138,7 @@ fn build_hook_return(
 ) -> proc_macro2::TokenStream {
     let hook_ret_type = hook_lifetime.map_or_else(
         || ret_type.clone(),
-        |lifetime| with_lifetime(ret_type, lifetime),
+        |lifetime| NameElidedLifetimes::apply(ret_type, lifetime),
     );
     let hook_result = if any_erased {
         quote! { ::core::option::Option<#hook_ret_type> }
@@ -194,7 +194,7 @@ pub(crate) fn expand(
     let ret_type = match &fallback_fn.sig.output {
         ReturnType::Default => parse_quote! { () },
         ReturnType::Type(_, ty) => {
-            if mentions_generics(ty, &generic_idents) {
+            if MentionsGenerics::check(ty, &generic_idents) {
                 return Err(syn::Error::new_spanned(
                     ty,
                     "vendor_overridable: return type must not mention generic parameters",
@@ -204,10 +204,7 @@ pub(crate) fn expand(
         }
     };
     let async_lifetime: syn::Lifetime = parse_quote!('__vendor_override);
-    let has_borrowed_input = fallback_fn.sig.inputs.iter().any(|arg| match arg {
-        syn::FnArg::Typed(pat_type) => contains_reference(&pat_type.ty),
-        syn::FnArg::Receiver(_) => false,
-    });
+    let has_borrowed_input = has_borrowed_input(&fallback_fn.sig.inputs);
     let hook_lifetime = (is_async && has_borrowed_input).then_some(&async_lifetime);
     let HookParams {
         hook_param_types,

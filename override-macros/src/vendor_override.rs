@@ -20,8 +20,8 @@ use syn::{
 };
 
 use crate::shared::{
-    contains_reference, hook_ident_for, param_ident, registration_ident_for, registry_paths,
-    with_lifetime,
+    NameElidedLifetimes, has_borrowed_input, hook_ident_for, param_ident, registration_ident_for,
+    registry_paths,
 };
 
 /// Parses `path::to::function` and optional `, erase(param, ...)` arguments.
@@ -162,7 +162,7 @@ fn build_shim_parts(
             if let Some(lifetime) = async_lifetime
                 && let syn::FnArg::Typed(pat_type) = &mut shim_arg
             {
-                *pat_type.ty = with_lifetime(&pat_type.ty, lifetime);
+                *pat_type.ty = NameElidedLifetimes::apply(&pat_type.ty, lifetime);
             }
             shim_params.push(shim_arg);
         }
@@ -236,10 +236,7 @@ pub(crate) fn expand(
     };
     let ret_ty = quote! { #ret_type };
     let async_lifetime: syn::Lifetime = parse_quote!('__vendor_override);
-    let has_borrowed_input = func.sig.inputs.iter().any(|arg| match arg {
-        syn::FnArg::Typed(pat_type) => contains_reference(&pat_type.ty),
-        syn::FnArg::Receiver(_) => false,
-    });
+    let has_borrowed_input = has_borrowed_input(&func.sig.inputs);
     let shim_lifetime = (is_async && has_borrowed_input).then_some(&async_lifetime);
     let ShimParts {
         shim_params,
@@ -266,7 +263,7 @@ pub(crate) fn expand(
         }
         let shim_ret_type = shim_lifetime.map_or_else(
             || ret_type.clone(),
-            |lifetime| with_lifetime(&ret_type, lifetime),
+            |lifetime| NameElidedLifetimes::apply(&ret_type, lifetime),
         );
         let shim_result = if args.erased.is_empty() {
             quote! { #shim_ret_type }
