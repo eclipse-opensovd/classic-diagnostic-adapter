@@ -50,8 +50,22 @@ pub mod security_and_session {
         }
 
         #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
-        #[schemars(rename = "UpdateAccessModesRequest")]
-        pub struct Request {
+        #[schemars(rename = "UpdateSessionModesRequest")]
+        pub struct SessionRequest {
+            pub value: String,
+            /// Defines after how many seconds the
+            /// mode expires and should therefore
+            /// be automatically reset to the mode's
+            // default value
+            // It's optional although strictly speaking it should be required
+            // when following the sovd standard.
+            // todo (strict-mode): if strict mode is enabled, this should be required
+            pub mode_expiration: Option<u64>,
+        }
+
+        #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+        #[schemars(rename = "UpdateSecurityModesRequest")]
+        pub struct SecurityRequest {
             pub value: String,
             /// Defines after how many seconds the
             /// mode expires and should therefore
@@ -68,6 +82,8 @@ pub mod security_and_session {
             /// Optional parameters forwarded as payload to the `RequestSeed` service.
             pub parameters: Option<std::collections::HashMap<String, serde_json::Value>>,
         }
+
+        pub type Request = SecurityRequest;
 
         pub type Response<T> = crate::common::modes::put::Response<T>;
     }

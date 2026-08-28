@@ -229,7 +229,7 @@ pub(crate) mod session {
             ..
         }): State<WebserverEcuState<T, U>>,
         WithRejection(Json(request_body), _): WithRejection<
-            Json<sovd_modes::security_and_session::put::Request>,
+            Json<sovd_modes::security_and_session::put::SessionRequest>,
             ApiError,
         >,
     ) -> Response {
@@ -292,7 +292,7 @@ pub(crate) mod session {
 
     pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
         op.description("Change the active session.")
-            .input::<Json<sovd_modes::security_and_session::put::Request>>()
+            .input::<Json<sovd_modes::security_and_session::put::SessionRequest>>()
             .response_with::<200, Json<sovd_modes::security_and_session::put::Response<String>>, _>(
                 |res| {
                     res.description("Session updated successfully").example(
@@ -467,6 +467,15 @@ pub(crate) mod security {
             }
             .into_response();
         }
+        if !is_request_seed && request_body.parameters.is_some() {
+            return ErrorWrapper {
+                error: ApiError::BadRequest(
+                    "RequestSeed parameters cannot be used with SendKey.".to_string(),
+                ),
+                include_schema,
+            }
+            .into_response();
+        }
 
         let (seed_payload, key_payload) = if let Some(key) = key {
             let mut data = HashMap::new();
@@ -568,7 +577,7 @@ pub(crate) mod security {
 
     pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
         op.description("Change the security Level.")
-            .input::<Json<sovd_modes::security_and_session::put::Request>>()
+            .input::<Json<sovd_modes::security_and_session::put::SecurityRequest>>()
             .response_with::<200, Json<sovd_modes::security_and_session::put::Response<String>>, _>(
                 |res| {
                     res.description("Security level updated successfully")
