@@ -35,6 +35,8 @@ pub(crate) struct TestEcuDb {
     /// receive errors. Defaults to 2 to match the `CP_RepeatReqCountApp`
     /// comparam default.
     repeat_req_count_app: u32,
+    tester_present_message: Vec<u8>,
+    tester_present_response_expected: bool,
 }
 
 impl TestEcuDb {
@@ -43,6 +45,8 @@ impl TestEcuDb {
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             timeout_default: Duration::from_secs(5),
             repeat_req_count_app: 2,
+            tester_present_message: vec![0x3E, 0x00],
+            tester_present_response_expected: true,
         }
     }
 
@@ -52,6 +56,8 @@ impl TestEcuDb {
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             timeout_default,
             repeat_req_count_app: 2,
+            tester_present_message: vec![0x3E, 0x00],
+            tester_present_response_expected: true,
         }
     }
 
@@ -65,6 +71,22 @@ impl TestEcuDb {
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             timeout_default,
             repeat_req_count_app,
+            tester_present_message: vec![0x3E, 0x00],
+            tester_present_response_expected: true,
+        }
+    }
+
+    /// Create a test double with explicit tester-present communication parameters.
+    pub fn with_tester_present_config(
+        tester_present_message: Vec<u8>,
+        tester_present_response_expected: bool,
+    ) -> Self {
+        Self {
+            service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            timeout_default: Duration::from_secs(5),
+            repeat_req_count_app: 2,
+            tester_present_message,
+            tester_present_response_expected,
         }
     }
 }
@@ -131,14 +153,14 @@ impl UdsComParams for TestEcuDb {
     fn tester_present_addr_mode(self) -> AddressingMode {
         unimplemented!()
     }
-    fn tester_present_response_expected(self) -> bool {
-        unimplemented!()
+    fn tester_present_response_expected(&self) -> bool {
+        self.tester_present_response_expected
     }
     fn tester_present_send_type(self) -> TesterPresentSendType {
         unimplemented!()
     }
-    fn tester_present_message(self) -> Vec<u8> {
-        unimplemented!()
+    fn tester_present_message(&self) -> Vec<u8> {
+        self.tester_present_message.clone()
     }
     fn tester_present_exp_pos_resp(self) -> Vec<u8> {
         unimplemented!()
