@@ -51,3 +51,18 @@ cda_crate_universe.from_cargo(
     skip_cargo_lockfile_overwrite = True,
 )
 use_repo(cda_crate_universe, "cda_crates")
+
+can_crate_universe = use_extension(
+    "@rules_rust//crate_universe:extensions.bzl",
+    "crate",
+    isolate = True,
+)
+can_crate_universe.spec(
+    package = "tokio-socketcan-isotp",
+    git = "https://github.com/MarkSchmitt/tokio-socketcan-isotp.git",
+    tag = "v0.6.0",
+)
+can_crate_universe.from_specs(
+    name = "can_crates",
+)
+use_repo(can_crate_universe, "can_crates")
