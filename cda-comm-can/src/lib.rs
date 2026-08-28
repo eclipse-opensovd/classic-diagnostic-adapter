@@ -53,9 +53,7 @@ pub use gateway::{CanDiagGateway, error};
 /// needed for type-checking and is statically unreachable.
 #[cfg(not(feature = "can"))]
 #[derive(Clone)]
-pub struct CanDiagGateway {
-    _unconstructable: std::convert::Infallible,
-}
+pub enum CanDiagGateway {}
 
 #[cfg(not(feature = "can"))]
 impl PhysicalTransport for CanDiagGateway {
@@ -116,27 +114,15 @@ impl FunctionalTransport for CanDiagGateway {
 #[async_trait]
 impl TransportControl for CanDiagGateway {
     async fn enable(&self) -> Result<(), CommControlError> {
-        #[allow(
-            clippy::used_underscore_binding,
-            reason = "Type is unconstructable, this match is unreachable"
-        )]
-        match self._unconstructable {}
+        match *self {}
     }
 
     async fn disable(&self) -> Result<(), CommControlError> {
-        #[allow(
-            clippy::used_underscore_binding,
-            reason = "Type is unconstructable, this match is unreachable"
-        )]
-        match self._unconstructable {}
+        match *self {}
     }
 
     async fn state(&self) -> TransportState {
-        #[allow(
-            clippy::used_underscore_binding,
-            reason = "Type is unconstructable, this match is unreachable"
-        )]
-        match self._unconstructable {}
+        match *self {}
     }
 }
 
