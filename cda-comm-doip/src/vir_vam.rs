@@ -29,6 +29,31 @@ use crate::{
     connections::{GatewayState, handle_gateway_connection},
     socket::DoIPUdpSocket,
 };
+
+/// Delay between VIR re-broadcasts while a gateway is unconnected.
+const GATEWAY_REDISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How often to re-broadcast before giving up. A gateway that stays silent this
+/// long is absent rather than slow, and announces itself when it boots.
+const GATEWAY_REDISCOVERY_ATTEMPTS: u8 = 3;
+
+/// Broadcasts a VIR on `gateway_port`. Entities answer with a VAM.
+async fn broadcast_vir(
+    socket: &mut DoIPUdpSocket,
+    gateway_port: u16,
+) -> Result<(), DiagServiceError> {
+    let target = format!("255.255.255.255:{gateway_port}")
+        .parse()
+        .map_err(|_| DiagServiceError::SendFailed("Invalid port".to_owned()))?;
+    socket
+        .send(
+            DoipPayload::VehicleIdentificationRequest(VehicleIdentificationRequest {}),
+            target,
+        )
+        .await
+        .map_err(|e| DiagServiceError::SendFailed(format!("Failed to send VIR: {e:?}")))
+}
+
 pub(crate) async fn get_vehicle_identification<T, F>(
     socket: &mut DoIPUdpSocket,
     netmask: u32,
@@ -40,18 +65,8 @@ where
     T: EcuAddresses,
     F: Future<Output = ()> + Send + 'static,
 {
-    // send VIR
     tracing::info!("Broadcasting VIR");
-    let broadcast_ip = "255.255.255.255";
-    socket
-        .send(
-            DoipPayload::VehicleIdentificationRequest(VehicleIdentificationRequest {}),
-            format!("{broadcast_ip}:{gateway_port}")
-                .parse()
-                .map_err(|_| DiagServiceError::SendFailed("Invalid port".to_owned()))?,
-        )
-        .await
-        .map_err(|e| DiagServiceError::SendFailed(format!("Failed to send VIR: {e:?}")))?;
+    broadcast_vir(socket, gateway_port).await?;
 
     let mut gateways = Vec::new();
 
@@ -292,6 +307,14 @@ where
                 }
             };
 
+            // `start()` broadcasts a VIR once. A gateway whose response is lost
+            // would otherwise stay unconnected until it announces itself. Every
+            // entity answers a broadcast, so this is bounded: it covers a lost
+            // response, not an absent gateway.
+            let mut rediscovery = tokio::time::interval(GATEWAY_REDISCOVERY_INTERVAL);
+            rediscovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut rediscovery_left = GATEWAY_REDISCOVERY_ATTEMPTS;
+
             loop {
                 let mut socket_guard = broadcast_socket.lock().await;
                 // `start()` binds `state.socket` before spawning this task, so
@@ -306,6 +329,28 @@ where
                     biased;
                     () = &mut shutdown_signal => {
                         break
+                    },
+                    _ = rediscovery.tick(), if rediscovery_left > 0 => {
+                        let all_connected = {
+                            let connected = state.logical_address_to_connection.read().await;
+                            gateway_ecu_map
+                                .keys()
+                                .all(|addr| connected.contains_key(addr))
+                        };
+                        // Connections are only added, never dropped, so once
+                        // every gateway is known there is nothing left to find.
+                        if all_connected {
+                            rediscovery_left = 0;
+                        } else {
+                            rediscovery_left = rediscovery_left.saturating_sub(1);
+                            tracing::debug!(
+                                attempts_left = rediscovery_left,
+                                "Gateway unconnected, re-broadcasting VIR"
+                            );
+                            if let Err(error) = broadcast_vir(socket, transport_config.port).await {
+                                tracing::warn!(%error, "Failed to re-broadcast VIR");
+                            }
+                        }
                     },
                     response = socket.recv() => {
                         match response {

@@ -274,7 +274,9 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                     ecu_name = %ecu_name,
                     "Skip variant detection for functional description"
                 );
-                continue;
+                // No `continue`: the ECU is still scheduled below to pick up the
+                // offline-verdict retries. Without them a transient
+                // unreachability here is never re-checked.
             }
             if let Err(DiagServiceError::EcuOffline(_)) =
                 self.gateway.ecu_online(ecu_name, db).await
