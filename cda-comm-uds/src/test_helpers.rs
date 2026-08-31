@@ -13,16 +13,17 @@
 
 //! Shared test doubles for `cda-comm-uds` tests.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use cda_interfaces::{
     ComponentInfos, Connectivity, DiagComm, DiagCommLookup, DiagCommType, DiagServiceError,
     DoipComParams, Dtc, DynamicPlugin, EcuAddresses, EcuRuntimeState, EcuSchemas, EcuSecurity,
-    EcuState, EcuStateManager, HashMap, HashMapExtensions, HashSet, MuxCaseInfo, PayloadDecoder,
-    PayloadEncoder, Protocol, ResponseParameterInfo, SchemaDescription, SecurityAccess,
-    ServiceParameterMetadata, ServicePayload, UDS_ID_RESPONSE_BITMASK, UdsComParams,
-    VariantDetection, VariantState,
+    EcuState, EcuStateManager, FunctionalTransport, HashMap, HashMapExtensions, HashSet,
+    MuxCaseInfo, NetworkTopology, PayloadDecoder, PayloadEncoder, PhysicalTransport, Protocol,
+    ResponseParameterInfo, SchemaDescription, SecurityAccess, ServiceParameterMetadata,
+    ServicePayload, TransmissionParameters, TransportResponse, UDS_ID_RESPONSE_BITMASK,
+    UdsComParams, VariantDetection, VariantState,
     datatypes::{
         AddressingMode, ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
         ComponentOperationsInfo, DtcLookup, DtcReadInformationFunction, RetryPolicy,
@@ -34,6 +35,76 @@ use cda_interfaces::{
     },
     service_ids,
 };
+use tokio::sync::{RwLock, mpsc};
+
+/// A test gateway whose `send` behavior is configurable via a closure.
+#[derive(Clone)]
+pub(crate) struct TestGateway {
+    pub(crate) send_fn: Arc<TestGatewaySendFn>,
+}
+
+pub(crate) type TestGatewaySendFn = dyn Fn(
+        mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
+        bool,
+    ) -> Result<(), DiagServiceError>
+    + Send
+    + Sync;
+
+impl PhysicalTransport for TestGateway {
+    fn send(
+        &self,
+        _transmission_params: TransmissionParameters,
+        _message: ServicePayload,
+        response_sender: mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
+        expect_uds_reply: bool,
+    ) -> impl Future<Output = Result<tokio::task::JoinHandle<()>, DiagServiceError>> + Send {
+        let result = (self.send_fn)(response_sender, expect_uds_reply);
+        async move {
+            result?;
+            Ok(tokio::task::spawn(std::future::ready(())))
+        }
+    }
+
+    fn ecu_online<T: EcuAddresses>(
+        &self,
+        _ecu_name: &str,
+        _ecu_db: &RwLock<T>,
+    ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
+        std::future::ready(Ok(()))
+    }
+}
+
+impl FunctionalTransport for TestGateway {
+    fn send_functional(
+        &self,
+        _transmission_params: TransmissionParameters,
+        _message: ServicePayload,
+        _expected_ecu_logical_addrs: HashMap<u16, String>,
+        _timeout: Duration,
+        _expect_positive_response: bool,
+    ) -> impl Future<
+        Output = Result<
+            HashMap<String, Result<ServicePayload, DiagServiceError>>,
+            DiagServiceError,
+        >,
+    > + Send {
+        std::future::ready(Ok(HashMap::new()))
+    }
+}
+
+impl NetworkTopology for TestGateway {
+    fn get_gateway_network_address(
+        &self,
+        _logical_address: u16,
+    ) -> impl Future<Output = Option<String>> + Send {
+        std::future::ready(None)
+    }
+}
+
+#[async_trait]
+impl cda_interfaces::Shutdown for TestGateway {
+    async fn shutdown(&self) {}
+}
 
 /// Decoded response produced by [`TestEcuDb`]'s [`PayloadDecoder`].
 ///

@@ -16,4 +16,10 @@ mod diag_kernel;
 pub use diag_kernel::{
     diagservices::*,
     ecumanager::{EcuManager, EcuManagerConfig},
+    security::{LOOKUP_REQUEST_SEED_SERVICE_HOOK, lookup_request_seed_service},
 };
+
+// Declares the vendor-override registry and `validate_vendor_overrides()` for
+// this crate. Required once at the crate root because this crate defines
+// vendor-overridable functions.
+override_macros::declare_vendor_override_registry!();

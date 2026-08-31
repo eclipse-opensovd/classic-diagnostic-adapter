@@ -421,6 +421,35 @@
 # nanos = 0
 # secs = 1
 
+# Diagnostic communication initialization and post-update behavior.
+[communication]
+# The value (in seconds) for the HTTP `Retry-After` header returned when a
+# diagnostic request arrives while initialization is still pending.
+# deferred_retry_after_seconds = 30
+# Controls when diagnostic transport network activation begins:
+# - "Always": whole-vehicle communication initializes eagerly at startup (default).
+# - "OnDemand": HTTP/SOVD starts first. The first qualifying ECU diagnostic
+#   request, or an explicit `activate()` call, triggers initialization.
+# - "Disabled": HTTP/SOVD starts first. The default communication plugin
+#   provides no activation path, and `trigger_detection()` needs an
+#   already-enabled transport.
+# init_mode = "Always"
+# Controls transport behavior after a runtime database update:
+# - "Enabled": resume the transport the update displaced, requesting
+#   activation if it started from a deferred runtime, subject to `init_mode`
+#   (default).
+# - "Deferred": leave communication deferred even if the update displaced
+#   an enabled runtime. The transport stays down until triggered.
+# post_update_mode = "Enabled"
+# Controls whether enabling communication also runs whole-vehicle variant
+# detection:
+# - "Always": the registered detector runs as the last stage of every
+#   activation (default).
+# - "Never": activation brings the transport and its lifecycle hooks up
+#   only, so variant-dependent surfaces report not-ready until detection is
+#   triggered explicitly.
+# variant_detection = "Always"
+
 [components.additional_fields.x-sovd2uds-can-ecus.CAN]
 # ignore_case = true
 # values = ["yes"]
@@ -452,8 +481,8 @@
 # attempting a lookup with this flag set against a multi-protocol database
 # returns `DiagServiceError::InvalidDatabase`.
 # ignore_protocol = false
-# Path to load the databases from, this must be a directory.
-# path = "."
+# Directory to load the databases from, if none have been loaded into storage before.
+# seed_dir = "."
 
 # Holds configuration for diagnostic service naming conventions.
 #

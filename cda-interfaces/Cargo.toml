@@ -25,6 +25,8 @@ workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+uuid = { workspace = true, features = ["v4"] }
+http = { workspace = true }
 # internal dependencies
 bytes = { workspace = true }
 foldhash = { workspace = true }

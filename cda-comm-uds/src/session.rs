@@ -109,7 +109,7 @@ impl<S: EcuGateway, T: EcuManager> UdsSession for UdsManager<S, T> {
         expiration: Option<Duration>,
     ) -> Result<Self::Response, DiagServiceError> {
         tracing::info!(ecu_name = %ecu_name, session = %session, "Setting session");
-        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
+        let ecu_diag_service = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
         let dc = ecu_diag_service
             .read()
             .await
@@ -178,7 +178,7 @@ impl<S: EcuGateway, T: EcuManager> UdsSession for UdsManager<S, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::sync::Arc;
 
     use cda_interfaces::{
         DynamicPlugin, EcuStateManager, HashMap, ServicePayload, TransportResponse, UdsSession,
@@ -186,12 +186,14 @@ mod tests {
         diagservices::{DiagServiceResponse, DiagServiceResponseType},
         service_ids,
     };
+    use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
     use tokio::sync::RwLock;
 
     use crate::{
         UdsManager,
-        test_helpers::{TestEcuDb, negative_session_response, positive_session_response},
-        transport::send_tests::TestGateway,
+        test_helpers::{
+            TestEcuDb, TestGateway, negative_session_response, positive_session_response,
+        },
     };
 
     const ECU: &str = "TestECU";
@@ -237,7 +239,7 @@ mod tests {
             gateway_replying_with(response),
             ecus,
             FaultConfig::default(),
-            enable_communication_access_for_test(),
+            enabled_communication_access_for_test(),
         );
         ecu(&manager)
             .await
