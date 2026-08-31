@@ -10,7 +10,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use cda_comm_can::CanDiagGateway;
 use cda_comm_doip::DoipDiagGateway;
@@ -23,10 +23,9 @@ use cda_plugin_runtime_update::{
     },
 };
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
-use cda_sovd::{SovdLockStateProvider, UpdateGuardState};
+use cda_sovd::SovdLockStateProvider;
 use cda_storage::LocalStorage;
 use cda_transport_router::DiagnosticTransportRouter;
-use tokio::sync::Mutex;
 
 use crate::{
     AppError, UdsManagerType, cda_factory::CdaMainVehicleFactory,
@@ -98,9 +97,8 @@ pub async fn add_runtime_update_routes<S, P>(
     dynamic_router: &cda_sovd::dynamic_router::DynamicRouter,
     plugin: P,
     lock_provider: Arc<SovdLockStateProvider>,
-    update_guard: &UpdateGuardState,
     upload_body_limit_bytes: usize,
-    retry_after_seconds: u64,
+    update_retry_after: Duration,
 ) where
     S: SecurityPluginLoader,
     P: RuntimeFilesUpdatePlugin,
@@ -110,9 +108,8 @@ pub async fn add_runtime_update_routes<S, P>(
         dynamic_router,
         service,
         lock_provider,
-        update_guard,
         upload_body_limit_bytes,
-        retry_after_seconds,
+        update_retry_after,
     )
     .await;
 }
@@ -136,10 +133,9 @@ where
     SL: SecurityPluginLoader,
 {
     let health_for_factory = infra.health.clone();
-    let shutdown_signal = infra.shutdown_signal.clone();
     let factory = Arc::new(CdaMainVehicleFactory::<SP>::new(
-        shutdown_signal,
         health_for_factory,
+        Arc::clone(&infra.communication_access),
     ));
 
     let storage = Arc::new(LocalStorage::new(&infra.storage_dir).map_err(|e| {
@@ -154,12 +150,10 @@ where
         components_config: infra.components_config,
         lock_provider: Arc::clone(&infra.lock_provider),
         shutdown_signal: infra.shutdown_signal,
-        uds_manager: infra.uds_manager,
-        diagnostic_gateway: infra.gateway,
-        update_guard: infra.update_guard,
-        ecu_execution_registry: infra.ecu_execution_registry.clone(),
+        communication_access: Arc::clone(&infra.communication_access),
+        uds_manager: infra.uds_manager_replacer,
+        diagnostic_gateway: infra.gateway_replacer,
         health: infra.health,
-        variant_detection_handle: Mutex::new(infra.variant_detection_handle.lock().await.take()),
         storage_dir: infra.storage_dir.clone(),
         mdd_decompress: infra.mdd_decompress,
         storage: Arc::clone(&storage),
@@ -180,15 +174,13 @@ where
     Ok(DefaultRuntimeUpdatePlugin::new(
         storage,
         reloader_plugin,
-        Arc::new(DefaultUpdateSecurityHandler::new(
-            Arc::clone(&infra.lock_provider),
-            vec![
-                Box::new(infra.flash_transfer_guard),
-                Box::new(infra.ecu_execution_registry.clone()),
-            ],
-        )),
+        Arc::new(DefaultUpdateSecurityHandler::new()),
         Arc::clone(&infra.lock_provider),
         infra.mdd_decompress,
-        Arc::clone(&infra.update_in_progress),
+        infra.communication_disable,
+        Arc::clone(&infra.communication_access),
+        infra.http_protections,
+        infra.update_retry_after,
+        infra.post_update_mode,
     ))
 }

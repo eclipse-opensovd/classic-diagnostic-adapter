@@ -54,6 +54,10 @@ pub enum RuntimeUpdateError {
     FatalError(String),
     #[error("Severe Error: {0}")]
     SevereError(String),
+    #[error("Communication operation failed: {0}")]
+    CommunicationFailure(String),
+    #[error("Component replacement failed: {0}")]
+    ReplacementFailure(String),
 }
 
 impl From<CdaStorageError> for RuntimeUpdateError {
@@ -73,5 +77,21 @@ impl From<CdaStorageError> for RuntimeUpdateError {
 pub struct VerificationError(pub String);
 
 #[derive(Debug, thiserror::Error)]
-#[error("Reload error: {0}")]
-pub struct ReloadError(pub String);
+pub enum ReloadError {
+    #[error("Reload error: {0}")]
+    General(String),
+    #[error("Communication operation failed: {0}")]
+    CommunicationFailure(String),
+    #[error("Component replacement failed: {0}")]
+    ReplacementFailure(String),
+}
+
+impl From<ReloadError> for RuntimeUpdateError {
+    fn from(error: ReloadError) -> Self {
+        match error {
+            ReloadError::CommunicationFailure(message) => Self::CommunicationFailure(message),
+            ReloadError::ReplacementFailure(message) => Self::ReplacementFailure(message),
+            ReloadError::General(message) => Self::ReloadFailed(message),
+        }
+    }
+}

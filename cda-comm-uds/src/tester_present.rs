@@ -19,7 +19,7 @@ use cda_interfaces::{
 };
 use tokio::time::{MissedTickBehavior, interval as tokio_interval};
 
-use crate::{UdsManager, types::TesterPresentTask};
+use crate::{UdsManager, transport::CommunicationReadiness, types::TesterPresentTask};
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     /// Start or stop a tester present task for a single ECU.
@@ -160,7 +160,13 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         };
 
         match self
-            .send_with_raw_payload(&control_msg.ecu, payload, None, false)
+            .send_with_raw_payload(
+                &control_msg.ecu,
+                payload,
+                None,
+                false,
+                CommunicationReadiness::Enforce,
+            )
             .await
         {
             Ok(_) => Ok(()),
@@ -261,6 +267,53 @@ impl<S: EcuGateway, T: EcuManager> UdsTesterPresent for UdsManager<S, T> {
                 ecu_names
                     .iter()
                     .all(|ecu| tester_presents.get(ecu).is_some())
+            }
+        }
+    }
+}
+
+impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
+    /// Aborts all running tester-present tasks and saves their types so the
+    /// lifecycle initialization can restart them after communication is re-enabled.
+    pub(crate) async fn snapshot_and_abort_tester_present(&self) {
+        let mut tasks = self.tester_present_tasks.write().await;
+        let snapshot: Vec<TesterPresentType> = tasks.values().map(|tp| tp.type_.clone()).collect();
+        if !snapshot.is_empty() {
+            tracing::debug!(
+                count = snapshot.len(),
+                "Communication disabling; aborting tester-present tasks and saving snapshot"
+            );
+        }
+        let handles: Vec<_> = tasks.drain().map(|(_, tp)| tp.task).collect();
+        drop(tasks);
+        for handle in handles {
+            handle.abort();
+            let _ = handle.await;
+        }
+        *self.tester_present_snapshot.lock().await = snapshot;
+    }
+
+    /// Restarts the tester-present tasks captured by
+    /// [`UdsManager::snapshot_and_abort_tester_present`].
+    ///
+    /// The snapshot holds one entry per ECU, so a functional-group tester
+    /// present appears once per member. The duplicates are collapsed here,
+    /// because [`UdsTesterPresent::start_tester_present`] re-enumerates the
+    /// whole group from a single `Functional` entry.
+    pub(crate) async fn restart_tester_present_snapshot(&self) {
+        let snapshot = std::mem::take(&mut *self.tester_present_snapshot.lock().await);
+        let mut started = Vec::with_capacity(snapshot.len());
+        for type_ in snapshot {
+            if started.contains(&type_) {
+                continue;
+            }
+            started.push(type_.clone());
+            if let Err(e) = self.start_tester_present(type_.clone()).await {
+                tracing::warn!(
+                    ?type_,
+                    error = %e,
+                    "Failed to restart tester present after communication re-enable"
+                );
             }
         }
     }

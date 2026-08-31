@@ -24,7 +24,7 @@ use cda_interfaces::{
 };
 use strum::IntoEnumIterator;
 
-use crate::UdsManager;
+use crate::{UdsManager, transport::CommunicationReadiness};
 
 /// Record number requesting all records/all memory (ISO 14229-1).
 const DTC_RECORD_NUMBER_ALL: u8 = 0xFF;
@@ -463,7 +463,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         scope: Option<String>,
         memory_selection: Option<u8>,
     ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError> {
-        let ecu = self.uds_ecu_db(ecu_name)?;
+        let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
         let mut all_dtcs = HashMap::new();
         let scoped_services: Vec<_> = ecu
             .read()
@@ -644,7 +644,8 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         fault_code: Option<String>,
     ) -> Result<Self::Response, DiagServiceError> {
-        let ecu = self.uds_ecu_db(ecu_name)?;
+        let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
+
         let delete_dtc_service = ecu.read().await.lookup_service_through_func_class(
             "faultmem",
             service_ids::CLEAR_DIAGNOSTIC_INFORMATION,
@@ -680,7 +681,13 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         };
 
         match self
-            .send_with_raw_payload(ecu_name, service_payload, None, true)
+            .send_with_raw_payload(
+                ecu_name,
+                service_payload,
+                None,
+                true,
+                CommunicationReadiness::Enforce,
+            )
             .await?
         {
             None => Err(DiagServiceError::NoResponse(
@@ -696,7 +703,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         scope: &str,
     ) -> Result<Self::Response, DiagServiceError> {
-        let ecu = self.uds_ecu_db(ecu_name)?;
+        let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
 
         // If the requested scope is the default scope, delegate to the standard delete_dtcs path.
         if scope.eq_ignore_ascii_case(&self.fault_config.default_scope) {

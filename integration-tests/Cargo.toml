@@ -27,6 +27,7 @@ cda-interfaces = { workspace = true }
 cda-core = { workspace = true }
 cda-database = { workspace = true }
 cda-sovd = { workspace = true }
+cda-plugin-communication-management = { workspace = true }
 sovd-interfaces = { workspace = true }
 cda-tracing = { workspace = true }
 cda-plugin-security = { workspace = true }
@@ -74,7 +75,6 @@ chrono = { workspace = true }
 futures = { workspace = true }
 # libc
 libc = { workspace = true }
-
 # compile time format
 const_format = { workspace = true }
 # temp directories for isolated tests

@@ -177,7 +177,7 @@ pub mod std_ext {
         match lock.read() {
             Ok(guard) => guard,
             Err(poisoned) => {
-                tracing::warn!("RwLock poisoned, proceeding with poisoned read lock");
+                tracing::error!("RwLock poisoned, clearing poisoned state");
                 lock.clear_poison();
                 poisoned.into_inner()
             }
@@ -189,7 +189,19 @@ pub mod std_ext {
         match lock.write() {
             Ok(guard) => guard,
             Err(poisoned) => {
-                tracing::warn!("RwLock poisoned, proceeding with poisoned write lock");
+                tracing::error!("RwLock poisoned, clearing poisoned state");
+                lock.clear_poison();
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    #[inline]
+    pub fn lock_mutex<T>(lock: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        match lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::error!("Mutex poisoned, clearing poisoned state");
                 lock.clear_poison();
                 poisoned.into_inner()
             }

@@ -29,8 +29,8 @@ pub mod datatypes;
 pub mod diagservices;
 mod ecugateway;
 pub use ecugateway::{
-    EcuGateway, FunctionalTransport, NetworkTopology, PhysicalTransport, ReusableTransportResource,
-    RouteStatus, TransmissionParameters, TransportProbe,
+    EcuGateway, FunctionalTransport, NetworkTopology, PhysicalTransport, RouteStatus,
+    TransmissionParameters, TransportProbe,
 };
 mod ecumanager;
 pub use ecumanager::*;
@@ -38,8 +38,11 @@ mod ecuuds;
 pub use ecuuds::*;
 pub mod file_manager;
 pub mod health;
+pub mod http_protection;
 mod schema;
 pub use schema::*;
+pub mod communication_control;
+pub mod component_slot;
 pub mod config;
 pub mod runtime_update_api;
 pub mod storage_api;
@@ -78,6 +81,67 @@ pub use strings::*;
 pub mod util;
 
 pub type DynamicPlugin = Box<dyn std::any::Any + Send + Sync>;
+
+/// ECU names for which variant detection should be triggered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariantDetectionRequest(Vec<String>);
+
+impl VariantDetectionRequest {
+    #[must_use]
+    pub fn new(ecus: Vec<String>) -> Self {
+        Self(ecus)
+    }
+
+    #[must_use]
+    pub fn into_ecus(self) -> Vec<String> {
+        self.0
+    }
+}
+
+/// Sends requests to the variant-detection listener.
+#[derive(Debug, Clone)]
+pub struct VariantDetectionSender(tokio::sync::mpsc::Sender<VariantDetectionRequest>);
+
+impl VariantDetectionSender {
+    #[must_use]
+    pub fn new(sender: tokio::sync::mpsc::Sender<VariantDetectionRequest>) -> Self {
+        Self(sender)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the variant-detection receiver has been closed.
+    pub async fn send(
+        &self,
+        request: VariantDetectionRequest,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<VariantDetectionRequest>> {
+        self.0.send(request).await
+    }
+}
+
+/// Receives requests for the variant-detection listener.
+#[derive(Debug)]
+pub struct VariantDetectionReceiver(tokio::sync::mpsc::Receiver<VariantDetectionRequest>);
+
+impl VariantDetectionReceiver {
+    #[must_use]
+    pub fn new(receiver: tokio::sync::mpsc::Receiver<VariantDetectionRequest>) -> Self {
+        Self(receiver)
+    }
+
+    pub async fn recv(&mut self) -> Option<VariantDetectionRequest> {
+        self.0.recv().await
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if no request is currently available or all senders have been dropped.
+    pub fn try_recv(
+        &mut self,
+    ) -> Result<VariantDetectionRequest, tokio::sync::mpsc::error::TryRecvError> {
+        self.0.try_recv()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum DiagCommAction {
@@ -265,6 +329,16 @@ pub enum DiagServiceError {
     NotFound(String),
     #[error("Request not supported: {0}")]
     RequestNotSupported(String),
+    #[error("Communication disabled: {0}")]
+    CommunicationDisabled(String),
+    /// Communication was not enabled and either activation is not authorized
+    /// under the current `init_mode` or activation itself failed. Carries a
+    /// configured retry hint, unlike the coarser [`CommunicationDisabled`](Self::CommunicationDisabled).
+    #[error("Communication not ready: {message}")]
+    CommunicationNotReady {
+        message: String,
+        retry_after: Duration,
+    },
     #[error("Invalid database: {0}")]
     InvalidDatabase(String),
     #[error("Invalid request: {0}")]

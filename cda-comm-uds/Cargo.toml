@@ -27,13 +27,12 @@ path = "src/lib.rs"
 [dependencies]
 # internal dependencies
 cda-interfaces = { workspace = true }
-cda-plugin-runtime-update = { workspace = true }
 
 async-trait = { workspace = true }
 
-socket2 = { workspace = true, features = ["all"] }
 #tokio
 tokio = { workspace = true, features = ["sync", "fs", "time", "rt", "io-util"] }
+tokio-util = { workspace = true, features = ["rt"] }
 #futures
 futures = { workspace = true }
 
@@ -55,3 +54,4 @@ cda-build = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
+cda-plugin-communication-management = { workspace = true, features = ["test-utils"] }

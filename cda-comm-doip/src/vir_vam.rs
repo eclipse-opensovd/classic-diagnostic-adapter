@@ -15,17 +15,17 @@ use std::{future::Future, sync::Arc, time::Duration};
 
 use cda_interfaces::{
     DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, HashMap,
-    HashMapExtensions, dlt_ctx,
+    HashMapExtensions, VariantDetectionRequest, VariantDetectionSender, dlt_ctx,
 };
 use doip_definitions::{
     header::PayloadType,
     payload::{DoipPayload, VehicleIdentificationRequest},
 };
-use tokio::sync::{Mutex, RwLock, mpsc};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    DiscoveredGateway, DoipGatewaySetupError, DoipGatewayState, DoipTransportConfig,
+    ConnectionTasks, DiscoveredGateway, DoipGatewaySetupError, DoipGatewayState,
+    DoipTransportConfig,
     connections::{GatewayState, handle_gateway_connection},
     socket::DoIPUdpSocket,
 };
@@ -108,10 +108,10 @@ pub(crate) async fn listen_for_vams<T, F>(
     transport_config: DoipTransportConfig,
     netmask: u32,
     state: DoipGatewayState<T>,
-    variant_detection: mpsc::Sender<Vec<String>>,
+    connection_tasks: Arc<ConnectionTasks>,
+    variant_detection: VariantDetectionSender,
     connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     mut shutdown_signal: futures::future::Shared<F>,
-    cancel_token: CancellationToken,
 ) -> tokio::task::JoinHandle<()>
 where
     T: EcuAddresses + DoipComParams,
@@ -124,13 +124,19 @@ where
         netmask: u32,
     }
 
+    #[derive(Clone)]
+    struct VamNotifications {
+        variant_detection: VariantDetectionSender,
+        connectivity_handler: Arc<dyn EcuConnectivityHandler>,
+    }
+
     #[tracing::instrument(
         skip(
             state,
+            connection_tasks,
             gateway_ecu_map,
             gateway_ecu_name_map,
-            variant_detection,
-            connectivity_handler,
+            vam_notifications,
             transport_config
         ),
         fields(
@@ -140,11 +146,11 @@ where
     async fn handle_doip_response<T: EcuAddresses + DoipComParams>(
         transport_config: &DoipTransportConfig,
         state: &DoipGatewayState<T>,
+        connection_tasks: &Arc<ConnectionTasks>,
         doip_msg_ctx: DoipMessageContext,
         gateway_ecu_map: &HashMap<u16, Vec<u16>>,
         gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
-        variant_detection: mpsc::Sender<Vec<String>>,
-        connectivity_handler: Arc<dyn EcuConnectivityHandler>,
+        vam_notifications: VamNotifications,
     ) {
         let DoipMessageContext {
             doip_msg,
@@ -169,7 +175,7 @@ where
                     // (i.e. disconnected -> connected)
                     send_variant_detection(
                         gateway_ecu_name_map,
-                        &variant_detection,
+                        &vam_notifications.variant_detection,
                         doip_target.logical_address,
                     )
                     .await;
@@ -183,9 +189,9 @@ where
                             doip_connections: Arc::clone(&state.doip_connections),
                             ecus: Arc::clone(&state.ecus),
                             gateway_ecu_map: gateway_ecu_map.clone(),
-                            connection_tasks: Arc::clone(&state.connection_tasks),
+                            connection_tasks: Arc::clone(connection_tasks),
                         },
-                        connectivity_handler,
+                        vam_notifications.connectivity_handler,
                     )
                     .await
                     {
@@ -196,7 +202,7 @@ where
                             );
                             send_variant_detection(
                                 gateway_ecu_name_map,
-                                &variant_detection,
+                                &vam_notifications.variant_detection,
                                 logical_address,
                             )
                             .await;
@@ -220,11 +226,14 @@ where
     )]
     async fn send_variant_detection(
         gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
-        variant_detection: &mpsc::Sender<Vec<String>>,
+        variant_detection: &VariantDetectionSender,
         logical_address: u16,
     ) {
         if let Some(ecus) = gateway_ecu_name_map.get(&logical_address) {
-            if let Err(e) = variant_detection.send(ecus.clone()).await {
+            if let Err(e) = variant_detection
+                .send(VariantDetectionRequest::new(ecus.clone()))
+                .await
+            {
                 tracing::warn!(
                     error = ?e,
                     "Failed to send variant detection request"
@@ -255,6 +264,10 @@ where
     }
 
     tracing::info!("Listening for spontaneous VAMs");
+    let notifications = VamNotifications {
+        variant_detection,
+        connectivity_handler,
+    };
 
     cda_interfaces::spawn_named!(
         "vam-listen",
@@ -264,7 +277,7 @@ where
                 Arc::clone(&state.socket)
             } else {
                 match crate::create_udp_vir_socket(broadcast_ip, transport_config.port) {
-                    Ok(sock) => Arc::new(Mutex::new(sock)),
+                    Ok(sock) => Arc::new(Mutex::new(Some(sock))),
                     Err(e) => {
                         tracing::warn!(
                             broadcast_ip = %broadcast_ip,
@@ -280,7 +293,13 @@ where
             };
 
             loop {
-                let mut socket = broadcast_socket.lock().await;
+                let mut socket_guard = broadcast_socket.lock().await;
+                // `start()` binds `state.socket` before spawning this task, so
+                // this is unreachable. Log and stop rather than panic.
+                let Some(socket) = socket_guard.as_mut() else {
+                    tracing::error!("Broadcast socket unexpectedly unbound; stopping vam listener");
+                    break;
+                };
                 tokio::select! {
                     // Use `biased` to prioritize shutdown signal and cancel handling
                     // over processing the VAM
@@ -288,24 +307,30 @@ where
                     () = &mut shutdown_signal => {
                         break
                     },
-                    () = cancel_token.cancelled() => {
-                        break
-                    },
-                    Some(Ok((doip_msg, source_addr))) = socket.recv() => {
-                        if let DoipPayload::VehicleAnnouncementMessage(_) = &doip_msg.payload {
-                            handle_doip_response(
-                                &transport_config,
-                                &state,
-                                DoipMessageContext {
-                                    doip_msg,
-                                    source_addr,
-                                    netmask,
-                                },
-                                &gateway_ecu_map,
-                                &gateway_ecu_name_map,
-                                variant_detection.clone(),
-                                Arc::clone(&connectivity_handler),
-                            ).await;
+                    response = socket.recv() => {
+                        match response {
+                            Some(Ok((doip_msg, source_addr))) => {
+                                if let DoipPayload::VehicleAnnouncementMessage(_) = &doip_msg.payload {
+                                    handle_doip_response(
+                                        &transport_config,
+                                        &state,
+                                        &connection_tasks,
+                                        DoipMessageContext {
+                                            doip_msg,
+                                            source_addr,
+                                            netmask,
+                                        },
+                                        &gateway_ecu_map,
+                                        &gateway_ecu_name_map,
+                                        notifications.clone(),
+                                    ).await;
+                                }
+                            }
+                            Some(Err(error)) => tracing::warn!(?error, "Failed to receive VAM"),
+                            None => {
+                                tracing::warn!("VAM socket closed");
+                                break;
+                            }
                         }
                     },
                 }

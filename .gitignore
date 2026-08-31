@@ -45,3 +45,6 @@ mbedtls-4*
 
 # Python virtual environments
 .venv
+
+# Heaptrack allocation captures
+heaptrack.*

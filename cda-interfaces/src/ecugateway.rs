@@ -11,9 +11,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{RwLock, mpsc};
 
 use crate::{
     DiagServiceError, EcuAddresses, HashMap, ServicePayload, Shutdown, uds::TransportResponse,
@@ -136,22 +136,6 @@ pub trait NetworkTopology: Send + Sync {
     ) -> impl Future<Output = Option<String>> + Send {
         std::future::ready(None)
     }
-}
-
-/// An [`EcuGateway`] that may own a reusable transport resource.
-///
-/// Implementing this trait allows a reload handler to retrieve and hand back an existing
-/// transport resource to the factory during a database reload. Gateways without a reusable
-/// resource, such as CAN-only gateways, return `None`.
-///
-/// The associated resource type is deliberately opaque in `cda-interfaces` so that this crate
-/// stays free of dependencies on concrete transport implementations.
-pub trait ReusableTransportResource {
-    /// Opaque reusable transport resource type (e.g. `cda_comm_doip::socket::DoIPUdpSocket`).
-    type TransportResource: Send + Sync + 'static;
-
-    /// Returns a shared, cloneable handle to the reusable transport resource when present.
-    fn reusable_transport_resource(&self) -> Option<Arc<Mutex<Self::TransportResource>>>;
 }
 
 /// Core gateway supertrait: physical and functional sends + topology queries.
