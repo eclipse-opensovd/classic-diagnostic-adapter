@@ -191,6 +191,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         parameters: FlashTransferStartParams<'_>,
     ) -> Result<(), DiagServiceError> {
+        let communication_guard = self.require_communication_ready()?;
         let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
 
         let FlashTransferStartParams {
@@ -244,14 +245,6 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
         let ecu_name_clone = ecu_name.clone();
 
         let (sender, receiver) = watch::channel::<bool>(false);
-
-        // Shared access keeps this transfer from overlapping an exclusive
-        // operation, e.g. a communication shutdown or a flash transfer.
-        let communication_guard = self.communication_access.acquire().map_err(|error| {
-            self.build_communication_not_ready_err(format!(
-                "Diagnostic communication unavailable: {error}"
-            ))
-        })?;
 
         // Check-and-insert under a single mutex hold, so concurrent requests for
         // the same ECU are serialized.

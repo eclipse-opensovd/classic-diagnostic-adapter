@@ -216,6 +216,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         ),
         DiagServiceError,
     > {
+        let _communication_guard = self.require_communication_ready()?;
         let ecu = self.uds_ecu_db(ecu_name)?;
         let (read_func, extended_data_lookup) = ecu
             .read()
@@ -463,6 +464,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         scope: Option<String>,
         memory_selection: Option<u8>,
     ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError> {
+        let _communication_guard = self.require_communication_ready()?;
         let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
         let mut all_dtcs = HashMap::new();
         let scoped_services: Vec<_> = ecu
@@ -644,6 +646,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         fault_code: Option<String>,
     ) -> Result<Self::Response, DiagServiceError> {
+        let _communication_guard = self.require_communication_ready()?;
         let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
 
         let delete_dtc_service = ecu.read().await.lookup_service_through_func_class(
@@ -703,36 +706,37 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         scope: &str,
     ) -> Result<Self::Response, DiagServiceError> {
+        let _communication_guard = self.require_communication_ready()?;
         let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
+        let fault_config = &self.fault_config;
 
         // If the requested scope is the default scope, delegate to the standard delete_dtcs path.
-        if scope.eq_ignore_ascii_case(&self.fault_config.default_scope) {
+        if scope.eq_ignore_ascii_case(&fault_config.default_scope) {
             return self.delete_dtcs(ecu_name, security_plugin, None).await;
         }
 
         // When a user-defined scope is provided, use the configured custom
         // clear service (e.g. RoutineControl 31 01 42 00) via `self.send`
         // which does not require any additional parameters, per definition.
-        if !scope.eq_ignore_ascii_case(&self.fault_config.user_memory_scope) {
+        if !scope.eq_ignore_ascii_case(&fault_config.user_memory_scope) {
             return Err(DiagServiceError::InvalidParameter {
                 possible_values: HashSet::from_iter([
-                    self.fault_config.default_scope.clone(),
-                    self.fault_config.user_memory_scope.clone(),
+                    fault_config.default_scope.clone(),
+                    fault_config.user_memory_scope.clone(),
                 ]),
             });
         }
 
-        let user_defined_dtc_clear_service = self
-            .fault_config
+        let user_defined_dtc_clear_service = fault_config
             .user_defined_dtc_clear_service
             .as_ref()
             .ok_or_else(|| {
-                DiagServiceError::InvalidConfiguration(
-                    "User defined DTC scope name is not set in the configuration, but custom \
-                     scope clear is requested"
-                        .to_owned(),
-                )
-            })?;
+            DiagServiceError::InvalidConfiguration(
+                "User defined DTC scope name is not set in the configuration, but custom scope \
+                 clear is requested"
+                    .to_owned(),
+            )
+        })?;
 
         let delete_dtc_service = ecu
             .read()
