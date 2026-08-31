@@ -23,8 +23,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     make \
     && rm -rf /var/lib/apt/lists/*
 
-# Install cargo-chef and sccache
-RUN cargo install cargo-chef sccache --locked
+# sccache 0.18 requires Rust 1.91, while this image builds with Rust 1.88.
+RUN cargo install cargo-chef --locked && \
+    cargo install sccache --version 0.17.0 --locked
 
 # --- Stage 2: Prepare the recipe (dependencies only) ---
 FROM chef AS planner
