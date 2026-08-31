@@ -31,7 +31,6 @@ use crate::util::{
     },
 };
 
-mod configuration;
 mod custom_routes;
 mod data;
 mod deferred_init;
