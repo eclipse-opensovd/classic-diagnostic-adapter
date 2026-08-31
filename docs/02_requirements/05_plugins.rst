@@ -17,10 +17,28 @@ Plugins
 API
 ---
 
-The plugin system API must support the following use-cases.
+The plugin system API must support the following use-cases. An available plugin
+hook is not, by itself, a general HTTP interception contract: each hook has only
+the authority and request context explicitly assigned to its plugin type.
 
 * Plugins must be able to utilize all the APIs in the CDA.
-* Plugins must be able to access and modify a SOVD-request-context, if applicable for the type/interception point of that plugin
+* Plugins must be able to access and modify a SOVD-request-context
+
+Communication Lifecycle Plugins
+-------------------------------
+
+The communication lifecycle plugin is an authoritative startup-selected facade,
+not a generic HTTP interceptor. Its synchronous restricted-request hook may
+trigger nonblocking deferred communication enablement, but it cannot select,
+delay, replace, or mutate the denial response. HTTP protections are separately
+owned opaque resources; no plugin hook receives an identifier or authority to
+lift another owner's protection.
+
+A future generic request/response interception extension may provide a Tower
+finalizer that observes requests and downstream responses. That extension must
+remain separate from communication lifecycle authority and HTTP-protection
+ownership. It must not use response customization to grant cross-owner
+protection mutation authority.
 
 .. _requirements-plugins-security:
 

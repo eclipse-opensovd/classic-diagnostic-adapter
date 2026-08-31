@@ -12,13 +12,16 @@
  */
 
 use std::{
-    sync::{Arc, LazyLock},
+    future::Future,
+    panic::AssertUnwindSafe,
+    sync::LazyLock,
     time::{Duration, Instant},
 };
 
 use cda_health::config::HealthConfig;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, HashMapExtensions,
+    communication_control::CommunicationSettings,
     config::ConfigSanity,
     datatypes::{
         ComParamConfig, ComParamPrecedence, ComParams, ComponentsConfig, DatabaseNamingConvention,
@@ -27,13 +30,14 @@ use cda_interfaces::{
 };
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 use cda_tracing::LoggingConfig;
+use futures::FutureExt;
 use http::{Method, StatusCode};
 use opensovd_cda_lib::{
-    cda_version,
     config::configfile::{
         CanConfig, CanEcuMapping, Configuration, DatabaseConfig, EcuComParams, EcuConfig,
         RuntimeUpdateConfig, ServerConfig, StrictConfig, TransportOverride, TransportType,
     },
+    update::UpdatePluginBuilder,
 };
 use sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response as NetworkStructureResponse;
 use tokio::sync::{Mutex, MutexGuard, OnceCell};
@@ -49,6 +53,21 @@ static TEST_RUNTIME: OnceCell<TestRuntime> = OnceCell::const_new();
 static EXCLUSIVE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 static CDA_SHUTDOWN: LazyLock<Mutex<Option<tokio::sync::broadcast::Sender<()>>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// The running CDA's task, awaited by [`stop_cda`] so that the instance is only
+/// observed as stopped once its port is released. Otherwise a following
+/// [`start_cda`] races it for the same port.
+static CDA_TASK: LazyLock<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
+    LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// The communication settings the shared CDA is currently running with, or
+/// `None` while no CDA is running.
+///
+/// A test inherits whichever instance the previous one left behind, so
+/// [`ensure_cda_running`] uses this to tell an unusable leftover (stopped, or
+/// running in deferred mode) from the plain instance most tests expect.
+static RUNNING_CDA_COMMUNICATION: LazyLock<Mutex<Option<CommunicationSettings>>> =
     LazyLock::new(|| Mutex::new(None));
 
 /// Tokio isolates the runtime for each test.
@@ -77,8 +96,6 @@ const CAN_BUS_NAME: &str = "vcan0";
 /// service is reachable by its compose service name over the bridge network.
 const CAN_DOCKER_SOCKETCAND_HOST: &str = "socketcand";
 
-const MAIN_HEALTH_COMPONENT_KEY: &str = "main";
-
 pub(crate) struct TestRuntime {
     pub(crate) config: Configuration,
     pub(crate) ecu_sim: EcuSim,
@@ -90,13 +107,42 @@ pub(crate) struct EcuSim {
     pub(crate) control_port: u16,
 }
 
+/// Whether runtime initialization brings the CDA up along with the rest of the
+/// infrastructure.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CdaStartup {
+    /// Start the CDA as part of the setup and wait for it to report ready.
+    Immediate,
+    /// Start only the ECU simulator. The test starts the CDA itself, e.g. via
+    /// [`restart_cda`].
+    Deferred,
+}
+
 pub(crate) async fn setup_integration_test<'a>(
+    exclusive: bool,
+) -> Result<(&'a TestRuntime, Option<MutexGuard<'a, ()>>), TestingError> {
+    setup(CdaStartup::Immediate, exclusive).await
+}
+
+/// Like [`setup_integration_test`], but leaves the CDA stopped. The ECU
+/// simulator runs and the caller starts the CDA itself, e.g. via
+/// [`restart_cda`], for tests that control exactly when it starts.
+pub(crate) async fn setup_integration_test_without_cda<'a>(
+    exclusive: bool,
+) -> Result<(&'a TestRuntime, Option<MutexGuard<'a, ()>>), TestingError> {
+    setup(CdaStartup::Deferred, exclusive).await
+}
+
+async fn setup<'a>(
+    cda: CdaStartup,
     exclusive: bool,
 ) -> Result<(&'a TestRuntime, Option<MutexGuard<'a, ()>>), TestingError> {
     let lock_guard = EXCLUSIVE_LOCK.lock().await;
 
+    // The infrastructure is process-wide, so only the first test through here
+    // decides whether the CDA is started as part of initialization.
     let runtime = match TEST_RUNTIME
-        .get_or_try_init(|| async { initialize_runtime().await })
+        .get_or_try_init(|| async { initialize_runtime(cda).await })
         .await
     {
         Ok(runtime) => runtime,
@@ -106,6 +152,13 @@ pub(crate) async fn setup_integration_test<'a>(
         }
     };
 
+    // Every later test has to establish the CDA state it needs itself, rather
+    // than depending on the mode the first test happened to pick.
+    match cda {
+        CdaStartup::Immediate => ensure_cda_running(&runtime.config).await?,
+        CdaStartup::Deferred => stop_shared_cda().await,
+    }
+
     // Make sure we have a clean state at the beginning of the test
     ecusim::reset_sim(&runtime.ecu_sim).await?;
     if exclusive {
@@ -114,16 +167,13 @@ pub(crate) async fn setup_integration_test<'a>(
         tracing::debug!("forwarding exclusive lock");
         Ok((runtime, Some(lock_guard)))
     } else {
-        // For non-exclusive tests, just return the cloned Arc.
         Ok((runtime, None))
     }
 }
 
-async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
+async fn initialize_runtime(cda: CdaStartup) -> Result<TestRuntime, TestingError> {
     let tracing = cda_tracing::new();
-    let layers = vec![cda_tracing::new_term_subscriber(
-        &cda_tracing::LoggingConfig::default(),
-    )];
+    let layers = vec![cda_tracing::new_term_subscriber(&LoggingConfig::default())];
     cda_tracing::init_tracing(tracing.with(layers)).map_err(|e| {
         TestingError::SetupError(format!("Failed to initialize tracing for tests: {e}"))
     })?;
@@ -164,19 +214,31 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
     register_panic_hook();
     if use_docker() {
         write_config_toml(&test_container_dir()?, config.clone())?;
-        start_docker_compose(cda_port, gateway_port, sim_control_port)?;
+        start_docker_compose(cda, cda_port, gateway_port, sim_control_port)?;
     } else {
         if can_infra() {
             start_ecu_sim_can(&ecu_sim).await?;
         } else {
             start_ecu_sim_doip(&ecu_sim).await?;
         }
-        start_cda(config.clone());
+        if cda == CdaStartup::Immediate {
+            start_cda(config.clone());
+        }
     }
 
-    if let Err(e) = wait_for_cda_online(&config.server).await {
-        dump_docker_logs();
-        return Err(e);
+    match cda {
+        CdaStartup::Immediate => {
+            if let Err(e) = wait_for_cda_online(&config.server).await {
+                dump_docker_logs();
+                return Err(e);
+            }
+            mark_cda_started(&config).await;
+        }
+        // Nothing else to wait for. `start_ecu_sim_*` already waited for the sim.
+        CdaStartup::Deferred if use_docker() => {
+            wait_for_ecu_sim_ready(&ecu_sim.host, ecu_sim.control_port).await?;
+        }
+        CdaStartup::Deferred => {}
     }
 
     Ok(TestRuntime { config, ecu_sim })
@@ -273,7 +335,7 @@ fn base_test_config(
         },
         can: None,
         database: DatabaseConfig {
-            path: mdd_file_path()?,
+            seed_dir: mdd_file_path()?,
             naming_convention: DatabaseNamingConvention::default(),
             exit_no_database_loaded: true,
             fallback_to_base_variant: true,
@@ -318,6 +380,7 @@ fn base_test_config(
             init_storage_from_database_path: true,
             ..RuntimeUpdateConfig::default()
         },
+        communication: CommunicationSettings::default(),
         strict: StrictConfig::default(),
     })
 }
@@ -441,141 +504,71 @@ pub(crate) fn host() -> String {
 }
 
 pub(crate) fn start_cda(config: Configuration) {
-    // Some unwraps are used here, this is on purpose
-    // as we want the tests to fail hard if CDA fails to start.
-    TOKIO_RUNTIME.spawn(async move {
-        let webserver_config = cda_sovd::WebServerConfig {
-            host: config.server.address.clone(),
-            port: config.server.port,
-        };
-
-        let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
-        *CDA_SHUTDOWN.lock().await = Some(shutdown_tx);
-
-        let clonable_shutdown_signal = cda_interfaces::shutdown_signal(async move {
-            shutdown_rx.recv().await.ok();
-        });
-
-        // Launch the webserver with deferred initialization
-        let (dynamic_router, webserver_join_handle) =
-            match cda_sovd::launch_webserver(webserver_config, clonable_shutdown_signal.clone())
-                .await
-            {
-                Ok((router, jh)) => (router, jh),
-                Err(e) => {
-                    tracing::error!(error = ?e, "Failed to launch webserver");
-                    std::process::exit(1);
-                }
-            };
-
-        let health = cda_health::add_health_routes(&dynamic_router, cda_version().to_owned()).await;
-        let main_health_provider = {
-            let provider = Arc::new(cda_health::StatusHealthProvider::new(
-                cda_health::Status::Starting,
-            ));
-            health
-                .register_provider(
-                    MAIN_HEALTH_COMPONENT_KEY,
-                    Arc::clone(&provider) as Arc<dyn cda_health::HealthProvider>,
-                )
-                .await
-                .map_err(|e| {
-                    tracing::error!(error = %e, "Failed to register main health provider");
-                    std::process::exit(1);
-                })
-                .ok();
-            provider
-        };
-        let health = Some(health);
-
-        let vehicle_data = opensovd_cda_lib::load_vehicle_data::<DefaultSecurityPluginData>(
-            &config,
-            clonable_shutdown_signal.clone(),
-            health.as_ref(),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!({error=?e});
-            std::process::exit(1);
-        })
-        .unwrap();
-
-        // Register version endpoints
-        if let serde_json::Value::Object(version_info) = serde_json::json!({
-            "id": "version",
-            "data": {
-                "name": "Eclipse OpenSOVD Classic Diagnostic Adapter",
-                "api": {
-                    "version": "1.1"
+    start_cda_with_setup(
+        config,
+        opensovd_cda_lib::Setup::<DefaultSecurityPluginData, DefaultSecurityPlugin>::new()
+            .with_existing_tracing()
+            .with_update_plugin(opensovd_cda_lib::update::update_plugin_fn(
+                |infra: opensovd_cda_lib::setup::CdaRuntime<DefaultSecurityPluginData>| async {
+                    opensovd_cda_lib::update::create_default_update_plugin::<
+                        DefaultSecurityPluginData,
+                        DefaultSecurityPlugin,
+                    >(infra)
+                    .await
                 },
-                "implementation": {
-                    "version": cda_version(),
-                }
-            }
-        }) {
-            cda_sovd::add_static_data_endpoint(
-                &dynamic_router,
-                version_info.clone(),
-                "/vehicle/v15/apps/sovd2uds/data/version",
-            )
-            .await;
-            cda_sovd::add_static_data_endpoint(
-                &dynamic_router,
-                version_info,
-                "/vehicle/v15/data/version",
-            )
-            .await;
-        }
+            )),
+    );
+}
 
-        cda_sovd::add_vehicle_routes::<_, _, DefaultSecurityPlugin>(
-            &dynamic_router,
-            cda_sovd::VehicleConfig {
-                flash_files_path: config.flash_files_path.clone(),
-                functional_group_config: config.functional_description,
-                components_config: config.components,
-            },
-            cda_sovd::VehicleResources {
-                ecu_uds: vehicle_data.uds_manager,
-                file_manager: vehicle_data.file_managers,
-                locks: vehicle_data.locks,
-                update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            },
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!({error=?e});
-            std::process::exit(1);
-        })
-        .unwrap();
+/// Start a CDA instance on the shared `TOKIO_RUNTIME` with a custom [`Setup`].
+///
+/// The shutdown sender is stored in `CDA_SHUTDOWN` so that [`stop_cda`] and
+/// [`restart_cda`] work regardless of which setup was used.
+pub(crate) fn start_cda_with_setup<UPB>(
+    config: Configuration,
+    setup: opensovd_cda_lib::Setup<DefaultSecurityPluginData, DefaultSecurityPlugin, UPB>,
+) where
+    UPB: UpdatePluginBuilder<DefaultSecurityPluginData> + Send + 'static,
+{
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
+    let setup = setup.with_shutdown_signal(cda_interfaces::shutdown_signal(async move {
+        shutdown_rx.recv().await.ok();
+    }));
 
-        tracing::info!("CDA fully initialized and ready to serve requests");
-        main_health_provider
-            .update_status(cda_health::Status::Up)
-            .await;
-
-        // Wait for shutdown signal
-        clonable_shutdown_signal.await;
-        tracing::info!("Shutting down...");
-        webserver_join_handle
+    let handle = TOKIO_RUNTIME.spawn(async move {
+        *CDA_SHUTDOWN.lock().await = Some(shutdown_tx);
+        opensovd_cda_lib::run_with_ext_from_config(config, setup)
             .await
-            .map_err(|e| {
-                tracing::error!({error=?e}, "Webserver task join error");
-                std::process::exit(1);
-            })
-            .ok();
+            .expect("CDA exited with error");
     });
+    *CDA_TASK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
 }
 
 pub(crate) async fn stop_cda() -> Result<(), TestingError> {
-    if let Some(sender) = CDA_SHUTDOWN.lock().await.as_ref() {
-        sender.send(()).ok();
-        Ok(())
-    } else {
-        Err(TestingError::ProcessFailed("CDA not running".to_owned()))
+    let Some(sender) = CDA_SHUTDOWN.lock().await.take() else {
+        return Err(TestingError::ProcessFailed("CDA not running".to_owned()));
+    };
+    sender.send(()).ok();
+    // Await the task, not just the shutdown signal. A following `start_cda`
+    // binds the same port and would race the still-open listener.
+    let task = CDA_TASK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(task) = task {
+        task.await.ok();
     }
+    Ok(())
 }
 
+/// Writes the compose `.env`, builds the images and brings the stack up.
+///
+/// With [`CdaStartup::Deferred`] only the ecu-sim is started. `--no-deps` keeps
+/// compose from pulling in the `cda` service the test starts itself.
 fn start_docker_compose(
+    cda: CdaStartup,
     cda_port: u16,
     gateway_port: u16,
     sim_control_port: u16,
@@ -615,10 +608,18 @@ fn start_docker_compose(
         .map_err(|e| TestingError::ProcessFailed(format!("Failed to build docker compose: {e}")))?;
     check_command_success(status, "docker compose build failed")?;
 
-    docker_compose_up(None)
+    match cda {
+        CdaStartup::Immediate => docker_compose_up(None, false),
+        CdaStartup::Deferred => docker_compose_up(Some("ecu-sim".to_owned()), true),
+    }
 }
 
-fn docker_compose_up(container: Option<String>) -> Result<(), TestingError> {
+/// `docker compose up -d` for a single service (or all services when
+/// `container` is `None`).
+///
+/// `no_deps` maps to `--no-deps`: without it compose (re)starts the service's
+/// `depends_on` targets, resurrecting containers a test stopped on purpose.
+fn docker_compose_up(container: Option<String>, no_deps: bool) -> Result<(), TestingError> {
     let test_container_dir = test_container_dir()?;
     let mut cmd = std::process::Command::new("docker");
     cmd.arg("compose");
@@ -633,6 +634,10 @@ fn docker_compose_up(container: Option<String>) -> Result<(), TestingError> {
         .arg("-d")
         .env("DOCKER_BUILDKIT", "1")
         .env("COMPOSE_PROFILES", compose_profiles());
+
+    if no_deps {
+        cmd.arg("--no-deps");
+    }
 
     if let Some(container_name) = container {
         cmd.arg(container_name);
@@ -770,7 +775,7 @@ fn write_config_toml(
     config.functional_description.description_database = "functional_groups".into();
 
     "0.0.0.0".clone_into(&mut config.server.address);
-    "/app/odx".clone_into(&mut config.database.path);
+    "/app/odx".clone_into(&mut config.database.seed_dir);
 
     // In docker the socketcand daemon runs in its own service, reachable by
     // service name over the bridge network (not the host loopback used locally).
@@ -881,7 +886,7 @@ fn write_docker_env_file(
 
 pub(crate) async fn start_ecu_sim_doip(sim: &EcuSim) -> Result<(), TestingError> {
     if use_docker() {
-        docker_compose_up(Some("ecu-sim".to_owned()))?;
+        docker_compose_up(Some("ecu-sim".to_owned()), false)?;
     } else {
         let ecu_sim_dir = ecu_sim_dir()?;
         if !ecu_sim_dir.exists() {
@@ -986,27 +991,145 @@ fn stop_ecu_sim_sync() -> Result<(), TestingError> {
     TOKIO_RUNTIME.block_on(async { stop_ecu_sim().await })
 }
 
-fn docker_compose_restart(container: Option<String>) -> Result<(), TestingError> {
+/// (Re)starts the shared CDA with `config`. A CDA that is not currently running
+/// is not an error, so this doubles as a plain start.
+pub(crate) async fn restart_cda(config: &Configuration) -> Result<(), TestingError> {
+    mark_cda_stopped().await;
+    if use_docker() {
+        write_config_toml(&test_container_dir()?, config.clone())?;
+        // Restart atomically so the container restart policy cannot race a
+        // separate stop/up sequence and leave CDA unavailable.
+        // `--no-deps` prevents restarting an ECU sim a test stopped on purpose.
+        // The restarted process reloads the bind-mounted configuration.
+        docker_compose_restart("cda")?;
+    } else {
+        // `stop_cda` only fails when nothing is running.
+        stop_cda().await.ok();
+        start_cda(config.clone());
+    }
+    wait_for_cda_online(&config.server).await?;
+    mark_cda_started(config).await;
+    Ok(())
+}
+
+/// Restarts the shared CDA after applying a test-specific configuration change.
+pub(crate) async fn restart_cda_with_config<F>(
+    config: &Configuration,
+    configure: F,
+) -> Result<(), TestingError>
+where
+    F: FnOnce(&mut Configuration),
+{
+    let mut config = config.clone();
+    configure(&mut config);
+    restart_cda(&config).await
+}
+
+/// Restarts the shared CDA with `temporary_config`, runs `body`, then tears it
+/// down and restores `config` even if `body` panics.
+pub(crate) async fn with_temporary_cda<F, G, Fut, FutPre>(
+    config: &Configuration,
+    temporary_config: Configuration,
+    pre_start: G,
+    body: F,
+) where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ()>,
+    G: FnOnce() -> FutPre,
+    FutPre: Future<Output = ()>,
+{
+    pre_start().await;
+
+    restart_cda(&temporary_config)
+        .await
+        .expect("Failed to start CDA");
+
+    let outcome = AssertUnwindSafe(body()).catch_unwind().await;
+
+    restart_cda(config)
+        .await
+        .expect("Failed to restore normal CDA");
+
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// Restores the shared CDA if the previous test left none running, or left one
+/// running with different [`CommunicationSettings`]. Restarting is expensive, so
+/// it only happens when the running instance cannot serve this test.
+async fn ensure_cda_running(config: &Configuration) -> Result<(), TestingError> {
+    let running_with = RUNNING_CDA_COMMUNICATION.lock().await.clone();
+    if running_with.as_ref() == Some(&config.communication) && cda_is_online(&config.server).await {
+        return Ok(());
+    }
+
+    tracing::info!("Shared CDA is missing or misconfigured, restarting it for this test");
+    restart_cda(config).await
+}
+
+/// Stops the shared CDA, leaving the ECU simulator up, so that a test starting
+/// its own CDA sees a quiet vehicle network.
+async fn stop_shared_cda() {
+    mark_cda_stopped().await;
+    if use_docker() {
+        // A no-op (and a success) when the container does not exist.
+        let _ = docker_compose_stop("cda");
+    } else {
+        // Fails only when nothing is running, which is the desired state anyway.
+        stop_cda().await.ok();
+    }
+}
+
+/// One-shot readiness probe: whether a CDA is serving right now, as opposed to
+/// [`wait_for_cda_online`]'s polling.
+async fn cda_is_online(cfg: &ServerConfig) -> bool {
+    let url = format!("http://{}:{}/health/ready", cfg.address, cfg.port);
+    reqwest::Client::new()
+        .get(url)
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await
+        .is_ok_and(|response| response.status() == StatusCode::NO_CONTENT)
+}
+
+async fn mark_cda_started(config: &Configuration) {
+    *RUNNING_CDA_COMMUNICATION.lock().await = Some(config.communication.clone());
+}
+
+async fn mark_cda_stopped() {
+    *RUNNING_CDA_COMMUNICATION.lock().await = None;
+}
+
+fn docker_compose_restart(container: &str) -> Result<(), TestingError> {
     let test_container_dir = test_container_dir()?;
     let mut cmd = std::process::Command::new("docker");
-    cmd.arg("compose").arg("restart");
-    if let Some(container_name) = container {
-        cmd.arg(container_name);
+    cmd.arg("compose");
+    if coverage_mode() {
+        append_coverage_compose_files(&mut cmd);
     }
-    let status = cmd.current_dir(&test_container_dir).status().map_err(|e| {
-        TestingError::ProcessFailed(format!("Failed to restart docker compose: {e}"))
-    })?;
+    let status = cmd
+        .arg("restart")
+        .arg("--no-deps")
+        .arg(container)
+        .current_dir(&test_container_dir)
+        .status()
+        .map_err(|e| {
+            TestingError::ProcessFailed(format!("Failed to restart docker compose: {e}"))
+        })?;
     check_command_success(status, "docker compose restart failed")
 }
 
-pub(crate) async fn restart_cda(config: &Configuration) -> Result<(), TestingError> {
-    if use_docker() {
-        docker_compose_restart(Some("cda".to_owned()))?;
-    } else {
-        stop_cda().await?;
-        start_cda(config.clone());
-    }
-    wait_for_cda_online(&config.server).await
+fn docker_compose_stop(container: &str) -> Result<(), TestingError> {
+    let test_container_dir = test_container_dir()?;
+    let status = std::process::Command::new("docker")
+        .arg("compose")
+        .arg("stop")
+        .arg(container)
+        .current_dir(&test_container_dir)
+        .status()
+        .map_err(|e| TestingError::ProcessFailed(format!("Failed to stop docker compose: {e}")))?;
+    check_command_success(status, "docker compose stop failed")
 }
 
 fn use_docker() -> bool {

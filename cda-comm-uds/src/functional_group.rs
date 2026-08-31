@@ -199,6 +199,17 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
             return HashMap::new();
         }
 
+        let _guard = match self.require_communication_ready() {
+            Ok(guard) => guard,
+            Err(error) => {
+                let mut result_map = HashMap::new();
+                for ecu_name in ecu_list {
+                    result_map.insert(ecu_name, Err(error.clone()));
+                }
+                return result_map;
+            }
+        };
+
         let Some(globals_ecu) = self.ecus.get(&self.functional_description_database) else {
             tracing::warn!(
                 functional_group = %functional_group,
@@ -356,7 +367,7 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
         params: Option<HashMap<String, serde_json::Value>>,
         map_to_json: bool,
     ) -> Result<Self::Response, DiagServiceError> {
-        let ecu = self.uds_ecu_db(ecu_name)?;
+        let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
         let service = ecu
             .read()
             .await

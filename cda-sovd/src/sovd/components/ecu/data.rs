@@ -346,8 +346,10 @@ pub(crate) mod diag_service {
             use aide::UseApi;
             use axum::{extract::State, http::StatusCode};
             use cda_interfaces::{
-                DiagServiceError, datatypes::ComponentDataInfo,
-                file_manager::mock::MockFileManager, mock::MockUdsEcu,
+                DiagServiceError,
+                datatypes::ComponentDataInfo,
+                file_manager::mock::MockFileManager,
+                mock::{MockUdsEcu, mock_ecu_state_online_variant_detected},
             };
             use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
 
@@ -357,6 +359,9 @@ pub(crate) mod diag_service {
             #[tokio::test]
             async fn returns_200_with_openapi_doc_when_service_exists() {
                 let mut mock_uds = MockUdsEcu::new();
+                mock_uds
+                    .expect_get_ecu_state()
+                    .returning(|_| Ok(mock_ecu_state_online_variant_detected()));
                 mock_uds
                     .expect_get_components_data_info()
                     .withf(|ecu, _| ecu == "TestECU")
@@ -403,6 +408,9 @@ pub(crate) mod diag_service {
             async fn returns_404_when_service_not_found() {
                 let mut mock_uds = MockUdsEcu::new();
                 mock_uds
+                    .expect_get_ecu_state()
+                    .returning(|_| Ok(mock_ecu_state_online_variant_detected()));
+                mock_uds
                     .expect_get_components_data_info()
                     .returning(|_, _| {
                         Ok(vec![ComponentDataInfo {
@@ -436,6 +444,9 @@ pub(crate) mod diag_service {
             #[tokio::test]
             async fn returns_error_when_data_info_lookup_fails() {
                 let mut mock_uds = MockUdsEcu::new();
+                mock_uds
+                    .expect_get_ecu_state()
+                    .returning(|_| Ok(mock_ecu_state_online_variant_detected()));
                 mock_uds
                     .expect_get_components_data_info()
                     .returning(|_, _| Err(DiagServiceError::NotFound("ECU not found".to_owned())));

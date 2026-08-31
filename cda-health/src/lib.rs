@@ -26,7 +26,7 @@ pub enum HealthError {
     ProviderAlreadyExists(String),
 }
 
-pub use cda_interfaces::health::{HealthProvider, Status};
+pub use cda_interfaces::health::{HealthProvider, HealthStatus, Status};
 use cda_sovd::dynamic_router::DynamicRouter;
 
 /// A simple health provider implementation that stores the last status.
@@ -53,11 +53,14 @@ impl StatusHealthProvider {
 }
 
 #[async_trait::async_trait]
-impl HealthProvider for StatusHealthProvider {
+impl HealthStatus for StatusHealthProvider {
     async fn status(&self) -> Status {
         *self.status.read().await
     }
+}
 
+#[async_trait::async_trait]
+impl HealthProvider for StatusHealthProvider {
     async fn set_status(&self, status: Status) {
         *self.status.write().await = status;
     }
@@ -65,7 +68,7 @@ impl HealthProvider for StatusHealthProvider {
 
 #[derive(Clone)]
 pub struct HealthState {
-    providers: Arc<RwLock<HashMap<String, Arc<dyn HealthProvider>>>>,
+    providers: Arc<RwLock<HashMap<String, Arc<dyn HealthStatus>>>>,
     version: String,
 }
 
@@ -78,7 +81,7 @@ impl HealthState {
     pub async fn register_provider(
         &self,
         name: impl Into<String>,
-        provider: Arc<dyn HealthProvider>,
+        provider: Arc<dyn HealthStatus>,
     ) -> Result<(), HealthError> {
         let name = name.into();
         let mut providers = self.providers.write().await;
@@ -357,7 +360,7 @@ mod tests {
         let provider = Arc::new(StatusHealthProvider::new(Status::Starting));
         let provider_clone = Arc::clone(&provider);
         state
-            .register_provider("database", provider_clone as Arc<dyn HealthProvider>)
+            .register_provider("database", provider_clone as Arc<dyn HealthStatus>)
             .await
             .unwrap();
 

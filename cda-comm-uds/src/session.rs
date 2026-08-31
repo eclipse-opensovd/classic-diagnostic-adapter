@@ -109,7 +109,7 @@ impl<S: EcuGateway, T: EcuManager> UdsSession for UdsManager<S, T> {
         expiration: Option<Duration>,
     ) -> Result<Self::Response, DiagServiceError> {
         tracing::info!(ecu_name = %ecu_name, session = %session, "Setting session");
-        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
+        let ecu_diag_service = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
         let dc = ecu_diag_service
             .read()
             .await
@@ -120,14 +120,6 @@ impl<S: EcuGateway, T: EcuManager> UdsSession for UdsManager<S, T> {
             .await?;
         match result.response_type() {
             DiagServiceResponseType::Positive => {
-                ecu_diag_service
-                    .read()
-                    .await
-                    .set_service_state(
-                        cda_interfaces::service_ids::SESSION_CONTROL,
-                        session.to_owned(),
-                    )
-                    .await;
                 self.start_reset_task(ecu_name, expiration, ResetType::Session)
                     .await;
 
@@ -178,7 +170,7 @@ impl<S: EcuGateway, T: EcuManager> UdsSession for UdsManager<S, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::sync::Arc;
 
     use cda_interfaces::{
         DynamicPlugin, EcuStateManager, HashMap, ServicePayload, TransportResponse, UdsSession,
@@ -186,12 +178,14 @@ mod tests {
         diagservices::{DiagServiceResponse, DiagServiceResponseType},
         service_ids,
     };
+    use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
     use tokio::sync::RwLock;
 
     use crate::{
         UdsManager,
-        test_helpers::{TestEcuDb, negative_session_response, positive_session_response},
-        transport::send_tests::TestGateway,
+        test_helpers::{
+            TestEcuDb, TestGateway, negative_session_response, positive_session_response,
+        },
     };
 
     const ECU: &str = "TestECU";
@@ -220,11 +214,8 @@ mod tests {
     /// Builds a manager whose ECU sits in `current_session` and whose gateway
     /// answers every session change with `response`.
     ///
-    /// The ECU's encoder deliberately leaves `ServicePayload::new_session`
-    /// unset, reproducing the case where the state chart has no transition
-    /// starting from the active session. The transport layer's `new_session`
-    /// fallback therefore cannot fire, so anything these tests observe in the
-    /// `SESSION_CONTROL` state was written by `set_ecu_session` itself.
+    /// The test ECU encoder supplies `ServicePayload::new_session`, so these
+    /// tests exercise the production path that stores it after a positive response.
     async fn manager_in_session(
         current_session: &str,
         response: Vec<u8>,
@@ -237,7 +228,7 @@ mod tests {
             gateway_replying_with(response),
             ecus,
             FaultConfig::default(),
-            enable_communication_access_for_test(),
+            enabled_communication_access_for_test(),
         );
         ecu(&manager)
             .await
@@ -292,15 +283,7 @@ mod tests {
         assert_eq!(current_session(&manager).await.as_deref(), Some("Default"));
     }
 
-    /// Regression test for the ECU appearing stuck in the programming session.
-    /// The state chart lookup that populates `ServicePayload::new_session` only
-    /// resolves transitions whose source is the active state, so once the ECU
-    /// had left the default session that fallback stopped firing and the stored
-    /// state was never overwritten again.
-    ///
-    /// `TestEcuDb` cannot reproduce that lookup (it has no state chart), so what
-    /// this pins down is the consequence: a confirmed session change replaces an
-    /// existing, non-default value rather than only filling an empty slot.
+    /// A confirmed session change replaces an existing, non-default value.
     #[tokio::test]
     async fn positive_response_replaces_existing_non_default_session_state() {
         let manager = manager_in_session("Programming", positive_session_response()).await;

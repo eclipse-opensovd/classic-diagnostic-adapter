@@ -202,8 +202,18 @@ impl<S: SecurityPlugin> EcuManager<S> {
         }
 
         let new_session = current_session.and_then(|session| {
-            state_chart_session
-                .and_then(|sc| Self::lookup_state_transition(diag_comm, &(sc.into()), session))
+            state_chart_session.and_then(|sc| {
+                let state_chart = sc.into();
+                Self::lookup_state_transition(diag_comm, &state_chart, session).or_else(|| {
+                    let default_session = self
+                        .default_state(&self.database_naming_convention.semantics.session)
+                        .ok()?;
+                    if default_session.eq_ignore_ascii_case(session) {
+                        return None;
+                    }
+                    Self::lookup_state_transition(diag_comm, &state_chart, &default_session)
+                })
+            })
         });
         let new_security = current_security.and_then(|security| {
             state_chart_security
@@ -511,7 +521,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_lookup_state_transition_no_match_returns_none() {
+    async fn test_payload_state_transition_falls_back_to_default_session() {
         let (ecu_manager, dc) =
             create_ecu_manager_with_state_transitions(ServiceSecurityTransition::LockedToExtended);
         {
@@ -535,10 +545,7 @@ mod tests {
             result.err()
         );
         let payload = result.unwrap();
-        assert!(
-            payload.new_session.is_none(),
-            "expected no session transition when current state does not match"
-        );
+        assert_eq!(payload.new_session, Some("ExtendedSession".to_owned()));
         assert!(
             payload.new_security.is_none(),
             "expected no security transition when current state does not match"

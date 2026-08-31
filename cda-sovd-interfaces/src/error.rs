@@ -14,13 +14,12 @@
 use cda_interfaces::HashMap;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(schemars::JsonSchema, PartialEq, Eq, Clone, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "kebab-case")]
 #[allow(
     dead_code,
     reason = "Pre-filled with all SOVD error codes; not all variants used yet"
 )]
-#[derive(schemars::JsonSchema, PartialEq, Eq)]
 pub enum ErrorCode {
     /// Details are specified in the `vendor_code`
     VendorSpecific,

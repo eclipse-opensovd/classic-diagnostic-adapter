@@ -28,7 +28,7 @@
 
 use std::time::Duration;
 
-use cda_interfaces::TransportProbe;
+use cda_interfaces::{TransportProbe, VariantDetectionRequest, VariantDetectionSender};
 use tokio_util::sync::CancellationToken;
 
 use super::{CanDiagGateway, background::BackgroundTask};
@@ -45,7 +45,7 @@ impl CanDiagGateway {
     /// them `Online` through the regular detection flow.
     pub(super) fn start_rediscovery(
         &self,
-        variant_detection: tokio::sync::mpsc::Sender<Vec<String>>,
+        variant_detection: VariantDetectionSender,
     ) -> BackgroundTask {
         let gateway = self.clone();
         let cancel = CancellationToken::new();
@@ -87,7 +87,11 @@ impl CanDiagGateway {
                         ecus = ?recovered,
                         "ECUs rediscovered on CAN"
                     );
-                    if variant_detection.send(recovered).await.is_err() {
+                    if variant_detection
+                        .send(VariantDetectionRequest::new(recovered))
+                        .await
+                        .is_err()
+                    {
                         tracing::warn!(
                             "Variant detection channel closed, stopping CAN rediscovery"
                         );

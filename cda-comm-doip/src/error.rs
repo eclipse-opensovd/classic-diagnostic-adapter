@@ -38,6 +38,8 @@ pub enum DoipGatewaySetupError {
     ResourceError(String),
     #[error("Server error: `{0}`")]
     ServerError(String),
+    #[error("Invalid state: `{0}`")]
+    InvalidState(String),
 }
 
 /// Errors that can occur on an active `DoIP` connection.

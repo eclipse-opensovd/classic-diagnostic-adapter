@@ -11,7 +11,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
+
+pub mod request_guard;
 
 use aide::{
     axum::{
@@ -25,7 +27,7 @@ use axum::{
     Json,
     body::Bytes,
     extract::{Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, header::RETRY_AFTER},
     middleware,
     response::{IntoResponse, Response},
 };
@@ -33,6 +35,7 @@ use axum_extra::extract::WithRejection;
 use cda_interfaces::{
     Connectivity, FunctionalDescriptionConfig, HashMap, HashMapExtensions as _, SchemaProvider,
     UdsEcu, VariantState,
+    communication_control::{ActivationCause, CommunicationAccess, CommunicationGuard},
     datatypes::ComponentsConfig,
     diagservices::{FieldParseError, UdsPayloadData},
     file_manager::FileManager,
@@ -49,7 +52,7 @@ use sovd_interfaces::{
     components::{ComponentsResponse, ecu as sovd_ecu},
     error::DataError,
 };
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::{
@@ -64,12 +67,8 @@ pub(crate) mod apps;
 pub(crate) mod components;
 pub(crate) mod docs;
 pub(crate) mod error;
-pub mod execution_registry;
 pub(crate) mod functions;
 pub(crate) mod locks;
-pub mod update_guard;
-
-pub use execution_registry::EcuExecutionRegistry;
 
 trait IntoSovd {
     type SovdType;
@@ -111,14 +110,51 @@ pub(crate) struct WebserverEcuState<T: UdsEcu + Clone, U: FileManager> {
     locks: Arc<Locks>,
     // Map of Execution Id -> ComParamMap
     comparam_executions: Arc<RwLock<IndexMap<Uuid, sovd_ecu::operations::comparams::Execution>>>,
+    // Guards replace sampled execution activity as the source of update exclusion.
+    communication_activities: Arc<Mutex<HashMap<Uuid, CommunicationGuard>>>,
+    communication_access: Arc<dyn CommunicationAccess>,
     // Map of Service Name -> (Execution Id -> ServiceExecution) for ECU routine operations
     pub(crate) service_executions: Arc<RwLock<HashMap<String, IndexMap<Uuid, ServiceExecution>>>>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
     mdd_embedded_files: Arc<U>,
-    update_in_progress: Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Shared behaviour for execution-state types (`ServiceExecution` for single-ECU
+async fn release_communication_activity(
+    activities: &Mutex<HashMap<Uuid, CommunicationGuard>>,
+    id: &Uuid,
+) {
+    let activity = activities.lock().await.remove(id);
+    drop(activity);
+}
+
+pub(crate) fn with_retry_after(mut response: Response, retry_after: Option<Duration>) -> Response {
+    if let Some(retry_after) = retry_after {
+        let seconds = retry_after.as_secs();
+        let value = HeaderValue::try_from(seconds.to_string())
+            .expect("numeric Retry-After value is always valid");
+        response.headers_mut().insert(RETRY_AFTER, value);
+    }
+    response
+}
+
+/// Acquires a communication lease or starts authorized on-demand activation before
+/// returning a retryable SOVD error.
+pub(crate) fn acquire_communication_activity(
+    communication_access: &dyn CommunicationAccess,
+) -> Result<CommunicationGuard, ApiError> {
+    match communication_access.acquire() {
+        Ok(activity) => Ok(activity),
+        Err(error) => {
+            communication_access.request_activate(ActivationCause::DiagnosticRequest);
+            Err(ApiError::from_communication_error(
+                error,
+                communication_access.retry_after(),
+            ))
+        }
+    }
+}
+
+/// Shared behavior for execution-state types (`ServiceExecution` for single-ECU
 /// operations, `FgServiceExecution` for functional-group operations).
 pub(crate) trait ExecutionStatus {
     fn execution_status(&self) -> &sovd_ecu::operations::ExecutionStatus;
@@ -135,6 +171,35 @@ pub(crate) trait ExecutionStatus {
     fn placeholder() -> Self
     where
         Self: Sized;
+}
+
+/// Owns cleanup for a reserved async operation execution and its communication lease.
+pub(crate) struct ExecutionGuard<E> {
+    executions: Arc<RwLock<HashMap<String, IndexMap<Uuid, E>>>>,
+    communication_activities: Arc<Mutex<HashMap<Uuid, CommunicationGuard>>>,
+    service: String,
+    exec_id: Uuid,
+}
+
+impl<E: ExecutionStatus> ExecutionGuard<E> {
+    fn new(
+        executions: Arc<RwLock<HashMap<String, IndexMap<Uuid, E>>>>,
+        communication_activities: Arc<Mutex<HashMap<Uuid, CommunicationGuard>>>,
+        service: String,
+        exec_id: Uuid,
+    ) -> Self {
+        Self {
+            executions,
+            communication_activities,
+            service,
+            exec_id,
+        }
+    }
+
+    pub(crate) async fn cleanup(&self) {
+        remove_reserved_execution(&self.executions, &self.service, &self.exec_id).await;
+        release_communication_activity(&self.communication_activities, &self.exec_id).await;
+    }
 }
 
 /// Stored state for a single ECU routine execution (async lifecycle).
@@ -302,20 +367,18 @@ pub(crate) async fn guard_execution<T: ExecutionStatus + Clone>(
 /// On success the returned [`Uuid`] identifies the reserved execution slot.
 /// The caller **must** later call either [`finalize_execution`] (async
 /// success) or [`remove_reserved_execution`] (sync success / any error).
+///
+/// The caller must already hold a communication guard. Runtime-update admission
+/// is enforced by the request guard and communication access, so this function
+/// only reserves a per-service execution slot.
 pub(crate) async fn reserve_execution<E: ExecutionStatus>(
     executions: &RwLock<HashMap<String, IndexMap<Uuid, E>>>,
     service: &str,
     display_name: &str,
     include_schema: bool,
-    update_in_progress: &std::sync::atomic::AtomicBool,
+    id: Uuid,
 ) -> Result<Uuid, error::ErrorWrapper> {
     let mut guard = executions.write().await;
-    if update_in_progress.load(std::sync::atomic::Ordering::Acquire) {
-        return Err(error::ErrorWrapper {
-            error: ApiError::Conflict("Runtime update in progress, operation blocked".to_owned()),
-            include_schema,
-        });
-    }
     let has_running = guard.get(service).is_some_and(|m| {
         m.values()
             .any(|e| *e.execution_status() == sovd_ecu::operations::ExecutionStatus::Running)
@@ -328,7 +391,6 @@ pub(crate) async fn reserve_execution<E: ExecutionStatus>(
             include_schema,
         });
     }
-    let id = Uuid::new_v4();
     let mut entry = E::placeholder();
     entry.set_in_flight(true);
     guard
@@ -336,6 +398,43 @@ pub(crate) async fn reserve_execution<E: ExecutionStatus>(
         .or_default()
         .insert(id, entry);
     Ok(id)
+}
+
+/// Publishes a communication lease before making its execution visible, so every
+/// visible execution has an owner that can release the lease.
+pub(crate) async fn acquire_and_reserve_execution<E: ExecutionStatus>(
+    communication_access: &dyn CommunicationAccess,
+    executions: Arc<RwLock<HashMap<String, IndexMap<Uuid, E>>>>,
+    communication_activities: Arc<Mutex<HashMap<Uuid, CommunicationGuard>>>,
+    service: &str,
+    display_name: &str,
+    include_schema: bool,
+) -> Result<(Uuid, ExecutionGuard<E>), error::ErrorWrapper> {
+    let communication_activity =
+        acquire_communication_activity(communication_access).map_err(|error| {
+            error::ErrorWrapper {
+                error,
+                include_schema,
+            }
+        })?;
+    let exec_id = Uuid::new_v4();
+    communication_activities
+        .lock()
+        .await
+        .insert(exec_id, communication_activity);
+    if let Err(error) =
+        reserve_execution(&executions, service, display_name, include_schema, exec_id).await
+    {
+        release_communication_activity(&communication_activities, &exec_id).await;
+        return Err(error);
+    }
+    let guard = ExecutionGuard::new(
+        executions,
+        communication_activities,
+        service.to_owned(),
+        exec_id,
+    );
+    Ok((exec_id, guard))
 }
 
 /// Updates a previously reserved execution with the received parameters,
@@ -378,7 +477,7 @@ pub(crate) struct WebserverState<T: UdsEcu + Clone> {
     locks: Arc<Locks>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
     components_config: Arc<RwLock<ComponentsConfig>>,
-    update_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    communication_access: Arc<dyn CommunicationAccess>,
 }
 
 pub(crate) fn resource_response(
@@ -414,8 +513,8 @@ pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: Securi
     flash_files_path: String,
     mut file_manager: HashMap<String, U>,
     locks: Arc<Locks>,
-    update_in_progress: Arc<std::sync::atomic::AtomicBool>,
-) -> (Router, EcuExecutionRegistry) {
+    communication_access: Arc<dyn CommunicationAccess>,
+) -> Router {
     let flash_data = Arc::new(RwLock::new(sovd_interfaces::sovd2uds::FileList {
         files: Vec::new(),
         path: Some(PathBuf::from(flash_files_path)),
@@ -426,17 +525,15 @@ pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: Securi
         locks,
         flash_data: Arc::clone(&flash_data),
         components_config: Arc::new(RwLock::new(components_config)),
-        update_in_progress,
+        communication_access,
     };
 
-    let registry = EcuExecutionRegistry::default();
-    let router = components_route::<T, U>(state.clone(), &mut file_manager, &registry).await;
+    let router = components_route::<T, U>(state.clone(), &mut file_manager).await;
 
-    let vehicle_router = vehicle_route::<T, S>(state, router, functional_group_config)
+    vehicle_route::<T, S>(state, router, functional_group_config)
         .await
         .layer(middleware::from_fn(security_plugin_middleware::<S>))
-        .with_state(uds.clone());
-    (vehicle_router, registry)
+        .with_state(uds.clone())
 }
 
 async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoader>(
@@ -562,7 +659,6 @@ fn docs_components(op: TransformOperation) -> TransformOperation {
 async fn components_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
     state: WebserverState<T>,
     file_manager: &mut HashMap<String, U>,
-    registry: &EcuExecutionRegistry,
 ) -> Router<WebserverState<T>> {
     let mut router = Router::new().api_route(
         "/vehicle/v15/components",
@@ -570,7 +666,7 @@ async fn components_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + '
     );
     let mut ecus = state.uds.get_physical_ecus().await;
     for ecu_name in ecus.drain(0..) {
-        match ecu_route::<T, U>(&ecu_name, &state, file_manager, registry).await {
+        match ecu_route::<T, U>(&ecu_name, &state, file_manager) {
             Ok((ecu_path, nested)) => {
                 router = router.nest_api_service(&ecu_path, nested);
             }
@@ -586,11 +682,10 @@ async fn components_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + '
     clippy::too_many_lines,
     reason = "Route creation kept together for structural clarity"
 )]
-async fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
+fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
     ecu_name: &str,
     state: &WebserverState<T>,
     file_manager: &mut HashMap<String, U>,
-    registry: &EcuExecutionRegistry,
 ) -> Result<(String, Router), SovdError> {
     let ecu_lower = ecu_name.to_lowercase();
     let ecu_state = WebserverEcuState {
@@ -598,6 +693,8 @@ async fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>
         uds: state.uds.clone(),
         locks: Arc::<Locks>::clone(&state.locks),
         comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
+        communication_activities: Arc::new(Mutex::new(HashMap::default())),
+        communication_access: Arc::clone(&state.communication_access),
         service_executions: Arc::new(RwLock::new(HashMap::default())),
         flash_data: Arc::clone(&state.flash_data),
         mdd_embedded_files: Arc::new(file_manager.remove(&ecu_lower).ok_or_else(|| {
@@ -605,14 +702,7 @@ async fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>
                 "FileManager for ECU '{ecu_name}' not found in provided FileManager map"
             ))
         })?),
-        update_in_progress: Arc::clone(&state.update_in_progress),
     };
-    registry
-        .register(
-            Arc::clone(&ecu_state.comparam_executions),
-            Arc::clone(&ecu_state.service_executions),
-        )
-        .await;
     let ecu_path = format!("/vehicle/v15/components/{ecu_lower}");
 
     let router = Router::new()
@@ -1127,12 +1217,140 @@ impl IntoSovd for FieldParseError {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use cda_interfaces::{UdsEcu, file_manager::FileManager};
+    use cda_interfaces::{
+        UdsEcu,
+        communication_control::{
+            ActivationCause, CommunicationAccess, CommunicationError, CommunicationState,
+            VariantDetectionMode,
+        },
+        file_manager::FileManager,
+    };
+    use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
     use sovd_interfaces::sovd2uds::FileList;
 
     use super::*;
     use crate::sovd::locks::LockType;
+
+    struct DeferredCommunicationAccess {
+        activation_requests: AtomicUsize,
+    }
+
+    impl CommunicationAccess for DeferredCommunicationAccess {
+        fn state(&self) -> CommunicationState {
+            CommunicationState::Disabled
+        }
+
+        fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+            Err(CommunicationError::Disabled)
+        }
+
+        fn request_activate(&self, _cause: ActivationCause) -> CommunicationState {
+            self.activation_requests.fetch_add(1, Ordering::SeqCst);
+            CommunicationState::Disabled
+        }
+
+        fn retry_after(&self) -> Duration {
+            Duration::from_secs(7)
+        }
+
+        fn variant_detection(&self) -> VariantDetectionMode {
+            VariantDetectionMode::Always
+        }
+    }
+
+    #[test]
+    fn communication_denial_requests_activation_and_returns_retry_hint() {
+        let access = DeferredCommunicationAccess {
+            activation_requests: AtomicUsize::new(0),
+        };
+
+        let Err(error) = acquire_communication_activity(&access) else {
+            panic!("disabled communication must reject acquisition");
+        };
+
+        assert_eq!(access.activation_requests.load(Ordering::SeqCst), 1);
+        let ApiError::ServiceUnavailable {
+            retry_after,
+            vendor_code,
+            ..
+        } = error
+        else {
+            panic!("disabled communication must return service unavailable");
+        };
+        assert_eq!(retry_after, Some(Duration::from_secs(7)));
+        assert_eq!(vendor_code, Some(VendorErrorCode::CommunicationNotReady));
+    }
+
+    #[tokio::test]
+    async fn reservation_publishes_lease_with_execution_and_cleans_up_both() {
+        let executions = Arc::new(RwLock::new(HashMap::default()));
+        let activities = Arc::new(Mutex::new(HashMap::default()));
+        let access = enabled_communication_access_for_test();
+
+        let result = acquire_and_reserve_execution::<ServiceExecution>(
+            &*access,
+            Arc::clone(&executions),
+            Arc::clone(&activities),
+            "routine",
+            "routine",
+            false,
+        )
+        .await;
+        let Ok((id, guard)) = result else {
+            panic!("enabled communication must reserve execution");
+        };
+
+        assert!(activities.lock().await.contains_key(&id));
+        assert!(
+            executions
+                .read()
+                .await
+                .get("routine")
+                .is_some_and(|entries| entries.contains_key(&id))
+        );
+
+        guard.cleanup().await;
+
+        assert!(!activities.lock().await.contains_key(&id));
+        assert!(executions.read().await.get("routine").is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_reservation_releases_published_lease() {
+        let mut entries = IndexMap::new();
+        entries.insert(
+            Uuid::new_v4(),
+            ServiceExecution {
+                parameters: serde_json::Map::new(),
+                status: sovd_ecu::operations::ExecutionStatus::Running,
+                in_flight: false,
+                is_created: true,
+            },
+        );
+        let mut execution_map = HashMap::default();
+        execution_map.insert("routine".to_owned(), entries);
+        let executions = Arc::new(RwLock::new(execution_map));
+        let activities = Arc::new(Mutex::new(HashMap::default()));
+        let access = enabled_communication_access_for_test();
+
+        let result = acquire_and_reserve_execution::<ServiceExecution>(
+            &*access,
+            executions,
+            Arc::clone(&activities),
+            "routine",
+            "routine",
+            false,
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("second running execution must be rejected");
+        };
+
+        assert!(matches!(error.error, ApiError::Conflict(_)));
+        assert!(activities.lock().await.is_empty());
+    }
 
     pub fn create_test_webserver_state<T: UdsEcu + Clone, U: FileManager>(
         ecu_name: String,
@@ -1152,6 +1370,8 @@ pub(crate) mod tests {
                 ))),
             }),
             comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
+            communication_activities: Arc::new(Mutex::new(HashMap::default())),
+            communication_access: enabled_communication_access_for_test(),
             service_executions: Arc::new(RwLock::new(HashMap::default())),
             flash_data: Arc::new(RwLock::new(FileList {
                 files: Vec::new(),
@@ -1159,7 +1379,6 @@ pub(crate) mod tests {
                 schema: None,
             })),
             mdd_embedded_files: Arc::new(file_manager),
-            update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }

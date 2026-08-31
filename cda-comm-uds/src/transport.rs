@@ -42,6 +42,14 @@ use crate::{UdsEcuDb, UdsManager, types::UdsParameters};
 /// the next attempt proceeds anyway and a warning is logged.
 const RETRY_TEARDOWN_GRACE: Duration = Duration::from_millis(500);
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CommunicationReadiness {
+    /// Require communication to be enabled for the send.
+    Enforce,
+    /// Send without checking communication readiness.
+    AssumeReady,
+}
+
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     #[tracing::instrument(
         skip(self, service, payload),
@@ -61,14 +69,18 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         map_to_json: bool,
         timeout: Option<Duration>,
     ) -> Result<<T as PayloadDecoder>::Response, DiagServiceError> {
+        let _guard = self.require_communication_ready()?;
         let ecu = self.uds_ecu_db(ecu_name)?;
 
-        // Pre-send: run variant detection when required (see
-        // `needs_variant_detection`). Detection also acts as a reachability
-        // probe for ECUs marked Offline.
+        // Pre-send: gate on variant detection when the variant has never been
+        // tested (see ``ecu_concluded_variant_detection``), and separately run
+        // detection as a reachability probe for ECUs marked Offline (see
+        // `needs_variant_detection`).
         {
             let status = ecu.read().await.ecu_status();
-            if needs_variant_detection(&status) {
+            if status.variant_state == VariantState::NotTested {
+                self.uds_ecu_variant_detection_concluded(ecu_name).await?;
+            } else if needs_variant_detection(&status) {
                 tracing::info!(
                     ecu_name,
                     connectivity = ?status.connectivity,
@@ -99,12 +111,17 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             payload,
             map_to_json,
             timeout,
+            CommunicationReadiness::Enforce,
         )
         .await
     }
 
     /// Inner send path that skips the variant detection guard.
     /// Used by `detect_variant` to avoid infinite recursion.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Arguments mirror the public send path plus variant-detection readiness"
+    )]
     pub(crate) async fn send_without_variant_guard(
         &self,
         ecu_name: &str,
@@ -113,6 +130,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         payload: Option<UdsPayloadData>,
         map_to_json: bool,
         timeout: Option<Duration>,
+        communication_readiness: CommunicationReadiness,
     ) -> Result<<T as PayloadDecoder>::Response, DiagServiceError> {
         let start = Instant::now();
         tracing::debug!(
@@ -139,7 +157,13 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         let expect_response = !payload.is_suppress_positive_response();
 
         let response = self
-            .send_with_raw_payload(ecu_name, payload.clone(), timeout, expect_response)
+            .send_with_raw_payload(
+                ecu_name,
+                payload.clone(),
+                timeout,
+                expect_response,
+                communication_readiness,
+            )
             .await;
         let response_after = start.elapsed().saturating_sub(payload_build_after);
 
@@ -199,13 +223,20 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
             payload_size = payload.data.len(),
             dlt_context = dlt_ctx!("UDS"))
     )]
+    /// Sends the raw payload to the ECU.
     pub(crate) async fn send_with_raw_payload(
         &self,
         ecu_name: &str,
         payload: ServicePayload,
         timeout: Option<Duration>,
         expect_response: bool,
+        communication_readiness: CommunicationReadiness,
     ) -> Result<Option<ServicePayload>, DiagServiceError> {
+        let _communication_guard = match communication_readiness {
+            CommunicationReadiness::Enforce => Some(self.require_communication_ready()?),
+            CommunicationReadiness::AssumeReady => None,
+        };
+
         // todo: do we need to ensure that we do not send here
         // when we have an ongoing data transfer as well?
         let start = std::time::Instant::now();
@@ -637,8 +668,10 @@ impl<S: EcuGateway, T: EcuManager> UdsTransport for UdsManager<S, T> {
     ) -> Result<Vec<u8>, DiagServiceError> {
         tracing::trace!(ecu_name = %ecu_name, payload = ?payload, "Sending raw UDS packet");
 
-        let payload = self
-            .uds_ecu_db(ecu_name)?
+        let _guard = self.require_communication_ready()?;
+        let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
+
+        let payload = ecu
             .read()
             .await
             .check_genericservice(security_plugin, payload)
@@ -648,7 +681,13 @@ impl<S: EcuGateway, T: EcuManager> UdsTransport for UdsManager<S, T> {
         let expect_response = !payload.is_suppress_positive_response();
 
         match self
-            .send_with_raw_payload(ecu_name, payload, timeout, expect_response)
+            .send_with_raw_payload(
+                ecu_name,
+                payload,
+                timeout,
+                expect_response,
+                CommunicationReadiness::Enforce,
+            )
             .await?
         {
             Some(response) => Ok(response.data),
@@ -879,7 +918,7 @@ mod tests {
 #[cfg(test)]
 pub(crate) mod send_tests {
     use std::{
-        sync::{Arc, atomic::AtomicBool},
+        sync::Arc,
         time::{Duration, Instant},
     };
 
@@ -887,14 +926,25 @@ pub(crate) mod send_tests {
         DiagServiceError, EcuAddresses, EcuGateway, EcuRuntimeState, EcuStateManager,
         FunctionalTransport, HashMap, HashMapExtensions, NetworkTopology, PendingNrc,
         PhysicalTransport, ServicePayload, TransmissionParameters, TransportResponse,
-        UDS_ID_RESPONSE_BITMASK, VariantDetection, datatypes::FaultConfig, service_ids,
+        UDS_ID_RESPONSE_BITMASK, VariantDetection,
+        communication_control::{
+            ActivationCause, CommunicationAccess, CommunicationError, CommunicationGuard,
+            CommunicationState, VariantDetectionMode,
+        },
+        datatypes::FaultConfig,
+        service_ids,
     };
-    use tokio::sync::{RwLock, mpsc};
+    use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
+    use tokio::sync::{Mutex, RwLock, mpsc};
 
-    use super::RETRY_TEARDOWN_GRACE;
+    use super::{CommunicationReadiness, RETRY_TEARDOWN_GRACE};
     use crate::{
-        UdsEcuDb, UdsManager, state_coordinator::EcuStateCoordinator, test_helpers::TestEcuDb,
+        UdsEcuDb, UdsManager,
+        state_coordinator::EcuStateCoordinator,
+        test_helpers::{TestEcuDb, TestGateway},
     };
+
+    const TEST_COMMUNICATION_RETRY_AFTER: Duration = Duration::from_secs(2);
 
     impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuAddresses> UdsManager<S, T> {
         /// Test-only constructor that creates a `UdsManager` without spawning
@@ -904,42 +954,122 @@ pub(crate) mod send_tests {
             gateway: S,
             ecus: Arc<HashMap<String, RwLock<T>>>,
             fault_config: FaultConfig,
-            update_in_progress: Arc<AtomicBool>,
+            communication_access: Arc<dyn CommunicationAccess>,
         ) -> Self {
             let runtime_states: HashMap<String, EcuRuntimeState> = ecus
                 .keys()
                 .map(|name| (name.clone(), EcuRuntimeState::new()))
                 .collect();
-            let (redetect_tx, _redetect_rx) = tokio::sync::mpsc::channel(8);
-            let state_coordinator = EcuStateCoordinator::new(runtime_states, redetect_tx);
+            let (redetect_tx, _redetect_rx) = mpsc::channel(8);
+            let state_coordinator = EcuStateCoordinator::new(
+                runtime_states,
+                cda_interfaces::VariantDetectionSender::new(redetect_tx),
+            );
             Self {
                 ecus,
                 gateway,
-                data_transfers: Arc::new(tokio::sync::Mutex::new(HashMap::default())),
-                ecu_semaphores: Arc::new(tokio::sync::Mutex::new(HashMap::default())),
+                data_transfers: Arc::new(Mutex::new(HashMap::default())),
+                ecu_semaphores: Arc::new(Mutex::new(HashMap::default())),
                 tester_present_tasks: Arc::new(RwLock::new(HashMap::default())),
                 session_reset_tasks: Arc::new(RwLock::new(HashMap::default())),
                 security_reset_tasks: Arc::new(RwLock::new(HashMap::default())),
                 state_coordinator,
                 functional_description_database: String::new(),
                 fault_config,
-                update_in_progress,
+                communication_access,
+                communication_retry_after: TEST_COMMUNICATION_RETRY_AFTER,
+                variant_detection_receiver: Arc::new(Mutex::new(None)),
+                variant_detection_listener: Arc::new(Mutex::new(None)),
+                tester_present_snapshot: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
 
-    /// A test gateway whose `send` behavior is configurable via a closure.
-    #[derive(Clone)]
-    pub(crate) struct TestGateway {
-        pub(crate) send_fn: Arc<TestGatewaySendFn>,
+    fn disabled_communication_access() -> Arc<dyn CommunicationAccess> {
+        struct Disabled;
+        impl CommunicationAccess for Disabled {
+            fn state(&self) -> CommunicationState {
+                CommunicationState::Disabled
+            }
+
+            fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+                Err(CommunicationError::Disabled)
+            }
+
+            fn request_activate(&self, _cause: ActivationCause) -> CommunicationState {
+                CommunicationState::Disabled
+            }
+
+            fn variant_detection(&self) -> VariantDetectionMode {
+                VariantDetectionMode::Always
+            }
+        }
+        Arc::new(Disabled)
     }
 
-    pub(crate) type TestGatewaySendFn = dyn Fn(
-            mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
-            bool,
-        ) -> Result<(), DiagServiceError>
-        + Send
-        + Sync;
+    /// A `CommunicationAccess` fake with controllable `acquire` and
+    /// `request_activate` behavior. Once "enabled" it delegates guard minting to
+    /// [`enabled_communication_access_for_test`], so tests never mint a
+    /// `CommunicationGuard` themselves.
+    struct FakeCommunicationAccess {
+        enabled: std::sync::atomic::AtomicBool,
+        activate_calls: std::sync::atomic::AtomicUsize,
+        activate_succeeds: bool,
+        real: Arc<dyn CommunicationAccess>,
+    }
+
+    impl FakeCommunicationAccess {
+        fn new(initially_enabled: bool, activate_succeeds: bool) -> Arc<Self> {
+            Arc::new(Self {
+                enabled: std::sync::atomic::AtomicBool::new(initially_enabled),
+                activate_calls: std::sync::atomic::AtomicUsize::new(0),
+                activate_succeeds,
+                real: enabled_communication_access_for_test(),
+            })
+        }
+
+        fn activate_call_count(&self) -> usize {
+            self.activate_calls
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl CommunicationAccess for FakeCommunicationAccess {
+        fn state(&self) -> CommunicationState {
+            if self.enabled.load(std::sync::atomic::Ordering::SeqCst) {
+                CommunicationState::Enabled
+            } else {
+                CommunicationState::Disabled
+            }
+        }
+
+        fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+            if self.enabled.load(std::sync::atomic::Ordering::SeqCst) {
+                self.real.acquire()
+            } else {
+                Err(CommunicationError::Disabled)
+            }
+        }
+
+        fn request_activate(&self, _cause: ActivationCause) -> CommunicationState {
+            self.activate_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Fire-and-forget, like the real implementation. The fake models an
+            // instant activation by flipping `enabled` synchronously, so a
+            // retrying caller observes the effect.
+            if self.activate_succeeds {
+                self.enabled
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                CommunicationState::Enabled
+            } else {
+                self.state()
+            }
+        }
+
+        fn variant_detection(&self) -> VariantDetectionMode {
+            VariantDetectionMode::Always
+        }
+    }
 
     /// Keeps a `response_sender` alive for the remainder of the test process,
     /// modelling a real gateway task that stays parked (holding its sender)
@@ -960,47 +1090,6 @@ pub(crate) mod send_tests {
             .lock()
             .unwrap()
             .push(sender);
-    }
-
-    impl PhysicalTransport for TestGateway {
-        fn send(
-            &self,
-            _transmission_params: TransmissionParameters,
-            _message: ServicePayload,
-            response_sender: mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
-            expect_uds_reply: bool,
-        ) -> impl Future<Output = Result<tokio::task::JoinHandle<()>, DiagServiceError>> + Send
-        {
-            // The closure receives `response_sender` by value and fully owns its
-            // lifetime, mirroring how the real gateways manage their per-request
-            // task's sender:
-            //   * to model a gateway that closes the channel after forwarding
-            //     its frame(s) (e.g. the CAN gateway breaking after the first
-            //     SID-matching response), simply let the sender drop when the
-            //     closure returns -> the caller's `recv()` observes `None`.
-            //   * to model a gateway task that stays parked with no (further)
-            //     response until the caller gives up (e.g. an offline/answer-
-            //     suppressing ECU), the closure must keep the sender alive
-            //     itself (store a clone), so the caller's `rx_timeout` fires.
-            let result = (self.send_fn)(response_sender, expect_uds_reply);
-            async move {
-                result?;
-                // This test double's "task" is already fully done by the time
-                // `send` returns (the closure above ran synchronously), so the
-                // returned handle resolves essentially instantly. Tests that
-                // need to exercise the retry-teardown synchronization itself
-                // use `SlowTeardownGateway` instead.
-                Ok(tokio::task::spawn(std::future::ready(())))
-            }
-        }
-
-        fn ecu_online<T: EcuAddresses>(
-            &self,
-            _ecu_name: &str,
-            _ecu_db: &RwLock<T>,
-        ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
-            std::future::ready(Ok(()))
-        }
     }
 
     /// Test gateway dedicated to exercising the retry-teardown synchronization
@@ -1084,38 +1173,6 @@ pub(crate) mod send_tests {
         async fn shutdown(&self) {}
     }
 
-    impl FunctionalTransport for TestGateway {
-        fn send_functional(
-            &self,
-            _transmission_params: TransmissionParameters,
-            _message: ServicePayload,
-            _expected_ecu_logical_addrs: HashMap<u16, String>,
-            _timeout: Duration,
-            _expect_positive_response: bool,
-        ) -> impl Future<
-            Output = Result<
-                HashMap<String, Result<ServicePayload, DiagServiceError>>,
-                DiagServiceError,
-            >,
-        > + Send {
-            std::future::ready(Ok(HashMap::new()))
-        }
-    }
-
-    impl NetworkTopology for TestGateway {
-        fn get_gateway_network_address(
-            &self,
-            _logical_address: u16,
-        ) -> impl Future<Output = Option<String>> + Send {
-            std::future::ready(None)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl cda_interfaces::Shutdown for TestGateway {
-        async fn shutdown(&self) {}
-    }
-
     // Test helpers
 
     fn make_test_payload(sid: u8, data: &[u8]) -> ServicePayload {
@@ -1139,7 +1196,7 @@ pub(crate) mod send_tests {
             gateway,
             ecus,
             FaultConfig::default(),
-            Arc::new(AtomicBool::new(false)),
+            disabled_communication_access(),
         )
     }
 
@@ -1155,7 +1212,7 @@ pub(crate) mod send_tests {
             gateway,
             ecus,
             FaultConfig::default(),
-            Arc::new(AtomicBool::new(false)),
+            disabled_communication_access(),
         )
     }
 
@@ -1175,7 +1232,7 @@ pub(crate) mod send_tests {
             gateway,
             ecus,
             FaultConfig::default(),
-            Arc::new(AtomicBool::new(false)),
+            disabled_communication_access(),
         )
     }
 
@@ -1185,7 +1242,20 @@ pub(crate) mod send_tests {
             gateway,
             ecus,
             FaultConfig::default(),
-            Arc::new(AtomicBool::new(false)),
+            disabled_communication_access(),
+        )
+    }
+
+    fn make_manager_with_access(
+        gateway: TestGateway,
+        communication_access: Arc<dyn CommunicationAccess>,
+    ) -> UdsManager<TestGateway, TestEcuDb> {
+        let ecus = Arc::new(HashMap::new());
+        UdsManager::new_for_raw_payload_tests(
+            gateway,
+            ecus,
+            FaultConfig::default(),
+            communication_access,
         )
     }
 
@@ -1205,7 +1275,26 @@ pub(crate) mod send_tests {
         }
     }
 
-    // Tests
+    #[tokio::test]
+    async fn send_with_raw_payload_enforces_communication_readiness() {
+        let manager = make_manager(make_gateway());
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
+
+        let result = manager
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::Enforce,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DiagServiceError::CommunicationNotReady { .. })
+        ));
+    }
 
     #[tokio::test]
     async fn test_send_with_raw_payload_positive_response() {
@@ -1214,7 +1303,13 @@ pub(crate) mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -1240,7 +1335,13 @@ pub(crate) mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, false)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                false,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -1274,7 +1375,13 @@ pub(crate) mod send_tests {
         let expect_response = !payload.is_suppress_positive_response();
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, expect_response)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                expect_response,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok(), "expected Ok(None), got {result:?}");
@@ -1293,7 +1400,13 @@ pub(crate) mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("NonExistent", payload, None, true)
+            .send_with_raw_payload(
+                "NonExistent",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_err());
@@ -1318,7 +1431,13 @@ pub(crate) mod send_tests {
         };
 
         let result = manager
-            .send_with_raw_payload("TestECU", empty_payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                empty_payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_err());
@@ -1337,7 +1456,13 @@ pub(crate) mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_err());
@@ -1362,7 +1487,13 @@ pub(crate) mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, Some(Duration::from_millis(50)), true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                Some(Duration::from_millis(50)),
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_err());
@@ -1417,7 +1548,13 @@ pub(crate) mod send_tests {
         let payload = make_test_payload(service_ids::READ_DATA_BY_IDENTIFIER, &[0xF1, 0x90]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(
@@ -1453,7 +1590,13 @@ pub(crate) mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(
@@ -1500,7 +1643,13 @@ pub(crate) mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok(), "Expected eventual success, got {result:?}");
@@ -1568,7 +1717,13 @@ pub(crate) mod send_tests {
 
         let start = std::time::Instant::now();
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
         let elapsed = start.elapsed();
 
@@ -1636,7 +1791,13 @@ pub(crate) mod send_tests {
 
         let result = tokio::time::timeout(
             Duration::from_millis(200),
-            manager.send_with_raw_payload("TestECU", payload, None, true),
+            manager.send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            ),
         )
         .await;
 
@@ -1687,7 +1848,13 @@ pub(crate) mod send_tests {
         // (this is exactly what `send_without_variant_guard` does when
         // called from `gather_detection_responses` post-fix).
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
         let elapsed = start.elapsed();
 
@@ -1739,7 +1906,13 @@ pub(crate) mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -1788,7 +1961,13 @@ pub(crate) mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -1832,7 +2011,13 @@ pub(crate) mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -1867,7 +2052,13 @@ pub(crate) mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -1890,7 +2081,13 @@ pub(crate) mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, Some(Duration::from_secs(1)), true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                Some(Duration::from_secs(1)),
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -1920,7 +2117,7 @@ pub(crate) mod send_tests {
             gateway,
             Arc::clone(&ecus),
             FaultConfig::default(),
-            Arc::new(AtomicBool::new(false)),
+            disabled_communication_access(),
         );
 
         // Payload with new_session set - should be stored on positive response
@@ -1933,7 +2130,13 @@ pub(crate) mod send_tests {
         };
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -1962,7 +2165,13 @@ pub(crate) mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_err());
@@ -2013,7 +2222,13 @@ pub(crate) mod send_tests {
         let payload = make_test_payload(service_ids::READ_DATA_BY_IDENTIFIER, &[0xF1, 0x90]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -2046,7 +2261,7 @@ pub(crate) mod send_tests {
             gateway,
             ecus,
             FaultConfig::default(),
-            Arc::new(AtomicBool::new(false)),
+            disabled_communication_access(),
         )
     }
 
@@ -2076,7 +2291,13 @@ pub(crate) mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
 
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
 
         assert!(
@@ -2119,7 +2340,13 @@ pub(crate) mod send_tests {
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
         let start = Instant::now();
         let result = manager
-            .send_with_raw_payload("TestECU", payload, None, true)
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
             .await;
         let elapsed = start.elapsed();
 
@@ -2144,5 +2371,61 @@ pub(crate) mod send_tests {
             elapsed < Duration::from_secs(5),
             "Expected the call to proceed despite the stale task never finishing, took {elapsed:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn require_communication_ready_returns_guard_immediately_when_already_enabled() {
+        let access = FakeCommunicationAccess::new(true, true);
+        let manager = make_manager_with_access(make_gateway(), Arc::clone(&access) as _);
+
+        let result = manager.require_communication_ready();
+
+        assert!(result.is_ok());
+        assert_eq!(access.activate_call_count(), 0);
+    }
+
+    /// The first call while not enabled returns `CommunicationNotReady`
+    /// immediately rather than blocking through the activation it just fired. A
+    /// later retry succeeds.
+    #[tokio::test]
+    async fn require_communication_ready_fires_background_trigger_and_returns_not_ready_immediately()
+     {
+        let access = FakeCommunicationAccess::new(false, true);
+        let manager = make_manager_with_access(make_gateway(), Arc::clone(&access) as _);
+
+        let first = manager.require_communication_ready();
+        assert!(matches!(
+            first,
+            Err(DiagServiceError::CommunicationNotReady {
+                retry_after: TEST_COMMUNICATION_RETRY_AFTER,
+                ..
+            })
+        ));
+        assert_eq!(access.activate_call_count(), 1);
+
+        // The background trigger has taken effect by the time of a retry.
+        assert_eq!(access.state(), CommunicationState::Enabled);
+        let retry = manager.require_communication_ready();
+        assert!(retry.is_ok());
+        // The retry found communication already enabled, so no second trigger.
+        assert_eq!(access.activate_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn require_communication_ready_surfaces_not_ready_when_activation_not_authorized() {
+        let access = FakeCommunicationAccess::new(false, false);
+        let manager = make_manager_with_access(make_gateway(), Arc::clone(&access) as _);
+
+        let result = manager.require_communication_ready();
+
+        assert!(matches!(
+            result,
+            Err(DiagServiceError::CommunicationNotReady {
+                retry_after: TEST_COMMUNICATION_RETRY_AFTER,
+                ..
+            })
+        ));
+        assert_eq!(access.activate_call_count(), 1);
+        assert_eq!(access.state(), CommunicationState::Disabled);
     }
 }
