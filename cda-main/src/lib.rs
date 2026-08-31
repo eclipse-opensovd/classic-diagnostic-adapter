@@ -1062,4 +1062,50 @@ mod webserver_lifecycle_tests {
         tokio::task::yield_now().await;
         assert!(abort_handle.is_finished());
     }
+
+    #[tokio::test]
+    async fn cda_stays_running_when_no_database_loaded_and_exit_flag_is_false() {
+        fn available_port() -> u16 {
+            std::net::TcpListener::bind("127.0.0.1:0")
+                .expect("Bind temporary port")
+                .local_addr()
+                .expect("Read temporary port")
+                .port()
+        }
+
+        let database_dir = tempfile::tempdir().expect("Create empty database directory");
+        let storage_dir = tempfile::tempdir().expect("Create empty storage directory");
+        let mut config = Configuration::default();
+        config.server.port = available_port();
+        config.doip.tester_address = "127.0.0.1".to_owned();
+        config.doip.gateway_port = available_port();
+        config.database.seed_dir = database_dir.path().to_string_lossy().into_owned();
+        config.database.exit_no_database_loaded = false;
+        config.runtime_update_config.storage_dir =
+            storage_dir.path().to_string_lossy().into_owned();
+
+        let task = tokio::spawn(run_with_ext_from_config(
+            config,
+            Setup::<DefaultSecurityPluginData, DefaultSecurityPlugin>::new()
+                .with_existing_tracing()
+                .with_update_plugin(update_plugin_fn(
+                    |infra: setup::CdaRuntime<DefaultSecurityPluginData>| async move {
+                        create_default_update_plugin::<
+                            DefaultSecurityPluginData,
+                            DefaultSecurityPlugin,
+                        >(infra)
+                        .await
+                    },
+                )),
+        ));
+
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(250)).await;
+        assert!(
+            !task.is_finished(),
+            "CDA exited without any loaded database"
+        );
+
+        task.abort();
+        task.await.expect_err("CDA task must be cancelled");
+    }
 }

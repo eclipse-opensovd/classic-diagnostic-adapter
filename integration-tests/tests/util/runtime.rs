@@ -28,16 +28,12 @@ use cda_interfaces::{
         DoipComParams, FaultConfig, FlatbBufConfig,
     },
 };
-use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 use cda_tracing::LoggingConfig;
 use futures::FutureExt;
 use http::{Method, StatusCode};
-use opensovd_cda_lib::{
-    config::configfile::{
-        CanConfig, CanEcuMapping, Configuration, DatabaseConfig, EcuComParams, EcuConfig,
-        RuntimeUpdateConfig, ServerConfig, StrictConfig, TransportOverride, TransportType,
-    },
-    update::UpdatePluginBuilder,
+use opensovd_cda_lib::config::configfile::{
+    CanConfig, CanEcuMapping, Configuration, DatabaseConfig, EcuComParams, EcuConfig,
+    RuntimeUpdateConfig, ServerConfig, StrictConfig, TransportOverride, TransportType,
 };
 use sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response as NetworkStructureResponse;
 use tokio::sync::{Mutex, MutexGuard, OnceCell};
@@ -51,15 +47,6 @@ use crate::util::{
 static TEST_RUNTIME: OnceCell<TestRuntime> = OnceCell::const_new();
 
 static EXCLUSIVE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-static CDA_SHUTDOWN: LazyLock<Mutex<Option<tokio::sync::broadcast::Sender<()>>>> =
-    LazyLock::new(|| Mutex::new(None));
-
-/// The running CDA's task, awaited by [`stop_cda`] so that the instance is only
-/// observed as stopped once its port is released. Otherwise a following
-/// [`start_cda`] races it for the same port.
-static CDA_TASK: LazyLock<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
-    LazyLock::new(|| std::sync::Mutex::new(None));
 
 /// The communication settings the shared CDA is currently running with, or
 /// `None` while no CDA is running.
@@ -76,11 +63,6 @@ static RUNNING_CDA_COMMUNICATION: LazyLock<Mutex<Option<CommunicationSettings>>>
 static TOKIO_RUNTIME: LazyLock<tokio::runtime::Runtime> =
     LazyLock::new(|| tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime"));
 
-static ECU_SIM_PROCESS: LazyLock<Mutex<Option<std::process::Child>>> =
-    LazyLock::new(|| Mutex::new(None));
-
-const CDA_INTEGRATION_TEST_USE_DOCKER: &str = "CDA_INTEGRATION_TEST_USE_DOCKER";
-const CDA_INTEGRATION_TEST_TESTER_ADDRESS: &str = "CDA_INTEGRATION_TEST_TESTER_ADDRESS";
 const CDA_INTEGRATION_TEST_COVERAGE: &str = "CDA_INTEGRATION_TEST_COVERAGE";
 const CDA_INTEGRATION_TEST_USE_CAN: &str = "CDA_INTEGRATION_TEST_USE_CAN";
 /// Mixed mode: `DoIP` and CAN run simultaneously. TMCC3000/HOVR4000/JGWT5000
@@ -142,7 +124,14 @@ async fn setup<'a>(
     // The infrastructure is process-wide, so only the first test through here
     // decides whether the CDA is started as part of initialization.
     let runtime = match TEST_RUNTIME
-        .get_or_try_init(|| async { initialize_runtime(cda).await })
+        .get_or_try_init(|| async move {
+            TOKIO_RUNTIME
+                .spawn(async move { initialize_runtime(cda).await })
+                .await
+                .map_err(|e| {
+                    TestingError::SetupError(format!("Test runtime initialization failed: {e}"))
+                })?
+        })
         .await
     {
         Ok(runtime) => runtime,
@@ -178,22 +167,13 @@ async fn initialize_runtime(cda: CdaStartup) -> Result<TestRuntime, TestingError
         TestingError::SetupError(format!("Failed to initialize tracing for tests: {e}"))
     })?;
 
-    // If docker is disabled, we run the sim and cda locally
-    // this is useful for debugging tests
-    // without having to rebuild the docker containers every time.
     let host = host();
-    let (cda_port, gateway_port, sim_control_port) = if use_docker() {
-        (
-            find_available_tcp_port(&host)?,
-            // gateway_port is written to `.env` as SIM_GATEWAY_PORT but the JVM
-            // reads SIM_DOIP_PORT, so this allocation is currently dead (kept as
-            // a pre-existing behaviour; cleanup tracked separately).
-            find_available_tcp_port(&host)?,
-            find_available_tcp_port(&host)?,
-        )
-    } else {
-        (20002, 13400, 8181) // default ports for local usage
-    };
+    let cda_port = find_available_tcp_port(&host)?;
+    // gateway_port is written to `.env` as SIM_GATEWAY_PORT but the JVM reads
+    // SIM_DOIP_PORT, so this allocation is currently dead (kept as a
+    // pre-existing behaviour; cleanup tracked separately).
+    let gateway_port = find_available_tcp_port(&host)?;
+    let sim_control_port = find_available_tcp_port(&host)?;
 
     let config = if use_mixed() {
         cda_test_config_mixed(host.clone(), cda_port, gateway_port)?
@@ -212,19 +192,8 @@ async fn initialize_runtime(cda: CdaStartup) -> Result<TestRuntime, TestingError
 
     register_cleanup();
     register_panic_hook();
-    if use_docker() {
-        write_config_toml(&test_container_dir()?, config.clone())?;
-        start_docker_compose(cda, cda_port, gateway_port, sim_control_port)?;
-    } else {
-        if can_infra() {
-            start_ecu_sim_can(&ecu_sim).await?;
-        } else {
-            start_ecu_sim_doip(&ecu_sim).await?;
-        }
-        if cda == CdaStartup::Immediate {
-            start_cda(config.clone());
-        }
-    }
+    write_config_toml(&test_container_dir()?, config.clone())?;
+    start_docker_compose(cda, cda_port, gateway_port, sim_control_port)?;
 
     match cda {
         CdaStartup::Immediate => {
@@ -234,11 +203,9 @@ async fn initialize_runtime(cda: CdaStartup) -> Result<TestRuntime, TestingError
             }
             mark_cda_started(&config).await;
         }
-        // Nothing else to wait for. `start_ecu_sim_*` already waited for the sim.
-        CdaStartup::Deferred if use_docker() => {
+        CdaStartup::Deferred => {
             wait_for_ecu_sim_ready(&ecu_sim.host, ecu_sim.control_port).await?;
         }
-        CdaStartup::Deferred => {}
     }
 
     Ok(TestRuntime { config, ecu_sim })
@@ -493,74 +460,7 @@ fn can_ecu_mappings() -> Vec<CanEcuMapping> {
 }
 
 pub(crate) fn host() -> String {
-    if use_docker() {
-        "0.0.0.0".to_owned()
-    } else {
-        // Allow overriding the tester address when not using docker.
-        // This is useful, as on some systems, using 127.0.0.1 or 0.0.0.0 does not work properly
-        // and the CDA will not reach the sim.
-        std::env::var(CDA_INTEGRATION_TEST_TESTER_ADDRESS).unwrap_or("0.0.0.0".to_owned())
-    }
-}
-
-pub(crate) fn start_cda(config: Configuration) {
-    start_cda_with_setup(
-        config,
-        opensovd_cda_lib::Setup::<DefaultSecurityPluginData, DefaultSecurityPlugin>::new()
-            .with_existing_tracing()
-            .with_update_plugin(opensovd_cda_lib::update::update_plugin_fn(
-                |infra: opensovd_cda_lib::setup::CdaRuntime<DefaultSecurityPluginData>| async {
-                    opensovd_cda_lib::update::create_default_update_plugin::<
-                        DefaultSecurityPluginData,
-                        DefaultSecurityPlugin,
-                    >(infra)
-                    .await
-                },
-            )),
-    );
-}
-
-/// Start a CDA instance on the shared `TOKIO_RUNTIME` with a custom [`Setup`].
-///
-/// The shutdown sender is stored in `CDA_SHUTDOWN` so that [`stop_cda`] and
-/// [`restart_cda`] work regardless of which setup was used.
-pub(crate) fn start_cda_with_setup<UPB>(
-    config: Configuration,
-    setup: opensovd_cda_lib::Setup<DefaultSecurityPluginData, DefaultSecurityPlugin, UPB>,
-) where
-    UPB: UpdatePluginBuilder<DefaultSecurityPluginData> + Send + 'static,
-{
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
-    let setup = setup.with_shutdown_signal(cda_interfaces::shutdown_signal(async move {
-        shutdown_rx.recv().await.ok();
-    }));
-
-    let handle = TOKIO_RUNTIME.spawn(async move {
-        *CDA_SHUTDOWN.lock().await = Some(shutdown_tx);
-        opensovd_cda_lib::run_with_ext_from_config(config, setup)
-            .await
-            .expect("CDA exited with error");
-    });
-    *CDA_TASK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
-}
-
-pub(crate) async fn stop_cda() -> Result<(), TestingError> {
-    let Some(sender) = CDA_SHUTDOWN.lock().await.take() else {
-        return Err(TestingError::ProcessFailed("CDA not running".to_owned()));
-    };
-    sender.send(()).ok();
-    // Await the task, not just the shutdown signal. A following `start_cda`
-    // binds the same port and would race the still-open listener.
-    let task = CDA_TASK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    if let Some(task) = task {
-        task.await.ok();
-    }
-    Ok(())
+    "0.0.0.0".to_owned()
 }
 
 /// Writes the compose `.env`, builds the images and brings the stack up.
@@ -677,11 +577,6 @@ fn docker_compose_down(container: Option<String>) -> Result<(), TestingError> {
 }
 
 fn dump_docker_logs() {
-    if !use_docker() {
-        tracing::debug!("Skipping docker logs dump - not using docker");
-        return;
-    }
-
     let test_container_dir = match test_container_dir() {
         Ok(dir) => dir,
         Err(e) => {
@@ -777,8 +672,8 @@ fn write_config_toml(
     "0.0.0.0".clone_into(&mut config.server.address);
     "/app/odx".clone_into(&mut config.database.seed_dir);
 
-    // In docker the socketcand daemon runs in its own service, reachable by
-    // service name over the bridge network (not the host loopback used locally).
+    // The socketcand daemon runs in its own service, reachable by service name
+    // over the compose bridge network.
     if let Some(can) = config.can.as_mut() {
         can.interface =
             format!("socketcand:{CAN_DOCKER_SOCKETCAND_HOST}:{SOCKETCAND_PORT}:{CAN_BUS_NAME}");
@@ -884,129 +779,25 @@ fn write_docker_env_file(
     Ok(())
 }
 
-pub(crate) async fn start_ecu_sim_doip(sim: &EcuSim) -> Result<(), TestingError> {
-    if use_docker() {
-        docker_compose_up(Some("ecu-sim".to_owned()), false)?;
-    } else {
-        let ecu_sim_dir = ecu_sim_dir()?;
-        if !ecu_sim_dir.exists() {
-            return Err(TestingError::PathNotFound(format!(
-                "ecu-sim run script not found at {}",
-                ecu_sim_dir.display()
-            )));
-        }
-
-        let child = std::process::Command::new("bash")
-            .current_dir(&ecu_sim_dir)
-            .arg("gradlew")
-            .arg("run")
-            .spawn()
-            .map_err(|e| TestingError::ProcessFailed(format!("Failed to start ecu-sim: {e}")))?;
-
-        *ECU_SIM_PROCESS.lock().await = Some(child);
-    }
-    wait_for_ecu_sim_ready(&sim.host, sim.control_port).await
-}
-
-/// Starts the ecu-sim the same way the current test mode originally started
-/// it: with the CAN stack when CAN infrastructure is in use (pure-CAN and
-/// mixed runs), plain `DoIP` otherwise. Tests that restart the sim must use
-/// this so the sim comes back on the same transports.
-///
-/// In docker mode the compose service carries its CAN configuration in the
-/// generated `.env`, so restarting the container restores the right
-/// transports for every mode; `start_ecu_sim_can` only implements the local
-/// (non-docker) jar path.
-pub(crate) async fn start_ecu_sim_for_mode(sim: &EcuSim) -> Result<(), TestingError> {
-    if !use_docker() && can_infra() {
-        start_ecu_sim_can(sim).await
-    } else {
-        start_ecu_sim_doip(sim).await
-    }
-}
-
-pub(crate) async fn start_ecu_sim_can(sim: &EcuSim) -> Result<(), TestingError> {
-    // Local (non-docker) CAN path: spawn the same `ecu-sim-all.jar` as the DoIP
-    // path but with `SIM_CAN_SOCKETCAND_*` set so the JVM connects to a
-    // socketcand daemon. The daemon and its (v)can bus must already be running
-    // locally (e.g. `socketcand -i vcan0` on 127.0.0.1:29536). In docker mode
-    // the daemon runs in its own compose service (see `write_docker_env_file` /
-    // docker-compose.yml), not here.
-    let ecu_sim_dir = ecu_sim_dir()?;
-    if !ecu_sim_dir.exists() {
-        return Err(TestingError::PathNotFound(format!(
-            "ecu-sim run script not found at {}",
-            ecu_sim_dir.display()
-        )));
-    }
-    let jar = ecu_sim_dir.join("build/libs/ecu-sim-all.jar");
-    if !jar.exists() {
-        return Err(TestingError::PathNotFound(format!(
-            "ecu-sim-all.jar not found at {}. Run `./gradlew shadowJar` in the ecu-sim directory \
-             first.",
-            jar.display()
-        )));
-    }
-
-    // Use `java` from PATH by default; CDA_INTEGRATION_TEST_JAVA_BIN
-    // overrides it for systems where the required JDK (>= 21) is not the
-    // default one.
-    let java_bin =
-        std::env::var("CDA_INTEGRATION_TEST_JAVA_BIN").unwrap_or_else(|_| "java".to_owned());
-    let child = std::process::Command::new(&java_bin)
-        .arg("-jar")
-        .arg(&jar)
-        .env("SIM_DOIP_PORT", "13400")
-        .env("SIM_REST_PORT", sim.control_port.to_string())
-        .env("SIM_NETWORK_INTERFACE", "127.0.0.1")
-        .env("SIM_CAN_SOCKETCAND_HOST", "127.0.0.1")
-        .env("SIM_CAN_SOCKETCAND_PORT", SOCKETCAND_PORT.to_string())
-        .env("SIM_CAN_SOCKETCAND_BUS", CAN_BUS_NAME)
-        .spawn()
-        .map_err(|e| {
-            TestingError::ProcessFailed(format!(
-                "Failed to start ecu-sim CAN sim with {java_bin}: {e}"
-            ))
-        })?;
-
-    *ECU_SIM_PROCESS.lock().await = Some(child);
+pub(crate) async fn start_ecu_sim(sim: &EcuSim) -> Result<(), TestingError> {
+    docker_compose_up(Some("ecu-sim".to_owned()), false)?;
     wait_for_ecu_sim_ready(&sim.host, sim.control_port).await
 }
 
 pub(crate) async fn stop_ecu_sim() -> Result<(), TestingError> {
-    if use_docker() {
-        docker_compose_down(Some("ecu-sim".to_owned()))
-    } else {
-        if let Some(mut child) = ECU_SIM_PROCESS.lock().await.take() {
-            child.kill().map_err(|e| {
-                TestingError::ProcessFailed(format!("Failed to kill ecu-sim process: {e}"))
-            })?;
-            child.wait().ok();
-        }
-        Ok(())
-    }
-}
-
-fn stop_ecu_sim_sync() -> Result<(), TestingError> {
-    TOKIO_RUNTIME.block_on(async { stop_ecu_sim().await })
+    docker_compose_down(Some("ecu-sim".to_owned()))
 }
 
 /// (Re)starts the shared CDA with `config`. A CDA that is not currently running
 /// is not an error, so this doubles as a plain start.
 pub(crate) async fn restart_cda(config: &Configuration) -> Result<(), TestingError> {
     mark_cda_stopped().await;
-    if use_docker() {
-        write_config_toml(&test_container_dir()?, config.clone())?;
-        // Restart atomically so the container restart policy cannot race a
-        // separate stop/up sequence and leave CDA unavailable.
-        // `--no-deps` prevents restarting an ECU sim a test stopped on purpose.
-        // The restarted process reloads the bind-mounted configuration.
-        docker_compose_restart("cda")?;
-    } else {
-        // `stop_cda` only fails when nothing is running.
-        stop_cda().await.ok();
-        start_cda(config.clone());
-    }
+    write_config_toml(&test_container_dir()?, config.clone())?;
+    // Restart atomically so the container restart policy cannot race a
+    // separate stop/up sequence and leave CDA unavailable.
+    // `--no-deps` prevents restarting an ECU sim a test stopped on purpose.
+    // The restarted process reloads the bind-mounted configuration.
+    docker_compose_restart("cda")?;
     wait_for_cda_online(&config.server).await?;
     mark_cda_started(config).await;
     Ok(())
@@ -1072,13 +863,8 @@ async fn ensure_cda_running(config: &Configuration) -> Result<(), TestingError> 
 /// its own CDA sees a quiet vehicle network.
 async fn stop_shared_cda() {
     mark_cda_stopped().await;
-    if use_docker() {
-        // A no-op (and a success) when the container does not exist.
-        let _ = docker_compose_stop("cda");
-    } else {
-        // Fails only when nothing is running, which is the desired state anyway.
-        stop_cda().await.ok();
-    }
+    // A no-op (and a success) when the container does not exist.
+    let _ = docker_compose_stop("cda");
 }
 
 /// One-shot readiness probe: whether a CDA is serving right now, as opposed to
@@ -1130,10 +916,6 @@ fn docker_compose_stop(container: &str) -> Result<(), TestingError> {
         .status()
         .map_err(|e| TestingError::ProcessFailed(format!("Failed to stop docker compose: {e}")))?;
     check_command_success(status, "docker compose stop failed")
-}
-
-fn use_docker() -> bool {
-    std::env::var(CDA_INTEGRATION_TEST_USE_DOCKER).map_or(true, |s| s == "true")
 }
 
 fn coverage_mode() -> bool {
@@ -1222,15 +1004,7 @@ async fn wait_for_http_ready_with_timeout(
 
 async fn wait_for_ecu_sim_ready(host: &str, sim_control_port: u16) -> Result<(), TestingError> {
     let url = format!("http://{host}:{sim_control_port}");
-    // Allow extra time for Gradle to download its distribution on a cold cache.
-    let timeout = if use_docker() {
-        Duration::from_secs(10)
-    } else {
-        // use 333 as its not divisible by 60 to prevent
-        // nightly clippy from suggesting to use from_mins
-        Duration::from_secs(333)
-    };
-    wait_for_http_ready_with_timeout(url, "ECU sim", None, timeout).await
+    wait_for_http_ready_with_timeout(url, "ECU sim", None, Duration::from_secs(10)).await
 }
 
 pub(crate) async fn wait_for_cda_online(cfg: &ServerConfig) -> Result<(), TestingError> {
@@ -1295,13 +1069,6 @@ pub(crate) async fn wait_for_ecus_online(config: &Configuration) -> Result<(), T
     }
 }
 
-fn ecu_sim_dir() -> Result<std::path::PathBuf, TestingError> {
-    test_container_dir().map(|mut path| {
-        path.push("ecu-sim");
-        path
-    })
-}
-
 fn mdd_file_path() -> Result<String, TestingError> {
     fn mdd_files_exist(path: &std::path::Path) -> bool {
         std::fs::read_dir(path)
@@ -1334,8 +1101,6 @@ fn mdd_file_path() -> Result<String, TestingError> {
 }
 
 /// Returns the flash files path and ensures a test flash file exists for integration tests.
-/// In Docker mode the path points to the container mount (`/app/flash`),
-/// otherwise to `testcontainer/flash_files/` on the host.
 fn flash_files_path() -> Result<String, TestingError> {
     let flash_dir = test_container_dir()?.join("flash_files");
 
@@ -1351,11 +1116,7 @@ fn flash_files_path() -> Result<String, TestingError> {
         })?;
     }
 
-    if use_docker() {
-        Ok("/app/flash".to_owned())
-    } else {
-        Ok(flash_dir.to_string_lossy().to_string())
-    }
+    Ok("/app/flash".to_owned())
 }
 
 pub(crate) fn find_available_tcp_port(listen_address: &str) -> Result<u16, TestingError> {
@@ -1383,22 +1144,15 @@ pub(crate) fn test_container_dir() -> Result<std::path::PathBuf, TestingError> {
 
 fn register_cleanup() {
     extern "C" fn cleanup_handler() {
-        let use_docker =
-            std::env::var(CDA_INTEGRATION_TEST_USE_DOCKER).map_or(true, |s| s == "true");
+        // Extract coverage data before shutting down containers.
+        if coverage_mode()
+            && let Err(e) = extract_coverage_from_container()
+        {
+            eprintln!("Failed to extract coverage data: {e}");
+        }
 
-        if use_docker {
-            // Extract coverage data before shutting down containers
-            if coverage_mode()
-                && let Err(e) = extract_coverage_from_container()
-            {
-                eprintln!("Failed to extract coverage data: {e}");
-            }
-
-            if let Err(e) = docker_compose_down(None) {
-                eprintln!("Failed to stop docker compose: {e}");
-            }
-        } else if let Err(e) = stop_ecu_sim_sync() {
-            eprintln!("Failed to stop ecu-sim: {e}");
+        if let Err(e) = docker_compose_down(None) {
+            eprintln!("Failed to stop docker compose: {e}");
         }
     }
     unsafe {
