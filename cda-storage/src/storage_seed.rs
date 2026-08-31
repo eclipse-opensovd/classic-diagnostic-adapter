@@ -11,45 +11,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_interfaces::storage_api::{Collection, CollectionName, Storage};
+use cda_interfaces::storage_api::{
+    Collection, CollectionName, ReadableStream, Storage, StorageError,
+};
 
-/// Seeds a storage collection from an iterator of `(key, data)` pairs when the collection is
-/// empty.  No-op if the collection is already populated or the iterator yields no items.
+/// Seeds a storage collection from an iterator of `(key, data)` pairs when the collection does
+/// not exist yet. No-op if the collection already exists.
 ///
 /// Returns the number of entries written, or `None` when seeding was skipped.
-pub async fn seed_storage_collection(
+pub async fn seed_storage_collection_if_nonexistent(
     storage: &impl Storage,
     collection_name: &CollectionName,
-    entries: impl IntoIterator<Item = (String, Vec<u8>)>,
+    entries: impl IntoIterator<Item = (String, impl ReadableStream)>,
 ) -> Option<usize> {
-    let collection = match storage.get_or_create_collection(collection_name).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                collection = %collection_name,
-                error = %e,
-                "Cannot access collection, skipping seed"
-            );
-            return None;
-        }
-    };
-
-    match collection.is_empty().await {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::debug!(collection = %collection_name, "Collection already populated, skipping seed");
-            return None;
-        }
-        Err(e) => {
-            tracing::warn!(
-                collection = %collection_name,
-                error = %e,
-                "Failed to check collection, skipping seed"
-            );
-            return None;
-        }
-    }
-
     let mut tx = match storage.begin_transaction() {
         Ok(tx) => tx,
         Err(e) => {
@@ -58,10 +32,37 @@ pub async fn seed_storage_collection(
         }
     };
 
+    match storage.get_collection(collection_name).await {
+        Err(StorageError::CollectionNotFound(_)) => {} // continue
+        Ok(_) => {
+            tracing::debug!(collection = %collection_name, "Collection already exists, skipping seed.");
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(
+                collection = %collection_name,
+                error = %error,
+                "Failed to check collection, skipping seed"
+            );
+            return None;
+        }
+    }
+
+    let collection = match storage.create_collection(&mut tx, collection_name).await {
+        Ok(collection) => collection,
+        Err(source) => {
+            tracing::warn!(
+                collection = %collection_name,
+                error = %source,
+                "Cannot create collection, skipping seed"
+            );
+            return None;
+        }
+    };
+
     let mut count = 0usize;
-    for (key, data) in entries {
-        let mut cursor = std::io::Cursor::new(data);
-        if let Err(e) = collection.write(&mut tx, &key, &mut cursor).await {
+    for (key, mut data) in entries {
+        if let Err(e) = collection.write(&mut tx, &key, &mut data).await {
             tracing::warn!(key, collection = %collection_name, error = %e, "Failed to write entry to storage, skipping");
             continue;
         }

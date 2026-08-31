@@ -511,6 +511,37 @@ async fn request_seed_forwards_parameters_to_fsnr2000() {
     force_variant_detection(&runtime.config, &auth, ecu_endpoint)
         .await
         .expect("FSNR2000 boot variant should be detected");
+
+    assert_request_seed_rejected(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        None,
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+
+    assert_request_seed_rejected(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        Some(HashMap::from([(String::from("Invalid"), json!(0x5A))])),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+
+    assert_request_seed_rejected(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        Some(HashMap::from([(
+            String::from("SeedRequestParameter"),
+            json!(0x5B),
+        )])),
+        StatusCode::BAD_GATEWAY,
+    )
+    .await;
+
     ecusim::start_recording(&runtime.ecu_sim, "fsnr2000")
         .await
         .expect("FSNR2000 recording should start");
@@ -599,7 +630,20 @@ async fn send_key_rejects_request_seed_parameters() {
     )
     .await
     .expect("SendKey with RequestSeed parameters should be rejected");
-    assert!(response.is_none(), "a rejected SendKey should not return a body");
+    assert!(
+        response.is_none(),
+        "a rejected SendKey should not return a body"
+    );
+
+    lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1524,6 +1568,34 @@ async fn request_seed(
         StatusCode::OK,
     )
     .await
+}
+
+async fn assert_request_seed_rejected(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+    parameters: Option<HashMap<String, serde_json::Value>>,
+    expected_status: StatusCode,
+) {
+    let response: Option<RequestSeedResponse> = put_mode(
+        config,
+        headers,
+        ecu_endpoint,
+        "security",
+        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
+            value: "Level_5_RequestSeed".to_owned(),
+            mode_expiration: None,
+            key: None,
+            parameters,
+        },
+        expected_status,
+    )
+    .await
+    .expect("RequestSeed should be rejected");
+    assert!(
+        response.is_none(),
+        "a rejected RequestSeed should not return a body"
+    );
 }
 
 async fn send_key(

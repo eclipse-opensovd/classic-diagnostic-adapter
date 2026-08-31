@@ -124,8 +124,12 @@ Diagnostic Database Update Plugin
     Applications embedding CDA can replace the complete runtime update implementation at startup.
     Implement ``cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin`` and pass a builder
     to ``Setup::with_update_plugin``. The builder receives ``CdaRuntime``, which exposes the live
-    configuration, UDS manager, DoIP gateway, lock provider, storage directory, update guard, and
-    reload-related infrastructure required by an implementation.
+    configuration, lock provider, storage directory, update guard, and reload-related
+    infrastructure required by an implementation. The UDS manager and `DoIP` gateway are exposed
+    only as replace-only capabilities (``gateway_replacer``, ``uds_manager_replacer``, typed
+    ``ReplaceComponent<_>``): an implementation can install a freshly built replacement, but has
+    no read access to the live component and therefore cannot drive UDS requests or enable
+    transport directly. See ``docs/04_adr/06_deferred_initialization.rst`` for the rationale.
 
     The ``update_plugin_fn`` helper adapts an async closure without requiring a separate builder
     type:

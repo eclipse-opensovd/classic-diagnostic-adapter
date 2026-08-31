@@ -31,6 +31,7 @@ members = [
   "cda-tracing",
   "cda-plugin-security",
   "cda-plugin-runtime-update",
+  "cda-plugin-communication-management",
   "cda-health",
   "cda-extra",
   "cda-storage",
@@ -38,6 +39,7 @@ members = [
   "cda-build",
   "comm-mbedtls/mbedtls-sys",
   "comm-mbedtls/mbedtls-rs",
+  "override-macros",
 ]
 
 [workspace.dependencies]
@@ -55,6 +57,7 @@ cda-comm-uds = { path = "cda-comm-uds" }
 cda-database = { path = "cda-database" }
 cda-plugin-security = { path = "cda-plugin-security" }
 cda-plugin-runtime-update = { path = "cda-plugin-runtime-update" }
+cda-plugin-communication-management = { path = "cda-plugin-communication-management" }
 cda-sovd = { path = "cda-sovd" }
 cda-tracing = { path = "cda-tracing" }
 cda-health = { path = "cda-health" }
@@ -64,6 +67,7 @@ sovd-interfaces = { path = "cda-sovd-interfaces" }
 cda-build = { path = "cda-build" }
 mbedtls-sys = { path = "comm-mbedtls/mbedtls-sys" }
 mbedtls-rs = { path = "comm-mbedtls/mbedtls-rs" }
+override-macros = { path = "override-macros" }
 
 # ---- common crates ----
 async-trait = "0.1.89"
@@ -150,6 +154,11 @@ urlencoding = "2.1.3"
 const_format = "0.2.35" # compile time string formatting
 rustversion = "1.0.22"  # macros for conditional compilation
 
+linkme = "0.3"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "visit"] }
+
 [workspace.lints.clippy]
 # enable pedantic
 pedantic = { level = "deny", priority = -1 }
@@ -177,6 +186,9 @@ opt-level = 3
 [profile.release-with-debug]
 inherits = "release"
 debug = true
+opt-level = 3
+codegen-units = 1
+strip = false
 
 [patch.crates-io]
 # Necessary because upstream is still using an older version of serde_qs (0.14 instead of 1.0.0-rc.3)
