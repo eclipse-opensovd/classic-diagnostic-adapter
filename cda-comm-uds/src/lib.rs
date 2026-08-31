@@ -238,6 +238,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         params: HashMap<String, serde_json::Value>,
         map_to_json: bool,
     ) -> Result<<T as cda_interfaces::PayloadDecoder>::Response, DiagServiceError> {
+        let _communication_guard = self.require_communication_ready()?;
         // Look up the service definition in the MDD database using the same
         // approach as lookup_diagcomms_by_request_prefix - matches against
         // coded constant parameter values in the database.
@@ -298,6 +299,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         params: HashMap<String, serde_json::Value>,
         map_to_json: bool,
     ) -> Result<<T as cda_interfaces::PayloadDecoder>::Response, DiagServiceError> {
+        let _communication_guard = self.require_communication_ready()?;
         let ecu = self.uds_ecu_db(ecu_name)?;
         let diag_comm = ecu
             .read()
