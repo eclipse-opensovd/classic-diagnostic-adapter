@@ -813,7 +813,7 @@ impl cda_interfaces::runtime_update_api::VehicleDatabaseLockUpdater for SovdLock
 
 #[async_trait]
 impl LockStateProvider for SovdLockStateView {
-    async fn vehicle_lock_owner_sub(&self) -> Option<String> {
+    async fn vehicle_lock_owner_id(&self) -> Option<String> {
         let vehicle_lock = self.vehicle_lock.lock_ro().await;
         match &vehicle_lock {
             ReadLock::OptionLock(l) => l.as_ref().map(|l| l.owner().to_owned()),
@@ -831,8 +831,8 @@ impl LockStateProvider for SovdLockStateView {
 
 #[async_trait]
 impl LockStateProvider for SovdLockStateProvider {
-    async fn vehicle_lock_owner_sub(&self) -> Option<String> {
-        self.view().vehicle_lock_owner_sub().await
+    async fn vehicle_lock_owner_id(&self) -> Option<String> {
+        self.view().vehicle_lock_owner_id().await
     }
 
     async fn has_non_vehicle_locks(&self) -> bool {

@@ -180,7 +180,7 @@ pub(crate) async fn require_vehicle_lock(
     claims: &dyn cda_plugin_security::Claims,
     retry_after: Duration,
 ) -> Result<(), Box<Response>> {
-    match lock_state.vehicle_lock_owner_sub().await {
+    match lock_state.vehicle_lock_owner_id().await {
         None => Err(Box::new(
             DbUpdateErrorResponse::new(
                 RuntimeUpdateError::NoLock("Vehicle lock is missing".to_owned()),

@@ -136,7 +136,7 @@ impl<C: Collection + DirectFileAccess> Default for UpdateCollections<C> {
 #[async_trait]
 pub trait LockStateProvider: Send + Sync + 'static {
     /// Returns the opaque identity of the vehicle lock owner, or `None` if no vehicle lock is held.
-    async fn vehicle_lock_owner_sub(&self) -> Option<String>;
+    async fn vehicle_lock_owner_id(&self) -> Option<String>;
 
     /// Returns `true` if any non-vehicle resource lock is currently held.
     async fn has_non_vehicle_locks(&self) -> bool;

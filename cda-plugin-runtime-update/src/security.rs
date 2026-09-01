@@ -46,7 +46,7 @@ impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'sta
         collections: &UpdateCollections<C>,
     ) -> Result<(), RuntimeUpdateError> {
         lock_state_provider
-            .vehicle_lock_owner_sub()
+            .vehicle_lock_owner_id()
             .await
             .ok_or_else(|| RuntimeUpdateError::NoLock("No vehicle lock owned".to_owned()))?;
         if lock_state_provider.has_non_vehicle_locks().await {
@@ -115,7 +115,7 @@ mod tests {
 
     #[async_trait]
     impl LockStateProvider for MockLockProvider {
-        async fn vehicle_lock_owner_sub(&self) -> Option<String> {
+        async fn vehicle_lock_owner_id(&self) -> Option<String> {
             self.owner.clone()
         }
 
