@@ -20,6 +20,7 @@ pub(crate) mod runtimefilesupdate {
         response::IntoResponse,
     };
     use cda_interfaces::{
+        DynamicPlugin,
         http_protection::registry::{HttpMethod, HttpRouteMatcher},
         runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin},
     };
@@ -68,9 +69,10 @@ pub(crate) mod runtimefilesupdate {
             return resp.into_response();
         }
 
+        let security = sec_plugin as DynamicPlugin;
         route_state
             .plugin
-            .start_execution(body.parameters.mode)
+            .start_execution(body.parameters.mode, &security)
             .await
             .map_or_else(
                 |e| DbUpdateErrorResponse::new(e, route_state.retry_after).into_response(),

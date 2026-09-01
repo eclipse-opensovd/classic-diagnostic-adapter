@@ -15,7 +15,7 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    HashMap,
+    DynamicPlugin, HashMap,
     communication_control::{DisableCommunication, PostUpdateCommunicationMode},
     http_protection::registry::{HttpProtectionRegistry, HttpRouteMatcher},
     runtime_update_api::{
@@ -169,6 +169,7 @@ impl<
     async fn start_execution(
         &self,
         mode: ExecutionMode,
+        security: &DynamicPlugin,
     ) -> Result<String, RuntimeUpdateError> {
         let params = crate::operations::executions::ExecutionParams {
             storage: &self.storage,
@@ -182,7 +183,7 @@ impl<
             post_update_mode: self.post_update_mode.clone(),
             lock_state_provider: &*self.lock_provider,
         };
-        crate::operations::executions::start_execution(&params, mode).await
+        crate::operations::executions::start_execution(&params, mode, security).await
     }
 
     async fn get_execution_status(&self, execution_id: &str) -> Option<UpdateExecution> {
@@ -199,6 +200,7 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use cda_interfaces::{
+        DynamicPlugin,
         communication_control::{CommunicationState, PostUpdateCommunicationMode},
         http_protection::registry::HttpProtectionRegistry,
         runtime_update_api::{
@@ -527,7 +529,7 @@ mod tests {
         let plugin = make_plugin(storage);
 
         plugin
-            .start_execution(ExecutionMode::Apply)
+            .start_execution(ExecutionMode::Apply, &(Box::new(()) as DynamicPlugin))
             .await
             .expect("an update must start while communication is deferred");
         assert_eq!(plugin.list_executions().await.len(), 1);
@@ -554,7 +556,7 @@ mod tests {
             .expect("lease must be granted from a deferred runtime");
 
         let result = plugin
-            .start_execution(ExecutionMode::Apply)
+            .start_execution(ExecutionMode::Apply, &(Box::new(()) as DynamicPlugin))
             .await;
         assert!(matches!(result, Err(RuntimeUpdateError::ExecutionConflict)));
         assert!(plugin.list_executions().await.is_empty());

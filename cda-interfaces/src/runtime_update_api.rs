@@ -35,6 +35,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use strum_macros::EnumString;
 
 use crate::{
+    DynamicPlugin,
     storage_api::{Collection, DirectFileAccess},
 };
 
@@ -219,15 +220,27 @@ pub trait RuntimeUpdateSecurityPlugin<
     C: Collection + DirectFileAccess + Send + Sync + 'static,
 >: Send + Sync + 'static
 {
-    /// Applies authoritative lock and content policy before an execution is registered.
+    /// Performs cheap, side-effect-free caller admission before update guards are acquired.
     ///
-    /// Implementations should verify caller authorization AND check for conflicting
-    /// operations (e.g., active ECU or functional-group locks held by other callers).
+    /// Implementations must fail closed for unknown caller context and verify that the
+    /// authenticated caller owns the vehicle lock.
+    ///
+    /// # Errors
+    /// Returns an appropriate [`RuntimeUpdateError`] variant to deny the execution.
+    async fn check_execution_admission(
+        &self,
+        security: &DynamicPlugin,
+        lock_state_provider: &L,
+    ) -> Result<(), RuntimeUpdateError>;
+
+    /// Repeats caller ownership authorization under update guards and applies authoritative
+    /// lock and content policy before an execution is registered.
     ///
     /// # Errors
     /// Returns an appropriate [`RuntimeUpdateError`] variant to deny the execution.
     async fn check_execution_allowed(
         &self,
+        security: &DynamicPlugin,
         lock_state_provider: &L,
         collections: &UpdateCollections<C>,
     ) -> Result<(), RuntimeUpdateError>;
@@ -473,7 +486,11 @@ pub trait RuntimeUpdateExecutor: Send + Sync + 'static {
     /// Starts an asynchronous execution (Apply, Rollback, or Cleanup).
     ///
     /// Returns an execution ID that can be polled via [`get_execution_status`](Self::get_execution_status).
-    async fn start_execution(&self, mode: ExecutionMode) -> Result<String, RuntimeUpdateError>;
+    async fn start_execution(
+        &self,
+        mode: ExecutionMode,
+        security: &DynamicPlugin,
+    ) -> Result<String, RuntimeUpdateError>;
 
     /// Returns all currently tracked executions. Always contains at most one entry;
     /// terminal-state entries are purged when the next execution starts.
@@ -584,9 +601,13 @@ impl<P: RuntimeFileStore> RuntimeFileStore for ExclusiveRuntimePlugin<P> {
 
 #[async_trait]
 impl<P: RuntimeUpdateExecutor> RuntimeUpdateExecutor for ExclusiveRuntimePlugin<P> {
-    async fn start_execution(&self, mode: ExecutionMode) -> Result<String, RuntimeUpdateError> {
+    async fn start_execution(
+        &self,
+        mode: ExecutionMode,
+        security: &DynamicPlugin,
+    ) -> Result<String, RuntimeUpdateError> {
         let _guard = self.lock.write().await;
-        self.inner.start_execution(mode).await
+        self.inner.start_execution(mode, security).await
     }
 
     async fn get_execution_status(&self, execution_id: &str) -> Option<UpdateExecution> {

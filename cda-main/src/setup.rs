@@ -587,6 +587,7 @@ mod tests {
         async fn start_execution(
             &self,
             _mode: ExecutionMode,
+            _security: &cda_interfaces::DynamicPlugin,
         ) -> Result<String, RuntimeUpdateError> {
             Ok(String::new())
         }

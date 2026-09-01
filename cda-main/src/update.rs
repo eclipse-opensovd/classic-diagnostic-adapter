@@ -12,7 +12,7 @@
  */
 use std::{sync::Arc, time::Duration};
 
-use cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin;
+use cda_interfaces::{DynamicPlugin, runtime_update_api::RuntimeFilesUpdatePlugin};
 use cda_plugin_runtime_update::{
     DefaultRuntimeUpdatePlugin, DefaultUpdateSecurityHandler,
     default_runtime_reloader_plugin::{
@@ -150,9 +150,14 @@ where
     Ok(DefaultRuntimeUpdatePlugin::new(
         storage,
         reloader_plugin,
-        Arc::new(DefaultUpdateSecurityHandler::new(Arc::clone(
-            &file_inspector,
-        ))),
+        Arc::new(DefaultUpdateSecurityHandler::new(
+            Arc::clone(&file_inspector),
+            Arc::new(|security: &DynamicPlugin| {
+                security
+                    .downcast_ref::<SP>()
+                    .map(|plugin| plugin.as_auth_plugin().claims().sub().to_owned())
+            }),
+        )),
         Arc::clone(&infra.lock_provider),
         Arc::clone(&file_inspector),
         infra.communication_disable,

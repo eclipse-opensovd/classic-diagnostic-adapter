@@ -158,11 +158,27 @@ pub(crate) mod test_utils {
         cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
         for MockSecurityHandler
     {
+        async fn check_execution_admission(
+            &self,
+            _security: &cda_interfaces::DynamicPlugin,
+            lock_state_provider: &L,
+        ) -> Result<(), RuntimeUpdateError> {
+            let owner = lock_state_provider.vehicle_lock_owner_id().await;
+            match owner {
+                None => Err(RuntimeUpdateError::NoLock(
+                    "No vehicle lock held".to_string(),
+                )),
+                Some(_) => Ok(()),
+            }
+        }
+
         async fn check_execution_allowed(
             &self,
+            security: &cda_interfaces::DynamicPlugin,
             lock_state_provider: &L,
             _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
         ) -> Result<(), RuntimeUpdateError> {
+            let _ = security;
             if lock_state_provider.vehicle_lock_owner_id().await.is_some() {
                 Ok(())
             } else {
@@ -402,7 +418,9 @@ mod tests {
         async fn start_execution(
             &self,
             _mode: ExecutionMode,
+            security: &cda_interfaces::DynamicPlugin,
         ) -> Result<String, RuntimeUpdateError> {
+            assert_eq!(security.downcast_ref::<u64>(), Some(&7));
             Ok("exec-1".to_owned())
         }
 
@@ -557,9 +575,10 @@ mod tests {
     #[tokio::test]
     async fn exclusive_wrapper_forwards_exact_execution_context() {
         let (plugin, _, _, _, _) = make_plugin(1, 1);
+        let security = Box::new(7u64) as cda_interfaces::DynamicPlugin;
         assert_eq!(
             plugin
-                .start_execution(ExecutionMode::Cleanup)
+                .start_execution(ExecutionMode::Cleanup, &security)
                 .await
                 .unwrap(),
             "exec-1"

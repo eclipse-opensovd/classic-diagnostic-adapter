@@ -14,7 +14,7 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    HashMap,
+    DynamicPlugin, HashMap,
     communication_control::{
         DisableCommunication, DisableError, DisableGuard, DisableReason,
         PostUpdateCommunicationMode,
@@ -69,7 +69,8 @@ fn http_protection_config_for_update(
     .with_retry_after(retry_after)
 }
 
-pub(crate) async fn start_execution<S, R, T, L>(
+#[cfg(test)]
+async fn start_unauthenticated_execution<S, R, T, L>(
     params: &ExecutionParams<'_, S, R, T, L>,
     mode: ExecutionMode,
 ) -> Result<String, RuntimeUpdateError>
@@ -79,6 +80,24 @@ where
     T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
     L: LockStateProvider,
 {
+    start_execution(params, mode, &(Box::new(()) as DynamicPlugin)).await
+}
+
+pub(crate) async fn start_execution<S, R, T, L>(
+    params: &ExecutionParams<'_, S, R, T, L>,
+    mode: ExecutionMode,
+    security: &DynamicPlugin,
+) -> Result<String, RuntimeUpdateError>
+where
+    S: Storage + Send + Sync + 'static,
+    R: RuntimeReloaderPlugin + ?Sized,
+    T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
+    L: LockStateProvider,
+{
+    params
+        .security_handler
+        .check_execution_admission(security, params.lock_state_provider)
+        .await?;
     let (protection, disable_lease) = acquire_execution_guards(params).await?;
     let collections = match load_update_collections(&**params.storage).await {
         Ok(collections) => collections,
@@ -86,9 +105,15 @@ where
             return Err(reject_execution(error, protection, disable_lease, mode).await);
         }
     };
-    let (protection, disable_lease) =
-        validate_execution_preconditions(params, mode, &collections, protection, disable_lease)
-            .await?;
+    let (protection, disable_lease) = validate_execution_preconditions(
+        params,
+        mode,
+        security,
+        &collections,
+        protection,
+        disable_lease,
+    )
+    .await?;
     let execution_id = register_execution(params.executions, mode).await;
 
     spawn_execution(
@@ -162,6 +187,7 @@ where
 async fn validate_execution_preconditions<S, R, T, L>(
     params: &ExecutionParams<'_, S, R, T, L>,
     mode: ExecutionMode,
+    security: &DynamicPlugin,
     collections: &UpdateCollections<S::CollectionHandle>,
     protection: OwnedHttpProtection,
     disable_lease: Box<dyn DisableGuard>,
@@ -174,7 +200,7 @@ where
 {
     if let Err(error) = params
         .security_handler
-        .check_execution_allowed(params.lock_state_provider, collections)
+        .check_execution_allowed(security, params.lock_state_provider, collections)
         .await
     {
         return Err(reject_execution(error, protection, disable_lease, mode).await);
@@ -461,7 +487,7 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use cda_interfaces::{
-        HashMap,
+        DynamicPlugin, HashMap,
         communication_control::{
             CommunicationOperation, CommunicationOperationFailure, CommunicationState,
             DisableGuard, PostUpdateCommunicationMode, TransportControl, TransportState,
@@ -529,7 +555,45 @@ mod tests {
 
     struct RecoveryPreparationFails;
 
+    struct RejectingAdmission;
 
+    #[async_trait::async_trait]
+    impl<L, C> cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
+        for RejectingAdmission
+    where
+        L: cda_interfaces::runtime_update_api::LockStateProvider,
+        C: cda_interfaces::storage_api::Collection
+            + cda_interfaces::storage_api::DirectFileAccess
+            + Send
+            + Sync
+            + 'static,
+    {
+        async fn check_execution_admission(
+            &self,
+            _security: &DynamicPlugin,
+            _lock_state_provider: &L,
+        ) -> Result<(), RuntimeUpdateError> {
+            Err(RuntimeUpdateError::NoLock(
+                "Caller does not own the vehicle lock".to_owned(),
+            ))
+        }
+
+        async fn check_execution_allowed(
+            &self,
+            _security: &DynamicPlugin,
+            _lock_state_provider: &L,
+            _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
+        ) -> Result<(), RuntimeUpdateError> {
+            panic!("authoritative validation must not run after cheap rejection")
+        }
+
+        async fn check_file_integrity(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<(), cda_interfaces::runtime_update_api::VerificationError> {
+            Ok(())
+        }
+    }
 
     #[async_trait::async_trait]
     impl RuntimeReloaderPlugin for RecoveryPreparationFails {
@@ -672,6 +736,36 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn rejected_caller_has_no_guard_storage_or_execution_side_effects() {
+        let f = make_fixture();
+        let security_handler = Arc::new(RejectingAdmission);
+        let params = super::ExecutionParams {
+            storage: &f.storage,
+            security_handler: &security_handler,
+            reload_handler: &f.reload_handler,
+            executions: &f.executions,
+            communication_disable: &f.communication_disable,
+            http_protections: &f.http_restriction_manager,
+            update_exempt_routes: &[],
+            update_retry_after: Duration::from_secs(1),
+            post_update_mode: PostUpdateCommunicationMode::Enabled,
+            lock_state_provider: &f.lock_provider,
+        };
+        let security = Box::new("foreign".to_owned()) as DynamicPlugin;
+
+        let result = super::start_execution(&params, ExecutionMode::Apply, &security).await;
+
+        assert!(matches!(result, Err(RuntimeUpdateError::NoLock(_))));
+        assert!(!f.http_restriction_manager.is_active());
+        assert!(f.executions.read().await.is_empty());
+        assert!(
+            f.storage
+                .get_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
+                .await
+                .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn start_execution_apply_returns_execution_id() {
@@ -684,7 +778,7 @@ mod tests {
         )
         .await;
 
-        let exec_id = super::start_execution(&f.params(), ExecutionMode::Apply)
+        let exec_id = super::start_unauthenticated_execution(&f.params(), ExecutionMode::Apply)
             .await
             .unwrap();
         assert!(!exec_id.is_empty());
@@ -704,7 +798,7 @@ mod tests {
         )
         .await;
 
-        let exec_id = super::start_execution(&f.params(), ExecutionMode::Rollback)
+        let exec_id = super::start_unauthenticated_execution(&f.params(), ExecutionMode::Rollback)
             .await
             .unwrap();
         assert!(!exec_id.is_empty());
@@ -729,7 +823,7 @@ mod tests {
         // an error) rather than accepted (202-equivalent execution id) only to fail
         // later inside the spawned task.
         let result =
-            super::start_execution(&f.params(), ExecutionMode::Apply).await;
+            super::start_unauthenticated_execution(&f.params(), ExecutionMode::Apply).await;
 
         assert!(
             matches!(result, Err(RuntimeUpdateError::NoPendingUpdate)),
@@ -749,7 +843,7 @@ mod tests {
     #[tokio::test]
     async fn start_execution_cleanup_succeeds() {
         let f = make_fixture();
-        let exec_id = super::start_execution(&f.params(), ExecutionMode::Cleanup)
+        let exec_id = super::start_unauthenticated_execution(&f.params(), ExecutionMode::Cleanup)
             .await
             .unwrap();
         assert!(!exec_id.is_empty());
@@ -947,7 +1041,7 @@ mod tests {
         let mut f = make_fixture();
         f.communication_disable = communication_disable_for_test(transport, true);
 
-        let exec_id = super::start_execution(&f.params(), ExecutionMode::Cleanup)
+        let exec_id = super::start_unauthenticated_execution(&f.params(), ExecutionMode::Cleanup)
             .await
             .unwrap();
 
@@ -996,7 +1090,7 @@ mod tests {
             );
         }
 
-        let exec_id = super::start_execution(&f.params(), ExecutionMode::Cleanup)
+        let exec_id = super::start_unauthenticated_execution(&f.params(), ExecutionMode::Cleanup)
             .await
             .unwrap();
         assert!(!exec_id.is_empty());
@@ -1005,14 +1099,14 @@ mod tests {
     #[tokio::test]
     async fn previous_execution_removed_when_new_one_starts() {
         let f = make_fixture();
-        let first_id = super::start_execution(&f.params(), ExecutionMode::Cleanup)
+        let first_id = super::start_unauthenticated_execution(&f.params(), ExecutionMode::Cleanup)
             .await
             .unwrap();
 
         poll_until_terminal(&f.executions, &first_id).await;
 
         let _second_id =
-            super::start_execution(&f.params(), ExecutionMode::Cleanup)
+            super::start_unauthenticated_execution(&f.params(), ExecutionMode::Cleanup)
                 .await
                 .unwrap();
 
@@ -1047,7 +1141,7 @@ mod tests {
             lock_state_provider: &f.lock_provider,
         };
 
-        let exec_id = super::start_execution(&params, ExecutionMode::Apply)
+        let exec_id = super::start_unauthenticated_execution(&params, ExecutionMode::Apply)
             .await
             .unwrap();
 

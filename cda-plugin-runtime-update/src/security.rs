@@ -15,6 +15,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use cda_interfaces::{
+    DynamicPlugin,
     runtime_update_api::{
         LockStateProvider, RuntimeFileInspector, RuntimeUpdateError, RuntimeUpdateSecurityPlugin,
         UpdateCollections, VerificationError,
@@ -26,19 +27,46 @@ use cda_interfaces::{
 ///
 /// Validates vehicle lock ownership, detects lock conflicts, and verifies file
 /// integrity through the injected [`RuntimeFileInspector`].
+type CallerIdentity = dyn Fn(&DynamicPlugin) -> Option<String> + Send + Sync;
+
 pub struct DefaultUpdateSecurityHandler<L: LockStateProvider> {
     inspector: Arc<dyn RuntimeFileInspector>,
+    caller_identity: Arc<CallerIdentity>,
     _lock: std::marker::PhantomData<L>,
 }
 
 impl<L: LockStateProvider> DefaultUpdateSecurityHandler<L> {
-    /// Creates a security handler.
+    /// Creates a security handler with application-owned caller identity interpretation.
     #[must_use]
-    pub fn new(inspector: Arc<dyn RuntimeFileInspector>) -> Self {
+    pub fn new(
+        inspector: Arc<dyn RuntimeFileInspector>,
+        caller_identity: Arc<CallerIdentity>,
+    ) -> Self {
         Self {
             inspector,
+            caller_identity,
             _lock: std::marker::PhantomData,
         }
+    }
+
+    async fn check_vehicle_lock_owner(
+        &self,
+        security: &DynamicPlugin,
+        lock_state_provider: &L,
+    ) -> Result<(), RuntimeUpdateError> {
+        let caller = (self.caller_identity)(security).ok_or_else(|| {
+            RuntimeUpdateError::NoLock("Caller cannot be authorized for this operation".to_owned())
+        })?;
+        let owner = lock_state_provider
+            .vehicle_lock_owner_id()
+            .await
+            .ok_or_else(|| RuntimeUpdateError::NoLock("Vehicle lock is missing".to_owned()))?;
+        if owner != caller {
+            return Err(RuntimeUpdateError::NoLock(
+                "Vehicle lock is owned by another caller".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -46,15 +74,23 @@ impl<L: LockStateProvider> DefaultUpdateSecurityHandler<L> {
 impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'static>
     RuntimeUpdateSecurityPlugin<L, C> for DefaultUpdateSecurityHandler<L>
 {
+    async fn check_execution_admission(
+        &self,
+        security: &DynamicPlugin,
+        lock_state_provider: &L,
+    ) -> Result<(), RuntimeUpdateError> {
+        self.check_vehicle_lock_owner(security, lock_state_provider)
+            .await
+    }
+
     async fn check_execution_allowed(
         &self,
+        security: &DynamicPlugin,
         lock_state_provider: &L,
         collections: &UpdateCollections<C>,
     ) -> Result<(), RuntimeUpdateError> {
-        lock_state_provider
-            .vehicle_lock_owner_id()
-            .await
-            .ok_or_else(|| RuntimeUpdateError::NoLock("No vehicle lock owned".to_owned()))?;
+        self.check_vehicle_lock_owner(security, lock_state_provider)
+            .await?;
         if lock_state_provider.has_non_vehicle_locks().await {
             return Err(RuntimeUpdateError::LockConflict(
                 "Non-vehicle locks are held, cannot apply update".to_owned(),
@@ -103,6 +139,7 @@ async fn database_ecu_names<C: Collection + DirectFileAccess>(
 mod tests {
     use std::{
         path::PathBuf,
+        sync::atomic::{AtomicUsize, Ordering},
     };
 
     use async_trait::async_trait;
@@ -118,6 +155,22 @@ mod tests {
         owner: Option<String>,
         has_ecu_conflicts: bool,
         has_fg_conflicts: bool,
+    }
+
+    struct ChangingLockProvider {
+        reads: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LockStateProvider for ChangingLockProvider {
+        async fn vehicle_lock_owner_id(&self) -> Option<String> {
+            let read = self.reads.fetch_add(1, Ordering::SeqCst);
+            Some(if read == 0 { "caller" } else { "other" }.to_owned())
+        }
+
+        async fn has_non_vehicle_locks(&self) -> bool {
+            false
+        }
     }
 
     #[async_trait]
@@ -205,8 +258,13 @@ mod tests {
         let lock_provider = make_lock_provider(owner, has_ecu_conflicts, has_fg_conflicts);
         let handler = DefaultUpdateSecurityHandler::new(
             crate::test_utils::test_inspector(),
+            Arc::new(|security| security.downcast_ref::<String>().cloned()),
         );
         (handler, lock_provider)
+    }
+
+    fn caller(identity: &str) -> DynamicPlugin {
+        Box::new(identity.to_owned())
     }
 
     #[tokio::test]
@@ -214,6 +272,7 @@ mod tests {
         let (handler, lock_provider) = make_handler(None, false, false);
         let result = handler
             .check_execution_allowed(
+                &caller("user-a"),
                 &lock_provider,
                 &UpdateCollections::<LocalCollection>::default(),
             )
@@ -226,6 +285,7 @@ mod tests {
         let (handler, lock_provider) = make_handler(Some("user-b"), false, false);
         let result = handler
             .check_execution_allowed(
+                &caller("user-b"),
                 &lock_provider,
                 &UpdateCollections::<LocalCollection>::default(),
             )
@@ -238,6 +298,7 @@ mod tests {
         let (handler, lock_provider) = make_handler(Some("user-a"), true, false);
         let result = handler
             .check_execution_allowed(
+                &caller("user-a"),
                 &lock_provider,
                 &UpdateCollections::<LocalCollection>::default(),
             )
@@ -250,6 +311,7 @@ mod tests {
         let (handler, lock_provider) = make_handler(Some("user-a"), false, true);
         let result = handler
             .check_execution_allowed(
+                &caller("user-a"),
                 &lock_provider,
                 &UpdateCollections::<LocalCollection>::default(),
             )
@@ -266,6 +328,7 @@ mod tests {
         assert!(
             handler
                 .check_execution_allowed(
+                    &caller("user-a"),
                     &lock_provider,
                     &UpdateCollections::<LocalCollection>::default()
                 )
@@ -274,8 +337,58 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn execution_admission_rejects_wrong_owner() {
+        let (handler, lock_provider) = make_handler(Some("owner"), false, false);
+        let result =
+            <DefaultUpdateSecurityHandler<_> as RuntimeUpdateSecurityPlugin<
+                MockLockProvider,
+                LocalCollection,
+            >>::check_execution_admission(&handler, &caller("other"), &lock_provider)
+            .await;
+        assert!(matches!(result, Err(RuntimeUpdateError::NoLock(_))));
+    }
 
+    #[tokio::test]
+    async fn execution_admission_rejects_foreign_context() {
+        let (handler, lock_provider) = make_handler(Some("owner"), false, false);
+        let foreign = Box::new(7u8) as DynamicPlugin;
+        let result = <DefaultUpdateSecurityHandler<_> as RuntimeUpdateSecurityPlugin<
+            MockLockProvider,
+            LocalCollection,
+        >>::check_execution_admission(&handler, &foreign, &lock_provider)
+        .await;
+        assert!(matches!(result, Err(RuntimeUpdateError::NoLock(_))));
+    }
 
+    #[tokio::test]
+    async fn authoritative_check_rejects_vehicle_owner_change() {
+        let provider = ChangingLockProvider {
+            reads: AtomicUsize::new(0),
+        };
+        let handler = DefaultUpdateSecurityHandler::<ChangingLockProvider>::new(
+            crate::test_utils::test_inspector(),
+            Arc::new(|security| security.downcast_ref::<String>().cloned()),
+        );
+        let security = caller("caller");
+        <DefaultUpdateSecurityHandler<_> as RuntimeUpdateSecurityPlugin<
+            ChangingLockProvider,
+            LocalCollection,
+        >>::check_execution_admission(&handler, &security, &provider)
+        .await
+        .unwrap();
+        let result = <DefaultUpdateSecurityHandler<_> as RuntimeUpdateSecurityPlugin<
+            ChangingLockProvider,
+            LocalCollection,
+        >>::check_execution_allowed(
+            &handler,
+            &security,
+            &provider,
+            &UpdateCollections::default(),
+        )
+        .await;
+        assert!(matches!(result, Err(RuntimeUpdateError::NoLock(_))));
+    }
 
     #[tokio::test]
     async fn check_file_integrity_mdd_fails_on_nonexistent_file() {
@@ -318,7 +431,7 @@ mod tests {
 
         let collections = make_collections(&storage).await;
         let result = handler
-            .check_execution_allowed(&lock_provider, &collections)
+            .check_execution_allowed(&caller("user"), &lock_provider, &collections)
             .await;
         assert!(result.is_ok());
     }
