@@ -35,6 +35,10 @@ pub enum AppError {
     },
     #[error("Data error `{0}`")]
     DataError(String),
+    /// `provided` MDD files resolved, yet not one database loaded. Distinct
+    /// from an empty set, which is a legitimate state.
+    #[error("No database loaded although {provided} MDD file(s) were provided")]
+    NoDatabasesLoaded { provided: usize },
     #[error("Error during execution `{0}`")]
     RuntimeError(String),
     #[error("Not found: `{0}`")]

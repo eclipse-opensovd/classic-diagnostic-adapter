@@ -15,14 +15,14 @@ use aide::{axum::IntoApiResponse, transform::TransformOperation};
 use axum::{
     Json,
     body::Bytes,
-    extract::{Query, State},
+    extract::Query,
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
     DiagComm, DynamicPlugin, SchemaProvider, UdsEcu,
+    communication_control::CommunicationAccess,
     diagservices::{DiagServiceJsonResponse, DiagServiceResponseType},
-    file_manager::FileManager,
 };
 use cda_plugin_security::SecurityPlugin;
 use http::{HeaderMap, StatusCode};
@@ -30,7 +30,7 @@ use http::{HeaderMap, StatusCode};
 use crate::{
     openapi,
     sovd::{
-        IntoSovd, WebserverEcuState,
+        EcuContext, IntoSovd, WebserverEcuState, acquire_communication_activity,
         components::get_content_type_and_accept,
         create_response_schema, create_schema,
         error::{ApiError, ErrorWrapper, api_error_from_diag_response},
@@ -49,8 +49,8 @@ pub(crate) mod x_sovd2uds_bulk_data;
 pub(crate) mod x_sovd2uds_download;
 
 // [[ dimpl~sovd-api-component-sdgsd, GET /components/{ecu} SDG handler ]]
-pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+pub(crate) async fn get<T: UdsEcu + Clone>(
+    EcuContext(WebserverEcuState { ecu_name, uds, .. }): EcuContext<T>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::components::ComponentQuery>,
         ApiError,
@@ -164,10 +164,15 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
         })
 }
 
-pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+pub(crate) async fn post<T: UdsEcu + Clone>(
+    EcuContext(WebserverEcuState {
+        ecu_name,
+        uds,
+        communication_access,
+        ..
+    }): EcuContext<T>,
 ) -> Response {
-    update(&ecu_name, uds).await
+    update(&ecu_name, uds, communication_access.as_ref()).await
 }
 
 // [[ dimpl~sovd-api-ecu-variant-detection, PUT endpoint for ECU variant detection ]]
@@ -176,10 +181,15 @@ pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
 // Delegates to the UDS layer which sends diagnostic requests to the ECU and
 // evaluates the responses against known variant patterns. Returns 201 on
 // success or an error response if detection fails.
-pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+pub(crate) async fn put<T: UdsEcu + Clone>(
+    EcuContext(WebserverEcuState {
+        ecu_name,
+        uds,
+        communication_access,
+        ..
+    }): EcuContext<T>,
 ) -> Response {
-    update(&ecu_name, uds).await
+    update(&ecu_name, uds, communication_access.as_ref()).await
 }
 
 pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
@@ -187,7 +197,21 @@ pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
         .response_with::<201, (), _>(|res| res.description("ECU variant detection triggered."))
 }
 
-async fn update<T: UdsEcu + Clone>(ecu_name: &str, uds: T) -> Response {
+async fn update<T: UdsEcu + Clone>(
+    ecu_name: &str,
+    uds: T,
+    communication_access: &dyn CommunicationAccess,
+) -> Response {
+    let _communication_guard = match acquire_communication_activity(communication_access) {
+        Ok(guard) => guard,
+        Err(error) => {
+            return ErrorWrapper {
+                error,
+                include_schema: false,
+            }
+            .into_response();
+        }
+    };
     match uds.detect_variant(ecu_name).await {
         Ok(()) => (StatusCode::CREATED, ()).into_response(),
         Err(e) => ErrorWrapper {
@@ -445,17 +469,27 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     use bytes::Bytes;
     use cda_interfaces::{
         DataParseError, DiagComm, DiagCommType,
+        communication_control::{
+            ActivationCause, CommunicationAccess, CommunicationError, CommunicationGuard,
+            CommunicationState, VariantDetectionMode,
+        },
         diagservices::{
             DiagServiceJsonResponse, DiagServiceResponseType, FieldParseError,
             mock::MockDiagServiceResponse,
         },
+        mock::MockUdsEcu,
     };
     use http::{HeaderMap, HeaderValue, StatusCode, header};
 
-    use super::{format_data_response, parse_data_request};
+    use super::{format_data_response, parse_data_request, update};
     use crate::sovd::error::ApiError;
 
     async fn body_bytes(response: axum::response::Response) -> Bytes {
@@ -472,6 +506,50 @@ mod tests {
                 details: details.to_string(),
             },
         }
+    }
+
+    struct CountingAccess(Arc<AtomicUsize>);
+
+    struct CountingGuard(Arc<AtomicUsize>);
+
+    impl Drop for CountingGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl CommunicationAccess for CountingAccess {
+        fn state(&self) -> CommunicationState {
+            CommunicationState::Enabled
+        }
+
+        fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(CommunicationGuard::new(CountingGuard(Arc::clone(&self.0))))
+        }
+
+        fn request_activate(&self, _cause: ActivationCause) -> CommunicationState {
+            CommunicationState::Enabled
+        }
+
+        fn variant_detection(&self) -> VariantDetectionMode {
+            VariantDetectionMode::Always
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_detection_holds_communication_guard() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&active);
+        let mut uds = MockUdsEcu::new();
+        uds.expect_detect_variant().returning(move |_| {
+            assert_eq!(observed.load(Ordering::SeqCst), 1);
+            Ok(())
+        });
+
+        let response = update("TestECU", uds, &CountingAccess(Arc::clone(&active))).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
     }
 
     #[test]

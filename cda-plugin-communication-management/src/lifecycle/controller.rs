@@ -103,9 +103,10 @@ impl CommunicationHandle {
 
     /// Registers a hook that runs during subsequent lifecycle transitions.
     ///
-    /// Hooks run in registration order during activation and detection, and in
-    /// reverse order during deinitialization. Registering the same hook twice
-    /// runs it twice.
+    /// Any number may register. Hooks prepare, commit, and initialize in
+    /// registration order and deinitialize in reverse registration order.
+    /// Registering the same hook more than once creates multiple entries and
+    /// runs it once per entry.
     ///
     /// # Errors
     ///
@@ -139,7 +140,7 @@ impl CommunicationHandle {
         .await
     }
 
-    fn construct_worker_failure(
+    pub(super) fn worker_failure(
         &self,
         operation: CommunicationOperation,
     ) -> CommunicationOperationFailure {
@@ -151,7 +152,7 @@ impl CommunicationHandle {
     }
 
     /// Sends a worker command built from a fresh reply channel, mapping a send
-    /// failure to [`worker_failure`](Self::construct_worker_failure). Returns the reply
+    /// failure to [`worker_failure`](Self::worker_failure). Returns the reply
     /// channel un-awaited, for the callers that handle the receive side
     /// themselves. See [`submit_and_await`](Self::submit_and_await) for the
     /// common case.
@@ -169,12 +170,12 @@ impl CommunicationHandle {
         self.worker
             .send(build(tx))
             .await
-            .map_err(|_| self.construct_worker_failure(operation))?;
+            .map_err(|_| self.worker_failure(operation))?;
         Ok(rx)
     }
 
     /// As [`submit`](Self::submit), but awaits the reply, mapping a closed
-    /// channel to [`worker_failure`](Self::construct_worker_failure).
+    /// channel to [`worker_failure`](Self::worker_failure).
     async fn submit_and_await<T>(
         &self,
         operation: CommunicationOperation,
@@ -185,7 +186,7 @@ impl CommunicationHandle {
         self.submit(operation, build)
             .await?
             .await
-            .unwrap_or_else(|_| Err(self.construct_worker_failure(operation)))
+            .unwrap_or_else(|_| Err(self.worker_failure(operation)))
     }
 
     /// Activates communication, joining an already in-flight activation if one exists.
@@ -221,9 +222,8 @@ impl CommunicationHandle {
     /// A returned [`CommunicationState::Enabled`] means there was nothing to
     /// claim, so no detector ran.
     ///
-    /// If the detached task panics or is aborted before any caller joins it, the
-    /// state stays `Enabling(_)` until the next caller claims or joins the same
-    /// operation.
+    /// If the detached task is aborted before any caller joins it, the state stays
+    /// `Enabling(_)` until the next caller claims or joins the same operation.
     #[must_use]
     pub fn request_enable_and_detect(&self) -> CommunicationState {
         self.request_claimed(LifecycleRequest::EnableAndDetect)
@@ -562,8 +562,8 @@ impl CommunicationHandle {
     ///
     /// Granted from `Enabled` and from `Disabled`. The lease is exclusive
     /// ownership of the runtime, not an operation on the transport, so a
-    /// consumer such as a runtime update does not have to bring the vehicle
-    /// network up to become eligible.
+    /// holder of the disable capability does not have to activate transport to
+    /// become eligible.
     ///
     /// `DisableOwner::resumes_transport` records what `release()` means. A lease
     /// taken from `Enabled` resumes, one taken from `Disabled` returns to
@@ -579,7 +579,7 @@ impl CommunicationHandle {
     #[tracing::instrument(skip_all, fields(dlt_context = dlt_ctx!("COMM")))]
     pub async fn disable(&self, reason: DisableReason) -> Result<DisableLease, DisableError> {
         let id = DisableLeaseId::new();
-        {
+        let claim = {
             let mut state = self.state.lock();
             match transition::decide(
                 &state,
@@ -596,15 +596,14 @@ impl CommunicationHandle {
                         resumes_transport,
                         resume_detects,
                     });
+                    Ok(())
                 }
-                LifecycleDecision::GuardsHeld => return Err(DisableError::InUse),
-                LifecycleDecision::ShuttingDown => {
-                    return Err(DisableError::Failed(
-                        CommunicationOperationFailure::ShuttingDown {
-                            operation: CommunicationOperation::Disable,
-                        },
-                    ));
-                }
+                LifecycleDecision::GuardsHeld => Err(DisableError::InUse),
+                LifecycleDecision::ShuttingDown => Err(DisableError::Failed(
+                    CommunicationOperationFailure::ShuttingDown {
+                        operation: CommunicationOperation::Disable,
+                    },
+                )),
                 // Every remaining verdict means this state cannot grant a
                 // lease.
                 LifecycleDecision::Conflict
@@ -621,10 +620,11 @@ impl CommunicationHandle {
                         ?reason,
                         "Disable rejected: current state does not permit an exclusive lease"
                     );
-                    return Err(DisableError::Conflict);
+                    Err(DisableError::Conflict)
                 }
             }
-        }
+        };
+        claim?;
 
         match self.spawn_disable(id, reason).await {
             Ok(Ok(lease)) => Ok(lease),
@@ -682,7 +682,7 @@ impl CommunicationHandle {
             Ok(Ok(())) => Ok(DisableLease::new(self.clone(), id)),
             Ok(Err(failure)) => Err(failure),
             Err(_) => {
-                let failure = self.construct_worker_failure(operation);
+                let failure = self.worker_failure(operation);
                 self.finish_failed_disable_locally(id, failure.clone());
                 Err(failure)
             }
@@ -716,6 +716,19 @@ impl CommunicationHandle {
     > {
         self.submit(CommunicationOperation::Resume, |reply| {
             LifecycleCommand::ReleaseDisableLease { id, reply }
+        })
+        .await
+    }
+
+    pub(super) async fn submit_finish(
+        &self,
+        id: DisableLeaseId,
+    ) -> Result<
+        oneshot::Receiver<Result<(), CommunicationOperationFailure>>,
+        CommunicationOperationFailure,
+    > {
+        self.submit(CommunicationOperation::FinishDisableLease, |reply| {
+            LifecycleCommand::FinishDisableLease { id, reply }
         })
         .await
     }
@@ -757,7 +770,10 @@ impl CommunicationHandle {
         // Set under the state lock before the worker starts tearing down. Every
         // racing state write then either lands before it and is overwritten by
         // the worker's terminal write, or observes the flag and skips.
-        self.state.lock().shutting_down = true;
+        {
+            let mut state = self.state.lock();
+            state.shutting_down = true;
+        }
         self.worker.shutdown().await;
         if let Some(task) = self.worker_task.lock().await.take()
             && let Err(error) = task.await
@@ -772,6 +788,7 @@ impl CommunicationHandle {
                 | CommunicationState::Disabled
                 | CommunicationState::Disabling
                 | CommunicationState::DisabledExclusive
+                | CommunicationState::RecoveryRequired(_)
                 | CommunicationState::Error(_) => CommunicationOperation::Disable,
             };
             state.disable_owner = None;
@@ -1173,12 +1190,33 @@ mod tests {
         let second = handle.disable(DisableReason::RuntimeUpdate).await.unwrap();
         // The stale id must be rejected without disturbing the current lease.
         let reply = handle.submit_release(stale_id).await.unwrap();
-        assert!(matches!(
+        assert_eq!(
             reply.await.unwrap(),
-            Err(CommunicationOperationFailure::TransitionFailure { .. })
-        ));
+            Err(CommunicationOperationFailure::TransitionFailure {
+                operation: CommunicationOperation::Resume,
+            })
+        );
         assert_eq!(handle.state(), CommunicationState::DisabledExclusive);
         assert_eq!(second.release().await, Ok(CommunicationState::Enabled));
+    }
+
+    #[tokio::test]
+    async fn stale_lease_finish_reports_the_exact_finish_operation() {
+        let (handle, _) = handle();
+        let first = handle.disable(DisableReason::RuntimeUpdate).await.unwrap();
+        let stale_id = first.identity().unwrap();
+        assert_eq!(first.finish().await, Ok(()));
+
+        let second = handle.disable(DisableReason::RuntimeUpdate).await.unwrap();
+        let reply = handle.submit_finish(stale_id).await.unwrap();
+        assert_eq!(
+            reply.await.unwrap(),
+            Err(CommunicationOperationFailure::TransitionFailure {
+                operation: CommunicationOperation::FinishDisableLease,
+            })
+        );
+        assert_eq!(handle.state(), CommunicationState::DisabledExclusive);
+        assert_eq!(second.finish().await, Ok(()));
     }
 
     /// A `release()` future abandoned before its first poll must still defer. It
@@ -1468,6 +1506,56 @@ mod tests {
         assert_eq!(lease.release().await, Ok(CommunicationState::Enabled));
         assert_eq!(handle.state(), CommunicationState::Enabled);
         assert_eq!(control.enables.load(Ordering::Relaxed), 2);
+    }
+
+    /// `finish` must never enable the transport, even though this lease was taken
+    /// from an enabled runtime.
+    #[tokio::test]
+    async fn finish_stays_disabled_and_leaves_the_runtime_reusable() {
+        let (handle, control) = handle();
+        assert_eq!(
+            handle.enable_and_detect().await,
+            Ok(CommunicationState::Enabled)
+        );
+        assert_eq!(control.enables.load(Ordering::Relaxed), 1);
+
+        let lease = handle
+            .disable(DisableReason::RuntimeUpdate)
+            .await
+            .expect("disable must succeed once no guard is active");
+        assert_eq!(handle.state(), CommunicationState::DisabledExclusive);
+
+        assert_eq!(lease.finish().await, Ok(()));
+
+        assert_eq!(handle.state(), CommunicationState::Disabled);
+        assert_eq!(
+            control.enables.load(Ordering::Relaxed),
+            1,
+            "finish must not re-enable the transport"
+        );
+
+        assert_eq!(
+            handle.enable_and_detect().await,
+            Ok(CommunicationState::Enabled)
+        );
+        assert_eq!(control.enables.load(Ordering::Relaxed), 2);
+    }
+
+    /// A lease taken from an already-disabled runtime also stays disabled under
+    /// `finish`.
+    #[tokio::test]
+    async fn finish_from_already_disabled_stays_disabled() {
+        let (handle, _control) = handle();
+
+        let lease = handle
+            .disable(DisableReason::RuntimeUpdate)
+            .await
+            .expect("disable must succeed from Disabled");
+        assert_eq!(handle.state(), CommunicationState::DisabledExclusive);
+
+        assert_eq!(lease.finish().await, Ok(()));
+
+        assert_eq!(handle.state(), CommunicationState::Disabled);
     }
 
     #[derive(Default)]

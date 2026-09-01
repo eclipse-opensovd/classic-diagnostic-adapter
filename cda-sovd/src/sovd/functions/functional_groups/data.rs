@@ -14,7 +14,7 @@
 use aide::{UseApi, transform::TransformOperation};
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::Query,
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
@@ -22,7 +22,7 @@ use cda_interfaces::{DynamicPlugin, UdsEcu};
 use cda_plugin_security::Secured;
 use http::StatusCode;
 
-use super::WebserverFgState;
+use super::{FgContext, WebserverFgState};
 use crate::sovd::{
     IntoSovd, create_schema,
     error::{ApiError, ErrorWrapper},
@@ -34,11 +34,11 @@ pub(crate) async fn get<T: UdsEcu + Clone>(
         Query<sovd_interfaces::functions::functional_groups::data::get::Query>,
         ApiError,
     >,
-    State(WebserverFgState {
+    FgContext(WebserverFgState {
         uds,
         functional_group_name,
         ..
-    }): State<WebserverFgState<T>>,
+    }): FgContext<T>,
 ) -> Response {
     let schema = if query.include_schema {
         Some(create_schema!(
@@ -91,7 +91,7 @@ pub(crate) mod diag_service {
     use axum::{
         Json,
         body::Bytes,
-        extract::{Path, Query, State},
+        extract::{Path, Query},
         http::{HeaderMap, StatusCode},
         response::{IntoResponse, Response},
     };
@@ -104,7 +104,9 @@ pub(crate) mod diag_service {
         sovd::{
             components::{ecu::DiagServicePathParam, get_content_type_and_accept},
             error::{ApiError, ErrorWrapper, VendorErrorCode},
-            functions::functional_groups::{WebserverFgState, handle_ecu_response, map_to_json},
+            functions::functional_groups::{
+                FgContext, WebserverFgState, handle_ecu_response, map_to_json,
+            },
             get_payload_data,
         },
     };
@@ -119,11 +121,11 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::functions::functional_groups::data::service::Query>,
             ApiError,
         >,
-        State(WebserverFgState {
+        FgContext(WebserverFgState {
             uds,
             functional_group_name,
             ..
-        }): State<WebserverFgState<T>>,
+        }): FgContext<T>,
     ) -> Response {
         let include_schema = query.include_schema;
         if diag_service.contains('/') {
@@ -190,11 +192,11 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::functions::functional_groups::data::service::Query>,
             ApiError,
         >,
-        State(WebserverFgState {
+        FgContext(WebserverFgState {
             uds,
             functional_group_name,
             ..
-        }): State<WebserverFgState<T>>,
+        }): FgContext<T>,
         body: Bytes,
     ) -> Response {
         let include_schema = query.include_schema;

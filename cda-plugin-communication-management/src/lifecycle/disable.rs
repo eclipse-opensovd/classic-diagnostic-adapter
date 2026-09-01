@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Exclusive, consuming transport-disable ownership.
+//! Consuming, exclusive transport-disable ownership.
 
 use std::sync::Arc;
 
@@ -66,10 +66,10 @@ impl DisableLeaseId {
     }
 }
 
-/// Exclusive disable owner and the state restored when its lease is released.
+/// The exclusive disable owner and the state restored when its lease is released.
 ///
 /// These values are captured atomically when the lease is granted so each
-/// disable generation restores only the state it displaced.
+/// disable cycle restores only the state it displaced.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DisableOwner {
     pub(crate) id: DisableLeaseId,
@@ -92,7 +92,7 @@ impl DisableOwner {
     }
 }
 
-/// Exclusive ownership of disabled communication.
+/// Owns disabled communication exclusively.
 ///
 /// The authoritative [`DisableGuard`] implementation. See that trait for the
 /// `release` and drop semantics, and [`CommunicationHandle::disable`] for which
@@ -103,16 +103,16 @@ impl DisableOwner {
 /// Resume communication before continuing:
 ///
 /// ```ignore
-/// let lease = communication.disable(DisableReason::RuntimeUpdate).await?;
-/// update_runtime_files().await?;
+/// let lease = communication.disable(DisableReason::Custom("exclusive operation".to_owned())).await?;
+/// run_exclusive_operation().await?;
 /// lease.release().await?; // transport is enabled and initializers completed
 /// ```
 ///
 /// Leave communication disabled for later on-demand recovery:
 ///
 /// ```ignore
-/// let lease = communication.disable(DisableReason::RuntimeUpdate).await?;
-/// update_runtime_files().await?;
+/// let lease = communication.disable(DisableReason::Custom("exclusive operation".to_owned())).await?;
+/// run_exclusive_operation().await?;
 /// drop(lease); // releases exclusivity only, transport remains disabled
 /// ```
 #[must_use = "Dropping an unreleased lease releases exclusivity; transport stays Disabled until \
@@ -164,7 +164,38 @@ impl DisableLease {
         // The worker now owns this release and finishes it even if this task is
         // canceled below, so clear `id` to make a racing `Drop` a no-op.
         self.id = None;
-        reply.await.unwrap_or_else(|_| Err(stale_resume_failure()))
+        reply
+            .await
+            .unwrap_or_else(|_| Err(self.handle.worker_failure(CommunicationOperation::Resume)))
+    }
+
+    /// Consumes this lease, running the reconfiguration phase without resuming
+    /// the transport. Inherent, so a concrete lease needs no boxing. See
+    /// [`DisableGuard::finish`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when lifecycle finalization or reconfiguration fails, this lease
+    /// is stale (already released or finished), or the lifecycle worker is shutting
+    /// down.
+    pub async fn finish(mut self) -> Result<(), CommunicationOperationFailure> {
+        let Some(id) = self.id else {
+            return Err(stale_finish_failure());
+        };
+        let reply = match self.handle.submit_finish(id).await {
+            Ok(reply) => reply,
+            // Not accepted into the worker mailbox (shutdown). `self.id` stays
+            // `Some`, so `Drop` performs the synchronous defer.
+            Err(failure) => return Err(failure),
+        };
+        // The worker now owns this finish and completes it even if this task
+        // is canceled below, so clear `id` to make a racing `Drop` a no-op.
+        self.id = None;
+        reply.await.unwrap_or_else(|_| {
+            Err(self
+                .handle
+                .worker_failure(CommunicationOperation::FinishDisableLease))
+        })
     }
 
     /// Exposes the opaque ID to tests that verify a stale lease cannot release a
@@ -179,6 +210,10 @@ impl DisableLease {
 impl DisableGuard for DisableLease {
     async fn release(self: Box<Self>) -> Result<CommunicationState, CommunicationOperationFailure> {
         DisableLease::release(*self).await
+    }
+
+    async fn finish(self: Box<Self>) -> Result<(), CommunicationOperationFailure> {
+        DisableLease::finish(*self).await
     }
 }
 
@@ -199,5 +234,11 @@ impl Drop for DisableLease {
 pub(crate) fn stale_resume_failure() -> CommunicationOperationFailure {
     CommunicationOperationFailure::TransitionFailure {
         operation: CommunicationOperation::Resume,
+    }
+}
+
+pub(crate) fn stale_finish_failure() -> CommunicationOperationFailure {
+    CommunicationOperationFailure::TransitionFailure {
+        operation: CommunicationOperation::FinishDisableLease,
     }
 }

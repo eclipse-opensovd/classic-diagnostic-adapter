@@ -16,7 +16,7 @@ use cda_interfaces::{
     storage_api::{CollectionName, Storage, Transaction},
 };
 
-use crate::operations::{reload_database_if_present, try_get_collection};
+use crate::operations::try_get_collection;
 
 async fn swap_collection<S: Storage>(
     storage: &S,
@@ -39,14 +39,13 @@ async fn swap_collection<S: Storage>(
 /// # Parameters
 /// - `storage`: The storage backend.
 /// - `reload_handler`: Notified after commit so the runtime can hot-reload databases.
-/// - `mdd_decompress`: If true, decompress MDD files in-place after commit.
 ///
 /// # Errors
-/// Returns [`RuntimeUpdateError`] if validation, transaction, or reload fails.
+/// Returns [`RuntimeUpdateError`] if validation, a storage transaction, or the runtime reload
+/// fails.
 pub async fn execute_apply<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
     storage: &S,
     reload_handler: &R,
-    mdd_decompress: bool,
 ) -> Result<(), RuntimeUpdateError> {
     let mdd_next =
         try_get_collection(storage, &CollectionName::DiagnosticDatabaseNextUpdate).await?;
@@ -78,10 +77,7 @@ pub async fn execute_apply<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
 
     tx.commit().await?;
 
-    if mdd_next.is_some() {
-        reload_database_if_present(storage, reload_handler, mdd_decompress).await?;
-    }
-
+    crate::operations::rollback::reload_after_database_swap(reload_handler).await?;
     Ok(())
 }
 
@@ -119,9 +115,7 @@ mod tests {
         )
         .await;
 
-        execute_apply(&storage, &NoopReloadHandler, false)
-            .await
-            .unwrap();
+        execute_apply(&storage, &NoopReloadHandler).await.unwrap();
 
         // Current should have new data
         let db_col = storage
@@ -156,7 +150,7 @@ mod tests {
     async fn apply_empty_nextupdate_returns_no_pending_update() {
         let (storage, _dir) = make_storage();
 
-        let result = execute_apply(&storage, &NoopReloadHandler, false).await;
+        let result = execute_apply(&storage, &NoopReloadHandler).await;
 
         assert!(
             matches!(result, Err(RuntimeUpdateError::NoPendingUpdate)),
@@ -186,9 +180,7 @@ mod tests {
         )
         .await;
 
-        execute_apply(&storage, &NoopReloadHandler, false)
-            .await
-            .unwrap();
+        execute_apply(&storage, &NoopReloadHandler).await.unwrap();
 
         // Current should have all new files
         let db_col = storage
@@ -231,58 +223,10 @@ mod tests {
         .await;
 
         let handler = RecordingReloadHandler::new();
-        execute_apply(&storage, &handler, false).await.unwrap();
+        execute_apply(&storage, &handler).await.unwrap();
 
         let calls = handler.reload_calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "reload_databases should be called once");
-    }
-
-    #[tokio::test]
-    async fn apply_calls_reload_databases_with_paths() {
-        let (storage, dir) = make_storage();
-
-        init_collection(
-            &storage,
-            &CollectionName::DiagnosticDatabaseNextUpdate,
-            &[("ecu1.mdd", b"data")],
-        )
-        .await;
-
-        let handler = RecordingReloadHandler::new();
-        execute_apply(&storage, &handler, false).await.unwrap();
-
-        let expected_path = dir
-            .path()
-            .join("collections")
-            .join("diagnostic_database")
-            .join("ecu1.mdd");
-        let calls = handler.reload_calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        let Some(first_call) = calls.first() else {
-            panic!("expected call")
-        };
-        assert_eq!(first_call.len(), 1);
-        let Some(first_path) = first_call.first() else {
-            panic!("expected path")
-        };
-        assert_eq!(*first_path, expected_path);
-    }
-
-    #[tokio::test]
-    async fn apply_with_mdd_decompress_false_succeeds() {
-        let (storage, _dir) = make_storage();
-
-        init_collection(
-            &storage,
-            &CollectionName::DiagnosticDatabaseNextUpdate,
-            &[("ecu1.mdd", b"data")],
-        )
-        .await;
-
-        // mdd_decompress=false, should work fine
-        execute_apply(&storage, &NoopReloadHandler, false)
-            .await
-            .unwrap();
     }
 
     #[tokio::test]
@@ -303,9 +247,7 @@ mod tests {
             .await
             .unwrap();
 
-        execute_apply(&storage, &NoopReloadHandler, false)
-            .await
-            .unwrap();
+        execute_apply(&storage, &NoopReloadHandler).await.unwrap();
 
         // DiagnosticDatabase should now be empty (snapshot swap from empty NextUpdate)
         let db_col = storage
@@ -351,9 +293,7 @@ mod tests {
         )
         .await;
 
-        execute_apply(&storage, &NoopReloadHandler, false)
-            .await
-            .unwrap();
+        execute_apply(&storage, &NoopReloadHandler).await.unwrap();
 
         let db_col = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)

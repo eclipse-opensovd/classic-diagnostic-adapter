@@ -27,13 +27,74 @@ type RouteFinalizer = Arc<dyn Fn(axum::Router) -> axum::Router + Send + Sync>;
 /// Insertion order determines override precedence in the fallback chain.
 type RouteGroups = Arc<RwLock<IndexMap<u64, ApiRouter>>>;
 
+fn insert_missing<V>(target: &mut IndexMap<String, V>, source: IndexMap<String, V>) {
+    for (name, value) in source {
+        target.entry(name).or_insert(value);
+    }
+}
+
+fn merge_openapi_prefer_existing(api: &mut OpenApi, mut source: OpenApi) {
+    if let Some(source_paths) = source.paths.take() {
+        let paths = api.paths.get_or_insert_with(Default::default);
+        insert_missing(&mut paths.paths, source_paths.paths);
+        insert_missing(&mut paths.extensions, source_paths.extensions);
+    }
+    if let Some(source_components) = source.components.take() {
+        let components = api.components.get_or_insert_with(Default::default);
+        insert_missing(
+            &mut components.security_schemes,
+            source_components.security_schemes,
+        );
+        insert_missing(&mut components.responses, source_components.responses);
+        insert_missing(&mut components.parameters, source_components.parameters);
+        insert_missing(&mut components.examples, source_components.examples);
+        insert_missing(
+            &mut components.request_bodies,
+            source_components.request_bodies,
+        );
+        insert_missing(&mut components.headers, source_components.headers);
+        insert_missing(&mut components.schemas, source_components.schemas);
+        insert_missing(&mut components.links, source_components.links);
+        insert_missing(&mut components.callbacks, source_components.callbacks);
+        insert_missing(&mut components.path_items, source_components.path_items);
+        insert_missing(&mut components.extensions, source_components.extensions);
+    }
+    insert_missing(&mut api.webhooks, source.webhooks);
+    insert_missing(&mut api.extensions, source.extensions);
+    for server in source.servers {
+        if !api
+            .servers
+            .iter()
+            .any(|existing| existing.url == server.url)
+        {
+            api.servers.push(server);
+        }
+    }
+    for requirement in source.security {
+        if !api.security.contains(&requirement) {
+            api.security.push(requirement);
+        }
+    }
+    for tag in source.tags {
+        if !api.tags.iter().any(|existing| existing.name == tag.name) {
+            api.tags.push(tag);
+        }
+    }
+    if api.info == aide::openapi::Info::default() {
+        api.info = source.info;
+    }
+    if api.json_schema_dialect.is_none() {
+        api.json_schema_dialect = source.json_schema_dialect;
+    }
+    if api.external_docs.is_none() {
+        api.external_docs = source.external_docs;
+    }
+}
+
 /// An opaque handle to a route group registered with a [`DynamicRouter`].
 ///
-/// Returned by [`DynamicRouter::add_routes`] and must be retained if you need to
-/// [`replace`](DynamicRouter::replace_routes) or [`remove`](DynamicRouter::remove_routes)
-/// those routes later. This is essential for hot-reload scenarios (e.g., swapping vehicle
-/// routes after an MDD database reload) where the old route group must be atomically
-/// replaced with a new one.
+/// Returned by [`DynamicRouter::add_routes`] and retained when an OEM route
+/// group may later be replaced or removed.
 ///
 /// Without a handle, registered routes cannot be referenced after insertion.
 #[derive(Clone, Debug)]
@@ -62,8 +123,8 @@ pub struct RouteGroupNotFound {
 /// groups. To partially override, re-register all desired methods on that path in the
 /// overriding group.
 ///
-/// Handles are returned on registration and must be stored by the caller if the routes need
-/// to be replaced or removed later (e.g., during a runtime database reload).
+/// Handles are returned on registration and must be stored by callers that
+/// replace or remove OEM route groups later.
 #[derive(Clone)]
 pub struct DynamicRouter {
     route_groups: RouteGroups,
@@ -108,8 +169,8 @@ impl DynamicRouter {
     }
 
     /// Returns a clone of the current `OpenAPI` specification.
-    pub async fn get_openapi(&self) -> Arc<OpenApi> {
-        Arc::new(self.openapi.read().await.clone())
+    pub async fn get_openapi(&self) -> OpenApi {
+        self.openapi.read().await.clone()
     }
 
     /// Registers a route group and recomposes the router.
@@ -120,8 +181,7 @@ impl DynamicRouter {
     /// Later-added groups take precedence: if this group registers a path that an earlier
     /// group already serves, this group's handler wins (path-level override).
     ///
-    /// Retain the returned handle if you will need to hot-swap these routes at runtime
-    /// (e.g., replacing vehicle routes after an MDD database reload).
+    /// Retain the returned handle when the OEM route group may change later.
     pub async fn add_routes(&self, routes: ApiRouter) -> RouteHandle {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         {
@@ -134,10 +194,9 @@ impl DynamicRouter {
 
     /// Replaces the route group identified by `handle` with new routes and recomposes the router.
     ///
-    /// This is the primary mechanism for hot-reloading routes at runtime: the caller retains
-    /// the [`RouteHandle`] from the initial [`add_routes`](Self::add_routes) call and passes it
-    /// here to atomically swap the old routes with new ones (e.g., after rebuilding vehicle
-    /// routes from freshly loaded MDD databases).
+    /// The caller retains the [`RouteHandle`] from the initial
+    /// [`add_routes`](Self::add_routes) call and passes it here to atomically
+    /// replace an OEM route group.
     ///
     /// # Errors
     ///
@@ -203,21 +262,16 @@ impl DynamicRouter {
 
         let composed = finalizers.iter().fold(composed, |acc, f| f(acc));
 
-        // Build OpenAPI spec from groups (latest-added wins per path).
-        // aide's PathItem::merge_with favors self, so by iterating latest-first and
-        // only inserting paths not yet claimed, later groups' docs override earlier ones.
+        // Build OpenAPI spec from complete group documents (latest-added wins on key conflicts).
+        // Iterating latest-first preserves path precedence while retaining components and other
+        // document-level data from every group.
         let api = groups
             .iter()
             .rev()
             .fold(OpenApi::default(), |mut api, (_id, group)| {
                 let mut group_api = OpenApi::default();
                 let _router = group.clone().finish_api(&mut group_api);
-                if let Some(paths) = group_api.paths {
-                    let api_paths = api.paths.get_or_insert_with(Default::default);
-                    paths.paths.into_iter().for_each(|(path, item)| {
-                        api_paths.paths.entry(path).or_insert(item);
-                    });
-                }
+                merge_openapi_prefer_existing(&mut api, group_api);
                 api
             });
 
@@ -248,7 +302,7 @@ impl Default for DynamicRouter {
 #[cfg(test)]
 mod tests {
     use aide::{axum::routing, openapi::ReferenceOr};
-    use axum::{http::StatusCode, response::IntoResponse};
+    use axum::{Json, http::StatusCode, response::IntoResponse};
     use tower::ServiceExt;
 
     use super::*;
@@ -271,6 +325,27 @@ mod tests {
         match paths.paths.get(path)? {
             ReferenceOr::Item(item) => item.get.as_ref()?.description.clone(),
             ReferenceOr::Reference { .. } => None,
+        }
+    }
+
+    fn local_references(value: &serde_json::Value, references: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(reference) = object.get("$ref").and_then(serde_json::Value::as_str)
+                    && reference.starts_with('#')
+                {
+                    references.push(reference.to_owned());
+                }
+                for child in object.values() {
+                    local_references(child, references);
+                }
+            }
+            serde_json::Value::Array(array) => {
+                for child in array {
+                    local_references(child, references);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -429,6 +504,46 @@ mod tests {
         let api = dr.get_openapi().await;
         assert_eq!(get_path_description(&api, "/foo").as_deref(), Some("b foo"));
         assert_eq!(get_path_description(&api, "/bar").as_deref(), Some("a bar"));
+    }
+
+    #[allow(
+        clippy::redundant_closure_for_method_calls,
+        reason = "The method item is not sufficiently lifetime-generic for get_with"
+    )]
+    #[tokio::test]
+    async fn openapi_composition_preserves_all_local_reference_targets() {
+        #[derive(serde::Serialize, schemars::JsonSchema)]
+        struct Foo {
+            value: String,
+        }
+
+        let dr = DynamicRouter::new();
+        let group = ApiRouter::new().api_route(
+            "/foo",
+            routing::get_with(
+                || async {
+                    Json(Foo {
+                        value: "foo".to_owned(),
+                    })
+                },
+                |op| op.response::<200, Json<Foo>>(),
+            ),
+        );
+        dr.add_routes(group).await;
+
+        let document = serde_json::to_value(dr.get_openapi().await).unwrap();
+        let mut references = Vec::new();
+        local_references(&document, &mut references);
+
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(
+                document
+                    .pointer(reference.trim_start_matches('#'))
+                    .is_some(),
+                "unresolved local OpenAPI reference: {reference}"
+            );
+        }
     }
 
     #[tokio::test]

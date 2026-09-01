@@ -53,5 +53,5 @@ dlt-tracing = ["cda-interfaces/dlt-tracing"]
 cda-build = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util", "macros"] }
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 cda-plugin-communication-management = { workspace = true, features = ["test-utils"] }

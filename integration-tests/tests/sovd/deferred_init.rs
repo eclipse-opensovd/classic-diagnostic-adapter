@@ -27,7 +27,7 @@ use sovd_interfaces::{
 };
 
 use crate::{
-    sovd::{ECU_FLXC1000_ENDPOINT, runtimefiles},
+    sovd::{ECU_FLXC1000_ENDPOINT, ECU_FSNR2000_ENDPOINT, runtimefiles},
     util::{
         ecusim,
         http::{auth_header, response_to_t, send_cda_request},
@@ -43,6 +43,10 @@ const ECU_SIM_NAME: &str = "flxc1000";
 
 fn flxc1000_data_path() -> String {
     format!("/vehicle/v15/{ECU_FLXC1000_ENDPOINT}/data")
+}
+
+fn fsnr2000_data_path() -> String {
+    format!("/vehicle/v15/{ECU_FSNR2000_ENDPOINT}/data")
 }
 
 enum CdaMode {
@@ -299,8 +303,8 @@ async fn on_demand_trigger_produces_no_doip_traffic_before_authorized_request() 
 /// diagnostic endpoints return 503 again until re-triggered.
 ///
 /// The update takes the transport down through an exclusive disable lease. Under
-/// `Deferred` that lease is dropped rather than released, so communication
-/// returns to the state it was in before the first trigger.
+/// `Deferred` that lease is finished without activation, so staged data installs
+/// while communication stays down.
 ///
 /// The sequence is:
 ///   a. Start a CDA in deferred mode with `PostUpdateCommunicationMode::Deferred`.
@@ -356,8 +360,8 @@ async fn post_update_deferred_mode_returns_503_until_triggered() {
                 .await
                 .expect("Apply execution failed");
 
-            // Step d: the update dropped the disable lease instead of releasing
-            // it, so the diagnostic path answers 503 again. A non-deferred
+            // Step d: the update finished the disable lease without activating,
+            // so the diagnostic path answers 503 again. A non-deferred
             // post-update mode would have served 200 here.
             let response = wait_until_update_protection_lifted(
                 &base,
@@ -651,4 +655,157 @@ async fn variant_detection_never_requires_explicit_trigger() {
     if let Err(panic) = outcome {
         std::panic::resume_unwind(panic);
     }
+}
+
+/// A lease finished without activating must still reach the applied data, so
+/// the new ECU set is live while the transport is still down. Were it skipped
+/// there, an update would report `Completed` while the runtime still served the
+/// old databases.
+#[tokio::test]
+async fn post_update_deferred_mode_serves_the_new_ecu_set_while_disabled() {
+    const REMOVED_MDD: &str = "FSNR2000.mdd";
+
+    let (runtime, _guard) = setup_integration_test(true)
+        .await
+        .expect("Failed to setup runtime");
+
+    with_temporary_cda(
+        &runtime.config,
+        CdaMode::Deferred(PostUpdateCommunicationMode::Deferred).config(runtime),
+        || async {},
+        || async {
+            let base = base_url(runtime);
+            let client = reqwest::Client::new();
+            let headers = auth_header(&runtime.config, None)
+                .await
+                .expect("Failed to authenticate");
+
+            // Start from an activated runtime, so the update really does take the
+            // transport down rather than finding it already down.
+            let response = wait_until_not_pending(
+                &base,
+                &flxc1000_data_path(),
+                &headers,
+                Duration::from_secs(30),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::OK,
+                "endpoint must return 200 once the background activation completes"
+            );
+
+            let lock_id = runtimefiles::setup_with_lock(&runtime.config, &headers).await;
+
+            // Apply a snapshot that drops one ECU from the vehicle.
+            runtimefiles::stage_database_without(&runtime.config, &headers, REMOVED_MDD)
+                .await
+                .expect("Failed to stage the reduced database");
+            runtimefiles::execute_mode(&runtime.config, &headers, ExecutionMode::Apply)
+                .await
+                .expect("Apply execution failed");
+
+            // The dropped ECU is checked first: its route is resolved before any
+            // communication is acquired, so a 404 here neither needs nor fires the
+            // on-demand activation trigger.
+            let removed = wait_until_update_protection_lifted(
+                &base,
+                &fsnr2000_data_path(),
+                &headers,
+                Duration::from_secs(30),
+            )
+            .await;
+            assert_eq!(
+                removed.status(),
+                reqwest::StatusCode::NOT_FOUND,
+                "an ECU dropped by the update must 404 even though the transport never came back \
+                 up"
+            );
+
+            // The surviving ECU still resolves, so the 404 above is the new ECU set
+            // and not a route table that lost everything.
+            let kept = client
+                .get(format!("{base}{}", flxc1000_data_path()))
+                .headers(headers.clone())
+                .send()
+                .await
+                .expect("request for the surviving ECU failed");
+            assert_eq!(
+                kept.status(),
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "a surviving ECU must still resolve, and answer 503 while the deferred transport \
+                 is down"
+            );
+
+            // The 503 above fired the on-demand trigger. The next update needs the
+            // exclusive disable lease, which a mid-flight activation refuses, so
+            // let that activation settle first.
+            let reactivated = wait_until_not_pending(
+                &base,
+                &flxc1000_data_path(),
+                &headers,
+                Duration::from_secs(30),
+            )
+            .await;
+            assert_eq!(
+                reactivated.status(),
+                reqwest::StatusCode::OK,
+                "the surviving ECU must serve again once the triggered activation completes"
+            );
+
+            // Put the vehicle back, and the restored ECU must resolve again.
+            runtimefiles::stage_full_database(&runtime.config, &headers)
+                .await
+                .expect("Failed to stage the full database");
+            runtimefiles::execute_mode(&runtime.config, &headers, ExecutionMode::Apply)
+                .await
+                .expect("Second apply execution failed");
+
+            let restored = wait_until_update_protection_lifted(
+                &base,
+                &fsnr2000_data_path(),
+                &headers,
+                Duration::from_secs(30),
+            )
+            .await;
+            assert_ne!(
+                restored.status(),
+                reqwest::StatusCode::NOT_FOUND,
+                "an ECU restored by the update must resolve again"
+            );
+
+            // Settle the activation the poll above may have triggered, so Cleanup
+            // can take the exclusive lease.
+            let settled = wait_until_not_pending(
+                &base,
+                &flxc1000_data_path(),
+                &headers,
+                Duration::from_secs(30),
+            )
+            .await;
+            assert_eq!(
+                settled.status(),
+                reqwest::StatusCode::OK,
+                "the vehicle must be serving again before the suite continues"
+            );
+
+            // Reset the staging collection and hand the whole vehicle to the rest
+            // of the shared suite.
+            runtimefiles::execute_mode(&runtime.config, &headers, ExecutionMode::Cleanup)
+                .await
+                .expect("Cleanup execution failed");
+            wait_until_update_protection_lifted(
+                &base,
+                &flxc1000_data_path(),
+                &headers,
+                Duration::from_secs(30),
+            )
+            .await;
+            wait_for_ecus_online(&runtime.config)
+                .await
+                .expect("ECUs did not come back online after the update cycle");
+            runtimefiles::teardown_lock(&runtime.config, &headers, &lock_id).await;
+        },
+    )
+    .await;
 }

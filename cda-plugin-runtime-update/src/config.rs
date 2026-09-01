@@ -25,8 +25,9 @@ pub struct RuntimeUpdateConfig {
     /// Default: 1 second.
     #[serde(default = "default_retry_after_seconds")]
     pub retry_after_seconds: u64,
-    /// When `true` and the `DiagnosticDatabase` storage collection is empty,
-    /// seed it from `database.path` on first startup by copying all `.mdd` files.
+    /// When `true` and the `DiagnosticDatabase` storage collection is absent,
+    /// seed it from `database.seed_dir` on first startup by copying all `.mdd` files.
+    /// An existing collection, including an empty one, remains authoritative.
     /// Default: `false`.
     #[serde(default)]
     pub init_storage_from_database_path: bool,

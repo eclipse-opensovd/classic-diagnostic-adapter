@@ -29,7 +29,7 @@ use sovd_interfaces::{
 use crate::{
     sovd,
     sovd::{
-        ECU_FLXC1000_ENDPOINT, ECU_FSNR2000_ENDPOINT,
+        ECU_FLXC1000_ENDPOINT, ECU_FSNR2000_ENDPOINT, ECU_TMCC3000_ENDPOINT,
         locks::{
             self, NON_OWNER_BEARER_TOKEN, bearer_token_header, create_lock, default_timeout,
             lock_operation,
@@ -37,8 +37,14 @@ use crate::{
     },
     util::{
         TestingError,
-        http::{QueryParams, auth_header, response_to_json, response_to_t, send_cda_request},
-        runtime::{setup_integration_test, test_container_dir, wait_for_ecus_online},
+        http::{
+            QueryParams, auth_header, extract_field_from_json, response_to_json, response_to_t,
+            send_cda_request, send_request,
+        },
+        runtime::{
+            arm_vehicle_factory_failures, restart_cda, setup_integration_test, test_container_dir,
+            wait_for_ecus_online,
+        },
     },
 };
 
@@ -93,6 +99,49 @@ async fn wait_for_execution_terminal(
             "execution {execution_id} did not reach a terminal status within {timeout:?}"
         );
         cda_interfaces::util::tokio_ext::sleep_for(POLL_INTERVAL).await;
+    }
+}
+
+async fn wait_for_update_protection_release(
+    config: &Configuration,
+    auth: &http::HeaderMap,
+) -> Result<(), TestingError> {
+    let authorization = auth
+        .get(reqwest::header::AUTHORIZATION)
+        .ok_or_else(|| TestingError::SetupError("Authorization header missing".to_owned()))?;
+    let url = format!(
+        "http://{}:{}/vehicle/v15/{RUNTIMEFILES_CURRENT}",
+        config.server.address, config.server.port
+    );
+    #[allow(
+        unknown_lints,
+        clippy::duration_suboptimal_units,
+        reason = "from_mins is not available in Rust 1.88, our MSRV"
+    )]
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(60))
+        .expect("deadline must not overflow");
+    loop {
+        let status = reqwest::Client::new()
+            .get(&url)
+            .header(reqwest::header::AUTHORIZATION, authorization)
+            .send()
+            .await
+            .map_err(|error| TestingError::ProcessFailed(error.to_string()))?
+            .status();
+        if status == StatusCode::OK {
+            return Ok(());
+        }
+        if status != StatusCode::CONFLICT {
+            return Err(TestingError::InvalidData(format!(
+                "unexpected status while waiting for update protection release: {status}"
+            )));
+        }
+        assert!(
+            Instant::now() < deadline,
+            "update protection remained active"
+        );
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(100)).await;
     }
 }
 
@@ -422,12 +471,8 @@ async fn runtimefiles_lifecycle() -> Result<(), TestingError> {
     execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
     assert_state_after_apply(&runtime.config, &auth, initial_count).await?;
 
-    // Rollback requires a non-empty backup. A fresh test environment has no current files, so
-    // applying the upload creates an empty backup and rollback is correctly unavailable.
-    if initial_count > 0 {
-        execute_mode(&runtime.config, &auth, ExecutionMode::Rollback).await?;
-        assert_state_after_rollback(&runtime.config, &auth, initial_count).await?;
-    }
+    execute_mode(&runtime.config, &auth, ExecutionMode::Rollback).await?;
+    assert_state_after_rollback(&runtime.config, &auth, initial_count).await?;
 
     // Trigger "Cleanup" - spec: "reset all pending updates, as well as deleting the backup".
     execute_mode(&runtime.config, &auth, ExecutionMode::Cleanup).await?;
@@ -1021,7 +1066,7 @@ async fn runtimefiles_apply_with_no_pending_changes() -> Result<(), TestingError
 
     // Attempt Apply with no pending changes (nextupdate == current) - must NOT return 202
     let body = mode_json(ExecutionMode::Apply);
-    let apply_response = send_cda_request(
+    send_cda_request(
         &runtime.config,
         RUNTIMEFILES_UPDATE_EXECUTIONS,
         StatusCode::NOT_FOUND,
@@ -1030,17 +1075,13 @@ async fn runtimefiles_apply_with_no_pending_changes() -> Result<(), TestingError
         Some(&auth),
         None,
     )
-    .await;
-    if apply_response.is_err() {
-        // If the server returns something other than 404, that's a finding - log it but don't fail
-        // The primary assertion is that it must NOT be 202
-    }
+    .await?;
 
     teardown_lock(&runtime.config, &auth, &lock_id).await;
     Ok(())
 }
 
-/// Spec: Rollback when backup is empty must return 404 Not Found.
+/// Spec: Rollback when the backup collection is absent must return 404 Not Found.
 #[tokio::test]
 async fn runtimefiles_rollback_with_no_backup() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;
@@ -1469,6 +1510,37 @@ fn mdd_file_names() -> Vec<String> {
     names
 }
 
+fn storage_file_bytes(config: &Configuration, collection: &str) -> Result<Vec<u8>, TestingError> {
+    let use_docker = std::env::var("CDA_INTEGRATION_TEST_USE_DOCKER").map_or(true, |v| v == "true");
+    if use_docker {
+        let output = std::process::Command::new("docker")
+            .args([
+                "compose",
+                "exec",
+                "-T",
+                "cda",
+                "cat",
+                &format!("/app/collections/{collection}/flxc1000.mdd"),
+            ])
+            .current_dir(test_container_dir()?)
+            .output()
+            .map_err(|error| TestingError::ProcessFailed(error.to_string()))?;
+        if !output.status.success() {
+            return Err(TestingError::ProcessFailed(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
+        return Ok(output.stdout);
+    }
+    std::fs::read(
+        std::path::Path::new(&config.runtime_update_config.storage_dir)
+            .join("collections")
+            .join(collection)
+            .join("flxc1000.mdd"),
+    )
+    .map_err(|error| TestingError::ProcessFailed(error.to_string()))
+}
+
 /// Helper: GETs a runtimefiles list endpoint and deserializes the typed response.
 async fn get_file_list(
     config: &Configuration,
@@ -1491,6 +1563,31 @@ async fn get_file_list(
 /// Serializes an `ExecutionMode` into the JSON body expected by execution endpoints.
 fn mode_json(mode: ExecutionMode) -> String {
     serde_json::json!({ "parameters": { "mode": mode } }).to_string()
+}
+
+/// POSTs an execution mode and returns either completed or failed terminal state.
+#[allow(
+    unknown_lints,
+    clippy::duration_suboptimal_units,
+    reason = "from_mins is not available in Rust 1.88, our MSRV"
+)]
+async fn execute_mode_to_terminal(
+    config: &Configuration,
+    auth: &http::HeaderMap,
+    mode: ExecutionMode,
+) -> Result<serde_json::Value, TestingError> {
+    let response = send_cda_request(
+        config,
+        RUNTIMEFILES_UPDATE_EXECUTIONS,
+        StatusCode::ACCEPTED,
+        Method::POST,
+        Some(&mode_json(mode)),
+        Some(auth),
+        None,
+    )
+    .await?;
+    let execution = response_to_t::<OperationIdItem>(&response)?;
+    wait_for_execution_terminal(config, auth, &execution.id, Duration::from_secs(60)).await
 }
 
 /// POSTs an execution mode to the executions endpoint (expecting 202 Accepted)
@@ -1562,7 +1659,7 @@ async fn wait_for_execution_completion(
             ExecutionStatusKind::Running => {}
             ExecutionStatusKind::Failed => {
                 return Err(TestingError::InvalidData(format!(
-                    "runtime update {execution_id} failed: {}",
+                    "runtime update {execution_id} did not complete: {}",
                     execution
                         .parameters
                         .reason
@@ -1748,12 +1845,12 @@ async fn find_flxc1000_id_in_nextupdate(
     Ok(id)
 }
 
-/// Helper: verifies ECU route state after Apply (FLXC1000 gone, FSNR2000 present, health ok).
+/// Helper: verifies live ECU data after Apply (FLXC1000 gone, FSNR2000 present, health ok).
 async fn assert_ecu_routes_after_apply(
     config: &Configuration,
     auth: &http::HeaderMap,
 ) -> Result<(), TestingError> {
-    // FLXC1000 was removed from staging -> its route no longer exists.
+    // The templated route resolves FLXC1000 against the live ECU set and returns a miss.
     send_cda_request(
         config,
         ECU_FLXC1000_ENDPOINT,
@@ -1765,7 +1862,7 @@ async fn assert_ecu_routes_after_apply(
     )
     .await?;
 
-    // FSNR2000 was in staging, so its route must survive the rebuild.
+    // FSNR2000 was in staging, so its live lookup must still succeed.
     send_cda_request(
         config,
         ECU_FSNR2000_ENDPOINT,
@@ -1777,8 +1874,7 @@ async fn assert_ecu_routes_after_apply(
     )
     .await?;
 
-    // The health route lives in a separate group and must not be affected
-    // by replace_routes on the vehicle route handle.
+    // Reloading vehicle data must not affect the independently registered health group.
     let health_url = format!(
         "http://{}:{}/health/ready",
         config.server.address, config.server.port
@@ -1792,6 +1888,74 @@ async fn assert_ecu_routes_after_apply(
         health_response.status(),
         StatusCode::NO_CONTENT,
         "Expected 204 from /health/ready after Apply"
+    );
+
+    assert_openapi_lists_live_ecus(config, auth).await?;
+
+    Ok(())
+}
+
+/// Helper: verifies the generated `OpenAPI` document describes exactly the ECU
+/// set the router serves after an Apply.
+///
+/// The document is expanded per request from `uds.get_physical_ecus()`, while
+/// `{component_id}` routes resolve through the `EcuContext` extractor. Both read
+/// the same live state independently, so asserting only on the routes above
+/// would let the published contract drift away from them across a reload.
+async fn assert_openapi_lists_live_ecus(
+    config: &Configuration,
+    auth: &http::HeaderMap,
+) -> Result<(), TestingError> {
+    let url = reqwest::Url::parse(&format!(
+        "http://{}:{}{}",
+        config.server.address,
+        config.server.port,
+        cda_sovd::OPENAPI_JSON_ROUTE
+    ))
+    .expect("invalid openapi.json URL");
+    let response = send_request(StatusCode::OK, Method::GET, None, Some(auth), url).await?;
+    let paths = response_to_json(&response)?
+        .get("paths")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .ok_or_else(|| TestingError::InvalidData("openapi.json has no paths object".to_owned()))?;
+
+    let surviving = format!("/vehicle/v15/{ECU_FSNR2000_ENDPOINT}");
+    for path in [
+        surviving.clone(),
+        format!("{surviving}/data"),
+        format!("{surviving}/faults"),
+        format!("{surviving}/locks"),
+    ] {
+        assert!(
+            paths.contains_key(&path),
+            "openapi.json must document {path} for the surviving ECU, got {:?}",
+            paths.keys().collect::<Vec<_>>()
+        );
+    }
+
+    let removed = format!("/vehicle/v15/{ECU_FLXC1000_ENDPOINT}");
+    let stale: Vec<&String> = paths
+        .keys()
+        .filter(|path| path.starts_with(&removed))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "openapi.json must not document the removed ECU {removed}, found {stale:?}"
+    );
+
+    let templated: Vec<&String> = paths
+        .keys()
+        .filter(|path| {
+            path.contains("{component_id}")
+                || path.contains("{functional_group_id}")
+                || path.contains("{*")
+        })
+        .collect();
+    assert!(
+        templated.is_empty(),
+        "openapi.json must expand every component and functional-group template, found \
+         {templated:?}"
     );
 
     Ok(())
@@ -2201,6 +2365,205 @@ async fn runtimefiles_only_lock_holder_can_mutate() -> Result<(), TestingError> 
     Ok(())
 }
 
+#[tokio::test]
+async fn failed_real_ecu_data_build_restores_live_data_and_mdd_bytes() -> Result<(), TestingError> {
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth = auth_header(&runtime.config, None).await?;
+    let vehicle_lock_id = setup_with_lock(&runtime.config, &auth).await;
+
+    stage_full_database(&runtime.config, &auth).await?;
+    execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
+    wait_for_ecus_online(&runtime.config).await?;
+    let original_bytes = storage_file_bytes(&runtime.config, "diagnostic_database")?;
+
+    stage_database_without(&runtime.config, &auth, "FLXC1000.mdd").await?;
+    arm_vehicle_factory_failures(&runtime.config, &[true, false])?;
+    let execution = execute_mode_to_terminal(&runtime.config, &auth, ExecutionMode::Apply).await?;
+    assert_eq!(execution.get("status"), Some(&serde_json::json!("failed")));
+    wait_for_update_protection_release(&runtime.config, &auth).await?;
+
+    assert_eq!(
+        storage_file_bytes(&runtime.config, "diagnostic_database")?,
+        original_bytes
+    );
+    send_cda_request(
+        &runtime.config,
+        ECU_FLXC1000_ENDPOINT,
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await?;
+    assert!(
+        !get_file_list(&runtime.config, &auth, RUNTIMEFILES_BACKUP)
+            .await?
+            .items
+            .iter()
+            .any(|item| item.id.eq_ignore_ascii_case("flxc1000.mdd"))
+    );
+
+    let ecu_lock = create_lock(
+        default_timeout(),
+        locks::ECU_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let ecu_lock_id = response_to_t::<LockResponse>(&ecu_lock)?.id;
+    lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&ecu_lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+    teardown_lock(&runtime.config, &auth, &vehicle_lock_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_real_rollback_build_restores_live_data_and_mdd_bytes() -> Result<(), TestingError> {
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth = auth_header(&runtime.config, None).await?;
+    let vehicle_lock_id = setup_with_lock(&runtime.config, &auth).await;
+
+    stage_full_database(&runtime.config, &auth).await?;
+    execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
+    let rollback_candidate_bytes = storage_file_bytes(&runtime.config, "diagnostic_database")?;
+    stage_database_without(&runtime.config, &auth, "FLXC1000.mdd").await?;
+    execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
+
+    arm_vehicle_factory_failures(&runtime.config, &[true, false])?;
+    let execution =
+        execute_mode_to_terminal(&runtime.config, &auth, ExecutionMode::Rollback).await?;
+    assert_eq!(execution.get("status"), Some(&serde_json::json!("failed")));
+    wait_for_update_protection_release(&runtime.config, &auth).await?;
+
+    send_cda_request(
+        &runtime.config,
+        ECU_FLXC1000_ENDPOINT,
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await?;
+    assert_eq!(
+        storage_file_bytes(&runtime.config, "diagnostic_database_backup")?,
+        rollback_candidate_bytes
+    );
+    teardown_lock(&runtime.config, &auth, &vehicle_lock_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_real_ecu_data_build_and_recovery_retains_update_protection()
+-> Result<(), TestingError> {
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth = auth_header(&runtime.config, None).await?;
+    let _vehicle_lock_id = setup_with_lock(&runtime.config, &auth).await;
+
+    stage_full_database(&runtime.config, &auth).await?;
+    execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
+    stage_database_without(&runtime.config, &auth, "FLXC1000.mdd").await?;
+    arm_vehicle_factory_failures(&runtime.config, &[true, true])?;
+    let execution = execute_mode_to_terminal(&runtime.config, &auth, ExecutionMode::Apply).await?;
+    assert_eq!(execution.get("status"), Some(&serde_json::json!("failed")));
+
+    send_cda_request(
+        &runtime.config,
+        RUNTIMEFILES_CURRENT,
+        StatusCode::CONFLICT,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await?;
+    send_cda_request(
+        &runtime.config,
+        RUNTIMEFILES_UPDATE_EXECUTIONS,
+        StatusCode::CONFLICT,
+        Method::POST,
+        Some(&mode_json(ExecutionMode::Apply)),
+        Some(&auth),
+        None,
+    )
+    .await?;
+
+    restart_cda(&runtime.config).await?;
+    wait_for_ecus_online(&runtime.config).await?;
+    send_cda_request(
+        &runtime.config,
+        ECU_FLXC1000_ENDPOINT,
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_real_build_restores_empty_snapshot_across_restart() -> Result<(), TestingError> {
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth = auth_header(&runtime.config, None).await?;
+    let vehicle_lock_id = setup_with_lock(&runtime.config, &auth).await;
+
+    stage_empty_database(&runtime.config, &auth).await?;
+    execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
+    assert!(
+        get_file_list(&runtime.config, &auth, RUNTIMEFILES_CURRENT)
+            .await?
+            .items
+            .is_empty()
+    );
+
+    stage_full_database(&runtime.config, &auth).await?;
+    arm_vehicle_factory_failures(&runtime.config, &[true, false])?;
+    let execution = execute_mode_to_terminal(&runtime.config, &auth, ExecutionMode::Apply).await?;
+    assert_eq!(execution.get("status"), Some(&serde_json::json!("failed")));
+    wait_for_update_protection_release(&runtime.config, &auth).await?;
+    assert!(
+        get_file_list(&runtime.config, &auth, RUNTIMEFILES_CURRENT)
+            .await?
+            .items
+            .is_empty()
+    );
+    send_cda_request(
+        &runtime.config,
+        ECU_FLXC1000_ENDPOINT,
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await?;
+
+    teardown_lock(&runtime.config, &auth, &vehicle_lock_id).await;
+    restart_cda(&runtime.config).await?;
+    send_cda_request(
+        &runtime.config,
+        ECU_FLXC1000_ENDPOINT,
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
 /// Proves that after an Apply with a reduced MDD set (FLXC1000 removed from staging),
 /// the missing ECU's route returns 404, the health endpoint remains 204, and after
 /// Rollback the ECU route is restored (200).
@@ -2208,7 +2571,7 @@ async fn runtimefiles_only_lock_holder_can_mutate() -> Result<(), TestingError> 
 /// Workflow: upload FSNR2000 to trigger staging init from the seeded current collection,
 /// then explicitly delete flxc1000.mdd from nextupdate, then Apply.
 #[tokio::test]
-async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
+async fn runtimefiles_apply_updates_live_ecu_set() -> Result<(), TestingError> {
     // Acquire an exclusive integration-test lock so no other test interferes.
     let (runtime, _lock) = setup_integration_test(true).await?;
     let auth = auth_header(&runtime.config, None).await?;
@@ -2252,18 +2615,15 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
     )
     .await?;
 
-    // Trigger Apply - the CDA replaces its entire DB with staging (without FLXC1000).
-    // The reload_databases path shuts down the old UDS/gateway and rebuilds routes.
+    // Apply installs the staged database without rebuilding the manager, gateway, or routes.
     execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
     assert_ecu_routes_after_apply(&runtime.config, &auth).await?;
 
     // Apply created a backup of the original database; Rollback restores it.
     execute_mode(&runtime.config, &auth, ExecutionMode::Rollback).await?;
 
-    // Wait for all ECUs to come back online after the reload triggered by rollback.
-    // The reload creates a fresh DoIP gateway that must re-discover ECUs via VIR/VAM
-    // and run variant detection. Without this wait, subsequent tests may find ECUs
-    // still in Offline state.
+    // The disable and enable cycle makes the persistent gateway rediscover ECUs and
+    // run variant detection. Wait so later tests do not observe an offline transition.
     wait_for_ecus_online(&runtime.config).await?;
 
     // Rollback restores the original database -> FLXC1000 is back.
@@ -2282,13 +2642,209 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
     Ok(())
 }
 
-/// Spec: Apply must be blocked (409 Conflict) when the caller holds both a vehicle lock
-/// and an ECU lock simultaneously.
-///
-/// The ECU lock signals that the ECU is currently in use (e.g. an active diagnostic session).
-/// Replacing the runtime database while such a lock is held would silently discard the
-/// in-progress session, so the implementation must reject the request with 409 Conflict.
-/// Once the ECU lock is released, Apply must succeed (202 Accepted).
+#[tokio::test]
+async fn functional_group_listing_tracks_the_live_database() -> Result<(), TestingError> {
+    const GROUPS_ENDPOINT: &str = "functions/functionalgroups";
+    const GROUP_ENDPOINT: &str = "functions/functionalgroups/fgl_uds_ethernet_doip_dobt";
+
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth = auth_header(&runtime.config, None).await?;
+    let lock_id = setup_with_lock(&runtime.config, &auth).await;
+
+    stage_full_database(&runtime.config, &auth).await?;
+    execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
+    send_cda_request(
+        &runtime.config,
+        GROUP_ENDPOINT,
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await?;
+
+    stage_database_without(&runtime.config, &auth, "functional_groups.mdd").await?;
+    execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
+    let response = send_cda_request(
+        &runtime.config,
+        GROUPS_ENDPOINT,
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await?;
+    assert_eq!(
+        response_to_json(&response)?.get("items"),
+        Some(&serde_json::json!([]))
+    );
+    send_cda_request(
+        &runtime.config,
+        GROUP_ENDPOINT,
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await?;
+
+    execute_mode(&runtime.config, &auth, ExecutionMode::Rollback).await?;
+    let response = send_cda_request(
+        &runtime.config,
+        GROUPS_ENDPOINT,
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await?;
+    assert!(
+        response_to_json(&response)?
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+    );
+    send_cda_request(
+        &runtime.config,
+        GROUP_ENDPOINT,
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await?;
+
+    teardown_lock(&runtime.config, &auth, &lock_id).await;
+    Ok(())
+}
+
+/// An execution record survives an unchanged identity but not removal and re-addition.
+#[tokio::test]
+async fn async_operation_execution_tracks_the_live_identity() -> Result<(), TestingError> {
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth = auth_header(&runtime.config, None).await?;
+
+    let ecu_lock = create_lock(
+        default_timeout(),
+        locks::ECU_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let ecu_lock_body = response_to_json(&ecu_lock)?;
+    let ecu_lock_id = ecu_lock_body
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .expect("ECU lock response must contain an id")
+        .to_owned();
+
+    let execution = send_cda_request(
+        &runtime.config,
+        &format!("{ECU_FLXC1000_ENDPOINT}/operations/calibratesensors/executions"),
+        StatusCode::ACCEPTED,
+        Method::POST,
+        Some("{}"),
+        Some(&auth),
+        None,
+    )
+    .await?;
+    let execution_body = response_to_json(&execution)?;
+    let execution_id = execution_body
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .expect("operation response must contain an id")
+        .to_owned();
+
+    send_cda_request(
+        &runtime.config,
+        &format!("{ECU_FLXC1000_ENDPOINT}/operations/calibratesensors/executions/{execution_id}"),
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await?;
+    lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&ecu_lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    let vehicle_lock_id = setup_with_lock(&runtime.config, &auth).await;
+    stage_full_database(&runtime.config, &auth).await?;
+    execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
+
+    send_cda_request(
+        &runtime.config,
+        &format!("{ECU_FLXC1000_ENDPOINT}/operations/calibratesensors/executions/{execution_id}"),
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await?;
+
+    stage_database_without(&runtime.config, &auth, "FLXC1000.mdd").await?;
+    execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
+    send_cda_request(
+        &runtime.config,
+        ECU_FLXC1000_ENDPOINT,
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await?;
+
+    execute_mode(&runtime.config, &auth, ExecutionMode::Rollback).await?;
+    wait_for_ecus_online(&runtime.config).await?;
+    send_cda_request(
+        &runtime.config,
+        &format!("{ECU_FLXC1000_ENDPOINT}/operations/calibratesensors/executions/{execution_id}"),
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await?;
+    let readded_ecu_lock = create_lock(
+        default_timeout(),
+        locks::ECU_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let readded_ecu_lock_id = response_to_t::<LockResponse>(&readded_ecu_lock)?.id;
+    lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&readded_ecu_lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    teardown_lock(&runtime.config, &auth, &vehicle_lock_id).await;
+    Ok(())
+}
+
+/// Apply must be blocked while an ECU lock proves diagnostic work is in progress.
 #[tokio::test]
 async fn runtimefiles_apply_blocked_by_vehicle_and_ecu_lock() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;
@@ -2345,5 +2901,182 @@ async fn runtimefiles_apply_blocked_by_vehicle_and_ecu_lock() -> Result<(), Test
 
     teardown_lock(&runtime.config, &auth, &vehicle_lock_id).await;
 
+    Ok(())
+}
+
+/// A held communication guard must refuse a runtime update outright: the update
+/// cannot take the exclusive disable lease, so admission fails with
+/// `OperationsInProgress` (409) instead of pulling the transport out from under
+/// a running operation.
+#[tokio::test]
+async fn runtimefiles_apply_refused_while_communication_guard_held() -> Result<(), TestingError> {
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth = auth_header(&runtime.config, None).await?;
+    wait_for_ecus_online(&runtime.config).await?;
+
+    // The vehicle lock authorizes the ECU operation below as well as the update.
+    let vehicle_lock_id = setup_with_lock(&runtime.config, &auth).await;
+    stage_full_database(&runtime.config, &auth).await?;
+
+    // An async operation execution holds a communication guard until it is deleted.
+    // On its own ECU, so a completed execution another test leaves behind on
+    // FLXC1000 cannot collide with this one.
+    let start_response = send_cda_request(
+        &runtime.config,
+        &format!("{ECU_TMCC3000_ENDPOINT}/operations/calibratesensors/executions"),
+        StatusCode::ACCEPTED,
+        Method::POST,
+        Some("{}"),
+        Some(&auth),
+        None,
+    )
+    .await?;
+    let execution_id: String = extract_field_from_json(&response_to_json(&start_response)?, "id")?;
+
+    let refusal = send_cda_request(
+        &runtime.config,
+        RUNTIMEFILES_UPDATE_EXECUTIONS,
+        StatusCode::CONFLICT,
+        Method::POST,
+        Some(&mode_json(ExecutionMode::Apply)),
+        Some(&auth),
+        None,
+    )
+    .await?;
+    let message: String = extract_field_from_json(&response_to_json(&refusal)?, "message")?;
+    assert!(
+        message.to_lowercase().contains("operation"),
+        "Expected the refusal to name the running operation, got {message:?}"
+    );
+
+    // Releasing the guard must be the only thing standing between the same
+    // request and a 202, so that the 409 above cannot pass for an unrelated
+    // precondition failure.
+    let force = QueryParams(HashMap::from_iter([(
+        "x-sovd2uds-force".to_string(),
+        "true".to_string(),
+    )]));
+    send_cda_request(
+        &runtime.config,
+        &format!("{ECU_TMCC3000_ENDPOINT}/operations/calibratesensors/executions/{execution_id}"),
+        StatusCode::OK,
+        Method::DELETE,
+        None,
+        Some(&auth),
+        Some(&force),
+    )
+    .await?;
+
+    execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
+    execute_mode(&runtime.config, &auth, ExecutionMode::Cleanup).await?;
+    teardown_lock(&runtime.config, &auth, &vehicle_lock_id).await;
+
+    Ok(())
+}
+
+/// Stages an authoritative empty database snapshot.
+async fn stage_empty_database(
+    config: &Configuration,
+    auth: &http::HeaderMap,
+) -> Result<(), TestingError> {
+    stage_full_database(config, auth).await?;
+    let items = get_file_list(config, auth, RUNTIMEFILES_NEXTUPDATE)
+        .await?
+        .items;
+    for item in items {
+        send_cda_request(
+            config,
+            &format!("{RUNTIMEFILES_NEXTUPDATE}/{}", item.id),
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+            None,
+            Some(auth),
+            None,
+        )
+        .await?;
+    }
+    assert!(
+        get_file_list(config, auth, RUNTIMEFILES_NEXTUPDATE)
+            .await?
+            .items
+            .is_empty()
+    );
+    Ok(())
+}
+
+/// Stages every MDD fixture except `exclude`, so that applying the snapshot
+/// removes exactly that one ECU from the vehicle.
+///
+/// Requires the caller to hold the vehicle lock.
+pub(crate) async fn stage_database_without(
+    config: &Configuration,
+    auth: &http::HeaderMap,
+    exclude: &str,
+) -> Result<(), TestingError> {
+    send_cda_request(
+        config,
+        RUNTIMEFILES_NEXTUPDATE,
+        StatusCode::OK,
+        Method::DELETE,
+        None,
+        Some(auth),
+        None,
+    )
+    .await?;
+
+    let all = mdd_file_names();
+    let staged: Vec<String> = all
+        .iter()
+        .filter(|name| !name.eq_ignore_ascii_case(exclude))
+        .cloned()
+        .collect();
+    assert!(
+        !staged.is_empty() && staged.len() != all.len(),
+        "Precondition: {exclude} must be one of several fixtures, found {all:?}"
+    );
+
+    for name in staged {
+        let response = upload_mdd_by_name(config, auth, &name).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::CREATED,
+            "Precondition: staging {name} must succeed"
+        );
+    }
+
+    // The first upload into an empty staging area seeds it from the current
+    // collection, so the excluded file can reappear. Remove it after uploading.
+    let excluded_key = exclude.to_lowercase();
+    let items = get_file_list(config, auth, RUNTIMEFILES_NEXTUPDATE)
+        .await?
+        .items;
+    for item in items.iter().filter(|item| {
+        item.id
+            .to_lowercase()
+            .contains(excluded_key.trim_end_matches(".mdd"))
+    }) {
+        send_cda_request(
+            config,
+            &format!("{RUNTIMEFILES_NEXTUPDATE}/{}", item.id),
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+            None,
+            Some(auth),
+            None,
+        )
+        .await?;
+    }
+
+    let remaining = get_file_list(config, auth, RUNTIMEFILES_NEXTUPDATE)
+        .await?
+        .items;
+    assert!(
+        !remaining.iter().any(|item| item
+            .id
+            .to_lowercase()
+            .contains(excluded_key.trim_end_matches(".mdd"))),
+        "Precondition: {exclude} must be absent from staging, got {:?}",
+        remaining.iter().map(|item| &item.id).collect::<Vec<_>>()
+    );
     Ok(())
 }

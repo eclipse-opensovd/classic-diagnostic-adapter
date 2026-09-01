@@ -14,25 +14,23 @@
 use aide::{UseApi, transform::TransformOperation};
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::Query,
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
-use cda_interfaces::{
-    DynamicPlugin, UdsEcu, datatypes::ComponentConfigurationsInfo, file_manager::FileManager,
-};
+use cda_interfaces::{DynamicPlugin, UdsEcu, datatypes::ComponentConfigurationsInfo};
 use cda_plugin_security::Secured;
 use http::StatusCode;
 use sovd_interfaces::components::ecu::configurations as sovd_configurations;
 
 use crate::sovd::{
-    IntoSovd, WebserverEcuState, create_schema,
+    EcuContext, IntoSovd, WebserverEcuState, create_schema,
     error::{ApiError, ErrorWrapper},
 };
 
-pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+pub(crate) async fn get<T: UdsEcu + Clone>(
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+    EcuContext(WebserverEcuState { ecu_name, uds, .. }): EcuContext<T>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_configurations::ConfigurationsQuery>,
         ApiError,
@@ -111,13 +109,11 @@ pub(crate) mod diag_service {
     use aide::{UseApi, transform::TransformOperation};
     use axum::{
         body::Bytes,
-        extract::{Path, Query, State},
+        extract::{Path, Query},
         response::{IntoResponse, Response},
     };
     use axum_extra::extract::WithRejection;
-    use cda_interfaces::{
-        DiagComm, DiagCommType, SchemaProvider, UdsEcu, file_manager::FileManager,
-    };
+    use cda_interfaces::{DiagComm, DiagCommType, SchemaProvider, UdsEcu};
     use cda_plugin_security::Secured;
     use http::HeaderMap;
     use sovd_interfaces::components::ecu::configurations as sovd_configurations;
@@ -125,13 +121,13 @@ pub(crate) mod diag_service {
     use crate::{
         openapi,
         sovd::{
-            WebserverEcuState,
+            EcuContext, WebserverEcuState,
             components::ecu::{DiagServicePathParam, data_request},
             error::{ApiError, ErrorWrapper},
         },
     };
 
-    pub(crate) async fn put<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+    pub(crate) async fn put<T: UdsEcu + SchemaProvider + Clone>(
         headers: HeaderMap,
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         Path(DiagServicePathParam { service }): Path<DiagServicePathParam>,
@@ -139,7 +135,7 @@ pub(crate) mod diag_service {
             Query<sovd_configurations::ConfigurationsQuery>,
             ApiError,
         >,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+        EcuContext(WebserverEcuState { ecu_name, uds, .. }): EcuContext<T>,
         body: Bytes,
     ) -> Response {
         let include_schema = query.include_schema;
@@ -187,23 +183,23 @@ pub(crate) mod diag_service {
         use aide::{UseApi, openapi::OpenApi, transform::TransformOperation};
         use axum::{
             Json,
-            extract::{Path, State},
+            extract::Path,
             response::{IntoResponse as _, Response},
         };
-        use cda_interfaces::{DynamicPlugin, SchemaProvider, UdsEcu, file_manager::FileManager};
+        use cda_interfaces::{DynamicPlugin, SchemaProvider, UdsEcu};
         use cda_plugin_security::Secured;
 
         use crate::{
             openapi,
-            sovd::{WebserverEcuState, docs, error::ApiError},
+            sovd::{EcuContext, WebserverEcuState, docs, error::ApiError},
         };
 
         openapi::aide_helper::gen_path_param!(ConfigDocsPathParam service String);
 
-        pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+        pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone>(
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(ConfigDocsPathParam { service }): Path<ConfigDocsPathParam>,
-            State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+            EcuContext(WebserverEcuState { ecu_name, uds, .. }): EcuContext<T>,
         ) -> Response {
             let security_plugin: DynamicPlugin = security_plugin;
 
@@ -247,11 +243,10 @@ pub(crate) mod diag_service {
         #[cfg(test)]
         mod tests {
             use aide::UseApi;
-            use axum::{extract::State, http::StatusCode};
+            use axum::http::StatusCode;
             use cda_interfaces::{
                 DiagServiceError,
                 datatypes::ComponentConfigurationsInfo,
-                file_manager::mock::MockFileManager,
                 mock::{MockUdsEcu, mock_ecu_state_online_variant_detected},
             };
             use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
@@ -278,13 +273,10 @@ pub(crate) mod diag_service {
                         }])
                     });
 
-                let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                    "TestECU".to_owned(),
-                    mock_uds,
-                    MockFileManager::new(),
-                );
+                let state =
+                    create_test_webserver_state::<MockUdsEcu>("TestECU".to_owned(), mock_uds);
 
-                let response = get::<MockUdsEcu, MockFileManager>(
+                let response = get::<MockUdsEcu>(
                     UseApi(
                         Secured(Box::new(TestSecurityPlugin)),
                         std::marker::PhantomData,
@@ -292,7 +284,7 @@ pub(crate) mod diag_service {
                     Path(ConfigDocsPathParam {
                         service: "VarCoding1".to_owned(),
                     }),
-                    State(state),
+                    EcuContext(state),
                 )
                 .await;
 
@@ -325,13 +317,10 @@ pub(crate) mod diag_service {
                         }])
                     });
 
-                let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                    "TestECU".to_owned(),
-                    mock_uds,
-                    MockFileManager::new(),
-                );
+                let state =
+                    create_test_webserver_state::<MockUdsEcu>("TestECU".to_owned(), mock_uds);
 
-                let response = get::<MockUdsEcu, MockFileManager>(
+                let response = get::<MockUdsEcu>(
                     UseApi(
                         Secured(Box::new(TestSecurityPlugin)),
                         std::marker::PhantomData,
@@ -339,7 +328,7 @@ pub(crate) mod diag_service {
                     Path(ConfigDocsPathParam {
                         service: "NonExistent".to_owned(),
                     }),
-                    State(state),
+                    EcuContext(state),
                 )
                 .await;
 
@@ -360,13 +349,10 @@ pub(crate) mod diag_service {
                         ))
                     });
 
-                let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                    "TestECU".to_owned(),
-                    mock_uds,
-                    MockFileManager::new(),
-                );
+                let state =
+                    create_test_webserver_state::<MockUdsEcu>("TestECU".to_owned(), mock_uds);
 
-                let response = get::<MockUdsEcu, MockFileManager>(
+                let response = get::<MockUdsEcu>(
                     UseApi(
                         Secured(Box::new(TestSecurityPlugin)),
                         std::marker::PhantomData,
@@ -374,7 +360,7 @@ pub(crate) mod diag_service {
                     Path(ConfigDocsPathParam {
                         service: "Anything".to_owned(),
                     }),
-                    State(state),
+                    EcuContext(state),
                 )
                 .await;
 

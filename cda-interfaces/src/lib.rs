@@ -27,6 +27,7 @@ mod com_param_handling;
 pub use com_param_handling::*;
 pub mod datatypes;
 pub mod diagservices;
+pub mod ecu_data;
 mod ecugateway;
 pub use ecugateway::{
     EcuGateway, FunctionalTransport, NetworkTopology, PhysicalTransport, RouteStatus,
@@ -42,8 +43,9 @@ pub mod http_protection;
 mod schema;
 pub use schema::*;
 pub mod communication_control;
-pub mod component_slot;
 pub mod config;
+mod reloadable;
+pub use reloadable::{ReloadComponent, Reloadable, ReloadableOwner};
 pub mod runtime_update_api;
 pub mod storage_api;
 mod transport;

@@ -22,12 +22,12 @@
 
 //! Runtime Update Plugin API
 //!
-//! Provides the interface definitions for runtime MDD database management, including security
-//! handler traits, reload handler traits, and error types.
+//! Provides interfaces for transactional runtime-file snapshots, including security policy,
+//! application reload coordination, and error types.
 //!
 //! The concrete plugin implementation lives in `cda-plugin-runtime-update`.
 
-use std::{path::PathBuf, str::FromStr, sync::Arc};
+use std::{str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -35,53 +35,66 @@ use serde::{Deserialize, Deserializer, Serialize};
 use strum_macros::EnumString;
 
 use crate::{
-    FunctionalDescriptionConfig, HashMap, Shutdown, UdsQuery,
-    file_manager::FileManager,
     storage_api::{Collection, DirectFileAccess},
 };
 
 mod error;
-pub use error::{ReloadError, RuntimeUpdateError, VerificationError};
+pub use error::{ReloadError, ReloadFailure, RuntimeUpdateError, VerificationError};
 
-/// The result of creating a fresh set of vehicle components inside
-/// [`VehicleComponentFactory::create`].
-pub struct VehicleComponents<UdsManager, Gateway, File>
-where
-    UdsManager: UdsQuery + Shutdown,
-    Gateway: Shutdown,
-    File: FileManager,
-{
-    pub uds_manager: UdsManager,
-    pub file_managers: HashMap<String, File>,
-    pub diagnostic_gateway: Gateway,
-    pub functional_group_config: FunctionalDescriptionConfig,
-}
-
-/// Async factory that recreates vehicle components (UDS manager, diagnostic gateway,
-/// file managers) from a configuration snapshot and new MDD paths.
+/// Application capability that prepares one complete runtime update.
 ///
-///
-/// # Type parameters
-/// - `C`: opaque application configuration
-/// - `Q`: UDS manager type - must implement [`UdsQuery`] + [`Shutdown`]
-/// - `G`: diagnostic gateway type - must implement [`Shutdown`]
+/// The application owns the concrete data types and delivers each value directly
+/// to its typed component owner. Implementations must finish every fallible step,
+/// including dependent-resource preparation, before returning success. The
+/// returned payload is applied directly to its owner once every participant
+/// has succeeded.
 #[async_trait]
-pub trait VehicleComponentFactory<Config, Uds, Gateway>: Send + Sync + 'static
+pub trait ApplicationUpdatePreparation<Config>: Send + Sync + 'static
 where
     Config: Send + Sync + 'static,
-    Uds: UdsQuery + Shutdown,
-    Gateway: Shutdown,
 {
-    /// Concrete file-manager type produced by this factory.
-    type FileManager: FileManager;
-
-    /// Creates a fresh set of vehicle components.
+    /// Builds and stages a complete update while communication is disabled.
     ///
-    async fn create(
+    /// # Errors
+    /// Returns [`ReloadError`] if any component or dependent resource cannot be prepared.
+    ///
+    /// Staging happens only once every fallible step has succeeded, so a failed
+    /// preparation leaves nothing staged and there is nothing to discard.
+    async fn prepare_update(&self, config: &Config) -> Result<(), ReloadError>;
+}
+
+/// Opaque validated lock-topology payload that retains update admission until applied.
+pub trait ReservedVehicleDatabaseLocks: Send {
+    /// Publishes the validated topology. Synchronous and infallible: validation
+    /// already happened when the reservation was taken.
+    fn apply(self: Box<Self>);
+}
+
+/// Mutation capability for aligning lockable resources with vehicle database content.
+///
+/// Kept separate from [`LockStateProvider`] so read-only policy code cannot
+/// change which resources may be locked.
+#[async_trait]
+pub trait VehicleDatabaseLockUpdater: Send + Sync + 'static {
+    /// Validates a prospective topology and reserves ECU/group lock admission until it is applied.
+    async fn reserve_lock_resources(
         &self,
-        config: &Config,
-        mdd_paths: &[PathBuf],
-    ) -> Result<VehicleComponents<Uds, Gateway, Self::FileManager>, ReloadError>;
+        ecu_names: Vec<String>,
+    ) -> Result<Box<dyn ReservedVehicleDatabaseLocks>, ReloadError>;
+
+    /// Validates a prospective lock-resource replacement without applying it.
+    ///
+    /// # Errors
+    /// Returns an error when existing locks prevent updating the resource set.
+    async fn validate_lock_resources(&self, ecu_names: &[String]) -> Result<(), ReloadError>;
+
+    /// Validates and stages a replacement in one call for compatibility with
+    /// direct owner users. Coordinators requiring an all-owner atomic apply must
+    /// use [`Self::validate_lock_resources`] followed by [`Self::stage_lock_resources`].
+    ///
+    /// # Errors
+    /// Returns an error when existing locks prevent updating the resource set.
+    async fn update_lock_resources(&self, ecu_names: Vec<String>) -> Result<(), ReloadError>;
 }
 
 /// A file to be uploaded to the CDA during a runtime update.
@@ -93,7 +106,7 @@ pub struct UploadFile {
     pub data: Bytes,
 }
 
-/// Collections passed to [`RuntimeUpdateSecurityPlugin::check_apply_allowed`].
+/// Collections passed to [`RuntimeUpdateSecurityPlugin::check_execution_allowed`].
 ///
 /// Provides direct access to the staged (`*NextUpdate`) and currently active collections
 /// so implementations can inspect file lists, read metadata, or verify file content
@@ -114,6 +127,7 @@ impl<C: Collection + DirectFileAccess> Default for UpdateCollections<C> {
     }
 }
 
+
 /// Provides read-only access to vehicle lock state for security validation.
 ///
 /// Implemented by the SOVD server to expose lock information to plugins
@@ -121,11 +135,26 @@ impl<C: Collection + DirectFileAccess> Default for UpdateCollections<C> {
 /// implementation to integrate custom lock management systems.
 #[async_trait]
 pub trait LockStateProvider: Send + Sync + 'static {
-    /// Returns the `sub` claim of the vehicle lock owner, or `None` if no vehicle lock is held.
+    /// Returns the opaque identity of the vehicle lock owner, or `None` if no vehicle lock is held.
     async fn vehicle_lock_owner_sub(&self) -> Option<String>;
 
-    /// Returns `true` if any ECU or functional-group lock is currently held.
+    /// Returns `true` if any non-vehicle resource lock is currently held.
     async fn has_non_vehicle_locks(&self) -> bool;
+}
+
+/// Exact phase at which an update stopped being able to prove persistent/live coherence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryPhase {
+    /// Preparing the candidate live state failed.
+    CandidatePreparation,
+    /// Restoring the previous persistent state failed.
+    PersistentRestore,
+    /// Preparing the restored live state failed.
+    RestoredPreparation,
+    /// Recommitting the restored persistent state failed.
+    Recommit,
+    /// Finalizing communication state failed.
+    CommunicationFinalization,
 }
 
 /// Handler for reloading diagnostic runtime data after file operations (apply/rollback).
@@ -134,10 +163,13 @@ pub trait LockStateProvider: Send + Sync + 'static {
 /// ensuring that newly applied MDD databases are picked up without a restart.
 #[async_trait]
 pub trait RuntimeReloaderPlugin: Send + Sync + 'static {
-    /// Loads (or re-loads) the MDD databases at the given paths into the running system.
+    /// Loads (or re-loads) the MDD databases currently on disk into the running system.
     ///
-    /// Called after a successful apply operation with the paths of all newly active MDD files.
-    async fn reload_databases(&self, mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError>;
+    /// Called after a successful apply or rollback. The implementor resolves paths
+    /// itself on every call, rather than trusting a caller-supplied list that could
+    /// disagree with what was just committed. The caller holds a live disable
+    /// lease, so no reader can have entered after communication went down.
+    async fn reload_databases(&self) -> Result<(), ReloadFailure>;
 }
 
 /// Security and file integrity handler for the diagnostic database update process.
@@ -147,25 +179,22 @@ pub trait RuntimeReloaderPlugin: Send + Sync + 'static {
 /// primary OEM extension point for adding custom lock validation, signature checks,
 /// hash verification, version compatibility rules, or any other security requirements.
 ///
-/// Vehicle lock ownership for modifying operations (upload, delete) is enforced at
-/// the HTTP handler layer in cda-sovd, not through this trait.
+/// Execution ownership is enforced through this trait both before update guards are acquired and
+/// again under those guards. HTTP adapters may perform the same check as defense in depth.
 #[async_trait]
 pub trait RuntimeUpdateSecurityPlugin<
     L: LockStateProvider,
     C: Collection + DirectFileAccess + Send + Sync + 'static,
 >: Send + Sync + 'static
 {
-    /// Validates that the caller is allowed to start an execution (apply/rollback/cleanup).
-    /// Called by the plugin before `start_execution`.
+    /// Applies authoritative lock and content policy before an execution is registered.
     ///
     /// Implementations should verify caller authorization AND check for conflicting
     /// operations (e.g., active ECU or functional-group locks held by other callers).
-    /// `collections` provides handles to the staged and currently active file collections
-    /// for version compatibility or signature checks.
     ///
     /// # Errors
-    /// Return an appropriate [`RuntimeUpdateError`] variant to deny the execution.
-    async fn check_apply_allowed(
+    /// Returns an appropriate [`RuntimeUpdateError`] variant to deny the execution.
+    async fn check_execution_allowed(
         &self,
         lock_state_provider: &L,
         collections: &UpdateCollections<C>,
@@ -185,12 +214,46 @@ pub trait RuntimeUpdateSecurityPlugin<
     async fn check_file_integrity(&self, path: &std::path::Path) -> Result<(), VerificationError>;
 }
 
+/// Internal classification of a runtime update execution failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionFailureClass {
+    /// The operation was rejected or the previous state was fully restored.
+    Ordinary,
+    /// Recovery is incomplete and operator intervention is required.
+    Fatal,
+}
+
+/// Safe public failure details for a runtime update execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionFailure {
+    pub reason: String,
+    pub class: ExecutionFailureClass,
+}
+
+impl ExecutionFailure {
+    /// Creates an ordinary execution failure with a safe public reason.
+    pub fn ordinary(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            class: ExecutionFailureClass::Ordinary,
+        }
+    }
+
+    /// Creates a fatal execution failure with a safe public reason.
+    pub fn fatal(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            class: ExecutionFailureClass::Fatal,
+        }
+    }
+}
+
 /// Status of an in-progress or completed database update execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionStatus {
     Running,
     Completed,
-    Failed(String),
+    Failed(ExecutionFailure),
 }
 
 // Bulk-data types used by RuntimeFilesUpdatePlugin
@@ -321,17 +384,11 @@ pub struct UpdateExecution {
     pub status: ExecutionStatus,
 }
 
-// RuntimeFilesUpdatePlugin trait + ExclusiveRuntimePlugin wrapper
-
-/// The main plugin trait for managing diagnostic runtime files (MDD databases).
+/// Read-only access to diagnostic runtime file collections.
 ///
-/// Provides the full lifecycle for runtime file management: listing, uploading, deleting,
-/// and executing apply/rollback/cleanup operations on the diagnostic database.
-///
-/// Security validation for mutating operations is delegated to the associated
-/// [`RuntimeUpdateSecurityPlugin`].
+/// Consumers of this capability receive no staging or execution authority.
 #[async_trait]
-pub trait RuntimeFilesUpdatePlugin: Send + Sync + 'static {
+pub trait RuntimeFileCatalog: Send + Sync + 'static {
     /// Lists the currently active diagnostic runtime files.
     ///
     /// Returns files currently loaded and in use by the system.
@@ -342,7 +399,7 @@ pub trait RuntimeFilesUpdatePlugin: Send + Sync + 'static {
 
     /// Lists files staged for the next update (pending apply).
     ///
-    /// Returns files uploaded via [`upload`] that have not yet been applied.
+    /// Returns files uploaded via [`RuntimeFileStore::upload`] that have not yet been applied.
     async fn list_nextupdate(
         &self,
         query: &RuntimeFilesQuery,
@@ -355,7 +412,12 @@ pub trait RuntimeFilesUpdatePlugin: Send + Sync + 'static {
         &self,
         query: &RuntimeFilesQuery,
     ) -> Result<BulkDataList, RuntimeUpdateError>;
+}
 
+/// Mutating the staging and backup areas. Every method authorizes through
+/// [`RuntimeUpdateSecurityPlugin`] before touching anything.
+#[async_trait]
+pub trait RuntimeFileStore: Send + Sync + 'static {
     /// Uploads one or more files to the next-update staging area.
     async fn upload(
         &self,
@@ -370,10 +432,15 @@ pub trait RuntimeFilesUpdatePlugin: Send + Sync + 'static {
 
     /// Deletes all files from the backup area and returns their identifiers.
     async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError>;
+}
 
+/// Running and observing apply / rollback / cleanup executions asynchronously:
+/// [`start_execution`](Self::start_execution) returns a pollable id.
+#[async_trait]
+pub trait RuntimeUpdateExecutor: Send + Sync + 'static {
     /// Starts an asynchronous execution (Apply, Rollback, or Cleanup).
     ///
-    /// Returns an execution ID that can be polled via [`get_execution_status`].
+    /// Returns an execution ID that can be polled via [`get_execution_status`](Self::get_execution_status).
     async fn start_execution(&self, mode: ExecutionMode) -> Result<String, RuntimeUpdateError>;
 
     /// Returns all currently tracked executions. Always contains at most one entry;
@@ -382,7 +449,17 @@ pub trait RuntimeFilesUpdatePlugin: Send + Sync + 'static {
 
     /// Returns the current status of an execution by its ID, or `None` if not found.
     async fn get_execution_status(&self, execution_id: &str) -> Option<UpdateExecution>;
+}
 
+/// The complete plugin surface for managing diagnostic runtime files.
+///
+/// Provides listing, staging mutation, and apply/rollback/cleanup execution.
+/// Security validation for mutating operations is delegated to the associated
+/// [`RuntimeUpdateSecurityPlugin`]. A blanket implementation composes the three
+/// capabilities without granting any one capability additional authority.
+pub trait RuntimeFilesUpdatePlugin:
+    RuntimeFileCatalog + RuntimeFileStore + RuntimeUpdateExecutor
+{
     /// Wraps this plugin in [`ExclusiveRuntimePlugin`], adding read/write mutual exclusion.
     fn with_exclusive_access(self) -> ExclusiveRuntimePlugin<Self>
     where
@@ -390,6 +467,11 @@ pub trait RuntimeFilesUpdatePlugin: Send + Sync + 'static {
     {
         ExclusiveRuntimePlugin::new(self)
     }
+}
+
+impl<P> RuntimeFilesUpdatePlugin for P where
+    P: RuntimeFileCatalog + RuntimeFileStore + RuntimeUpdateExecutor
+{
 }
 
 /// Wrapper that enforces mutual exclusion on any [`RuntimeFilesUpdatePlugin`].
@@ -416,7 +498,7 @@ impl<P> ExclusiveRuntimePlugin<P> {
 }
 
 #[async_trait]
-impl<P: RuntimeFilesUpdatePlugin> RuntimeFilesUpdatePlugin for ExclusiveRuntimePlugin<P> {
+impl<P: RuntimeFileCatalog> RuntimeFileCatalog for ExclusiveRuntimePlugin<P> {
     async fn list_current(
         &self,
         query: &RuntimeFilesQuery,
@@ -440,7 +522,10 @@ impl<P: RuntimeFilesUpdatePlugin> RuntimeFilesUpdatePlugin for ExclusiveRuntimeP
         let _guard = self.lock.read().await;
         self.inner.list_backup(query).await
     }
+}
 
+#[async_trait]
+impl<P: RuntimeFileStore> RuntimeFileStore for ExclusiveRuntimePlugin<P> {
     async fn upload(
         &self,
         files: Vec<UploadFile>,
@@ -463,7 +548,10 @@ impl<P: RuntimeFilesUpdatePlugin> RuntimeFilesUpdatePlugin for ExclusiveRuntimeP
         let _guard = self.lock.write().await;
         self.inner.delete_backup().await
     }
+}
 
+#[async_trait]
+impl<P: RuntimeUpdateExecutor> RuntimeUpdateExecutor for ExclusiveRuntimePlugin<P> {
     async fn start_execution(&self, mode: ExecutionMode) -> Result<String, RuntimeUpdateError> {
         let _guard = self.lock.write().await;
         self.inner.start_execution(mode).await

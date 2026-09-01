@@ -68,8 +68,31 @@ fn communication_handle_from_resources(
     }
 }
 
+struct Disable(CommunicationHandle);
+
+#[async_trait::async_trait]
+impl crate::lifecycle::disable::DisableCommunication for Disable {
+    async fn disable(
+        &self,
+        reason: DisableReason,
+    ) -> Result<Box<dyn cda_interfaces::communication_control::DisableGuard>, DisableError> {
+        self.0.disable(reason).await.map(|lease| {
+            Box::new(lease) as Box<dyn cda_interfaces::communication_control::DisableGuard>
+        })
+    }
+}
+
 #[must_use]
 pub fn enabled_communication_access_for_test() -> Arc<dyn CommunicationAccess> {
+    enabled_communication_for_test().0
+}
+
+/// Returns access and disable capabilities backed by the same enabled lifecycle state.
+#[must_use]
+pub fn enabled_communication_for_test() -> (
+    Arc<dyn CommunicationAccess>,
+    Arc<dyn crate::lifecycle::disable::DisableCommunication>,
+) {
     struct TestTransport;
 
     #[async_trait::async_trait]
@@ -118,32 +141,18 @@ pub fn enabled_communication_access_for_test() -> Arc<dyn CommunicationAccess> {
     }
 
     let resources = worker::new_resources(Arc::new(TestTransport));
-    Arc::new(Access(communication_handle_from_resources(
+    let handle = communication_handle_from_resources(
         CommunicationState::Enabled,
         resources,
         VariantDetectionMode::Always,
-    )))
+    );
+    (Arc::new(Access(handle.clone())), Arc::new(Disable(handle)))
 }
 
 pub fn communication_disable_for_test(
     transport_control: Arc<dyn TransportControl>,
     initially_enabled: bool,
 ) -> Arc<dyn crate::lifecycle::disable::DisableCommunication> {
-    struct Disable(CommunicationHandle);
-
-    #[async_trait::async_trait]
-    impl crate::lifecycle::disable::DisableCommunication for Disable {
-        async fn disable(
-            &self,
-            reason: DisableReason,
-        ) -> Result<Box<dyn cda_interfaces::communication_control::DisableGuard>, DisableError>
-        {
-            self.0.disable(reason).await.map(|lease| {
-                Box::new(lease) as Box<dyn cda_interfaces::communication_control::DisableGuard>
-            })
-        }
-    }
-
     let handle = if initially_enabled {
         let resources = worker::new_resources(transport_control);
         communication_handle_from_resources(

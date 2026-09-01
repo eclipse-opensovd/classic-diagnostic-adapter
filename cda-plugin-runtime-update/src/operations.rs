@@ -14,10 +14,8 @@
 use std::sync::Arc;
 
 use cda_interfaces::{
-    runtime_update_api::{RuntimeReloaderPlugin, RuntimeUpdateError},
-    storage_api::{
-        Collection, CollectionName, DirectFileAccess, Storage, StorageError, Transaction,
-    },
+    runtime_update_api::RuntimeUpdateError,
+    storage_api::{CollectionName, Storage, StorageError, Transaction},
 };
 
 pub mod apply;
@@ -47,65 +45,12 @@ pub(crate) async fn delete_collection_ignore_missing<S: Storage>(
     }
 }
 
-pub(crate) async fn reload_database_if_present<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
-    storage: &S,
-    reload_handler: &R,
-    decompress: bool,
-) -> Result<(), RuntimeUpdateError> {
-    let db_col = storage
-        .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-        .await?;
-
-    let mdd_paths: Vec<_> = db_col
-        .list()
-        .await
-        .map(|files| {
-            files
-                .iter()
-                .filter_map(|key| match db_col.file_path(key) {
-                    Ok(p) => Some(p),
-                    Err(e) => {
-                        tracing::warn!(key = %key, error = %e, "Failed to resolve MDD path, skipping");
-                        None
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    if decompress {
-        for mdd_path in &mdd_paths {
-            if let Some(path_str) = mdd_path.to_str() {
-                if let Err(e) = cda_database::update_mdd_uncompressed(path_str) {
-                    tracing::warn!(
-                        mdd_file = %mdd_path.display(),
-                        error = %e,
-                        "Failed to decompress MDD file after apply, continuing"
-                    );
-                }
-            } else {
-                tracing::error!(
-                    mdd_file = %mdd_path.display(),
-                    "MDD path is not valid UTF-8, skipping decompression",
-                );
-            }
-        }
-    }
-
-    reload_handler
-        .reload_databases(mdd_paths)
-        .await
-        .map_err(RuntimeUpdateError::from)
-}
-
 #[cfg(test)]
 mod tests {
     use cda_interfaces::storage_api::{CollectionName, Storage as _, StorageError};
 
-    use super::{delete_collection_ignore_missing, reload_database_if_present, try_get_collection};
-    use crate::test_utils::{
-        RecordingReloadHandler, init_collection, make_storage, write_test_file,
-    };
+    use super::{delete_collection_ignore_missing, try_get_collection};
+    use crate::test_utils::{init_collection, make_storage};
 
     #[tokio::test]
     async fn try_get_collection_returns_some_when_collection_exists() {
@@ -171,64 +116,5 @@ mod tests {
         tx.commit().await.unwrap();
 
         assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn reload_database_calls_handler_with_all_mdd_paths() {
-        let (storage, _dir) = make_storage();
-        write_test_file(
-            &storage,
-            &CollectionName::DiagnosticDatabase,
-            "ecu1.mdd",
-            b"mdd_data_1",
-        )
-        .await;
-        write_test_file(
-            &storage,
-            &CollectionName::DiagnosticDatabase,
-            "ecu2.mdd",
-            b"mdd_data_2",
-        )
-        .await;
-
-        let handler = RecordingReloadHandler::new();
-        reload_database_if_present(&storage, &handler, false)
-            .await
-            .unwrap();
-
-        let calls = handler.reload_calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls.first().unwrap().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn reload_database_calls_handler_with_empty_vec_when_collection_empty() {
-        let (storage, _dir) = make_storage();
-        storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
-
-        let handler = RecordingReloadHandler::new();
-        reload_database_if_present(&storage, &handler, false)
-            .await
-            .unwrap();
-
-        let calls = handler.reload_calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert!(calls.first().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn reload_database_creates_collection_and_calls_handler_when_absent() {
-        let (storage, _dir) = make_storage();
-
-        let handler = RecordingReloadHandler::new();
-        let result = reload_database_if_present(&storage, &handler, false).await;
-
-        assert!(result.is_ok());
-        let calls = handler.reload_calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert!(calls.first().unwrap().is_empty());
     }
 }

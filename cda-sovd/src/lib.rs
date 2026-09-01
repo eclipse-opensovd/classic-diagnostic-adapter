@@ -11,18 +11,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use aide::{axum::routing, swagger::Swagger};
 use axum::{
     Json,
     http::{self, Request},
+    response::IntoResponse,
 };
 use cda_comm_doip::DoipGatewaySetupError;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
+    FunctionalDescriptionConfig, SchemaProvider, UdsEcu,
     communication_control::CommunicationAccess, datatypes::ComponentsConfig, dlt_ctx,
-    file_manager::FileManager, http_protection::registry::HttpRouteMatcher,
+    file_manager::EmbeddedFilesProvider, http_protection::registry::HttpRouteMatcher,
 };
 use cda_plugin_security::SecurityPluginLoader;
 use dynamic_router::DynamicRouter;
@@ -34,10 +35,14 @@ use tokio::net::TcpListener;
 use tower::{Layer, ServiceExt as TowerServiceExt};
 use tower_http::{normalize_path::NormalizePathLayer, trace::TraceLayer};
 
+#[cfg(test)]
+pub(crate) use crate::sovd::SovdRegistry;
 /// Public API surface re-exported from the crate-internal `sovd` module.
 pub use crate::sovd::{
-    SovdLockStateProvider, error::VendorErrorCode, locks::Locks,
-    request_guard::install_http_restriction_guard, static_data::add_static_data_endpoint,
+    IntoSovdLockStateView, IntoSovdRegistryView, SovdLockStateParts, SovdLockStateView,
+    SovdRegistryParts, SovdRegistryUpdate, SovdRegistryView, error::VendorErrorCode, locks::Locks,
+    new_sovd_lock_state, new_sovd_registry, request_guard::install_http_restriction_guard,
+    static_data::add_static_data_endpoint,
 };
 pub mod dynamic_router;
 mod openapi;
@@ -60,10 +65,11 @@ pub struct VehicleConfig {
 }
 
 /// Runtime resources (handles, shared state) for vehicle SOVD routes.
-pub struct VehicleResources<T, M> {
+pub struct VehicleResources<T, L = Arc<SovdLockStateView>, R = SovdRegistryView> {
     pub ecu_uds: T,
-    pub file_managers: HashMap<String, M>,
-    pub locks: Arc<Locks>,
+    pub lock_provider: L,
+    /// Read-only SOVD identity and execution-state view shared across reloads.
+    pub registry: R,
     /// Access-only view used to admit diagnostic communication activities.
     pub communication_access: Arc<dyn CommunicationAccess>,
 }
@@ -138,17 +144,16 @@ where
         flash_files_path = %config.flash_files_path
     )
 )]
-pub async fn add_vehicle_routes<T, M, S>(
+pub async fn add_vehicle_routes<T, S>(
     dynamic_router: &DynamicRouter,
     config: VehicleConfig,
-    resources: VehicleResources<T, M>,
+    resources: VehicleResources<T, impl IntoSovdLockStateView, impl IntoSovdRegistryView>,
 ) -> Result<RouteHandle, DoipGatewaySetupError>
 where
-    T: UdsEcu + SchemaProvider + Clone + Send + Sync + 'static,
-    M: FileManager + Send + Sync + 'static,
+    T: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone + Send + Sync + 'static,
     S: SecurityPluginLoader,
 {
-    let vehicle_router = build_vehicle_routes::<T, M, S>(config, resources).await;
+    let vehicle_router = build_vehicle_routes::<T, S>(config, resources).await;
 
     let handle = dynamic_router.add_routes(vehicle_router).await;
 
@@ -156,27 +161,22 @@ where
     Ok(handle)
 }
 
-#[allow(
-    clippy::implicit_hasher,
-    reason = "Type alias doesn't allow specifying hasher"
-)]
-pub async fn build_vehicle_routes<T, M, S>(
+pub async fn build_vehicle_routes<T, S>(
     config: VehicleConfig,
-    resources: VehicleResources<T, M>,
+    resources: VehicleResources<T, impl IntoSovdLockStateView, impl IntoSovdRegistryView>,
 ) -> aide::axum::ApiRouter
 where
-    T: UdsEcu + SchemaProvider + Clone + Send + Sync + 'static,
-    M: FileManager + Send + Sync + 'static,
+    T: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone + Send + Sync + 'static,
     S: SecurityPluginLoader,
 {
-    sovd::route::<T, M, S>(
+    sovd::route::<T, S>(
         config.functional_group_config,
         config.components_config,
         &resources.ecu_uds,
         config.flash_files_path,
-        resources.file_managers,
-        resources.locks,
+        resources.lock_provider,
         resources.communication_access,
+        resources.registry,
     )
     .await
 }
@@ -225,24 +225,39 @@ pub fn routes_accessible_during_update() -> Vec<HttpRouteMatcher> {
 /// request's `Host` header (with `X-Forwarded-Host` / `Forwarded` taking
 /// precedence for reverse-proxy deployments), so the Swagger-UI always reflects
 /// the address the client actually used to reach CDA.
-pub async fn add_openapi_routes(dynamic_router: &DynamicRouter) {
+///
+/// The stored spec keeps the templated instance paths used by the router. Each
+/// request expands a single mutable clone from the current live index.
+pub async fn add_openapi_routes(
+    dynamic_router: &DynamicRouter,
+    registry: impl Into<SovdRegistryView>,
+) {
+    let registry = registry.into();
     let dr = dynamic_router.clone();
     dynamic_router
         .add_finalizer(Arc::new(move |router: axum::Router| -> axum::Router {
             let dr = dr.clone();
+            let registry = registry.clone();
             let swagger_route: axum::routing::MethodRouter =
                 Swagger::new(OPENAPI_JSON_ROUTE).axum_route().into();
             let openapi_route: axum::routing::MethodRouter =
                 routing::get(move |ExtractHost(host): ExtractHost| {
                     let dr = dr.clone();
+                    let registry = registry.clone();
                     async move {
-                        let mut api = (*dr.get_openapi().await).clone();
+                        let mut api = dr.get_openapi().await;
                         let server_url = format!("http://{host}");
                         let _ = openapi::api_docs(
                             aide::transform::TransformOpenApi::new(&mut api),
                             server_url,
                         );
-                        Json(api)
+                        let live = registry.live();
+                        openapi::expand_templated_paths(
+                            &mut api,
+                            live.ecu_index().keys(),
+                            live.functional_group_index().keys(),
+                        );
+                        Json(api).into_response()
                     }
                 })
                 .into();
@@ -326,6 +341,77 @@ where
                 },
             ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use aide::axum::{ApiRouter, routing};
+    use axum::{body::Body, http::Request, response::IntoResponse};
+    use cda_interfaces::HashMap;
+    use tower::ServiceExt;
+
+    use super::{OPENAPI_JSON_ROUTE, SovdRegistry, add_openapi_routes};
+    use crate::dynamic_router::DynamicRouter;
+
+    fn openapi_request(host: &str) -> Request<Body> {
+        Request::builder()
+            .uri(OPENAPI_JSON_ROUTE)
+            .header(http::header::HOST, host)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    async fn openapi_json(router: axum::Router, host: &str) -> serde_json::Value {
+        let response = router.oneshot(openapi_request(host)).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    fn server_url(document: &serde_json::Value) -> Option<&str> {
+        document
+            .get("servers")?
+            .as_array()?
+            .first()?
+            .get("url")?
+            .as_str()
+    }
+
+    #[tokio::test]
+    async fn openapi_requests_are_independent_and_reflect_latest_routes() {
+        let dynamic_router = DynamicRouter::new();
+        let registry = SovdRegistry::default();
+        registry.apply(HashMap::default(), HashMap::default());
+        dynamic_router
+            .add_routes(ApiRouter::new().api_route(
+                "/first",
+                routing::get_with(|| async { "first".into_response() }, |op| op),
+            ))
+            .await;
+        add_openapi_routes(&dynamic_router, registry).await;
+
+        let first = openapi_json(dynamic_router.get_router().await, "first.example:1234").await;
+        let second = openapi_json(dynamic_router.get_router().await, "second.example:5678").await;
+        assert_eq!(server_url(&first), Some("http://first.example:1234"));
+        assert_eq!(server_url(&second), Some("http://second.example:5678"));
+        assert_eq!(server_url(&first), Some("http://first.example:1234"));
+
+        dynamic_router
+            .add_routes(ApiRouter::new().api_route(
+                "/second",
+                routing::get_with(|| async { "second".into_response() }, |op| op),
+            ))
+            .await;
+        let reloaded = openapi_json(dynamic_router.get_router().await, "latest.example").await;
+        let paths = reloaded
+            .get("paths")
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        assert!(paths.contains_key("/first"));
+        assert!(paths.contains_key("/second"));
+        assert_eq!(server_url(&reloaded), Some("http://latest.example"));
+    }
 }
 
 #[cfg(test)]

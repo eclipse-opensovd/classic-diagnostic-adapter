@@ -25,6 +25,7 @@ use cda_interfaces::{
     dlt_ctx, service_ids,
 };
 use tokio::sync::{RwLock, Semaphore, mpsc};
+use tokio_util::sync::CancellationToken;
 
 use crate::{UdsEcuDb, UdsManager, types::UdsParameters};
 
@@ -42,12 +43,62 @@ use crate::{UdsEcuDb, UdsManager, types::UdsParameters};
 /// the next attempt proceeds anyway and a warning is logged.
 const RETRY_TEARDOWN_GRACE: Duration = Duration::from_millis(500);
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum CommunicationReadiness {
     /// Require communication to be enabled for the send.
     Enforce,
     /// Send without checking communication readiness.
     AssumeReady,
+}
+
+/// Selects which operation owns the reachability mutation after a raw-send timeout.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReachabilityOwner {
+    /// Ordinary diagnostic sends notify the connectivity coordinator on timeout.
+    DiagnosticSend,
+    /// Variant detection aggregates its sends and publishes the final reachability verdict.
+    VariantDetection,
+}
+
+/// What to send to one ECU and how to shape the response.
+///
+/// Bundled so the send path stays inside the argument budget; the fields are
+/// exactly the public send parameters.
+pub(crate) struct UdsSendRequest<'a> {
+    pub(crate) service: DiagComm,
+    pub(crate) security_plugin: &'a DynamicPlugin,
+    pub(crate) payload: Option<UdsPayloadData>,
+    pub(crate) map_to_json: bool,
+    pub(crate) timeout: Option<Duration>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RawSendPolicy<'a> {
+    pub(crate) allow_application_retries: bool,
+    pub(crate) reachability_owner: ReachabilityOwner,
+    /// Detection cancellation is handled inside raw send so every gateway task is joined.
+    pub(crate) cancellation: Option<&'a CancellationToken>,
+}
+
+struct RawSendRequest {
+    payload: ServicePayload,
+    timeout: Option<Duration>,
+    expect_response: bool,
+}
+
+async fn cancellation_requested(cancellation: Option<&CancellationToken>) {
+    match cancellation {
+        Some(cancel) => cancel.cancelled().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn abort_gateway_task(handle: Option<tokio::task::JoinHandle<()>>) {
+    if let Some(handle) = handle {
+        handle.abort();
+        let _ = handle.await;
+    }
 }
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
@@ -69,9 +120,28 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         map_to_json: bool,
         timeout: Option<Duration>,
     ) -> Result<<T as PayloadDecoder>::Response, DiagServiceError> {
-        let _guard = self.require_communication_ready()?;
-        let ecu = self.uds_ecu_db(ecu_name)?;
+        let _communication_guard = self.require_communication_ready()?;
+        let ecu = self.uds_ecu_db(ecu_name).await?;
+        self.send_with_optional_timeout_for_ecu(
+            ecu_name,
+            &ecu,
+            UdsSendRequest {
+                service,
+                security_plugin,
+                payload,
+                map_to_json,
+                timeout,
+            },
+        )
+        .await
+    }
 
+    pub(crate) async fn send_with_optional_timeout_for_ecu(
+        &self,
+        ecu_name: &str,
+        ecu: &RwLock<T>,
+        request: UdsSendRequest<'_>,
+    ) -> Result<<T as PayloadDecoder>::Response, DiagServiceError> {
         // Pre-send: gate on variant detection when the variant has never been
         // tested (see ``ecu_concluded_variant_detection``), and separately run
         // detection as a reachability probe for ECUs marked Offline (see
@@ -79,7 +149,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         {
             let status = ecu.read().await.ecu_status();
             if status.variant_state == VariantState::NotTested {
-                self.uds_ecu_variant_detection_concluded(ecu_name).await?;
+                self.uds_ecu_handle_variant_detection_concluded(ecu).await?;
             } else if needs_variant_detection(&status) {
                 tracing::info!(
                     ecu_name,
@@ -104,34 +174,38 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             }
         }
 
-        self.send_without_variant_guard(
+        self.send_without_variant_guard_for_ecu(
             ecu_name,
+            ecu,
+            request,
+            RawSendPolicy {
+                allow_application_retries: true,
+                reachability_owner: ReachabilityOwner::DiagnosticSend,
+                cancellation: None,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn send_without_variant_guard_for_ecu(
+        &self,
+        ecu_name: &str,
+        ecu: &RwLock<T>,
+        request: UdsSendRequest<'_>,
+        policy: RawSendPolicy<'_>,
+    ) -> Result<<T as PayloadDecoder>::Response, DiagServiceError> {
+        let UdsSendRequest {
             service,
             security_plugin,
             payload,
             map_to_json,
             timeout,
-            CommunicationReadiness::Enforce,
-        )
-        .await
-    }
-
-    /// Inner send path that skips the variant detection guard.
-    /// Used by `detect_variant` to avoid infinite recursion.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "Arguments mirror the public send path plus variant-detection readiness"
-    )]
-    pub(crate) async fn send_without_variant_guard(
-        &self,
-        ecu_name: &str,
-        service: DiagComm,
-        security_plugin: &DynamicPlugin,
-        payload: Option<UdsPayloadData>,
-        map_to_json: bool,
-        timeout: Option<Duration>,
-        communication_readiness: CommunicationReadiness,
-    ) -> Result<<T as PayloadDecoder>::Response, DiagServiceError> {
+        } = request;
+        let RawSendPolicy {
+            allow_application_retries,
+            reachability_owner,
+            cancellation,
+        } = policy;
         let start = Instant::now();
         tracing::debug!(
             service = ?service,
@@ -139,7 +213,6 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 .map(ToString::to_string),
             "Sending UDS request"
         );
-        let ecu = self.uds_ecu_db(ecu_name)?;
 
         let payload = {
             let ecu = ecu.read().await;
@@ -157,21 +230,26 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         let expect_response = !payload.is_suppress_positive_response();
 
         let response = self
-            .send_with_raw_payload(
+            .send_with_raw_payload_for_ecu(
+                ecu,
                 ecu_name,
-                payload.clone(),
-                timeout,
-                expect_response,
-                communication_readiness,
+                RawSendRequest {
+                    payload: payload.clone(),
+                    timeout,
+                    expect_response,
+                },
+                RawSendPolicy {
+                    allow_application_retries,
+                    reachability_owner,
+                    cancellation,
+                },
             )
             .await;
         let response_after = start.elapsed().saturating_sub(payload_build_after);
 
         let response = match response {
             Ok(Some(msg)) => {
-                self.uds_ecu_db(ecu_name)
-                    .expect("ECU name has been already checked")
-                    .read()
+                ecu.read()
                     .await
                     .convert_from_uds(&service, &msg, map_to_json, None)
                     .await
@@ -207,15 +285,6 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
 }
 
 impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
-    #[allow(
-        clippy::needless_continue,
-        reason = "Explicit continue improves readability to make it clearer, which loop is being \
-                  continued"
-    )]
-    #[allow(
-        clippy::too_many_lines,
-        reason = "Splitting the send/receive flow would reduce readability"
-    )]
     #[tracing::instrument(
         skip(self, payload),
         fields(ecu_name,
@@ -224,6 +293,7 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
             dlt_context = dlt_ctx!("UDS"))
     )]
     /// Sends the raw payload to the ECU.
+    #[cfg(test)]
     pub(crate) async fn send_with_raw_payload(
         &self,
         ecu_name: &str,
@@ -236,13 +306,80 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
             CommunicationReadiness::Enforce => Some(self.require_communication_ready()?),
             CommunicationReadiness::AssumeReady => None,
         };
+        let ecu = self.uds_ecu_db(ecu_name).await?;
+        self.send_with_raw_payload_for_ecu(
+            &ecu,
+            ecu_name,
+            RawSendRequest {
+                payload,
+                timeout,
+                expect_response,
+            },
+            RawSendPolicy {
+                allow_application_retries: true,
+                reachability_owner: ReachabilityOwner::DiagnosticSend,
+                cancellation: None,
+            },
+        )
+        .await
+    }
 
+    pub(crate) async fn send_raw_payload_for_ecu(
+        &self,
+        ecu: &RwLock<T>,
+        ecu_name: &str,
+        payload: ServicePayload,
+        timeout: Option<Duration>,
+        expect_response: bool,
+    ) -> Result<Option<ServicePayload>, DiagServiceError> {
+        self.send_with_raw_payload_for_ecu(
+            ecu,
+            ecu_name,
+            RawSendRequest {
+                payload,
+                timeout,
+                expect_response,
+            },
+            RawSendPolicy {
+                allow_application_retries: true,
+                reachability_owner: ReachabilityOwner::DiagnosticSend,
+                cancellation: None,
+            },
+        )
+        .await
+    }
+
+    #[allow(
+        clippy::needless_continue,
+        reason = "Explicit continue improves readability to make it clearer, which loop is being \
+                  continued"
+    )]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Splitting the send/receive flow would reduce readability"
+    )]
+    async fn send_with_raw_payload_for_ecu(
+        &self,
+        ecu: &RwLock<T>,
+        ecu_name: &str,
+        request: RawSendRequest,
+        policy: RawSendPolicy<'_>,
+    ) -> Result<Option<ServicePayload>, DiagServiceError> {
+        let RawSendRequest {
+            payload,
+            timeout,
+            expect_response,
+        } = request;
         // todo: do we need to ensure that we do not send here
         // when we have an ongoing data transfer as well?
         let start = std::time::Instant::now();
 
-        let ecu = self.uds_ecu_db(ecu_name)?;
         let (uds_params, transmission_params) = Self::ecu_send_params(ecu).await;
+        let repeat_req_count_app = if policy.allow_application_retries {
+            uds_params.repeat_req_count_app
+        } else {
+            0
+        };
         let sent_sid = *payload.data.first().ok_or(DiagServiceError::BadPayload(
             "Cannot sent message without SID".to_owned(),
         ))?;
@@ -259,16 +396,22 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
         };
 
         // todo: what timeout should we use to wait till the ecu is 'free'?
-        let ecu_sem = tokio::time::timeout(Duration::from_secs(10), semaphore.acquire())
-            .await
-            .map_err(|_| {
-                tracing::error!(
-                    ecu = ecu_name,
-                    request_lock_key = %ecu_sem_key,
-                    "Timeout waiting for ecu to become available for requests."
-                );
-                DiagServiceError::Timeout
-            })?;
+        let ecu_sem = tokio::select! {
+            biased;
+            () = cancellation_requested(policy.cancellation) => {
+                return Err(DiagServiceError::Timeout);
+            }
+            result = tokio::time::timeout(Duration::from_secs(10), semaphore.acquire()) => {
+                result.map_err(|_| {
+                    tracing::error!(
+                        ecu = ecu_name,
+                        request_lock_key = %ecu_sem_key,
+                        "Timeout waiting for ecu to become available for requests."
+                    );
+                    DiagServiceError::Timeout
+                })?
+            }
+        };
 
         let rx_timeout = timeout.unwrap_or(uds_params.timeout_default);
         let mut rx_timeout_next = None;
@@ -283,57 +426,54 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
         let mut app_retry_count: u32 = 0;
 
         // Handle of the previous attempt's per-request gateway task, if any.
-        // Awaited (bounded by `RETRY_TEARDOWN_GRACE`) at the top of the next
-        // loop iteration before that attempt is sent, see below.
+        // Ordinary sends await it with `RETRY_TEARDOWN_GRACE`; detection sends abort and join it.
         let mut previous_task_handle: Option<tokio::task::JoinHandle<()>> = None;
 
         // outer loop to retry sending frames, resend frames must deal with (N)ACK again
         let (response, sent_after) = 'send: loop {
-            // Create a fresh response channel for every attempt. Each
-            // `continue 'send` (transmission/receive error, plain timeout, or
-            // NRC 0x21/0x94 busy-repeat) drops the previous attempt's
-            // `response_rx` together with its sole `response_tx`, which in turn
-            // fires `response_sender.closed()` in the gateway's per-request
-            // task, signaling it to tear itself down.
-            //
-            // Reusing a single channel across attempts (as done previously)
-            // kept every prior gateway task alive and subscribed to the same
-            // sender; a stale task could then push a late response or error
-            // into the shared channel and trip the receive-error branch below,
-            // causing a retry to fire immediately instead of only after this
-            // attempt's `rx_timeout` had elapsed.
+            // A fresh response channel isolates each retry. Dropping the prior
+            // attempt's endpoints signals its gateway task to stop, preventing
+            // late responses from bypassing the current attempt's timeout.
             let (response_tx, mut response_rx) = mpsc::channel(2);
 
-            // Dropping the previous attempt's channel only *signals* its
-            // gateway task to stop; it does not guarantee that task has
-            // actually finished releasing whatever per-ECU resource it holds
-            // (e.g. a DoIP connection mutex, or an ISO-TP socket for CAN,
-            // which has no equivalent lock). Await its handle - bounded by
-            // `RETRY_TEARDOWN_GRACE` - before sending the next attempt, so
-            // the two per-request tasks don't run concurrently against the
-            // same resource.
+            // Detection owns and joins its child task without a detach path. Ordinary sends retain
+            // the bounded teardown grace before retrying.
             if let Some(handle) = previous_task_handle.take() {
-                await_stale_gateway_task(handle, ecu_name).await;
+                if policy.cancellation.is_some() {
+                    abort_gateway_task(Some(handle)).await;
+                    if policy
+                        .cancellation
+                        .is_some_and(CancellationToken::is_cancelled)
+                    {
+                        return Err(DiagServiceError::Timeout);
+                    }
+                } else {
+                    await_stale_gateway_task(handle, ecu_name).await;
+                }
             }
 
-            match self
-                .gateway
-                .send(
-                    transmission_params.clone(),
-                    payload.clone(),
-                    response_tx,
-                    expect_response,
-                )
-                .await
-            {
+            let gateway_send = self.gateway.send(
+                transmission_params.clone(),
+                payload.clone(),
+                response_tx,
+                expect_response,
+            );
+            let send_result = tokio::select! {
+                biased;
+                () = cancellation_requested(policy.cancellation) => {
+                    return Err(DiagServiceError::Timeout);
+                }
+                result = gateway_send => result,
+            };
+            match send_result {
                 Ok(handle) => previous_task_handle = Some(handle),
                 Err(e) => {
-                    if app_retry_count < uds_params.repeat_req_count_app {
+                    if app_retry_count < repeat_req_count_app {
                         app_retry_count = app_retry_count.saturating_add(1);
                         tracing::debug!(
                             ecu_name,
                             attempt = app_retry_count,
-                            max_attempts = uds_params.repeat_req_count_app,
+                            max_attempts = repeat_req_count_app,
                             error = %e,
                             "Transmission error, repeating request (CP_RepeatReqCountApp)"
                         );
@@ -350,14 +490,24 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                 // ...but wait until the message was (n)ack'd. Bounded by `rx_timeout`
                 // so a gateway that never (n)acks and never closes the channel cannot
                 // block this call forever.
-                if tokio::time::timeout(rx_timeout, response_rx.recv())
-                    .await
-                    .is_err()
-                {
+                let ack = tokio::select! {
+                    biased;
+                    () = cancellation_requested(policy.cancellation) => {
+                        drop(response_rx);
+                        abort_gateway_task(previous_task_handle.take()).await;
+                        return Err(DiagServiceError::Timeout);
+                    }
+                    result = tokio::time::timeout(rx_timeout, response_rx.recv()) => result,
+                };
+                if ack.is_err() {
                     tracing::warn!(
                         ecu_name,
                         "Timed out waiting for (n)ack on a request with no expected response"
                     );
+                }
+                drop(response_rx);
+                if policy.cancellation.is_some() {
+                    abort_gateway_task(previous_task_handle.take()).await;
                 }
                 return Ok(None);
             }
@@ -365,12 +515,19 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
             // inner loop, deals with UDS frames only, i.e. used to read repeated frames
             // for response pending, without sending a new frame in between.
             let uds_result = 'read_uds_messages: loop {
-                match tokio::time::timeout(
-                    rx_timeout_next.unwrap_or(rx_timeout),
-                    response_rx.recv(),
-                )
-                .await
-                {
+                let response_wait = tokio::select! {
+                    biased;
+                    () = cancellation_requested(policy.cancellation) => {
+                        drop(response_rx);
+                        abort_gateway_task(previous_task_handle.take()).await;
+                        return Err(DiagServiceError::Timeout);
+                    }
+                    result = tokio::time::timeout(
+                        rx_timeout_next.unwrap_or(rx_timeout),
+                        response_rx.recv(),
+                    ) => result,
+                };
+                match response_wait {
                     Ok(Some(result)) => match result {
                         Ok(Some(TransportResponse::UdsResponse(msg))) => {
                             // if we received a response matching our sent SID, return it
@@ -399,7 +556,7 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                             // delay", unlike ResponsePending which keeps waiting below.
                             PendingNrc::BusyRepeatRequest { .. }
                             | PendingNrc::TemporarilyNotAvailable { .. } => {
-                                let (nrc, policy, completion_timeout, sleep_time) =
+                                let (nrc, retry_policy, completion_timeout, sleep_time) =
                                     if matches!(pending, PendingNrc::BusyRepeatRequest { .. }) {
                                         (
                                             "BusyRepeatRequest",
@@ -417,7 +574,7 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                                     };
                                 if let Err(e) = validate_timeout_by_policy(
                                     ecu_name,
-                                    policy,
+                                    retry_policy,
                                     &start.elapsed(),
                                     completion_timeout,
                                 ) {
@@ -427,7 +584,15 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                                     sleep_time = ?sleep_time,
                                     "{nrc} received, resending after delay"
                                 );
-                                cda_interfaces::util::tokio_ext::sleep_for(sleep_time).await;
+                                tokio::select! {
+                                    biased;
+                                    () = cancellation_requested(policy.cancellation) => {
+                                        drop(response_rx);
+                                        abort_gateway_task(previous_task_handle.take()).await;
+                                        return Err(DiagServiceError::Timeout);
+                                    }
+                                    () = cda_interfaces::util::tokio_ext::sleep_for(sleep_time) => {}
+                                }
                                 continue 'send; // continue 'send, will resend the message
                             }
                             PendingNrc::ResponsePending { .. } => {
@@ -463,12 +628,12 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                             // Per ISO 14229-2 Table 9 ("Response reception" error),
                             // repeat the last request up to CP_RepeatReqCountApp
                             // times before giving up.
-                            if app_retry_count < uds_params.repeat_req_count_app {
+                            if app_retry_count < repeat_req_count_app {
                                 app_retry_count = app_retry_count.saturating_add(1);
                                 tracing::debug!(
                                     ecu_name,
                                     attempt = app_retry_count,
-                                    max_attempts = uds_params.repeat_req_count_app,
+                                    max_attempts = repeat_req_count_app,
                                     "Repeating request after receive error (CP_RepeatReqCountApp)"
                                 );
                                 rx_timeout_next = None;
@@ -490,12 +655,12 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                         tracing::debug!(
                             "Response channel closed with no matching response for request"
                         );
-                        if app_retry_count < uds_params.repeat_req_count_app {
+                        if app_retry_count < repeat_req_count_app {
                             app_retry_count = app_retry_count.saturating_add(1);
                             tracing::debug!(
                                 ecu_name,
                                 attempt = app_retry_count,
-                                max_attempts = uds_params.repeat_req_count_app,
+                                max_attempts = repeat_req_count_app,
                                 "Repeating request after response channel closed \
                                  (CP_RepeatReqCountApp)"
                             );
@@ -518,12 +683,12 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                         // handling above, which is not affected by this
                         // counter and keeps its own, separate time-bounded
                         // retry policy.
-                        if app_retry_count < uds_params.repeat_req_count_app {
+                        if app_retry_count < repeat_req_count_app {
                             app_retry_count = app_retry_count.saturating_add(1);
                             tracing::debug!(
                                 ecu_name,
                                 attempt = app_retry_count,
-                                max_attempts = uds_params.repeat_req_count_app,
+                                max_attempts = repeat_req_count_app,
                                 "Repeating request after timeout (CP_RepeatReqCountApp)"
                             );
                             rx_timeout_next = None;
@@ -539,15 +704,20 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
             // gateway's per-request task and the ECU lock it holds.
             break 'send (uds_result, sent_after);
         };
+        if policy.cancellation.is_some() {
+            abort_gateway_task(previous_task_handle.take()).await;
+        }
         drop(ecu_sem);
 
-        // Post-send: if a service send (not tester present) timed out,
-        // the ECU is unreachable - notify the coordinator.
-        // The coordinator will suppress this if variant detection is in progress.
-        if matches!(response, Err(DiagServiceError::Timeout))
+        // A diagnostic send owns its timeout's connectivity mutation. Variant detection sends do
+        // not publish an intermediate disconnect: detection aggregates all responses and owns the
+        // final ECU/group reachability verdict.
+        if policy.reachability_owner == ReachabilityOwner::DiagnosticSend
+            && matches!(response, Err(DiagServiceError::Timeout))
             && sent_sid != service_ids::TESTER_PRESENT
         {
-            self.state_coordinator
+            self.state_coordinator()
+                .await
                 .handle_ecu_disconnected(ecu_name)
                 .await;
         }
@@ -555,10 +725,7 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
         if let Ok(ref msg) = response
             && msg.is_positive_response_for_sid(sent_sid)
         {
-            let ecu_mgr = self
-                .uds_ecu_db(ecu_name)
-                .expect("ECU name has been already checked");
-            let ecu_read = ecu_mgr.read().await;
+            let ecu_read = ecu.read().await;
             if let Some(new_session) = payload.new_session {
                 ecu_read
                     .set_service_state(service_ids::SESSION_CONTROL, new_session)
@@ -668,7 +835,7 @@ impl<S: EcuGateway, T: EcuManager> UdsTransport for UdsManager<S, T> {
     ) -> Result<Vec<u8>, DiagServiceError> {
         tracing::trace!(ecu_name = %ecu_name, payload = ?payload, "Sending raw UDS packet");
 
-        let _guard = self.require_communication_ready()?;
+        let _communication_guard = self.require_communication_ready()?;
         let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
 
         let payload = ecu
@@ -677,16 +844,23 @@ impl<S: EcuGateway, T: EcuManager> UdsTransport for UdsManager<S, T> {
             .check_genericservice(security_plugin, payload)
             .await?;
 
-        // See `send_without_variant_guard` for why this bit must be respected.
+        // See `send_without_variant_guard_for_ecu` for why this bit must be respected.
         let expect_response = !payload.is_suppress_positive_response();
 
         match self
-            .send_with_raw_payload(
+            .send_with_raw_payload_for_ecu(
+                &ecu,
                 ecu_name,
-                payload,
-                timeout,
-                expect_response,
-                CommunicationReadiness::Enforce,
+                RawSendRequest {
+                    payload,
+                    timeout,
+                    expect_response,
+                },
+                RawSendPolicy {
+                    allow_application_retries: true,
+                    reachability_owner: ReachabilityOwner::DiagnosticSend,
+                    cancellation: None,
+                },
             )
             .await?
         {
@@ -918,69 +1092,110 @@ mod tests {
 #[cfg(test)]
 mod send_tests {
     use std::{
-        sync::Arc,
+        sync::{Arc, Barrier as StdBarrier},
         time::{Duration, Instant},
     };
 
     use cda_interfaces::{
         DiagServiceError, EcuAddresses, EcuGateway, EcuRuntimeState, EcuStateManager,
-        FunctionalTransport, HashMap, HashMapExtensions, NetworkTopology, PendingNrc,
-        PhysicalTransport, ServicePayload, TransmissionParameters, TransportResponse,
-        UDS_ID_RESPONSE_BITMASK, VariantDetection,
+        FunctionalDescriptionConfig, FunctionalTransport, HashMap, HashMapExtensions,
+        NetworkTopology, PendingNrc, PhysicalTransport, ServicePayload, TransmissionParameters,
+        TransportResponse, UDS_ID_RESPONSE_BITMASK, UdsComParams, VariantDetection,
         communication_control::{
             ActivationCause, CommunicationAccess, CommunicationError, CommunicationGuard,
-            CommunicationState, VariantDetectionMode,
+            CommunicationState, DisableError, DisableReason, VariantDetectionMode,
         },
         datatypes::FaultConfig,
         service_ids,
     };
-    use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
-    use tokio::sync::{Mutex, RwLock, mpsc};
+    use cda_plugin_communication_management::lifecycle::{
+        enabled_communication_access_for_test, enabled_communication_for_test,
+    };
+    use tokio::sync::{Barrier, Mutex, Notify, RwLock, mpsc};
 
-    use super::{CommunicationReadiness, RETRY_TEARDOWN_GRACE};
+    use super::{
+        CommunicationReadiness, RETRY_TEARDOWN_GRACE, RawSendPolicy, RawSendRequest,
+        ReachabilityOwner,
+    };
     use crate::{
-        UdsEcuDb, UdsManager, state_coordinator::EcuStateCoordinator, test_helpers::TestEcuDb,
+        UdsEcuDb, UdsManager, VehicleEcuData, state_coordinator::EcuStateCoordinator,
+        test_helpers::TestEcuDb,
     };
 
     const TEST_COMMUNICATION_RETRY_AFTER: Duration = Duration::from_secs(2);
+
+    type UdsDataReloader<T> = cda_interfaces::ReloadableOwner<VehicleEcuData<T>>;
 
     impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuAddresses> UdsManager<S, T> {
         /// Test-only constructor that creates a `UdsManager` without spawning
         /// background tasks (variant detection, etc.), so `T` only needs the
         /// narrower trait bounds required by `send_with_raw_payload`.
-        fn new_for_raw_payload_tests(
+        fn new_for_raw_payload_test_parts(
             gateway: S,
-            ecus: Arc<HashMap<String, RwLock<T>>>,
+            ecus: &Arc<HashMap<String, Arc<RwLock<T>>>>,
             fault_config: FaultConfig,
             communication_access: Arc<dyn CommunicationAccess>,
-        ) -> Self {
+        ) -> (Self, Arc<UdsDataReloader<T>>) {
             let runtime_states: HashMap<String, EcuRuntimeState> = ecus
                 .keys()
                 .map(|name| (name.clone(), EcuRuntimeState::new()))
                 .collect();
             let (redetect_tx, _redetect_rx) = mpsc::channel(8);
-            let state_coordinator = EcuStateCoordinator::new(
+            let state_coordinator = Arc::new(EcuStateCoordinator::new(
                 runtime_states,
                 cda_interfaces::VariantDetectionSender::new(redetect_tx),
+            ));
+            let data = VehicleEcuData::new(
+                Arc::clone(ecus),
+                &FunctionalDescriptionConfig {
+                    description_database: String::new(),
+                    ..FunctionalDescriptionConfig::default()
+                },
+                fault_config,
+                state_coordinator,
             );
-            Self {
-                ecus,
-                gateway,
+            let reloader = Arc::new(UdsDataReloader::new(data));
+            let manager = Self {
+                ecu_data: reloader.reader(),
+                gateway: Arc::new(gateway),
                 data_transfers: Arc::new(Mutex::new(HashMap::default())),
                 ecu_semaphores: Arc::new(Mutex::new(HashMap::default())),
                 tester_present_tasks: Arc::new(RwLock::new(HashMap::default())),
                 session_reset_tasks: Arc::new(RwLock::new(HashMap::default())),
                 security_reset_tasks: Arc::new(RwLock::new(HashMap::default())),
-                state_coordinator,
-                functional_description_database: String::new(),
-                fault_config,
                 communication_access,
                 communication_retry_after: TEST_COMMUNICATION_RETRY_AFTER,
                 variant_detection_receiver: Arc::new(Mutex::new(None)),
                 variant_detection_listener: Arc::new(Mutex::new(None)),
+                detection_admission: {
+                    let admission = Arc::new(crate::detection_admission::DetectionAdmission::new());
+                    admission.open();
+                    admission
+                },
                 tester_present_snapshot: Arc::new(Mutex::new(Vec::new())),
-            }
+            };
+            (manager, reloader)
         }
+
+        fn new_for_raw_payload_tests(
+            gateway: S,
+            ecus: &Arc<HashMap<String, Arc<RwLock<T>>>>,
+            fault_config: FaultConfig,
+            communication_access: Arc<dyn CommunicationAccess>,
+        ) -> Self {
+            Self::new_for_raw_payload_test_parts(gateway, ecus, fault_config, communication_access)
+                .0
+        }
+    }
+
+    async fn live_fault_scope<S: EcuGateway>(manager: &UdsManager<S, TestEcuDb>) -> String {
+        manager
+            .ecu_data
+            .read()
+            .await
+            .fault_config()
+            .user_memory_scope
+            .clone()
     }
 
     fn disabled_communication_access() -> Arc<dyn CommunicationAccess> {
@@ -1069,6 +1284,32 @@ mod send_tests {
         }
     }
 
+    struct BlockingCommunicationAccess {
+        inner: Arc<dyn CommunicationAccess>,
+        acquire_entered: Arc<Notify>,
+        acquire_proceed: Arc<StdBarrier>,
+    }
+
+    impl CommunicationAccess for BlockingCommunicationAccess {
+        fn state(&self) -> CommunicationState {
+            self.inner.state()
+        }
+
+        fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+            self.acquire_entered.notify_one();
+            self.acquire_proceed.wait();
+            self.inner.acquire()
+        }
+
+        fn request_activate(&self, cause: ActivationCause) -> CommunicationState {
+            self.inner.request_activate(cause)
+        }
+
+        fn variant_detection(&self) -> VariantDetectionMode {
+            self.inner.variant_detection()
+        }
+    }
+
     /// A test gateway whose `send` behavior is configurable via a closure.
     #[derive(Clone)]
     struct TestGateway {
@@ -1101,6 +1342,79 @@ mod send_tests {
             .lock()
             .unwrap()
             .push(sender);
+    }
+
+    #[derive(Clone)]
+    struct ControllableTimeoutGateway {
+        detection_entered: Arc<Notify>,
+        release_detection: Arc<Notify>,
+    }
+
+    impl PhysicalTransport for ControllableTimeoutGateway {
+        fn send(
+            &self,
+            transmission_params: TransmissionParameters,
+            _message: ServicePayload,
+            response_sender: mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
+            _expect_uds_reply: bool,
+        ) -> impl Future<Output = Result<tokio::task::JoinHandle<()>, DiagServiceError>> + Send
+        {
+            let detection_entered = Arc::clone(&self.detection_entered);
+            let release_detection = Arc::clone(&self.release_detection);
+            async move {
+                Ok(tokio::spawn(async move {
+                    if transmission_params.ecu_name == "DetectionECU" {
+                        detection_entered.notify_one();
+                        tokio::select! {
+                            () = release_detection.notified() => {}
+                            () = response_sender.closed() => {}
+                        }
+                    } else {
+                        response_sender.closed().await;
+                    }
+                }))
+            }
+        }
+
+        fn ecu_online<T: EcuAddresses>(
+            &self,
+            _ecu_name: &str,
+            _ecu_db: &RwLock<T>,
+        ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
+            std::future::ready(Ok(()))
+        }
+    }
+
+    impl FunctionalTransport for ControllableTimeoutGateway {
+        fn send_functional(
+            &self,
+            _transmission_params: TransmissionParameters,
+            _message: ServicePayload,
+            _expected_ecu_logical_addrs: HashMap<u16, String>,
+            _timeout: Duration,
+            _expect_positive_response: bool,
+        ) -> impl Future<
+            Output = Result<
+                HashMap<String, Result<ServicePayload, DiagServiceError>>,
+                DiagServiceError,
+            >,
+        > + Send {
+            std::future::ready(Ok(HashMap::new()))
+        }
+    }
+
+    impl NetworkTopology for ControllableTimeoutGateway {
+        fn get_gateway_network_address(
+            &self,
+            _logical_address: u16,
+        ) -> impl Future<Output = Option<String>> + Send {
+            std::future::ready(None)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl cda_interfaces::Shutdown for ControllableTimeoutGateway {
+        async fn shutdown(&self) {}
     }
 
     impl PhysicalTransport for TestGateway {
@@ -1272,13 +1586,22 @@ mod send_tests {
     }
 
     fn make_manager(gateway: TestGateway) -> UdsManager<TestGateway, TestEcuDb> {
+        make_manager_with_reloader(gateway).0
+    }
+
+    fn make_manager_with_reloader(
+        gateway: TestGateway,
+    ) -> (
+        UdsManager<TestGateway, TestEcuDb>,
+        Arc<UdsDataReloader<TestEcuDb>>,
+    ) {
         let ecus = Arc::new(HashMap::from_iter([(
             "TestECU".to_string(),
-            RwLock::new(TestEcuDb::new()),
+            Arc::new(RwLock::new(TestEcuDb::new())),
         )]));
-        UdsManager::new_for_raw_payload_tests(
+        UdsManager::new_for_raw_payload_test_parts(
             gateway,
-            ecus,
+            &ecus,
             FaultConfig::default(),
             disabled_communication_access(),
         )
@@ -1290,11 +1613,13 @@ mod send_tests {
     ) -> UdsManager<TestGateway, TestEcuDb> {
         let ecus = Arc::new(HashMap::from_iter([(
             "TestECU".to_string(),
-            RwLock::new(TestEcuDb::with_timeout_default(timeout_default)),
+            Arc::new(RwLock::new(TestEcuDb::with_timeout_default(
+                timeout_default,
+            ))),
         )]));
         UdsManager::new_for_raw_payload_tests(
             gateway,
-            ecus,
+            &ecus,
             FaultConfig::default(),
             disabled_communication_access(),
         )
@@ -1307,14 +1632,16 @@ mod send_tests {
     ) -> UdsManager<TestGateway, TestEcuDb> {
         let ecus = Arc::new(HashMap::from_iter([(
             "TestECU".to_string(),
-            RwLock::new(TestEcuDb::with_timeout_default_and_repeat_req_count_app(
-                timeout_default,
-                repeat_req_count_app,
+            Arc::new(RwLock::new(
+                TestEcuDb::with_timeout_default_and_repeat_req_count_app(
+                    timeout_default,
+                    repeat_req_count_app,
+                ),
             )),
         )]));
         UdsManager::new_for_raw_payload_tests(
             gateway,
-            ecus,
+            &ecus,
             FaultConfig::default(),
             disabled_communication_access(),
         )
@@ -1324,10 +1651,182 @@ mod send_tests {
         let ecus = Arc::new(HashMap::new());
         UdsManager::new_for_raw_payload_tests(
             gateway,
-            ecus,
+            &ecus,
             FaultConfig::default(),
             disabled_communication_access(),
         )
+    }
+
+    async fn wait_for_connectivity(
+        coordinator: &EcuStateCoordinator,
+        expected: cda_interfaces::Connectivity,
+    ) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while coordinator
+                .get_handle("TestECU")
+                .expect("coordinator handle")
+                .connectivity()
+                != expected
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("connectivity mutation must complete");
+    }
+
+    #[tokio::test]
+    async fn ordinary_timeout_marks_ecu_offline() {
+        let manager = make_manager(TestGateway {
+            send_fn: Arc::new(|response_tx, _| {
+                park_sender(response_tx);
+                Ok(())
+            }),
+        });
+        let data = manager.ecu_data.read().await;
+        let ecu = data.ecus().get("TestECU").expect("test ECU");
+        let coordinator = Arc::clone(data.state_coordinator());
+        coordinator.handle_ecu_connected("TestECU").await;
+
+        let result = manager
+            .send_with_raw_payload_for_ecu(
+                ecu,
+                "TestECU",
+                RawSendRequest {
+                    payload: make_test_payload(service_ids::SESSION_CONTROL, &[0x01]),
+                    timeout: Some(Duration::from_millis(10)),
+                    expect_response: true,
+                },
+                RawSendPolicy {
+                    allow_application_retries: false,
+                    reachability_owner: ReachabilityOwner::DiagnosticSend,
+                    cancellation: None,
+                },
+            )
+            .await;
+
+        assert!(matches!(result, Err(DiagServiceError::Timeout)));
+        wait_for_connectivity(&coordinator, cda_interfaces::Connectivity::Offline).await;
+    }
+
+    #[tokio::test]
+    async fn detection_timeout_preserves_online_connectivity() {
+        let manager = make_manager(TestGateway {
+            send_fn: Arc::new(|response_tx, _| {
+                park_sender(response_tx);
+                Ok(())
+            }),
+        });
+        let data = manager.ecu_data.read().await;
+        let ecu = data.ecus().get("TestECU").expect("test ECU");
+        let coordinator = Arc::clone(data.state_coordinator());
+        coordinator.handle_ecu_connected("TestECU").await;
+        assert_eq!(
+            coordinator
+                .get_handle("TestECU")
+                .expect("coordinator handle")
+                .connectivity(),
+            cda_interfaces::Connectivity::Online
+        );
+
+        let result = manager
+            .send_with_raw_payload_for_ecu(
+                ecu,
+                "TestECU",
+                RawSendRequest {
+                    payload: make_test_payload(service_ids::SESSION_CONTROL, &[0x01]),
+                    timeout: Some(Duration::from_millis(10)),
+                    expect_response: true,
+                },
+                RawSendPolicy {
+                    allow_application_retries: false,
+                    reachability_owner: ReachabilityOwner::VariantDetection,
+                    cancellation: None,
+                },
+            )
+            .await;
+
+        assert!(matches!(result, Err(DiagServiceError::Timeout)));
+        assert_eq!(
+            coordinator
+                .get_handle("TestECU")
+                .expect("coordinator handle")
+                .connectivity(),
+            cda_interfaces::Connectivity::Online
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_timeout_is_not_suppressed_while_same_manager_detection_send_runs() {
+        let detection_entered = Arc::new(Notify::new());
+        let release_detection = Arc::new(Notify::new());
+        let ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_owned(),
+            Arc::new(RwLock::new(TestEcuDb::new())),
+        )]));
+        let manager = UdsManager::new_for_raw_payload_tests(
+            ControllableTimeoutGateway {
+                detection_entered: Arc::clone(&detection_entered),
+                release_detection: Arc::clone(&release_detection),
+            },
+            &ecus,
+            FaultConfig::default(),
+            disabled_communication_access(),
+        );
+        let detection_ecu = RwLock::new(TestEcuDb::with_identity("DetectionECU", 0x0002));
+        let data = manager.ecu_data.read().await;
+        let coordinator = Arc::clone(data.state_coordinator());
+        coordinator.handle_ecu_connected("TestECU").await;
+        drop(data);
+
+        let detection_manager = manager.clone();
+        let detection = tokio::spawn(async move {
+            detection_manager
+                .send_with_raw_payload_for_ecu(
+                    &detection_ecu,
+                    "TestECU",
+                    RawSendRequest {
+                        payload: make_test_payload(service_ids::SESSION_CONTROL, &[0x01]),
+                        timeout: Some(Duration::from_secs(1)),
+                        expect_response: true,
+                    },
+                    RawSendPolicy {
+                        allow_application_retries: false,
+                        reachability_owner: ReachabilityOwner::VariantDetection,
+                        cancellation: None,
+                    },
+                )
+                .await
+        });
+        detection_entered.notified().await;
+        let data = manager.ecu_data.read().await;
+        let diagnostic_ecu = data.ecus().get("TestECU").expect("diagnostic ECU");
+        let diagnostic_result = manager
+            .send_with_raw_payload_for_ecu(
+                diagnostic_ecu,
+                "TestECU",
+                RawSendRequest {
+                    payload: make_test_payload(service_ids::SESSION_CONTROL, &[0x01]),
+                    timeout: Some(Duration::from_millis(10)),
+                    expect_response: true,
+                },
+                RawSendPolicy {
+                    allow_application_retries: false,
+                    reachability_owner: ReachabilityOwner::DiagnosticSend,
+                    cancellation: None,
+                },
+            )
+            .await;
+
+        assert!(matches!(diagnostic_result, Err(DiagServiceError::Timeout)));
+        assert!(!detection.is_finished());
+        wait_for_connectivity(&coordinator, cda_interfaces::Connectivity::Offline).await;
+
+        release_detection.notify_one();
+        assert!(matches!(
+            detection.await.expect("detection task"),
+            Err(DiagServiceError::Timeout)
+        ));
     }
 
     fn make_manager_with_access(
@@ -1337,7 +1836,7 @@ mod send_tests {
         let ecus = Arc::new(HashMap::new());
         UdsManager::new_for_raw_payload_tests(
             gateway,
-            ecus,
+            &ecus,
             FaultConfig::default(),
             communication_access,
         )
@@ -1436,7 +1935,7 @@ mod send_tests {
     /// `ECUReset 0x81`) drives `expect_response = false`, so
     /// `send_with_raw_payload` completes with `Ok(None)` once the frame is
     /// (n)ack'd - never a `Timeout`/`NoResponse` error - even though the ECU
-    /// deliberately sends no response. `send_without_variant_guard` then
+    /// deliberately sends no response. `send_without_variant_guard_for_ecu` then
     /// converts this `Ok(None)` into a positive, empty decoded response via
     /// `DiagServiceResponse::empty_positive` (unit-tested in cda-core), which
     /// callers render as no-content instead of an error.
@@ -1744,20 +2243,9 @@ mod send_tests {
         );
     }
 
-    /// Regression test for the "immediate retry" bug observed on offline/answer-
-    /// suppressing ECUs (positive ACK, then no UDS reply). Previously a single
-    /// response channel was shared across all retries, so a stale gateway task
-    /// from a prior attempt could push a late response/error into that shared
-    /// channel and trip the receive-error branch, firing the next
-    /// `CP_RepeatReqCountApp` retry *immediately* instead of only after this
-    /// attempt's `rx_timeout` had elapsed (see log.pcapng: retry #1 correctly
-    /// waited ~`P6Max`, retry #2 fired ~1ms later).
-    ///
-    /// With a per-attempt channel, dropping the previous attempt's
-    /// `response_rx`/`response_tx` closes the stale task's sender, so a late
-    /// error injected into a *prior* attempt's sender cannot reach the current
-    /// attempt. Every retry must therefore be gated by the full timeout, so the
-    /// total elapsed time is `(1 + repeat_req_count_app) * timeout`.
+    /// Each retry owns a response channel. Closing a completed attempt prevents
+    /// its late errors from reaching the current attempt, so every retry remains
+    /// gated by the full timeout.
     #[tokio::test]
     async fn test_stale_task_error_does_not_cause_sub_timeout_retry() {
         // Holds the `response_tx` handed to the *previous* attempt, so we can
@@ -1898,20 +2386,9 @@ mod send_tests {
         );
     }
 
-    /// Regression test: sends that omit an explicit timeout
-    /// must fall back to the ECU's configured `CP_P6Max`-backed
-    /// `UdsComParams::timeout_default`, not a hardcoded literal. Previously,
-    /// `gather_detection_responses` (in `variant.rs`) hardcoded a 10s timeout
-    /// for every `0x22 F100` variant-detection send, ignoring the ECU's
-    /// actual configured response timeout entirely. The fix changed that
-    /// call site to pass `None` instead, relying on exactly the fallback
-    /// (`timeout.unwrap_or(uds_params.timeout_default)`) exercised here.
-    ///
-    /// This test exercises `send_with_raw_payload` directly rather than
-    /// `gather_detection_responses`/`detect_variant` itself, since those
-    /// require the full `EcuManager` trait (a much larger surface than the
-    /// `UdsEcuDb + VariantDetection` bound used by the existing test double
-    /// in this module), which is out of proportion for this scoped fix.
+    /// Sends without an explicit timeout use the ECU's configured
+    /// `CP_P6Max`-backed `UdsComParams::timeout_default`. Exercising the raw
+    /// send keeps this test on the module's narrow test-double interface.
     #[tokio::test]
     async fn test_send_with_raw_payload_uses_configured_timeout_default_when_none() {
         let gateway = TestGateway {
@@ -1929,7 +2406,7 @@ mod send_tests {
 
         let start = std::time::Instant::now();
         // No explicit timeout: must fall back to `uds_params.timeout_default`
-        // (this is exactly what `send_without_variant_guard` does when
+        // (this is exactly what `send_without_variant_guard_for_ecu` does when
         // called from `gather_detection_responses` post-fix).
         let result = manager
             .send_with_raw_payload(
@@ -2195,11 +2672,11 @@ mod send_tests {
 
         let ecus = Arc::new(HashMap::from_iter([(
             "TestECU".to_string(),
-            RwLock::new(TestEcuDb::new()),
+            Arc::new(RwLock::new(TestEcuDb::new())),
         )]));
         let manager: UdsManager<TestGateway, TestEcuDb> = UdsManager::new_for_raw_payload_tests(
             gateway,
-            Arc::clone(&ecus),
+            &ecus,
             FaultConfig::default(),
             disabled_communication_access(),
         );
@@ -2336,14 +2813,16 @@ mod send_tests {
     ) -> UdsManager<SlowTeardownGateway, TestEcuDb> {
         let ecus = Arc::new(HashMap::from_iter([(
             "TestECU".to_string(),
-            RwLock::new(TestEcuDb::with_timeout_default_and_repeat_req_count_app(
-                timeout_default,
-                repeat_req_count_app,
+            Arc::new(RwLock::new(
+                TestEcuDb::with_timeout_default_and_repeat_req_count_app(
+                    timeout_default,
+                    repeat_req_count_app,
+                ),
             )),
         )]));
         UdsManager::new_for_raw_payload_tests(
             gateway,
-            ecus,
+            &ecus,
             FaultConfig::default(),
             disabled_communication_access(),
         )
@@ -2511,5 +2990,222 @@ mod send_tests {
         ));
         assert_eq!(access.activate_call_count(), 1);
         assert_eq!(access.state(), CommunicationState::Disabled);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn request_paused_before_admission_resolves_only_after_update() {
+        let old_ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_owned(),
+            Arc::new(RwLock::new(TestEcuDb::new())),
+        )]));
+        let (access, disable) = enabled_communication_for_test();
+        let acquire_entered = Arc::new(Notify::new());
+        let acquire_proceed = Arc::new(StdBarrier::new(2));
+        let blocked_access = Arc::new(BlockingCommunicationAccess {
+            inner: access,
+            acquire_entered: Arc::clone(&acquire_entered),
+            acquire_proceed: Arc::clone(&acquire_proceed),
+        });
+        let (manager, reloader) = UdsManager::new_for_raw_payload_test_parts(
+            make_gateway(),
+            &old_ecus,
+            FaultConfig::default(),
+            blocked_access,
+        );
+
+        let request = tokio::spawn(async move {
+            manager
+                .send_with_raw_payload(
+                    "TestECU",
+                    make_test_payload(service_ids::SESSION_CONTROL, &[0x01]),
+                    Some(Duration::from_secs(1)),
+                    true,
+                    CommunicationReadiness::Enforce,
+                )
+                .await
+        });
+        acquire_entered.notified().await;
+
+        let lease = disable
+            .disable(DisableReason::RuntimeUpdate)
+            .await
+            .expect("a request not yet admitted must not block the update");
+        reloader.apply(ecu_data(Arc::new(HashMap::new()))).await;
+        lease.release().await.expect("communication resumes");
+
+        acquire_proceed.wait();
+        assert!(matches!(
+            request.await.expect("request task"),
+            Err(DiagServiceError::NotFound(_))
+        ));
+    }
+
+    /// An ECU handle keeps the `EcuData` it was read from alive; a later lookup
+    /// reads whatever the last runtime update applied.
+    #[tokio::test]
+    async fn applying_replaces_data_for_a_later_borrowed_lookup() {
+        let old_ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_string(),
+            Arc::new(RwLock::new(TestEcuDb::with_timeout_default(
+                Duration::from_secs(1),
+            ))),
+        )]));
+        let (manager, reloader) = UdsManager::new_for_raw_payload_test_parts(
+            make_gateway(),
+            &old_ecus,
+            FaultConfig::default(),
+            disabled_communication_access(),
+        );
+        let data = manager.ecu_data.read().await;
+        let old_timeout = data
+            .ecus()
+            .get("TestECU")
+            .expect("ecu present before reload")
+            .read()
+            .await
+            .timeout_default();
+        assert_eq!(old_timeout, Duration::from_secs(1));
+        drop(data);
+
+        let new_ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_string(),
+            Arc::new(RwLock::new(TestEcuDb::with_timeout_default(
+                Duration::from_secs(9),
+            ))),
+        )]));
+        reloader.apply(ecu_data(new_ecus)).await;
+        let data = manager.ecu_data.read().await;
+        let new_handle = data
+            .ecus()
+            .get("TestECU")
+            .expect("ecu present after installation");
+        assert_eq!(
+            new_handle.read().await.timeout_default(),
+            Duration::from_secs(9),
+            "a lookup made after installation must observe the new data"
+        );
+    }
+
+    #[tokio::test]
+    async fn exclusive_disable_cannot_begin_until_admitted_request_completes() {
+        let send_entered = Arc::new(Notify::new());
+        let response_gate = Arc::new(Barrier::new(2));
+        let gateway = TestGateway {
+            send_fn: Arc::new({
+                let send_entered = Arc::clone(&send_entered);
+                let response_gate = Arc::clone(&response_gate);
+                move |response_tx, _| {
+                    send_entered.notify_one();
+                    let response_gate = Arc::clone(&response_gate);
+                    tokio::spawn(async move {
+                        response_gate.wait().await;
+                        let response = TransportResponse::UdsResponse(ServicePayload {
+                            data: vec![
+                                service_ids::SESSION_CONTROL | UDS_ID_RESPONSE_BITMASK,
+                                0x01,
+                            ],
+                            source_address: 0x0001,
+                            target_address: 0x0E00,
+                            new_session: None,
+                            new_security: None,
+                        });
+                        response_tx.send(Ok(Some(response))).await.ok();
+                    });
+                    Ok(())
+                }
+            }),
+        };
+        let (access, disable) = enabled_communication_for_test();
+        let ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_owned(),
+            Arc::new(RwLock::new(TestEcuDb::new())),
+        )]));
+        let manager =
+            UdsManager::new_for_raw_payload_tests(gateway, &ecus, FaultConfig::default(), access);
+        let request = tokio::spawn(async move {
+            manager
+                .send_with_raw_payload(
+                    "TestECU",
+                    make_test_payload(service_ids::SESSION_CONTROL, &[0x01]),
+                    Some(Duration::from_secs(1)),
+                    true,
+                    CommunicationReadiness::Enforce,
+                )
+                .await
+        });
+
+        send_entered.notified().await;
+        assert!(matches!(
+            disable.disable(DisableReason::RuntimeUpdate).await,
+            Err(DisableError::InUse)
+        ));
+
+        response_gate.wait().await;
+        request
+            .await
+            .expect("request task")
+            .expect("request completes before update admission");
+        let lease = disable
+            .disable(DisableReason::RuntimeUpdate)
+            .await
+            .expect("exclusive disable is admitted after request completion");
+        drop(lease);
+    }
+
+    fn owner_test_manager(
+        scope: &str,
+    ) -> (
+        UdsManager<TestGateway, TestEcuDb>,
+        Arc<UdsDataReloader<TestEcuDb>>,
+    ) {
+        UdsManager::new_for_raw_payload_test_parts(
+            TestGateway {
+                send_fn: Arc::new(|_, _| Ok(())),
+            },
+            &Arc::new(HashMap::new()),
+            FaultConfig {
+                user_memory_scope: scope.to_owned(),
+                ..FaultConfig::default()
+            },
+            enabled_communication_access_for_test(),
+        )
+    }
+
+    fn owner_test_data(scope: &str) -> VehicleEcuData<TestEcuDb> {
+        let (redetect_tx, _redetect_rx) = mpsc::channel(1);
+        VehicleEcuData::new(
+            Arc::new(HashMap::new()),
+            &FunctionalDescriptionConfig::default(),
+            FaultConfig {
+                user_memory_scope: scope.to_owned(),
+                ..FaultConfig::default()
+            },
+            Arc::new(EcuStateCoordinator::new(
+                HashMap::new(),
+                cda_interfaces::VariantDetectionSender::new(redetect_tx),
+            )),
+        )
+    }
+
+    #[tokio::test]
+    async fn applying_new_data_updates_what_the_uds_manager_reads() {
+        let (manager, reloader) = owner_test_manager("current");
+        assert_eq!(live_fault_scope(&manager).await, "current");
+        reloader.apply(owner_test_data("replacement")).await;
+
+        assert_eq!(live_fault_scope(&manager).await, "replacement");
+    }
+
+    fn ecu_data(ecus: Arc<HashMap<String, Arc<RwLock<TestEcuDb>>>>) -> VehicleEcuData<TestEcuDb> {
+        let (redetect_tx, _redetect_rx) = mpsc::channel(1);
+        VehicleEcuData::new(
+            ecus,
+            &FunctionalDescriptionConfig::default(),
+            FaultConfig::default(),
+            Arc::new(EcuStateCoordinator::new(
+                HashMap::new(),
+                cda_interfaces::VariantDetectionSender::new(redetect_tx),
+            )),
+        )
     }
 }

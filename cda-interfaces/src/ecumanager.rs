@@ -24,6 +24,7 @@ use crate::{
         single_ecu,
     },
     diagservices::{DiagServiceResponse, UdsPayloadData},
+    file_manager::EmbeddedFiles,
     service_ids,
     util::std_ext,
 };
@@ -939,6 +940,7 @@ pub trait EcuManager:
     + UdsComParams
     + EcuAddresses
     + EcuSchemas
+    + EmbeddedFiles
     + Send
     + Sync
     + 'static

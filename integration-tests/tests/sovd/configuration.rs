@@ -15,10 +15,9 @@ use opensovd_cda_lib::config::configfile::{Configuration, DatabaseConfig};
 
 use crate::util::runtime::{find_available_tcp_port, start_cda, stop_cda, wait_for_cda_online};
 
-/// A CDA configured with `exit_no_database_loaded = false` must not exit when
-/// its database path contains no MDD files.
+/// The CDA must keep running when its database path contains no MDD files.
 #[tokio::test]
-async fn cda_stays_running_when_no_database_loaded_and_exit_flag_is_false() {
+async fn cda_stays_running_when_no_database_loaded() {
     let empty_db_dir = tempfile::tempdir().expect("create empty temp db dir");
 
     let host = "127.0.0.1".to_owned();
@@ -27,7 +26,6 @@ async fn cda_stays_running_when_no_database_loaded_and_exit_flag_is_false() {
     let mut config = Configuration {
         database: DatabaseConfig {
             seed_dir: empty_db_dir.path().to_string_lossy().into_owned(),
-            exit_no_database_loaded: false,
             ..Default::default()
         },
         ..Configuration::default()
@@ -42,7 +40,7 @@ async fn cda_stays_running_when_no_database_loaded_and_exit_flag_is_false() {
 
     wait_for_cda_online(&config.server)
         .await
-        .expect("CDA with exit_no_database_loaded=false must stay running");
+        .expect("CDA must stay running without any database");
 
     stop_cda().await.expect("Failed to stop CDA");
 }

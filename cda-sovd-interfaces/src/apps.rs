@@ -31,7 +31,8 @@ pub mod sovd2uds {
     pub mod operations {
         pub mod runtimefilesupdate {
             pub use cda_interfaces::runtime_update_api::{
-                ExecutionMode, ExecutionStatus, UpdateExecution,
+                ExecutionFailure, ExecutionFailureClass, ExecutionMode, ExecutionStatus,
+                UpdateExecution,
             };
 
             /// The operation-specific parameters for a diagnostic database update execution.
@@ -74,6 +75,9 @@ pub mod sovd2uds {
                 /// Human-readable failure description, present only when `status` is `failed`.
                 #[serde(default, skip_serializing_if = "Option::is_none")]
                 pub reason: Option<String>,
+                /// Vendor classification for failures that require operator recovery.
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                pub vendor_code: Option<String>,
             }
 
             /// Response body returned by `GET /executions/{id}`.
@@ -96,16 +100,24 @@ pub mod sovd2uds {
 
             impl From<UpdateExecution> for ExecutionResponse {
                 fn from(exec: UpdateExecution) -> Self {
-                    let (status, reason) = match exec.status {
-                        ExecutionStatus::Running => (ExecutionStatusKind::Running, None),
-                        ExecutionStatus::Completed => (ExecutionStatusKind::Completed, None),
-                        ExecutionStatus::Failed(msg) => (ExecutionStatusKind::Failed, Some(msg)),
+                    let (status, reason, vendor_code) = match exec.status {
+                        ExecutionStatus::Running => (ExecutionStatusKind::Running, None, None),
+                        ExecutionStatus::Completed => (ExecutionStatusKind::Completed, None, None),
+                        ExecutionStatus::Failed(failure) => (
+                            ExecutionStatusKind::Failed,
+                            Some(failure.reason),
+                            match failure.class {
+                                ExecutionFailureClass::Ordinary => None,
+                                ExecutionFailureClass::Fatal => Some("fatal-error".to_owned()),
+                            },
+                        ),
                     };
                     Self {
                         status,
                         parameters: ExecutionResponseParameters {
                             mode: exec.mode,
                             reason,
+                            vendor_code,
                         },
                         schema: None,
                     }
@@ -117,20 +129,112 @@ pub mod sovd2uds {
                 use super::*;
 
                 #[test]
-                fn failed_execution_places_mode_and_reason_in_parameters() {
-                    let response = ExecutionResponse::from(UpdateExecution {
+                fn execution_status_kind_uses_only_standard_sovd_values() {
+                    assert_eq!(
+                        serde_json::to_value(ExecutionStatusKind::Running).unwrap(),
+                        serde_json::json!("running")
+                    );
+                    assert_eq!(
+                        serde_json::to_value(ExecutionStatusKind::Completed).unwrap(),
+                        serde_json::json!("completed")
+                    );
+                    assert_eq!(
+                        serde_json::to_value(ExecutionStatusKind::Failed).unwrap(),
+                        serde_json::json!("failed")
+                    );
+
+                    let schema =
+                        serde_json::to_value(schemars::schema_for!(ExecutionStatusKind)).unwrap();
+                    assert_eq!(
+                        schema.get("enum"),
+                        Some(&serde_json::json!(["running", "completed", "failed"]))
+                    );
+                    for unsupported in [
+                        "recovery-required",
+                        "recoveryrequired",
+                        "RecoveryRequired",
+                        "additional",
+                    ] {
+                        assert!(
+                            serde_json::from_value::<ExecutionStatusKind>(serde_json::json!(
+                                unsupported
+                            ))
+                            .is_err(),
+                            "unexpectedly accepted non-SOVD execution status {unsupported}"
+                        );
+                    }
+                }
+
+                fn failed_response(failure: ExecutionFailure) -> serde_json::Value {
+                    serde_json::to_value(ExecutionResponse::from(UpdateExecution {
                         id: "execution-id".to_string(),
                         mode: ExecutionMode::Apply,
-                        status: ExecutionStatus::Failed("verification failed".to_string()),
-                    });
+                        status: ExecutionStatus::Failed(failure),
+                    }))
+                    .unwrap()
+                }
 
+                #[test]
+                fn ordinary_failure_serializes_without_vendor_code() {
                     assert_eq!(
-                        serde_json::to_value(response).unwrap(),
+                        failed_response(ExecutionFailure::ordinary("verification failed")),
                         serde_json::json!({
                             "status": "failed",
                             "parameters": {
                                 "mode": "apply",
                                 "reason": "verification failed"
+                            }
+                        })
+                    );
+                }
+
+                #[test]
+                fn recovery_failure_uses_failed_with_safe_vendor_details() {
+                    assert_eq!(
+                        failed_response(ExecutionFailure::fatal(
+                            "Runtime update failed and operator recovery is required",
+                        )),
+                        serde_json::json!({
+                            "status": "failed",
+                            "parameters": {
+                                "mode": "apply",
+                                "reason": "Runtime update failed and operator recovery is required",
+                                "vendor_code": "fatal-error"
+                            }
+                        })
+                    );
+                }
+
+                #[test]
+                fn fatal_failure_vendor_code_is_independent_of_reason() {
+                    let first = failed_response(ExecutionFailure::fatal("first safe reason"));
+                    let second = failed_response(ExecutionFailure::fatal("different safe reason"));
+
+                    assert_eq!(
+                        first.pointer("/parameters/vendor_code"),
+                        Some(&serde_json::json!("fatal-error"))
+                    );
+                    assert_eq!(
+                        second.pointer("/parameters/vendor_code"),
+                        Some(&serde_json::json!("fatal-error"))
+                    );
+                    assert_ne!(
+                        first.pointer("/parameters/reason"),
+                        second.pointer("/parameters/reason")
+                    );
+                }
+
+                #[test]
+                fn ordinary_reason_with_legacy_prefix_remains_ordinary() {
+                    assert_eq!(
+                        failed_response(ExecutionFailure::ordinary(
+                            "fatal-error: still an ordinary reason",
+                        )),
+                        serde_json::json!({
+                            "status": "failed",
+                            "parameters": {
+                                "mode": "apply",
+                                "reason": "fatal-error: still an ordinary reason"
                             }
                         })
                     );

@@ -29,12 +29,13 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
         ecu_name: &str,
         security_plugin: &DynamicPlugin,
     ) -> Result<(), DiagServiceError> {
+        let _communication_guard = self.require_communication_ready()?;
         // Cancel any existing security access reset task to prevent double resetting
         if let Some(old_task) = self.security_reset_tasks.write().await.remove(ecu_name) {
             old_task.abort();
         }
 
-        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
+        let ecu_diag_service = self.uds_ecu_db(ecu_name).await?;
         let default_security_access = ecu_diag_service.read().await.default_security_access()?;
         let current_security_access = ecu_diag_service.read().await.security_access().await?;
 
@@ -76,6 +77,7 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         expiration: Option<Duration>,
     ) -> Result<(SecurityAccess, Self::Response), DiagServiceError> {
+        let _communication_guard = self.require_communication_ready()?;
         let ecu_diag_service = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
         let security_access = ecu_diag_service
             .read()

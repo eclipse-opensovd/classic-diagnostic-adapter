@@ -16,16 +16,16 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use cda_interfaces::{
     HashMap,
-    communication_control::{CommunicationAccess, PostUpdateCommunicationMode},
-    http_protection::registry::HttpProtectionRegistry,
+    communication_control::{DisableCommunication, PostUpdateCommunicationMode},
+    http_protection::registry::{HttpProtectionRegistry, HttpRouteMatcher},
     runtime_update_api::{
-        BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider, RuntimeFilesQuery,
-        RuntimeFilesUpdatePlugin, RuntimeReloaderPlugin, RuntimeUpdateError,
-        RuntimeUpdateSecurityPlugin, UpdateExecution, UploadFile,
+        BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider, RuntimeFileCatalog,
+        RuntimeFileStore, RuntimeFilesQuery, RuntimeReloaderPlugin,
+        RuntimeUpdateError, RuntimeUpdateExecutor, RuntimeUpdateSecurityPlugin, UpdateExecution,
+        UploadFile,
     },
     storage_api::Storage,
 };
-use cda_plugin_communication_management::lifecycle::disable::DisableCommunication;
 use tokio::sync::RwLock;
 
 /// Default implementation of [`RuntimeFilesUpdatePlugin`] with injectable security and storage.
@@ -44,13 +44,11 @@ pub struct DefaultRuntimeUpdatePlugin<
     lock_provider: Arc<Lock>,
     /// Tracking map for in-progress executions: `exec_id` -> `DbUpdateExecution`
     executions: Arc<RwLock<HashMap<String, UpdateExecution>>>,
-    /// If true, call `update_mdd_uncompressed()` after Apply for each MDD file
-    mdd_decompress: bool,
+    /// Format-specific reads (validate, revision, ECU name), so the plugin
+    /// carries no database format of its own.
     communication_disable: Arc<dyn DisableCommunication>,
-    /// Used to request the configured post-update communication state. Only a
-    /// request, because `init_mode` decides whether it is honoured.
-    communication_access: Arc<dyn CommunicationAccess>,
     http_protections: HttpProtectionRegistry,
+    update_exempt_routes: Vec<HttpRouteMatcher>,
     update_retry_after: Duration,
     post_update_mode: PostUpdateCommunicationMode,
 }
@@ -68,10 +66,7 @@ impl<
     /// * `reload_handler` - Notified after apply/rollback to hot-reload databases
     /// * `security_handler` - Validates authorization and file integrity
     /// * `lock_provider` - Provides lock state for security validation
-    /// * `mdd_decompress` - Whether to decompress MDD files after apply
     /// * `communication_disable` - Used to acquire exclusive transport disable ownership
-    /// * `communication_access` - Used to request the configured post-update
-    ///   communication state, subject to `init_mode`
     /// * `update_retry_after` - Retry-After duration while an update owns protection
     /// * `post_update_mode` - Communication state to restore after an update
     #[allow(
@@ -84,10 +79,9 @@ impl<
         reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
         security_handler: Arc<UpdateSecurityPlugin>,
         lock_provider: Arc<Lock>,
-        mdd_decompress: bool,
         communication_disable: Arc<dyn DisableCommunication>,
-        communication_access: Arc<dyn CommunicationAccess>,
         http_protections: HttpProtectionRegistry,
+        update_exempt_routes: Vec<HttpRouteMatcher>,
         update_retry_after: Duration,
         post_update_mode: PostUpdateCommunicationMode,
     ) -> Self {
@@ -97,10 +91,9 @@ impl<
             security_handler,
             lock_provider,
             executions: Arc::new(RwLock::new(HashMap::default())),
-            mdd_decompress,
             communication_disable,
-            communication_access,
             http_protections,
+            update_exempt_routes,
             update_retry_after,
             post_update_mode,
         }
@@ -112,7 +105,7 @@ impl<
     Store: Storage + Send + Sync + 'static,
     UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
     Lock: LockStateProvider,
-> RuntimeFilesUpdatePlugin for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
+> RuntimeFileCatalog for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
 {
     async fn list_current(
         &self,
@@ -134,7 +127,15 @@ impl<
     ) -> Result<BulkDataList, RuntimeUpdateError> {
         crate::storage::list_backup_files(&*self.storage, query).await
     }
+}
 
+#[async_trait]
+impl<
+    Store: Storage + Send + Sync + 'static,
+    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    Lock: LockStateProvider,
+> RuntimeFileStore for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
+{
     async fn upload(
         &self,
         files: Vec<UploadFile>,
@@ -153,19 +154,29 @@ impl<
     async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
         crate::storage::delete_all_backup(&*self.storage).await
     }
+}
 
-    async fn start_execution(&self, mode: ExecutionMode) -> Result<String, RuntimeUpdateError> {
+#[async_trait]
+impl<
+    Store: Storage + Send + Sync + 'static,
+    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    Lock: LockStateProvider,
+> RuntimeUpdateExecutor for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
+{
+    async fn start_execution(
+        &self,
+        mode: ExecutionMode,
+    ) -> Result<String, RuntimeUpdateError> {
         let params = crate::operations::executions::ExecutionParams {
             storage: &self.storage,
             security_handler: &self.security_handler,
             reload_handler: &self.reloader_plugin,
             executions: &self.executions,
             communication_disable: &self.communication_disable,
-            communication_access: &self.communication_access,
             http_protections: &self.http_protections,
+            update_exempt_routes: &self.update_exempt_routes,
             update_retry_after: self.update_retry_after,
             post_update_mode: self.post_update_mode.clone(),
-            mdd_decompress: self.mdd_decompress,
             lock_state_provider: &*self.lock_provider,
         };
         crate::operations::executions::start_execution(&params, mode).await
@@ -188,15 +199,14 @@ mod tests {
         communication_control::{CommunicationState, PostUpdateCommunicationMode},
         http_protection::registry::HttpProtectionRegistry,
         runtime_update_api::{
-            ExecutionMode, HashAlgorithm, RuntimeFilesQuery, RuntimeFilesUpdatePlugin,
-            RuntimeUpdateError,
+            ExecutionMode, HashAlgorithm, RuntimeFileCatalog, RuntimeFileStore, RuntimeFilesQuery,
+            RuntimeUpdateError, RuntimeUpdateExecutor,
         },
         storage_api::CollectionName,
     };
     use cda_plugin_communication_management::lifecycle::{
         communication_disable_for_test,
         disable::{DisableCommunication, DisableReason},
-        enabled_communication_access_for_test,
     };
     use cda_storage::LocalStorage;
 
@@ -235,10 +245,9 @@ mod tests {
                 owner: owner.map(ToOwned::to_owned),
                 has_conflicts,
             }),
-            false,
             Arc::clone(&communication_disable),
-            enabled_communication_access_for_test(),
             http_protections,
+            Vec::new(),
             Duration::from_secs(1),
             PostUpdateCommunicationMode::Enabled,
         );
@@ -540,7 +549,9 @@ mod tests {
             .await
             .expect("lease must be granted from a deferred runtime");
 
-        let result = plugin.start_execution(ExecutionMode::Apply).await;
+        let result = plugin
+            .start_execution(ExecutionMode::Apply)
+            .await;
         assert!(matches!(result, Err(RuntimeUpdateError::ExecutionConflict)));
         assert!(plugin.list_executions().await.is_empty());
 

@@ -10,34 +10,70 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use cda_comm_can::CanDiagGateway;
-use cda_comm_doip::DoipDiagGateway;
-use cda_core::EcuManager;
 use cda_interfaces::{
-    HashMap,
-    communication_control::CommunicationAccess,
+    HashMap, ReloadComponent, VariantDetectionSender,
     health::HealthProvider,
-    runtime_update_api::{ReloadError, VehicleComponentFactory, VehicleComponents},
+    runtime_update_api::{
+        ApplicationUpdatePreparation, ReloadError, ReservedVehicleDatabaseLocks,
+        VehicleDatabaseLockUpdater,
+    },
 };
 use cda_plugin_security::SecurityPlugin;
-use cda_transport_router::DiagnosticTransportRouter;
 
-use crate::{config::configfile::Configuration, vehicle::UdsManagerType};
+use crate::{
+    AppError,
+    config::configfile::Configuration,
+    vehicle::{VehicleModel, create_vehicle_model},
+};
 
-/// Concrete [`VehicleComponentFactory`] that delegates to
-/// [`crate::vehicle::create_vehicle_components`].
-///
-/// Used by [`cda_plugin_runtime_update::default_runtime_reloader_plugin::DefaultRuntimeReloaderPlugin`]
-/// and called every time the diagnostic databases are reloaded.
+fn map_app_error(error: &AppError) -> ReloadError {
+    let message = error.to_string();
+    match error {
+        AppError::NoDatabasesLoaded { .. } => ReloadError::NoDatabasesLoaded(message),
+        _ => ReloadError::ReplacementFailure(format!("Failed to create vehicle data: {message}")),
+    }
+}
+
+#[cfg(feature = "integration-tests")]
+fn inject_planned_factory_failure(config: &Configuration) -> Result<(), ReloadError> {
+    let plan_path = std::path::Path::new(&config.runtime_update_config.storage_dir)
+        .join(".vehicle-factory-failure-plan");
+    let Ok(plan) = std::fs::read_to_string(&plan_path) else {
+        return Ok(());
+    };
+    let mut entries = plan.lines();
+    let next = entries.next();
+    let remaining = entries.collect::<Vec<_>>().join("\n");
+    if remaining.is_empty() {
+        std::fs::remove_file(&plan_path).map_err(|error| {
+            ReloadError::ReplacementFailure(format!(
+                "Failed to consume integration-test factory plan: {error}"
+            ))
+        })?;
+    } else {
+        std::fs::write(&plan_path, format!("{remaining}\n")).map_err(|error| {
+            ReloadError::ReplacementFailure(format!(
+                "Failed to consume integration-test factory plan: {error}"
+            ))
+        })?;
+    }
+    if next == Some("fail") {
+        return Err(ReloadError::ReplacementFailure(
+            "Integration-test vehicle factory failure".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 pub struct CdaMainVehicleFactory<SP>
 where
     SP: SecurityPlugin,
 {
     health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
-    communication_access: Arc<dyn CommunicationAccess>,
+    variant_detection: VariantDetectionSender,
     _phantom: std::marker::PhantomData<SP>,
 }
 
@@ -48,56 +84,214 @@ where
     #[must_use]
     pub fn new(
         health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
-        communication_access: Arc<dyn CommunicationAccess>,
+        variant_detection: VariantDetectionSender,
     ) -> Self {
         Self {
             health_providers,
-            communication_access,
+            variant_detection,
             _phantom: std::marker::PhantomData,
+        }
+    }
+
+    pub(crate) async fn create(
+        &self,
+        config: &Configuration,
+    ) -> Result<VehicleModel<SP>, ReloadError> {
+        let model = create_vehicle_model::<SP>(
+            config,
+            self.health_providers.as_ref(),
+            self.variant_detection.clone(),
+        )
+        .await
+        .map_err(|error| map_app_error(&error))?;
+        #[cfg(feature = "integration-tests")]
+        inject_planned_factory_failure(config)?;
+        Ok(model)
+    }
+}
+
+/// Opaque payload whose construction has completed and can be staged infallibly.
+#[async_trait]
+pub trait ReadyToApply: Send {
+    /// Publishes the prepared payload into its component owner, waiting for
+    /// in-flight readers of the previous data to finish.
+    async fn apply(self: Box<Self>);
+}
+
+/// One independently registered owner-specific runtime-update participant.
+///
+/// Preflight must perform every fallible or asynchronous operation without
+/// mutating staged owner state. The returned payload is opaque to the
+/// coordinator and stages synchronously only after every participant succeeds.
+#[async_trait]
+pub trait VehicleUpdateParticipant<SP: SecurityPlugin>: Send + Sync {
+    /// Constructs and validates this owner's next payload without applying it.
+    async fn preflight(
+        &self,
+        model: &VehicleModel<SP>,
+        config: &Configuration,
+    ) -> Result<Box<dyn ReadyToApply>, ReloadError>;
+}
+
+struct ComponentPayload<T> {
+    owner: Arc<dyn ReloadComponent<T>>,
+    data: T,
+}
+
+#[async_trait]
+impl<T: Send + 'static> ReadyToApply for ComponentPayload<T> {
+    async fn apply(self: Box<Self>) {
+        self.owner.apply(self.data).await;
+    }
+}
+
+pub(crate) struct UdsParticipant<SP: SecurityPlugin> {
+    pub(crate) owner:
+        Arc<dyn ReloadComponent<cda_comm_uds::VehicleEcuData<cda_core::EcuManager<SP>>>>,
+}
+
+#[async_trait]
+impl<SP: SecurityPlugin> VehicleUpdateParticipant<SP> for UdsParticipant<SP> {
+    async fn preflight(
+        &self,
+        model: &VehicleModel<SP>,
+        config: &Configuration,
+    ) -> Result<Box<dyn ReadyToApply>, ReloadError> {
+        Ok(Box::new(ComponentPayload {
+            owner: Arc::clone(&self.owner),
+            data: model.ecu_data(config),
+        }))
+    }
+}
+
+pub(crate) struct SovdParticipant {
+    pub(crate) owner: Arc<dyn ReloadComponent<cda_sovd::SovdRegistryUpdate>>,
+}
+
+#[async_trait]
+impl<SP: SecurityPlugin> VehicleUpdateParticipant<SP> for SovdParticipant {
+    async fn preflight(
+        &self,
+        model: &VehicleModel<SP>,
+        config: &Configuration,
+    ) -> Result<Box<dyn ReadyToApply>, ReloadError> {
+        Ok(Box::new(ComponentPayload {
+            owner: Arc::clone(&self.owner),
+            data: model.sovd_registry(config).await,
+        }))
+    }
+}
+
+struct LockPayload {
+    reservation: Box<dyn ReservedVehicleDatabaseLocks>,
+}
+
+#[async_trait]
+impl ReadyToApply for LockPayload {
+    async fn apply(self: Box<Self>) {
+        self.reservation.apply();
+    }
+}
+
+pub(crate) struct LockParticipant {
+    pub(crate) owner: Arc<dyn VehicleDatabaseLockUpdater>,
+}
+
+#[async_trait]
+impl<SP: SecurityPlugin> VehicleUpdateParticipant<SP> for LockParticipant {
+    async fn preflight(
+        &self,
+        model: &VehicleModel<SP>,
+        config: &Configuration,
+    ) -> Result<Box<dyn ReadyToApply>, ReloadError> {
+        let ecu_names = model.ecu_data(config).ecu_names();
+        let reservation = self.owner.reserve_lock_resources(ecu_names).await?;
+        Ok(Box::new(LockPayload { reservation }))
+    }
+}
+
+#[cfg(feature = "can")]
+pub(crate) struct CanParticipant {
+    pub(crate) owner: Option<Arc<dyn ReloadComponent<cda_comm_can::CanTopology>>>,
+}
+
+#[cfg(feature = "can")]
+#[async_trait]
+impl<SP: SecurityPlugin> VehicleUpdateParticipant<SP> for CanParticipant {
+    async fn preflight(
+        &self,
+        model: &VehicleModel<SP>,
+        config: &Configuration,
+    ) -> Result<Box<dyn ReadyToApply>, ReloadError> {
+        match (
+            &self.owner,
+            model
+                .can_topology(config)
+                .await
+                .map_err(|error| map_app_error(&error))?,
+        ) {
+            (Some(owner), Some(topology)) => Ok(Box::new(ComponentPayload {
+                owner: Arc::clone(owner),
+                data: topology,
+            })),
+            (None, None) => Ok(Box::new(NoopPayload)),
+            _ => Err(ReloadError::ReplacementFailure(
+                "Prepared CAN topology does not match the configured CAN owner".to_owned(),
+            )),
         }
     }
 }
 
+#[cfg(feature = "can")]
+struct NoopPayload;
+
+#[cfg(feature = "can")]
 #[async_trait]
-impl<SP>
-    VehicleComponentFactory<
-        Configuration,
-        UdsManagerType<SP>,
-        DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
-    > for CdaMainVehicleFactory<SP>
+impl ReadyToApply for NoopPayload {
+    async fn apply(self: Box<Self>) {}
+}
+
+/// Coordinates shared model construction and opaque owner-specific participants.
+pub struct CdaVehicleUpdatePreparation<SP: SecurityPlugin> {
+    data_factory: Arc<CdaMainVehicleFactory<SP>>,
+    participants: Vec<Arc<dyn VehicleUpdateParticipant<SP>>>,
+}
+
+impl<SP: SecurityPlugin> CdaVehicleUpdatePreparation<SP> {
+    /// Creates an empty coordinator. Owners are registered independently in
+    /// their required lifecycle order with [`Self::register_participant`].
+    #[must_use]
+    pub fn new(data_factory: Arc<CdaMainVehicleFactory<SP>>) -> Self {
+        Self {
+            data_factory,
+            participants: Vec::new(),
+        }
+    }
+
+    /// Registers one opaque owner-specific participant.
+    pub fn register_participant(&mut self, participant: Arc<dyn VehicleUpdateParticipant<SP>>) {
+        self.participants.push(participant);
+    }
+}
+
+#[async_trait]
+impl<SP> ApplicationUpdatePreparation<Configuration> for CdaVehicleUpdatePreparation<SP>
 where
     SP: SecurityPlugin,
 {
-    type FileManager = cda_database::FileManager;
+    async fn prepare_update(&self, config: &Configuration) -> Result<(), ReloadError> {
+        let model = self.data_factory.create(config).await?;
+        let mut ready = Vec::with_capacity(self.participants.len());
+        for participant in &self.participants {
+            ready.push(participant.preflight(&model, config).await?);
+        }
 
-    async fn create(
-        &self,
-        config: &Configuration,
-        mdd_paths: &[PathBuf],
-    ) -> Result<
-        VehicleComponents<
-            UdsManagerType<SP>,
-            DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
-            Self::FileManager,
-        >,
-        ReloadError,
-    > {
-        let crate_components = crate::vehicle::create_vehicle_components::<SP>(
-            config,
-            mdd_paths,
-            self.health_providers.as_ref(),
-            Arc::clone(&self.communication_access),
-        )
-        .await
-        .map_err(|e| {
-            ReloadError::ReplacementFailure(format!("Failed to create new vehicle components: {e}"))
-        })?;
-
-        Ok(VehicleComponents {
-            uds_manager: crate_components.uds_manager,
-            diagnostic_gateway: crate_components.diagnostic_gateway,
-            file_managers: crate_components.file_managers,
-            functional_group_config: config.functional_description.clone(),
-        })
+        // Every fallible step is done. Applying is infallible and runs under
+        // the caller's exclusive disable lease, with the transport down and
+        // ordinary HTTP refused, so no reader can observe the sequence.
+        for payload in ready {
+            payload.apply().await;
+        }
+        Ok(())
     }
 }

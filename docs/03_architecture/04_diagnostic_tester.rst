@@ -368,7 +368,7 @@ Communication Initialization Mode
 
     1. Immediate availability of health endpoints during startup (when health feature is enabled)
     2. Deferred registration of SOVD API routes after ECU discovery
-    3. Hot-reloading of routes when the diagnostic database is updated at runtime
+    3. Process-lifetime SOVD routes backed by component-owned state that is updated in place
 
     **``init_mode`` Values**
 
@@ -920,8 +920,9 @@ Error Handling
 
     **Graceful Degradation Behaviors**
 
-    - **No databases loaded**: Configurable via ``exit_no_database_loaded``. When true, the
-      application exits with an error. When false, the CDA continues with an empty ECU list.
+    - **No databases loaded**: The CDA continues with an empty ECU list, so an operator can
+      push working databases through the runtime-update endpoint. A *reload* that leaves no
+      database loaded although MDD files were provided is instead an error and is rolled back.
 
     - **Individual database failure**: Logged and skipped; other databases continue loading.
 

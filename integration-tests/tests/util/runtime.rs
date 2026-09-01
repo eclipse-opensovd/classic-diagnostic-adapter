@@ -337,7 +337,7 @@ fn base_test_config(
         database: DatabaseConfig {
             seed_dir: mdd_file_path()?,
             naming_convention: DatabaseNamingConvention::default(),
-            exit_no_database_loaded: true,
+            exit_no_database_loaded: false,
             fallback_to_base_variant: true,
             ignore_protocol: false,
             ignore_invalid_mdd: false,
@@ -512,7 +512,6 @@ pub(crate) fn start_cda(config: Configuration) {
                 |infra: opensovd_cda_lib::setup::CdaRuntime<DefaultSecurityPluginData>| async {
                     opensovd_cda_lib::update::create_default_update_plugin::<
                         DefaultSecurityPluginData,
-                        DefaultSecurityPlugin,
                     >(infra)
                     .await
                 },
@@ -862,7 +861,7 @@ fn docker_env_content(
         let _ = writeln!(env_content, "SIM_CAN_SOCKETCAND_PORT={SOCKETCAND_PORT}");
         let _ = writeln!(env_content, "SIM_CAN_SOCKETCAND_BUS={CAN_BUS_NAME}");
         let _ = writeln!(env_content, "# Extra cargo features for the CDA image");
-        let _ = writeln!(env_content, "CDA_FEATURES=can-socketcand");
+        let _ = writeln!(env_content, "CDA_FEATURES=integration-tests,can-socketcand");
     }
 
     env_content
@@ -989,6 +988,44 @@ pub(crate) async fn stop_ecu_sim() -> Result<(), TestingError> {
 
 fn stop_ecu_sim_sync() -> Result<(), TestingError> {
     TOKIO_RUNTIME.block_on(async { stop_ecu_sim().await })
+}
+
+pub(crate) fn arm_vehicle_factory_failures(
+    config: &Configuration,
+    failures: &[bool],
+) -> Result<(), TestingError> {
+    let plan = failures
+        .iter()
+        .map(|fail| if *fail { "fail" } else { "pass" })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if use_docker() {
+        let output = std::process::Command::new("docker")
+            .args([
+                "compose",
+                "exec",
+                "-T",
+                "cda",
+                "sh",
+                "-c",
+                &format!("printf '%s\\n' '{plan}' > /app/.vehicle-factory-failure-plan"),
+            ])
+            .current_dir(test_container_dir()?)
+            .output()
+            .map_err(|error| TestingError::ProcessFailed(error.to_string()))?;
+        if !output.status.success() {
+            return Err(TestingError::ProcessFailed(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
+        return Ok(());
+    }
+    std::fs::write(
+        std::path::Path::new(&config.runtime_update_config.storage_dir)
+            .join(".vehicle-factory-failure-plan"),
+        format!("{plan}\n"),
+    )
+    .map_err(|error| TestingError::ProcessFailed(error.to_string()))
 }
 
 /// (Re)starts the shared CDA with `config`. A CDA that is not currently running
@@ -1132,7 +1169,7 @@ fn docker_compose_stop(container: &str) -> Result<(), TestingError> {
     check_command_success(status, "docker compose stop failed")
 }
 
-fn use_docker() -> bool {
+pub(crate) fn use_docker() -> bool {
     std::env::var(CDA_INTEGRATION_TEST_USE_DOCKER).map_or(true, |s| s == "true")
 }
 
@@ -1544,7 +1581,7 @@ mod tests {
             "bus line malformed:\n{content}"
         );
         assert!(
-            content.contains("CDA_FEATURES=can-socketcand\n"),
+            content.contains("CDA_FEATURES=integration-tests,can-socketcand\n"),
             "features line malformed:\n{content}"
         );
         // Every line is a comment or a well-formed KEY=VALUE line.

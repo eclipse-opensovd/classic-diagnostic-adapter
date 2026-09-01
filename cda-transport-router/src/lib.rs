@@ -69,7 +69,8 @@ pub struct DiagnosticTransportRouter<D: EcuGateway + TransportProbe, C: EcuGatew
     /// ECUs not in this map are bound at first detection.
     transport_overrides: Arc<HashMap<String, TransportType>>,
     /// Transport each un-pinned ECU was first detected on (lowercase name ->
-    /// transport). Entries are written once and never change at runtime, so
+    /// transport). Entries are written once per transport cycle and cleared by
+    /// [`TransportControl::disable`], so
     /// a diagnostic session can never silently switch transports.
     ecu_bindings: Arc<RwLock<HashMap<String, TransportType>>>,
     /// Authoritative router lifecycle state.
@@ -108,16 +109,6 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe>
     pub fn with_can(mut self, gateway: C) -> Self {
         self.can_gateway = Some(gateway);
         self
-    }
-
-    /// Returns the wrapped `DoIP` gateway, if one is configured.
-    ///
-    /// Used by the runtime-update reload path to hand the existing `DoIP` UDP
-    /// socket over to the replacement gateway (avoiding a second socket bound
-    /// to the same `DoIP` port). `None` in CAN-only operation.
-    #[must_use]
-    pub fn doip(&self) -> Option<&D> {
-        self.doip_gateway.as_ref()
     }
 
     /// Binds the ECU to a transport, sticky: if another task bound it first,
@@ -530,7 +521,15 @@ impl<
             |g| Box::pin(g.disable()),
             TransportState::Disabled,
         )
-        .await
+        .await?;
+        // A binding records where an ECU was *detected*, so it only describes
+        // the ECU set that was live when it was written. This router is built
+        // once and outlives every runtime update, and an update always disables
+        // the transport before replacing the data -- so clearing here is what
+        // stops a stale binding from routing a re-added ECU to the transport it
+        // used to be on. Re-detection repopulates the map on the next send.
+        self.ecu_bindings.write().await.clear();
+        Ok(())
     }
 
     async fn state(&self) -> TransportState {
@@ -662,6 +661,31 @@ mod tests {
         async fn state(&self) -> TransportState {
             *self.state.read().await
         }
+    }
+
+    /// A runtime update disables the transport before replacing the ECU data.
+    /// This router is never rebuilt, so a binding left over from the previous
+    /// ECU set would decide the transport for a re-added ECU without ever
+    /// re-detecting it.
+    #[tokio::test]
+    async fn disable_clears_transport_bindings_so_the_next_cycle_re_detects() {
+        let router = DiagnosticTransportRouter::new(HashMap::default())
+            .with_doip(FakeGateway::new(false))
+            .with_can(FakeGateway::new(false));
+        router.enable().await.unwrap();
+        router.bind("ecu_a", TransportType::Can).await;
+        assert_eq!(
+            router.ecu_bindings.read().await.get("ecu_a"),
+            Some(&TransportType::Can),
+            "precondition: the ECU is bound to CAN"
+        );
+
+        router.disable().await.unwrap();
+
+        assert!(
+            router.ecu_bindings.read().await.is_empty(),
+            "a disabled transport must not carry bindings into the next ECU set"
+        );
     }
 
     /// When one gateway's `enable()` fails partway through the fan-out, the

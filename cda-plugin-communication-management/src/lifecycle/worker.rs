@@ -57,8 +57,8 @@ pub(crate) type ActivationReply =
 
 /// A plugin-authorized lifecycle operation submitted to the worker.
 pub(crate) enum LifecycleCommand {
-    /// Runs the physical activation sequence: activate transport, run
-    /// initializers in registration order.
+    /// Prepares participants and hooks, commits synchronously, enables transport,
+    /// initializes hooks, and optionally runs detection.
     Activate {
         operation: CommunicationOperation,
         /// Optional detector to run after initialization.
@@ -82,6 +82,12 @@ pub(crate) enum LifecycleCommand {
         id: DisableLeaseId,
         reply: ActivationReply,
     },
+    /// Finishes an exclusive disable lease without activating: prepares and
+    /// commits all registered owners and stays disabled.
+    FinishDisableLease {
+        id: DisableLeaseId,
+        reply: oneshot::Sender<Result<(), CommunicationOperationFailure>>,
+    },
     /// Registers a lifecycle hook.
     RegisterLifecycleHook {
         initializer: Arc<dyn CommunicationLifecycle>,
@@ -95,7 +101,8 @@ pub(crate) enum LifecycleCommand {
 }
 
 /// Resources owned by the lifecycle worker. The variant detector lives in the
-/// shared state.
+/// shared state. Participants own their staged and prepared payloads; this list
+/// only determines lifecycle ordering.
 pub(crate) struct WorkerResources {
     transport_control: Arc<dyn TransportControl>,
     initializers: Vec<Arc<dyn CommunicationLifecycle>>,
@@ -118,6 +125,15 @@ async fn deinitialize_all(initializers: &[Arc<dyn CommunicationLifecycle>]) {
 
 /// Enables transport, initializes hooks, then optionally runs detection.
 async fn run_activation(
+    resources: &WorkerResources,
+    operation: CommunicationOperation,
+    detector: Option<Arc<dyn CommunicationVariantDetection>>,
+) -> Result<CommunicationState, CommunicationOperationFailure> {
+    activate_committed(resources, operation, detector).await
+}
+
+/// Performs only the post-commit portion of activation.
+async fn activate_committed(
     resources: &WorkerResources,
     operation: CommunicationOperation,
     detector: Option<Arc<dyn CommunicationVariantDetection>>,
@@ -191,6 +207,8 @@ pub(crate) struct LifecycleWorker {
     resources: WorkerResources,
     commands: mpsc::Receiver<LifecycleCommand>,
     shutdown_rx: mpsc::UnboundedReceiver<oneshot::Sender<()>>,
+    worker_alive: Arc<AtomicBool>,
+    shutdown_completed: bool,
 }
 
 /// Cloneable handle used by [`super::controller::CommunicationHandle`] to
@@ -201,11 +219,17 @@ pub(crate) struct WorkerSender {
     shutdown_tx: mpsc::UnboundedSender<oneshot::Sender<()>>,
     /// Blocks new commands as soon as shutdown is requested.
     admission_closed: Arc<AtomicBool>,
+    /// Cleared synchronously if the worker terminates unexpectedly.
+    worker_alive: Arc<AtomicBool>,
 }
 
 impl WorkerSender {
     pub(crate) fn is_shutting_down(&self) -> bool {
         self.admission_closed.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn is_available(&self) -> bool {
+        self.worker_alive.load(Ordering::SeqCst)
     }
 
     /// Enqueues `command`, waiting for mailbox capacity if necessary.
@@ -218,7 +242,7 @@ impl WorkerSender {
         &self,
         command: LifecycleCommand,
     ) -> Result<(), mpsc::error::SendError<LifecycleCommand>> {
-        if self.is_shutting_down() {
+        if self.is_shutting_down() || !self.is_available() {
             return Err(mpsc::error::SendError(command));
         }
         self.commands.send(command).await
@@ -244,21 +268,26 @@ impl WorkerSender {
 pub(crate) struct WorkerReceivers {
     commands: mpsc::Receiver<LifecycleCommand>,
     shutdown_rx: mpsc::UnboundedReceiver<oneshot::Sender<()>>,
+    worker_alive: Arc<AtomicBool>,
 }
 
 /// Creates the worker's channels without starting its task.
 pub(crate) fn channel() -> (WorkerSender, WorkerReceivers) {
     let (commands_tx, commands_rx) = mpsc::channel(LIFECYCLE_WORKER_CAPACITY);
     let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
+    let admission_closed = Arc::new(AtomicBool::new(false));
+    let worker_alive = Arc::new(AtomicBool::new(true));
     (
         WorkerSender {
             commands: commands_tx,
             shutdown_tx,
-            admission_closed: Arc::new(AtomicBool::new(false)),
+            admission_closed: Arc::clone(&admission_closed),
+            worker_alive: Arc::clone(&worker_alive),
         },
         WorkerReceivers {
             commands: commands_rx,
             shutdown_rx,
+            worker_alive: Arc::clone(&worker_alive),
         },
     )
 }
@@ -274,8 +303,36 @@ pub(crate) fn spawn(
         resources,
         commands: receivers.commands,
         shutdown_rx: receivers.shutdown_rx,
+        worker_alive: receivers.worker_alive,
+        shutdown_completed: false,
     };
     cda_interfaces::spawn_named!("communication-lifecycle-worker", worker.run())
+}
+
+impl Drop for LifecycleWorker {
+    fn drop(&mut self) {
+        self.worker_alive.store(false, Ordering::SeqCst);
+        if self.shutdown_completed {
+            return;
+        }
+
+        let mut state = self.state.lock();
+        let operation = match state.state {
+            CommunicationState::Enabling(operation) => operation,
+            CommunicationState::Enabled
+            | CommunicationState::Disabled
+            | CommunicationState::Disabling
+            | CommunicationState::DisabledExclusive
+            | CommunicationState::RecoveryRequired(_)
+            | CommunicationState::Error(_) => CommunicationOperation::Disable,
+        };
+        state.disable_owner = None;
+        state.enabling_result = None;
+        state.detection_in_flight = None;
+        state.state = CommunicationState::Error(CommunicationOperationFailure::WorkerUnavailable {
+            operation,
+        });
+    }
 }
 
 impl LifecycleWorker {
@@ -304,6 +361,8 @@ impl LifecycleWorker {
                 }
             }
         }
+        self.shutdown_completed = true;
+        self.worker_alive.store(false, Ordering::SeqCst);
     }
 
     async fn handle_command(&mut self, command: LifecycleCommand) {
@@ -327,6 +386,10 @@ impl LifecycleWorker {
             }
             LifecycleCommand::ReleaseDisableLease { id, reply } => {
                 let result = self.execute_release(id).await;
+                let _ = reply.send(result);
+            }
+            LifecycleCommand::FinishDisableLease { id, reply } => {
+                let result = self.execute_finish(id);
                 let _ = reply.send(result);
             }
             LifecycleCommand::RegisterLifecycleHook { initializer, reply } => {
@@ -416,58 +479,103 @@ impl LifecycleWorker {
         &self,
         id: DisableLeaseId,
     ) -> Result<CommunicationState, CommunicationOperationFailure> {
-        let (result_tx, result_rx) = watch::channel(None);
-        let detector = {
-            let mut state = self.state.lock();
+        let owner = {
+            let state = self.state.lock();
             let Some(owner) = state.disable_owner.filter(|owner| owner.id == id) else {
                 tracing::debug!("Release rejected: unknown or conflicting lease");
                 return Err(super::disable::stale_resume_failure());
             };
-
+            let expected_decision = if owner.resumes_transport {
+                LifecycleDecision::Claim(CommunicationOperation::Resume)
+            } else {
+                LifecycleDecision::SettleDisabled
+            };
             match transition::decide(&state, false, LifecycleRequest::Resume) {
-                LifecycleDecision::Claim(CommunicationOperation::Resume) => {
-                    let detector = if owner.resume_detects {
-                        state.variant_detector()
-                    } else {
-                        None
-                    };
-                    state.disable_owner = None;
-                    state.state = CommunicationState::Enabling(CommunicationOperation::Resume);
-                    state.enabling_result = Some(result_rx);
-                    state.variant_detection = detection_mode(detector.as_ref());
-                    detector
-                }
-                LifecycleDecision::SettleDisabled => {
-                    state.disable_owner = None;
-                    state.state = CommunicationState::Disabled;
-                    return Ok(CommunicationState::Disabled);
-                }
+                decision if decision == expected_decision => {}
                 LifecycleDecision::ShuttingDown => {
                     return Err(CommunicationOperationFailure::ShuttingDown {
                         operation: CommunicationOperation::Resume,
                     });
                 }
-                LifecycleDecision::Conflict
-                | LifecycleDecision::Claim(_)
-                | LifecycleDecision::ClaimDetection
-                | LifecycleDecision::Join(_)
-                | LifecycleDecision::JoinDetection
-                | LifecycleDecision::AlreadyEnabled
-                | LifecycleDecision::ClaimDisable { .. }
-                | LifecycleDecision::GuardsHeld
-                | LifecycleDecision::LeaseHeld(_)
-                | LifecycleDecision::NotEnabled => {
+                _ => {
                     tracing::debug!("Release rejected: state no longer matches this lease");
                     return Err(super::disable::stale_resume_failure());
                 }
             }
+            owner
+        };
+
+        // Keep exclusive ownership through the complete fallible prepare phase.
+        // A failure therefore leaves old live state intact and cannot expose
+        // partially prepared state.
+        if let Err(failure) = Ok(()) {
+            self.finish_failed_finalization(id, &failure);
+            return Err(failure);
+        }
+
+        if !owner.resumes_transport {
+            let mut state = self.state.lock();
+            state.disable_owner = None;
+            state.state = CommunicationState::Disabled;
+            return Ok(CommunicationState::Disabled);
+        }
+
+        let (result_tx, result_rx) = watch::channel(None);
+        let detector = {
+            let mut state = self.state.lock();
+            let detector = owner
+                .resume_detects
+                .then(|| state.variant_detector())
+                .flatten();
+            state.disable_owner = None;
+            state.state = CommunicationState::Enabling(CommunicationOperation::Resume);
+            state.enabling_result = Some(result_rx);
+            state.variant_detection = detection_mode(detector.as_ref());
+            detector
         };
 
         let result =
-            run_activation(&self.resources, CommunicationOperation::Resume, detector).await;
+            activate_committed(&self.resources, CommunicationOperation::Resume, detector).await;
         let result = self.finish_enabling(result, CommunicationOperation::Resume);
+        if let Err(failure) = &result {
+            self.state.lock().state = CommunicationState::RecoveryRequired(failure.clone());
+        }
         let _ = result_tx.send(Some(result.clone()));
         result
+    }
+
+    /// Finishes a disable lease without activating, staying disabled regardless
+    /// of what the lease displaced.
+    ///
+    /// Unlike [`execute_release`](Self::execute_release), never claims
+    /// [`CommunicationOperation::Resume`]: only the lease holder can call this
+    /// and it consumes the lease, so no concurrent caller can join.
+    fn execute_finish(&self, id: DisableLeaseId) -> Result<(), CommunicationOperationFailure> {
+        // One lock hold: checking ownership and consuming the lease must be
+        // atomic, or a concurrent caller could take the lease in between.
+        let mut state = self.state.lock();
+        if !DisableOwner::owns(state.disable_owner, id) {
+            tracing::debug!("Finish rejected: unknown or conflicting lease");
+            return Err(super::disable::stale_finish_failure());
+        }
+        state.disable_owner = None;
+        state.state = CommunicationState::Disabled;
+        Ok(())
+    }
+
+    fn finish_failed_finalization(
+        &self,
+        id: DisableLeaseId,
+        failure: &CommunicationOperationFailure,
+    ) {
+        let mut state = self.state.lock();
+        if DisableOwner::owns(state.disable_owner, id) {
+            state.disable_owner = None;
+            // Preparation changed no live state and the transport remains
+            // physically disabled, so retain a retryable disabled lifecycle.
+            tracing::error!(%failure, "Staged installation preparation failed");
+            state.state = CommunicationState::Disabled;
+        }
     }
 
     /// Fails queued commands and disables the transport.
@@ -527,6 +635,11 @@ impl LifecycleWorker {
             LifecycleCommand::ReleaseDisableLease { reply, .. } => {
                 let _ = reply.send(Err(CommunicationOperationFailure::ShuttingDown {
                     operation: CommunicationOperation::Resume,
+                }));
+            }
+            LifecycleCommand::FinishDisableLease { reply, .. } => {
+                let _ = reply.send(Err(CommunicationOperationFailure::ShuttingDown {
+                    operation: CommunicationOperation::FinishDisableLease,
                 }));
             }
             LifecycleCommand::RegisterLifecycleHook { reply, .. } => {

@@ -69,10 +69,9 @@ pub async fn seed_storage_collection_if_nonexistent(
         count = count.saturating_add(1);
     }
 
-    if count == 0 {
-        return Some(0);
-    }
-
+    // Commit even with no entries: creating the collection is itself the durable
+    // record that seeding ran, and later resolution treats an existing empty
+    // collection as authoritative instead of falling back to the seed directory.
     if let Err(e) = tx.commit().await {
         tracing::error!(error = %e, "Failed to commit seed transaction");
         return None;

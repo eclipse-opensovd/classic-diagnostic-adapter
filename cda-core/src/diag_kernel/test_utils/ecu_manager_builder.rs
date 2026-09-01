@@ -48,6 +48,7 @@ pub(crate) fn new_ecu_manager(
             enabled_functional_groups: None,
             protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
         },
+        cda_database::FileManager::new(String::new(), Vec::new()),
     )
     .expect("Failed to create EcuManager");
 
@@ -86,6 +87,7 @@ pub(crate) fn new_ecu_manager_no_base_fallback(
             enabled_functional_groups: None,
             protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
         },
+        cda_database::FileManager::new(String::new(), Vec::new()),
     )
     .unwrap()
 }

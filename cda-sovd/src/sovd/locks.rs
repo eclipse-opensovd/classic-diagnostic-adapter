@@ -20,9 +20,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
-use cda_interfaces::{
-    DynamicPlugin, HashMap, HashMapExtensions, TesterPresentType, UdsEcu, file_manager::FileManager,
-};
+use cda_interfaces::{DynamicPlugin, HashMap, HashMapExtensions, TesterPresentType, UdsEcu};
 use cda_plugin_security::{Claims, SecurityPlugin};
 use chrono::{DateTime, SecondsFormat, Utc};
 use tokio::{
@@ -35,7 +33,7 @@ use uuid::Uuid;
 use crate::{
     openapi,
     sovd::{
-        IntoSovd, WebserverEcuState, WebserverState,
+        EcuContext, IntoSovd, ResolvedLocks, SovdLockStateView, WebserverEcuState, WebserverState,
         error::{ApiError, ErrorWrapper},
     },
 };
@@ -134,38 +132,46 @@ impl Locks {
         }
     }
 
-    /// Rebuilds the ECU lock entries for a new configuration.
-    /// Only the vehicle lock is preserved. Functional-group lock entries are
-    /// dynamic and not modified, but no FG locks may be held.
+    /// Returns whether this topology already contains exactly `ecu_names`.
+    pub async fn has_ecu_topology(&self, ecu_names: &[String]) -> bool {
+        let LockType::Ecu(ecu_rwlock) = &self.ecu else {
+            return false;
+        };
+        let entries = ecu_rwlock.read().await;
+        entries.len() == ecu_names.len() && ecu_names.iter().all(|name| entries.contains_key(name))
+    }
+
+    /// Validates that replacing ECU-dependent topology would not discard a held lock.
     ///
     /// # Errors
-    /// Returns an error if any ECU or functional-group lock is currently held.
-    pub async fn update_entries(&self, new_ecu_names: Vec<String>) -> Result<(), LockUpdateError> {
+    /// Returns an error when an ECU or functional-group lock is held.
+    pub async fn validate_replacement(&self) -> Result<(), LockUpdateError> {
         let LockType::FunctionalGroup(fg_rwlock) = &self.functional_group else {
             return Ok(());
         };
-        let fg_map = fg_rwlock.read().await;
-        if fg_map.values().any(Option::is_some) {
+        if fg_rwlock.read().await.values().any(Option::is_some) {
             return Err(LockUpdateError::FunctionalGroupLocksHeld);
         }
-        drop(fg_map);
 
         let LockType::Ecu(ecu_rwlock) = &self.ecu else {
             return Ok(());
         };
-        let mut ecu_map = ecu_rwlock.write().await;
-        if ecu_map.values().any(Option::is_some) {
+        if ecu_rwlock.read().await.values().any(Option::is_some) {
             return Err(LockUpdateError::EcuLocksHeld);
         }
-
-        let new_ecu_set: std::collections::HashSet<&str> =
-            new_ecu_names.iter().map(String::as_str).collect();
-        ecu_map.retain(|name, _| new_ecu_set.contains(name.as_str()));
-        for name in new_ecu_names {
-            ecu_map.entry(name).or_insert(None);
-        }
-
         Ok(())
+    }
+
+    /// Creates an unpublished replacement sharing only the process-wide vehicle lock.
+    #[must_use]
+    pub(crate) fn replacement(&self, ecu_names: Vec<String>) -> Self {
+        Self {
+            vehicle: self.vehicle.clone(),
+            ecu: LockType::Ecu(Arc::new(RwLock::new(
+                ecu_names.into_iter().map(|ecu| (ecu, None)).collect(),
+            ))),
+            functional_group: LockType::FunctionalGroup(Arc::new(RwLock::new(HashMap::new()))),
+        }
     }
 }
 
@@ -304,25 +310,25 @@ pub(crate) mod ecu {
     use cda_plugin_security::Secured;
 
     use super::{
-        ApiError, ErrorWrapper, FileManager, IntoResponse, Json, LockContext, LockPathParam, Path,
-        Response, State, UdsEcu, WebserverEcuState, WithRejection, delete_handler, get_handler,
+        ApiError, EcuContext, ErrorWrapper, IntoResponse, Json, LockContext, LockPathParam, Path,
+        Response, UdsEcu, WebserverEcuState, WithRejection, delete_handler, get_handler,
         get_id_handler, post_handler, put_handler, vehicle_read_lock,
     };
     use crate::sovd;
 
     pub(crate) mod lock {
         use super::{
-            ApiError, FileManager, Json, LockPathParam, Path, Response, Secured, State,
-            TransformOperation, UdsEcu, UseApi, WebserverEcuState, WithRejection, delete_handler,
-            get_id_handler, put_handler,
+            ApiError, EcuContext, Json, LockPathParam, Path, Response, Secured, TransformOperation,
+            UdsEcu, UseApi, WebserverEcuState, WithRejection, delete_handler, get_id_handler,
+            put_handler,
         };
         use crate::openapi;
-        pub(crate) async fn delete<T: UdsEcu + Clone, U: FileManager>(
+        pub(crate) async fn delete<T: UdsEcu + Clone>(
             Path(lock): Path<LockPathParam>,
             UseApi(sec_plugin, _): UseApi<Secured, ()>,
-            State(WebserverEcuState {
+            EcuContext(WebserverEcuState {
                 ecu_name, locks, ..
-            }): State<WebserverEcuState<T, U>>,
+            }): EcuContext<T>,
         ) -> Response {
             let claims = sec_plugin.as_auth_plugin().claims();
 
@@ -336,12 +342,12 @@ pub(crate) mod ecu {
                 .with(openapi::lock_not_owned)
         }
 
-        pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
+        pub(crate) async fn put<T: UdsEcu + Clone>(
             Path(lock): Path<LockPathParam>,
             UseApi(sec_plugin, _): UseApi<Secured, ()>,
-            State(WebserverEcuState {
+            EcuContext(WebserverEcuState {
                 ecu_name, locks, ..
-            }): State<WebserverEcuState<T, U>>,
+            }): EcuContext<T>,
             WithRejection(Json(body), _): WithRejection<
                 Json<sovd_interfaces::locking::Request>,
                 ApiError,
@@ -358,12 +364,12 @@ pub(crate) mod ecu {
                 .with(openapi::lock_not_owned)
         }
 
-        pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+        pub(crate) async fn get<T: UdsEcu + Clone>(
             Path(lock): Path<LockPathParam>,
             UseApi(_sec_plugin, _): UseApi<Secured, ()>,
-            State(WebserverEcuState {
+            EcuContext(WebserverEcuState {
                 ecu_name, locks, ..
-            }): State<WebserverEcuState<T, U>>,
+            }): EcuContext<T>,
         ) -> Response {
             get_id_handler(&locks.ecu, &lock, Some(&ecu_name), false).await
         }
@@ -381,14 +387,15 @@ pub(crate) mod ecu {
         }
     }
 
-    pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn post<T: UdsEcu + Clone>(
         UseApi(Secured(sec_plugin), _): UseApi<Secured, ()>,
-        State(WebserverEcuState {
+        EcuContext(WebserverEcuState {
             ecu_name,
             locks,
+            lock_provider,
             uds,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): EcuContext<T>,
         WithRejection(Json(body), _): WithRejection<
             Json<sovd_interfaces::locking::Request>,
             ApiError,
@@ -418,7 +425,8 @@ pub(crate) mod ecu {
             &uds,
             LockContext {
                 lock: &locks.ecu,
-                all_locks: &locks,
+                lock_provider: Some(lock_provider),
+                untracked_locks: None,
                 rw_lock: None,
             },
             Some(&ecu_name),
@@ -452,11 +460,11 @@ pub(crate) mod ecu {
             })
     }
 
-    pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn get<T: UdsEcu + Clone>(
         UseApi(sec_plugin, _): UseApi<Secured, ()>,
-        State(WebserverEcuState {
+        EcuContext(WebserverEcuState {
             ecu_name, locks, ..
-        }): State<WebserverEcuState<T, U>>,
+        }): EcuContext<T>,
     ) -> Response {
         let claims = sec_plugin.as_auth_plugin().claims();
         get_handler(&locks.ecu, &claims, Some(&ecu_name)).await
@@ -504,7 +512,8 @@ pub(crate) mod vehicle {
             State(state): State<WebserverState<T>>,
         ) -> Response {
             let claims = sec_plugin.as_auth_plugin().claims();
-            delete_handler(&state.locks.vehicle, &lock, &claims, None, false).await
+            let locks = state.lock_provider.current_locks().await;
+            delete_handler(&locks.vehicle, &lock, &claims, None, false).await
         }
 
         pub(crate) fn docs_delete(op: TransformOperation) -> TransformOperation {
@@ -524,7 +533,15 @@ pub(crate) mod vehicle {
             >,
         ) -> Response {
             let claims = sec_plugin.as_auth_plugin().claims();
-            put_handler(&state.locks.vehicle, &lock, &claims, None, body, false).await
+            put_handler(
+                state.lock_provider.vehicle_lock(),
+                &lock,
+                &claims,
+                None,
+                body,
+                false,
+            )
+            .await
         }
 
         pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
@@ -539,7 +556,7 @@ pub(crate) mod vehicle {
             UseApi(_sec_plugin, _): UseApi<Secured, ()>,
             State(state): State<WebserverState<T>>,
         ) -> Response {
-            get_id_handler(&state.locks.vehicle, &lock, None, false).await
+            get_id_handler(state.lock_provider.vehicle_lock(), &lock, None, false).await
         }
 
         pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
@@ -565,7 +582,8 @@ pub(crate) mod vehicle {
         >,
     ) -> Response {
         let claims = sec_plugin.as_auth_plugin().claims();
-        let mut vehicle_rw_lock = state.locks.vehicle.lock_rw().await;
+        let locks = state.lock_provider.current_locks().await;
+        let mut vehicle_rw_lock = locks.vehicle.lock_rw().await;
         let vehicle_lock = match vehicle_rw_lock.get_mut(None) {
             Ok(lock) => lock,
             Err(e) => {
@@ -585,7 +603,7 @@ pub(crate) mod vehicle {
             .into_response();
         }
 
-        let ecu_locks = state.locks.ecu.lock_ro().await;
+        let ecu_locks = locks.ecu.lock_ro().await;
         if let Err(e) = all_locks_owned(&ecu_locks, &claims) {
             return ErrorWrapper {
                 error: e,
@@ -594,7 +612,7 @@ pub(crate) mod vehicle {
             .into_response();
         }
 
-        let functional_locks = state.locks.functional_group.lock_ro().await;
+        let functional_locks = locks.functional_group.lock_ro().await;
         if let Err(e) = all_locks_owned(&functional_locks, &claims) {
             return ErrorWrapper {
                 error: e,
@@ -606,8 +624,9 @@ pub(crate) mod vehicle {
         post_handler(
             &state.uds,
             LockContext {
-                lock: &state.locks.vehicle,
-                all_locks: &state.locks,
+                lock: &locks.vehicle,
+                lock_provider: Some(std::sync::Arc::clone(&state.lock_provider)),
+                untracked_locks: None,
                 rw_lock: Some(vehicle_rw_lock),
             },
             None,
@@ -635,7 +654,7 @@ pub(crate) mod vehicle {
         State(state): State<WebserverState<T>>,
     ) -> Response {
         let claims = sec_plugin.as_auth_plugin().claims();
-        get_handler(&state.locks.vehicle, &claims, None).await
+        get_handler(state.lock_provider.vehicle_lock(), &claims, None).await
     }
 
     pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
@@ -677,11 +696,64 @@ async fn reset_ecu_session_and_security<T: UdsEcu>(
     }
 }
 
+/// Releases everything a vehicle lock covered: ECU sessions and security access
+/// for every ECU, then every tracked ECU and functional-group lock.
+///
+/// `untracked_locks` is the test topology used when no provider is wired.
+async fn release_vehicle_lock<T: UdsEcu + Clone>(
+    uds: &T,
+    lock_provider: Option<Arc<SovdLockStateView>>,
+    untracked_locks: Option<Arc<Locks>>,
+    security_plugin: Box<dyn SecurityPlugin>,
+) {
+    let locks = match lock_provider {
+        Some(provider) => provider.current_locks().await,
+        None => ResolvedLocks::untracked(untracked_locks.expect("test lock topology is present")),
+    };
+    let sec = &(security_plugin as DynamicPlugin);
+    for ecu in uds.get_ecus().await {
+        reset_ecu_session_and_security(uds, &ecu, "vehicle lock cleanup", sec).await;
+    }
+
+    for lock in [&locks.ecu, &locks.functional_group] {
+        loop {
+            let mut rw_lock = lock.lock_rw().await;
+
+            // Find the next entity to delete
+            let entity_to_delete = {
+                let Ok(mut iterator) = rw_lock.try_iter_mut() else {
+                    tracing::error!("Failed to iterate over locks during vehicle lock cleanup");
+                    break;
+                };
+
+                iterator.find_map(|(entity_name, entity_lock)| {
+                    if let Some(entity_lock) = entity_lock {
+                        entity_lock.deletion_task.abort();
+                        Some(entity_name.clone())
+                    } else {
+                        None
+                    }
+                })
+            };
+
+            // If no entity found, we're done
+            if entity_to_delete.is_none() {
+                break;
+            }
+
+            if let Err(e) = rw_lock.delete(entity_to_delete.as_ref()).await {
+                tracing::error!("Failed to delete lock: {e}");
+            }
+        }
+    }
+}
+
 async fn create_lock<T: UdsEcu + Clone>(
     uds: &T,
     expiration: sovd_interfaces::locking::Request,
     lock_type: &LockType,
-    locks: &Arc<Locks>,
+    lock_provider: Option<Arc<SovdLockStateView>>,
+    untracked_locks: Option<Arc<Locks>>,
     entity_name: Option<&String>,
     security_plugin: Box<dyn SecurityPlugin>,
 ) -> Result<Lock, ApiError> {
@@ -766,48 +838,10 @@ async fn create_lock<T: UdsEcu + Clone>(
             }
 
             LockType::Vehicle(_) => {
-                let locks = Arc::clone(locks);
                 let uds = (*uds).clone();
                 LockCleanupFnHelper::new(async move || {
-                    let sec = &(security_plugin as DynamicPlugin);
-                    for ecu in uds.get_ecus().await {
-                        reset_ecu_session_and_security(&uds, &ecu, "vehicle lock cleanup", sec)
-                            .await;
-                    }
-
-                    for lock in [&locks.ecu, &locks.functional_group] {
-                        loop {
-                            let mut rw_lock = lock.lock_rw().await;
-
-                            // Find the next entity to delete
-                            let entity_to_delete = {
-                                let Ok(mut iterator) = rw_lock.try_iter_mut() else {
-                                    tracing::error!(
-                                        "Failed to iterate over locks during vehicle lock cleanup"
-                                    );
-                                    break;
-                                };
-
-                                iterator.find_map(|(entity_name, entity_lock)| {
-                                    if let Some(entity_lock) = entity_lock {
-                                        entity_lock.deletion_task.abort();
-                                        Some(entity_name.clone())
-                                    } else {
-                                        None
-                                    }
-                                })
-                            };
-
-                            // If no entity found, we're done
-                            if entity_to_delete.is_none() {
-                                break;
-                            }
-
-                            if let Err(e) = rw_lock.delete(entity_to_delete.as_ref()).await {
-                                tracing::error!("Failed to delete lock: {e}");
-                            }
-                        }
-                    }
+                    release_vehicle_lock(&uds, lock_provider, untracked_locks, security_plugin)
+                        .await;
                 })
             }
         }
@@ -836,19 +870,36 @@ fn update_lock(
     entity_name: Option<&String>,
     lock: &LockType,
 ) -> Result<sovd_interfaces::locking::post_put::Response, ApiError> {
+    update_lock_expiration(
+        lock_id,
+        claim,
+        entity_lock,
+        expiration.into(),
+        entity_name,
+        lock,
+    )
+}
+
+fn update_lock_expiration(
+    lock_id: &str,
+    claim: &impl Claims,
+    entity_lock: &mut Option<Lock>,
+    expiration_utc: DateTime<Utc>,
+    entity_name: Option<&String>,
+    lock: &LockType,
+) -> Result<sovd_interfaces::locking::post_put::Response, ApiError> {
     validate_claim(Some(lock_id), claim, entity_lock.as_ref())?;
     match entity_lock {
         Some(entity_lock) => {
-            let expiration_utc: DateTime<Utc> = expiration.into();
-            entity_lock.deletion_task.abort();
-            entity_lock.deletion_task = schedule_token_deletion(
+            let replacement_task = schedule_token_deletion(
                 entity_name.map(std::borrow::ToOwned::to_owned),
                 entity_lock.sovd.id.clone(),
                 lock.clone(),
                 expiration_utc,
             )?;
-
+            let previous_task = std::mem::replace(&mut entity_lock.deletion_task, replacement_task);
             entity_lock.expiration = expiration_utc;
+            previous_task.abort();
             Ok(entity_lock.sovd.clone())
         }
         None => Err(ApiError::Conflict("No lock found".to_owned())),
@@ -1039,7 +1090,8 @@ pub(crate) async fn delete_handler(
 
 pub(crate) struct LockContext<'a> {
     pub(crate) lock: &'a LockType,
-    pub(crate) all_locks: &'a Arc<Locks>,
+    pub(crate) lock_provider: Option<Arc<SovdLockStateView>>,
+    pub(crate) untracked_locks: Option<Arc<Locks>>,
     pub(crate) rw_lock: Option<WriteLock<'a>>,
 }
 
@@ -1100,7 +1152,8 @@ pub(crate) async fn post_handler<T: UdsEcu + Clone>(
             uds,
             expiration,
             context.lock,
-            context.all_locks,
+            context.lock_provider,
+            context.untracked_locks,
             entity_name,
             security_plugin,
         )
@@ -1403,6 +1456,34 @@ mod tests {
     use crate::test_utils::axum_response_into;
 
     #[tokio::test]
+    async fn invalid_renewal_keeps_existing_expiration_task() {
+        let deletion_task = tokio::spawn(std::future::pending());
+        let mut entity_lock = Some(Lock::new(
+            sovd_interfaces::locking::Lock {
+                id: "lock-id".to_owned(),
+                owned: None,
+            },
+            Utc::now() + chrono::TimeDelta::seconds(60),
+            "test_user".to_owned(),
+            deletion_task,
+            LockCleanupFnHelper::new(|| async {}),
+        ));
+        let lock_type = LockType::Vehicle(Arc::new(RwLock::new(None)));
+
+        let result = update_lock_expiration(
+            "lock-id",
+            &TestSecurityPlugin.claims(),
+            &mut entity_lock,
+            Utc::now() - chrono::TimeDelta::seconds(1),
+            None,
+            &lock_type,
+        );
+
+        assert!(matches!(result, Err(ApiError::BadRequest(_))));
+        assert!(!entity_lock.unwrap().deletion_task.is_finished());
+    }
+
+    #[tokio::test]
     async fn test_ecu_lock_cleanup_calls_reset() {
         let (mock_uds, ecu_name, locks) = setup_ecu_lock_test();
         #[allow(
@@ -1594,7 +1675,8 @@ mod tests {
             mock_uds,
             LockContext {
                 lock: &locks.ecu,
-                all_locks: locks,
+                lock_provider: None,
+                untracked_locks: Some(Arc::clone(locks)),
                 rw_lock: None,
             },
             Some(ecu_name),
@@ -1671,7 +1753,8 @@ mod tests {
             mock_uds,
             LockContext {
                 lock: &locks.functional_group,
-                all_locks: locks,
+                lock_provider: None,
+                untracked_locks: Some(Arc::clone(locks)),
                 rw_lock: None,
             },
             Some(fg_name),
@@ -1716,7 +1799,8 @@ mod tests {
             mock_uds,
             LockContext {
                 lock: &locks.vehicle,
-                all_locks: locks,
+                lock_provider: None,
+                untracked_locks: Some(Arc::clone(locks)),
                 rw_lock: None,
             },
             None,

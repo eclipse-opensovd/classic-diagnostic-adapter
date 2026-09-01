@@ -537,6 +537,13 @@ async fn test_variant_detection_duplicates() {
     .await;
 
     // Stop sim and check if ECUs are marked as disconnected after variant detection
+    let ecu_sim = runtime.ecu_sim.clone();
+    super::hook_cleanup(move || {
+        let ecu_sim = ecu_sim.clone();
+        async move {
+            let _ = start_ecu_sim_for_mode(&ecu_sim).await;
+        }
+    });
     stop_ecu_sim().await.unwrap();
     force_variant_detection(&runtime.config, &auth, sovd::ECU_FLXCNG1000_ENDPOINT)
         .await

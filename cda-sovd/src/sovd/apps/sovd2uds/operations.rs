@@ -151,16 +151,33 @@ pub(crate) mod runtimefilesupdate {
                 "/vehicle/v15/authorize",
                 vec![HttpMethod::GET, HttpMethod::POST],
             ),
-            // Locks may be created, listed and extended but not deleted, so a
-            // client cannot drop its lock mid-flash.
-            HttpRouteMatcher::new(
-                "/vehicle/v15/locks",
-                vec![HttpMethod::GET, HttpMethod::POST, HttpMethod::PUT],
-            ),
+            // The stable vehicle lock may be listed and extended, but topology-dependent
+            // creation and deletion remain blocked during an update.
+            HttpRouteMatcher::new("/vehicle/v15/locks", vec![HttpMethod::GET, HttpMethod::PUT]),
             HttpRouteMatcher {
                 prefix: EXECUTIONS_ROUTE.to_string(),
                 methods: vec![HttpMethod::GET],
             },
         ]
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn only_stable_vehicle_lock_operations_are_available_during_update() {
+            let routes = routes_accessible_during_update();
+            let locks = routes
+                .iter()
+                .find(|route| route.prefix == "/vehicle/v15/locks")
+                .unwrap();
+
+            assert!(locks.matches("/vehicle/v15/locks", &HttpMethod::GET));
+            assert!(locks.matches("/vehicle/v15/locks/id", &HttpMethod::GET));
+            assert!(locks.matches("/vehicle/v15/locks/id", &HttpMethod::PUT));
+            assert!(!locks.matches("/vehicle/v15/locks", &HttpMethod::POST));
+            assert!(!locks.matches("/vehicle/v15/locks/id", &HttpMethod::DELETE));
+        }
     }
 }

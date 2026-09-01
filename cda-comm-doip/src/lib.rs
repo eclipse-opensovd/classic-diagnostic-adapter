@@ -24,7 +24,9 @@ use cda_interfaces::{
     communication_control::{
         GatewayLifecycle, TransportControl, TransportState, error::CommControlError,
     },
-    dlt_ctx, pending_nrc_from_raw, uds_response_from_raw,
+    dlt_ctx,
+    ecu_data::EcuDataView,
+    pending_nrc_from_raw, uds_response_from_raw,
     util::{self, tokio_ext},
 };
 use doip_definitions::{
@@ -116,7 +118,8 @@ impl DiagnosticResponse {
 pub(crate) struct DoipGatewayState<T: EcuAddresses + DoipComParams> {
     pub(crate) doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>>,
     pub(crate) logical_address_to_connection: Arc<RwLock<HashMap<u16, usize>>>,
-    pub(crate) ecus: Arc<HashMap<String, RwLock<T>>>,
+    /// Resolved per operation because this gateway outlives any one load.
+    pub(crate) ecu_data: Arc<dyn EcuDataView<T>>,
     /// `None` until the first successful `start()` binds it. No UDP socket is
     /// created at construction time, only when an authorized activation runs.
     pub(crate) socket: Arc<Mutex<Option<DoIPUdpSocket>>>,
@@ -166,7 +169,7 @@ impl<T: EcuAddresses + DoipComParams> Clone for DoipGatewayState<T> {
         Self {
             doip_connections: Arc::clone(&self.doip_connections),
             logical_address_to_connection: Arc::clone(&self.logical_address_to_connection),
-            ecus: Arc::clone(&self.ecus),
+            ecu_data: Arc::clone(&self.ecu_data),
             socket: Arc::clone(&self.socket),
             netmask: self.netmask,
         }
@@ -177,7 +180,6 @@ pub struct DoipDiagGateway<T: EcuAddresses + DoipComParams> {
     state: DoipGatewayState<T>,
     config: DoipConfig,
     variant_detection: VariantDetectionSender,
-    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     lifecycle: Arc<GatewayLifecycle<DoipGatewayOperation>>,
 }
 
@@ -323,31 +325,28 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     /// Returns `String` if initialization fails, e.g. when the configured
     /// tester address/subnet cannot be parsed into a netmask.
     #[tracing::instrument(
-        skip(doip_config, ecus, variant_detection, connectivity_handler),
+        skip(doip_config, ecu_data, variant_detection),
         fields(
             tester_ip = doip_config.tester_address,
             gateway_port = doip_config.gateway_port,
-            ecu_count = ecus.len(),
             dlt_context = dlt_ctx!("DOIP")
         )
     )]
     pub async fn new(
         doip_config: &DoipConfig,
-        ecus: Arc<HashMap<String, RwLock<T>>>,
+        ecu_data: Arc<dyn EcuDataView<T>>,
         variant_detection: VariantDetectionSender,
-        connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     ) -> Result<Self, DoipGatewaySetupError> {
         Ok(Self {
             state: DoipGatewayState {
                 doip_connections: Arc::new(RwLock::new(Vec::new())),
                 logical_address_to_connection: Arc::new(RwLock::new(HashMap::new())),
-                ecus,
+                ecu_data,
                 socket: Arc::new(Mutex::new(None)),
                 netmask: create_netmask(&doip_config.tester_address, &doip_config.tester_subnet)?,
             },
             config: doip_config.clone(),
             variant_detection,
-            connectivity_handler,
             lifecycle: Arc::new(GatewayLifecycle::new(TransportState::Disabled)),
         })
     }
@@ -388,11 +387,19 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             &config.tester_address,
             config.gateway_port,
         )?);
+        // Vehicle identification and the gateway connects below are network
+        // I/O measured in seconds. Take the load's handles and release the
+        // borrow first: the lock is write-preferring, so holding it that long
+        // would stall every other reader behind a waiting runtime update.
+        let (ecus, connectivity_handler) = {
+            let data = self.state.ecu_data.transport_data().await;
+            (Arc::clone(data.ecus()), data.connectivity_handler())
+        };
         let gateways = vir_vam::get_vehicle_identification::<T, _>(
             socket,
             mask,
             config.gateway_port,
-            &self.state.ecus,
+            &ecus,
             shutdown.clone(),
         )
         .await
@@ -400,7 +407,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         drop(socket_guard);
 
         let mut gateway_ecu_map: HashMap<u16, Vec<u16>> = HashMap::new();
-        for ecu_lock in self.state.ecus.values() {
+        for ecu_lock in ecus.values() {
             let ecu = ecu_lock.read().await;
             gateway_ecu_map
                 .entry(ecu.logical_gateway_address())
@@ -413,11 +420,11 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                 &transport_config,
                 &GatewayState {
                     doip_connections: Arc::clone(&self.state.doip_connections),
-                    ecus: Arc::clone(&self.state.ecus),
+                    ecus: Arc::clone(&ecus),
+                    connectivity_handler: Arc::clone(&connectivity_handler),
                     gateway_ecu_map: gateway_ecu_map.clone(),
                     connection_tasks: Arc::clone(&connection_tasks),
                 },
-                Arc::clone(&self.connectivity_handler),
             )
             .await
             {
@@ -443,10 +450,8 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             self.state.clone(),
             Arc::clone(&connection_tasks),
             self.variant_detection.clone(),
-            Arc::clone(&self.connectivity_handler),
             shutdown,
-        )
-        .await;
+        );
         operation.vam_listener = Some(listener);
         Ok(())
     }
@@ -500,10 +505,9 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         // in that case, lookup the ecu name and check if the functional address
         // matches the given address.
         // this will be the case for tester present.
-        if let Some(ecu) = self
-            .state
-            .ecus
-            .get(&transmission_params.ecu_name.to_lowercase())
+        let data = self.state.ecu_data.transport_data().await;
+        let ecus = data.ecus();
+        if let Some(ecu) = ecus.get(&transmission_params.ecu_name.to_lowercase())
             && ecu.read().await.logical_functional_address() == message.target_address
             && let Some(gateway_ecu) = doip_conn.ecus.get(&transmission_params.gateway_address)
         {
@@ -636,14 +640,15 @@ impl<T: EcuAddresses + DoipComParams> PhysicalTransport for DoipDiagGateway<T> {
         ecu_name: &str,
         ecu_db: &RwLock<E>,
     ) -> Result<(), DiagServiceError> {
-        let ecu_lock = ecu_db.read().await;
+        let (gateway_address, ecu_address) = {
+            let ecu = ecu_db.read().await;
+            (ecu.logical_gateway_address(), ecu.logical_address())
+        };
 
-        let doip_conn = self
-            .get_doip_connection(ecu_lock.logical_gateway_address())
-            .await?;
+        let doip_conn = self.get_doip_connection(gateway_address).await?;
         doip_conn
             .ecus
-            .get(&ecu_lock.logical_address())
+            .get(&ecu_address)
             .ok_or_else(|| DiagServiceError::EcuOffline(ecu_name.to_owned()))?;
         Ok(())
     }
@@ -809,7 +814,9 @@ impl<T: EcuAddresses + DoipComParams> NetworkTopology for DoipDiagGateway<T> {
 impl<T: EcuAddresses + DoipComParams> TransportProbe for DoipDiagGateway<T> {
     async fn route_status(&self, ecu_name: &str) -> RouteStatus {
         let ecu_name = ecu_name.to_lowercase();
-        let Some(ecu_lock) = self.state.ecus.get(&ecu_name) else {
+        let data = self.state.ecu_data.transport_data().await;
+        let ecus = data.ecus();
+        let Some(ecu_lock) = ecus.get(&ecu_name) else {
             return RouteStatus::NotConfigured;
         };
         // Check if the gateway connection for this ECU is established
@@ -1202,7 +1209,6 @@ impl<T: EcuAddresses + DoipComParams> Clone for DoipDiagGateway<T> {
             state: self.state.clone(),
             config: self.config.clone(),
             variant_detection: self.variant_detection.clone(),
-            connectivity_handler: Arc::clone(&self.connectivity_handler),
             lifecycle: Arc::clone(&self.lifecycle),
         }
     }
@@ -1307,10 +1313,13 @@ mod tests {
     use std::{net::UdpSocket, sync::Arc, time::Duration};
 
     use cda_interfaces::{
-        DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, HashMap,
-        HashMapExtensions, PendingNrc, PhysicalTransport, ServicePayload, TransmissionParameters,
-        TransportResponse, UDS_ID_RESPONSE_BITMASK, VariantDetectionSender,
+        DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler,
+        FunctionalDescriptionConfig, HashMap, HashMapExtensions, PendingNrc, PhysicalTransport,
+        ReloadableOwner, ServicePayload, TransmissionParameters, TransportResponse,
+        UDS_ID_RESPONSE_BITMASK, VariantDetectionSender,
         communication_control::{GatewayLifecycle, TransportState},
+        datatypes::FaultConfig,
+        ecu_data::EcuData,
         nrc, service_ids,
     };
     use doip_definitions::{
@@ -1432,10 +1441,16 @@ mod tests {
         let mut addr_map: HashMap<u16, usize> = HashMap::new();
         addr_map.insert(GATEWAY_ADDR, 0);
 
+        let data = ReloadableOwner::new(EcuData::new(
+            Arc::new(HashMap::new()),
+            &FunctionalDescriptionConfig::default(),
+            FaultConfig::default(),
+            Arc::new(TestConnectivityHandler),
+        ));
         let state = DoipGatewayState {
             doip_connections: Arc::new(RwLock::new(vec![conn])),
             logical_address_to_connection: Arc::new(RwLock::new(addr_map)),
-            ecus: Arc::new(HashMap::new()),
+            ecu_data: Arc::new(data.reader()),
             socket: Arc::new(Mutex::new(Some(udp_socket))),
             netmask: 0,
         };
@@ -1444,7 +1459,6 @@ mod tests {
             state,
             config: DoipConfig::default(),
             variant_detection: VariantDetectionSender::new(mpsc::channel(1).0),
-            connectivity_handler: Arc::new(TestConnectivityHandler),
             lifecycle: Arc::new(GatewayLifecycle::new(TransportState::Enabled)),
         }
     }
@@ -1455,11 +1469,16 @@ mod tests {
     /// authorized [`DoipDiagGateway::enable`]
     #[tokio::test]
     async fn new_never_binds_the_doip_socket() {
+        let data = ReloadableOwner::new(EcuData::new(
+            Arc::new(HashMap::new()),
+            &FunctionalDescriptionConfig::default(),
+            FaultConfig::default(),
+            Arc::new(TestConnectivityHandler),
+        ));
         let gateway = DoipDiagGateway::<TestEcu>::new(
             &DoipConfig::default(),
-            Arc::new(HashMap::new()),
+            Arc::new(data.reader()),
             VariantDetectionSender::new(mpsc::channel(1).0),
-            Arc::new(TestConnectivityHandler),
         )
         .await
         .unwrap();

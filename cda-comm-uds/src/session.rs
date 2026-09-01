@@ -109,6 +109,7 @@ impl<S: EcuGateway, T: EcuManager> UdsSession for UdsManager<S, T> {
         expiration: Option<Duration>,
     ) -> Result<Self::Response, DiagServiceError> {
         tracing::info!(ecu_name = %ecu_name, session = %session, "Setting session");
+        let _communication_guard = self.require_communication_ready()?;
         let ecu_diag_service = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
         let dc = ecu_diag_service
             .read()
@@ -139,7 +140,8 @@ impl<S: EcuGateway, T: EcuManager> UdsSession for UdsManager<S, T> {
             old_task.abort();
         }
 
-        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
+        let _communication_guard = self.require_communication_ready()?;
+        let ecu_diag_service = self.uds_ecu_db(ecu_name).await?;
         let default_session = ecu_diag_service.read().await.default_session()?;
         let current_session = ecu_diag_service.read().await.session().await?;
 

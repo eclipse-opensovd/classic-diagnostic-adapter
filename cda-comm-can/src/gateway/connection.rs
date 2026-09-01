@@ -11,35 +11,35 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::CanId;
 use tokio_socketcan_isotp::{IsoTpBehaviour, IsoTpOptions, IsoTpSocket};
 
-use super::{can_id::CanIdExt, error::CanError};
+use super::{CanEcuAddressing, can_id::CanIdExt, error::CanError};
 
 /// Represents a CAN connection to a single ECU using ISO-TP.
+///
+/// Holds the current ECU-data topology's derived addressing in shared form, so
+/// resolving a connection per use costs an `Arc` clone rather than a rebuild.
+#[derive(Clone, Debug)]
 pub struct CanEcuConnection {
-    /// ECU name for logging/identification
-    pub ecu_name: String,
-    /// Physical request CAN ID
-    pub request_id: CanId,
-    /// Physical response CAN ID
-    pub response_id: CanId,
-    /// CAN interface name
-    interface: String,
+    addressing: Arc<CanEcuAddressing>,
 }
 
 impl CanEcuConnection {
     /// Creates a new CAN ECU connection configuration.
     #[must_use]
-    pub fn new(ecu_name: String, interface: String, request_id: CanId, response_id: CanId) -> Self {
-        Self {
-            ecu_name,
-            request_id,
-            response_id,
-            interface,
-        }
+    pub fn new(addressing: Arc<CanEcuAddressing>) -> Self {
+        Self { addressing }
+    }
+
+    pub(crate) fn ecu_name(&self) -> &str {
+        &self.addressing.ecu_name
+    }
+
+    pub(crate) fn request_id(&self) -> CanId {
+        self.addressing.request_id
     }
 
     /// Opens an ISO-TP socket for this ECU connection.
@@ -50,8 +50,8 @@ impl CanEcuConnection {
         // Following tokio IsoTpSocket naming scheme:
         // src (ISO-TP rx_id) = what we receive on (ECU's response ID, e.g. 0x7E8)
         // dst (ISO-TP tx_id) = what we transmit on (ECU's request ID, e.g. 0x7E0)
-        let src = self.response_id.to_socket_id()?;
-        let dst = self.request_id.to_socket_id()?;
+        let src = self.addressing.response_id.to_socket_id()?;
+        let dst = self.addressing.request_id.to_socket_id()?;
 
         // Enable TX padding to send 8-byte CAN frames (required by many ECUs)
         let isotp_opts = IsoTpOptions::new(
@@ -64,14 +64,13 @@ impl CanEcuConnection {
         )
         .ok();
 
-        IsoTpSocket::open_with_opts(&self.interface, src, dst, isotp_opts, None, None).map_err(
-            |e| {
+        IsoTpSocket::open_with_opts(&self.addressing.interface, src, dst, isotp_opts, None, None)
+            .map_err(|e| {
                 CanError::SocketError(format!(
                     "Failed to open ISO-TP socket on {}: {}",
-                    self.interface, e
+                    self.addressing.interface, e
                 ))
-            },
-        )
+            })
     }
 
     /// Verifies that an ISO-TP socket can be opened for this connection.
@@ -108,20 +107,23 @@ impl CanEcuConnection {
         let socket = self.open_socket()?;
 
         tracing::debug!(
-            ecu = %self.ecu_name,
-            request_id = %self.request_id,
-            response_id = %self.response_id,
+            ecu = %self.addressing.ecu_name,
+            request_id = %self.addressing.request_id,
+            response_id = %self.addressing.response_id,
             data = %hex::encode(request),
             "Sending CAN request"
         );
 
         socket.write_packet(request).await.map_err(|e| {
-            CanError::SendFailed(format!("Failed to send to {}: {}", self.ecu_name, e))
+            CanError::SendFailed(format!(
+                "Failed to send to {}: {}",
+                self.addressing.ecu_name, e
+            ))
         })?;
 
         Ok(CanExchange {
             socket,
-            ecu_name: self.ecu_name.clone(),
+            ecu_name: self.addressing.ecu_name.clone(),
         })
     }
 
@@ -142,7 +144,7 @@ impl CanEcuConnection {
         if response.is_empty() {
             Err(CanError::ReceiveFailed(format!(
                 "Received empty probe response from {}",
-                self.ecu_name
+                self.addressing.ecu_name
             )))
         } else {
             Ok(response)
@@ -153,10 +155,7 @@ impl CanEcuConnection {
     /// Format: "interface:request_id->response_id"
     #[must_use]
     pub fn network_address(&self) -> String {
-        format!(
-            "{}:{}->{}",
-            self.interface, self.request_id, self.response_id
-        )
+        self.addressing.network_address()
     }
 }
 
@@ -190,17 +189,6 @@ impl CanExchange {
             ))),
             Err(_) => Err(CanError::Timeout),
         }
-    }
-}
-
-impl std::fmt::Debug for CanEcuConnection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CanEcuConnection")
-            .field("ecu_name", &self.ecu_name)
-            .field("interface", &self.interface)
-            .field("request_id", &self.request_id.to_string())
-            .field("response_id", &self.response_id.to_string())
-            .finish()
     }
 }
 
@@ -250,12 +238,12 @@ mod tests {
         });
 
         // Tester side: the production connection type with extended IDs.
-        let conn = CanEcuConnection::new(
+        let conn = CanEcuConnection::new(Arc::new(CanEcuAddressing::new(
             "smoke".to_owned(),
             IFACE.to_owned(),
             CanId::try_from(REQ_ID).unwrap(),
             CanId::try_from(RESP_ID).unwrap(),
-        );
+        )));
         let response = conn
             .send_receive(&[0x3E, 0x00], Duration::from_secs(2))
             .await

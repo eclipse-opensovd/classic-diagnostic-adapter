@@ -17,8 +17,6 @@
 pub mod access;
 pub mod error;
 pub mod operation;
-// Private: `SwappableGateway` is minted only via `ComponentSlot::transport_control`.
-mod swappable_gateway;
 
 use std::time::Duration;
 
@@ -53,15 +51,12 @@ pub enum TransportState {
 ///
 /// # Ownership model
 ///
-/// Each layer owns its own, unshared tracker: the diagnostic transport router
-/// one, and each gateway (`DoipDiagGateway`, `CanDiagGateway`) one. When the
-/// router calls `gateway.enable()`, both transition their own tracker. External
-/// consumers only ever observe the router's, via the transport-control view
-/// minted from `ComponentSlot::transport_control`.
+/// Each composed transport layer owns an unshared tracker. When a parent calls a
+/// child's `enable`, both transition their own tracker. External consumers
+/// observe only the outermost [`TransportControl`] implementation.
 ///
-/// A gateway's own tracker serves its `enable()` idempotency short-circuit, and
-/// is the only source of truth when the gateway is used without a router (tests,
-/// shutdown).
+/// A child transport's tracker serves its `enable` idempotency short-circuit and
+/// remains its source of truth when it is used independently.
 ///
 /// This type only tracks state. Serializing a complete lifecycle operation is
 /// the job of the operation mutex each layer already owns.
@@ -166,21 +161,16 @@ pub enum VariantDetectionMode {
     Never,
 }
 
-/// Controls behavior of diagnostic transport after a runtime database update.
-///
-/// An update always takes the exclusive disable lease, so communication is
-/// unavailable for its duration. This decides only what happens to the lease
-/// once the update finishes.
+/// Controls transport finalization after an operation that held exclusive
+/// disabled ownership.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum PostUpdateCommunicationMode {
-    /// After update, bring communication back up. Resumes the transport the
-    /// update displaced, and requests activation if it started from a deferred
-    /// runtime. That request is subject to `init_mode`, so under `Disabled`
-    /// communication stays down regardless.
+    /// Restore communication after the operation. Resumes displaced transport
+    /// state and requests activation when policy permits.
     #[default]
     Enabled,
-    /// After update, leave communication deferred, even if the update displaced
-    /// an enabled runtime. The transport stays down until triggered.
+    /// Finalize the operation while leaving transport disabled until a later
+    /// activation.
     Deferred,
 }
 
@@ -206,12 +196,11 @@ pub struct CommunicationSettings {
     ///   only, so variant-dependent surfaces report not-ready until detection is
     ///   triggered explicitly.
     pub variant_detection: VariantDetectionMode,
-    /// Controls transport behavior after a runtime database update:
-    /// - "Enabled": resume the transport the update displaced, requesting
-    ///   activation if it started from a deferred runtime, subject to `init_mode`
-    ///   (default).
-    /// - "Deferred": leave communication deferred even if the update displaced
-    ///   an enabled runtime. The transport stays down until triggered.
+    /// Controls transport behavior after an operation held exclusive disabled
+    /// ownership:
+    /// - "Enabled": restore displaced transport state and request activation
+    ///   when policy permits (default).
+    /// - "Deferred": remain disabled until a later activation.
     pub post_update_mode: PostUpdateCommunicationMode,
     /// The value (in seconds) for the HTTP `Retry-After` header returned when a
     /// diagnostic request arrives while initialization is still pending.
@@ -236,11 +225,11 @@ impl Default for CommunicationSettings {
 /// The intended call chain is:
 ///
 /// ```text
-/// CommunicationHandle -> SwappableGateway -> DiagnosticTransportRouter -> Gateways
+/// lifecycle coordinator -> outer TransportControl -> child transports
 /// ```
 ///
 /// The coordinator calls `state()` on the outermost implementor to populate
-/// operation results. It never reaches through to query individual gateway state.
+/// operation results. It never reaches through to query child transport state.
 #[async_trait]
 pub trait TransportControl: Send + Sync + 'static {
     /// Start the diagnostic transport sequence.
@@ -268,8 +257,8 @@ pub trait TransportControl: Send + Sync + 'static {
 
 /// Application-level hook into the communication transport lifecycle.
 ///
-/// Registered implementations run in registration order on every transport
-/// enable and in reverse order on every transport disable.
+/// Registered implementations run in registration order when the transport is
+/// enabled, and in reverse order when it is disabled.
 ///
 /// [`initialize`](Self::initialize) and [`deinitialize`](Self::deinitialize) are
 /// a matched pair. The framework never calls `initialize` twice without a

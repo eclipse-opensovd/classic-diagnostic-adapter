@@ -14,7 +14,6 @@
 use std::collections::HashSet;
 
 use async_trait::async_trait;
-use cda_database::mmap_and_decode_mdd;
 use cda_interfaces::{
     runtime_update_api::{
         LockStateProvider, RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateCollections,
@@ -25,8 +24,8 @@ use cda_interfaces::{
 
 /// Default implementation of the runtime update security handler.
 ///
-/// Validates vehicle lock ownership, detects lock conflicts, and verifies
-/// MDD file integrity.
+/// Validates vehicle lock ownership, detects lock conflicts, and verifies file
+/// integrity through the injected [`RuntimeFileInspector`].
 pub struct DefaultUpdateSecurityHandler<L: LockStateProvider>(std::marker::PhantomData<L>);
 
 impl<L: LockStateProvider> DefaultUpdateSecurityHandler<L> {
@@ -37,20 +36,11 @@ impl<L: LockStateProvider> DefaultUpdateSecurityHandler<L> {
     }
 }
 
-impl<L: LockStateProvider> Default for DefaultUpdateSecurityHandler<L> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[async_trait]
 impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'static>
     RuntimeUpdateSecurityPlugin<L, C> for DefaultUpdateSecurityHandler<L>
 {
-    /// Ensures the caller owns the vehicle lock and no ECU or functional-group
-    /// locks are held. Conflicting communication activity is already excluded by
-    /// the coordinator's runtime-update block.
-    async fn check_apply_allowed(
+    async fn check_execution_allowed(
         &self,
         lock_state_provider: &L,
         collections: &UpdateCollections<C>,
@@ -58,9 +48,7 @@ impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'sta
         lock_state_provider
             .vehicle_lock_owner_sub()
             .await
-            .ok_or(RuntimeUpdateError::NoLock(
-                "No vehicle lock owned".to_owned(),
-            ))?;
+            .ok_or_else(|| RuntimeUpdateError::NoLock("No vehicle lock owned".to_owned()))?;
         if lock_state_provider.has_non_vehicle_locks().await {
             return Err(RuntimeUpdateError::LockConflict(
                 "Non-vehicle locks are held, cannot apply update".to_owned(),
@@ -82,13 +70,7 @@ impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'sta
     }
 
     async fn check_file_integrity(&self, path: &std::path::Path) -> Result<(), VerificationError> {
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| VerificationError(format!("Invalid UTF-8 path: {}", path.display())))?;
-        mmap_and_decode_mdd(path_str).map_err(|e| {
-            VerificationError(format!("Failed to parse MDD '{}': {e}", path.display()))
-        })?;
-        Ok(())
+        crate::mdd::validate(path)
     }
 }
 
@@ -105,24 +87,16 @@ async fn mdd_ecu_names<C: Collection + DirectFileAccess>(
             let path = col
                 .file_path(key)
                 .map_err(|e| RuntimeUpdateError::ValidationFailed(e.to_string()))?;
-            let path_str = path.to_str().ok_or_else(|| {
-                RuntimeUpdateError::ValidationFailed(format!(
-                    "MDD path is not valid UTF-8: {}",
-                    path.display()
-                ))
-            })?;
-            mmap_and_decode_mdd(path_str)
-                .map(|mdd| mdd.ecu_name)
-                .map_err(|e| {
-                    RuntimeUpdateError::ValidationFailed(format!("Failed to read MDD: {e}"))
-                })
+            crate::mdd::ecu_name(&path)
         })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        path::PathBuf,
+    };
 
     use async_trait::async_trait;
     use cda_interfaces::{
@@ -222,15 +196,16 @@ mod tests {
         MockLockProvider,
     ) {
         let lock_provider = make_lock_provider(owner, has_ecu_conflicts, has_fg_conflicts);
-        let handler = DefaultUpdateSecurityHandler::new();
+        let handler = DefaultUpdateSecurityHandler::new(
+        );
         (handler, lock_provider)
     }
 
     #[tokio::test]
-    async fn check_apply_allowed_returns_no_lock_when_no_vehicle_lock_held() {
+    async fn check_execution_allowed_returns_no_lock_when_no_vehicle_lock_held() {
         let (handler, lock_provider) = make_handler(None, false, false);
         let result = handler
-            .check_apply_allowed(
+            .check_execution_allowed(
                 &lock_provider,
                 &UpdateCollections::<LocalCollection>::default(),
             )
@@ -239,10 +214,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_apply_allowed_succeeds_when_vehicle_lock_is_held() {
+    async fn check_execution_allowed_succeeds_when_vehicle_lock_is_held() {
         let (handler, lock_provider) = make_handler(Some("user-b"), false, false);
         let result = handler
-            .check_apply_allowed(
+            .check_execution_allowed(
                 &lock_provider,
                 &UpdateCollections::<LocalCollection>::default(),
             )
@@ -251,10 +226,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_apply_allowed_returns_lock_conflict_on_ecu_conflicts() {
+    async fn check_execution_allowed_returns_lock_conflict_on_ecu_conflicts() {
         let (handler, lock_provider) = make_handler(Some("user-a"), true, false);
         let result = handler
-            .check_apply_allowed(
+            .check_execution_allowed(
                 &lock_provider,
                 &UpdateCollections::<LocalCollection>::default(),
             )
@@ -263,10 +238,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_apply_allowed_returns_lock_conflict_on_fg_conflicts() {
+    async fn check_execution_allowed_returns_lock_conflict_on_fg_conflicts() {
         let (handler, lock_provider) = make_handler(Some("user-a"), false, true);
         let result = handler
-            .check_apply_allowed(
+            .check_execution_allowed(
                 &lock_provider,
                 &UpdateCollections::<LocalCollection>::default(),
             )
@@ -278,11 +253,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_apply_allowed_succeeds_when_owner_matches_and_no_conflicts() {
+    async fn check_execution_allowed_succeeds_when_owner_matches_and_no_conflicts() {
         let (handler, lock_provider) = make_handler(Some("user-a"), false, false);
         assert!(
             handler
-                .check_apply_allowed(
+                .check_execution_allowed(
                     &lock_provider,
                     &UpdateCollections::<LocalCollection>::default()
                 )
@@ -290,6 +265,9 @@ mod tests {
                 .is_ok()
         );
     }
+
+
+
 
     #[tokio::test]
     async fn check_file_integrity_mdd_fails_on_nonexistent_file() {
@@ -310,7 +288,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_apply_allowed_succeeds_when_pending_and_current_mdd_ecu_names_match() {
+    async fn check_execution_allowed_succeeds_when_pending_and_current_mdd_ecu_names_match() {
         let (handler, lock_provider) = make_handler(Some("user"), false, false);
         let dir = tempfile::tempdir().unwrap();
         let storage = LocalStorage::new(dir.path()).unwrap();
@@ -332,7 +310,7 @@ mod tests {
 
         let collections = make_collections(&storage).await;
         let result = handler
-            .check_apply_allowed(&lock_provider, &collections)
+            .check_execution_allowed(&lock_provider, &collections)
             .await;
         assert!(result.is_ok());
     }
