@@ -20,7 +20,7 @@ use cda_interfaces::{
     http_protection::registry::{HttpProtectionRegistry, HttpRouteMatcher},
     runtime_update_api::{
         BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider, RuntimeFileCatalog,
-        RuntimeFileStore, RuntimeFilesQuery, RuntimeReloaderPlugin,
+        RuntimeFileInspector, RuntimeFileStore, RuntimeFilesQuery, RuntimeReloaderPlugin,
         RuntimeUpdateError, RuntimeUpdateExecutor, RuntimeUpdateSecurityPlugin, UpdateExecution,
         UploadFile,
     },
@@ -46,6 +46,7 @@ pub struct DefaultRuntimeUpdatePlugin<
     executions: Arc<RwLock<HashMap<String, UpdateExecution>>>,
     /// Format-specific reads (validate, revision, ECU name), so the plugin
     /// carries no database format of its own.
+    file_inspector: Arc<dyn RuntimeFileInspector>,
     communication_disable: Arc<dyn DisableCommunication>,
     http_protections: HttpProtectionRegistry,
     update_exempt_routes: Vec<HttpRouteMatcher>,
@@ -79,6 +80,7 @@ impl<
         reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
         security_handler: Arc<UpdateSecurityPlugin>,
         lock_provider: Arc<Lock>,
+        file_inspector: Arc<dyn RuntimeFileInspector>,
         communication_disable: Arc<dyn DisableCommunication>,
         http_protections: HttpProtectionRegistry,
         update_exempt_routes: Vec<HttpRouteMatcher>,
@@ -91,6 +93,7 @@ impl<
             security_handler,
             lock_provider,
             executions: Arc::new(RwLock::new(HashMap::default())),
+            file_inspector,
             communication_disable,
             http_protections,
             update_exempt_routes,
@@ -111,21 +114,21 @@ impl<
         &self,
         query: &RuntimeFilesQuery,
     ) -> Result<BulkDataList, RuntimeUpdateError> {
-        crate::storage::list_current_files(&*self.storage, query).await
+        crate::storage::list_current_files(&*self.storage, query, &*self.file_inspector).await
     }
 
     async fn list_nextupdate(
         &self,
         query: &RuntimeFilesQuery,
     ) -> Result<BulkDataList, RuntimeUpdateError> {
-        crate::storage::compute_nextupdate_state(&*self.storage, query).await
+        crate::storage::compute_nextupdate_state(&*self.storage, query, &*self.file_inspector).await
     }
 
     async fn list_backup(
         &self,
         query: &RuntimeFilesQuery,
     ) -> Result<BulkDataList, RuntimeUpdateError> {
-        crate::storage::list_backup_files(&*self.storage, query).await
+        crate::storage::list_backup_files(&*self.storage, query, &*self.file_inspector).await
     }
 }
 
@@ -245,6 +248,7 @@ mod tests {
                 owner: owner.map(ToOwned::to_owned),
                 has_conflicts,
             }),
+            crate::test_utils::test_inspector(),
             Arc::clone(&communication_disable),
             http_protections,
             Vec::new(),

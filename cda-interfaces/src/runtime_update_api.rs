@@ -127,6 +127,38 @@ impl<C: Collection + DirectFileAccess> Default for UpdateCollections<C> {
     }
 }
 
+/// Format-specific operations used by the runtime-update plugin.
+///
+/// Implementations validate staged and installed files, expose ECU-name and revision metadata,
+/// and optionally decompress applied files. Database construction and signature
+/// policy remain the application's responsibility. Methods are
+/// synchronous because implementations inspect local files directly.
+pub trait RuntimeFileInspector: Send + Sync + 'static {
+    /// Verifies that `path` holds a well-formed runtime database.
+    ///
+    /// Called before promotion and before an installed file is constructed into live state.
+    ///
+    /// # Errors
+    /// Returns [`VerificationError`] when the file is malformed or unreadable.
+    fn validate(&self, path: &std::path::Path) -> Result<(), VerificationError>;
+
+    /// Returns the short name of the ECU this file describes.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeUpdateError`] when the file cannot be read or carries no name.
+    fn ecu_name(&self, path: &std::path::Path) -> Result<String, RuntimeUpdateError>;
+
+    /// Returns the file's revision, or `None` when it carries none or cannot be
+    /// read. Surfaced as `x-sovd2uds-revision`, where absent is not an error.
+    fn revision(&self, path: &std::path::Path) -> Option<String>;
+
+    /// Rewrites the file uncompressed in place, trading disk for lower runtime
+    /// memory. Formats without compression should succeed without doing anything.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeUpdateError`] when rewriting fails.
+    fn decompress_in_place(&self, path: &std::path::Path) -> Result<(), RuntimeUpdateError>;
+}
 
 /// Provides read-only access to vehicle lock state for security validation.
 ///

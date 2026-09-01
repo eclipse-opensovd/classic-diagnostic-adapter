@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use cda_interfaces::runtime_update_api::{RuntimeUpdateError, VerificationError};
+use cda_interfaces::runtime_update_api::RuntimeUpdateError;
 
 pub(crate) fn ecu_name(path: &Path) -> Result<String, RuntimeUpdateError> {
     let path = path.to_str().ok_or_else(|| {
@@ -32,12 +32,13 @@ pub(crate) fn revision(path: &Path) -> Option<String> {
         .and_then(|mdd| mdd.revision)
 }
 
-
-pub(crate) fn validate(path: &Path) -> Result<(), VerificationError> {
-    let path = path
-        .to_str()
-        .ok_or_else(|| VerificationError("MDD path is not valid UTF-8".to_owned()))?;
-    cda_database::mmap_and_decode_mdd(path)
-        .map(|_mdd| ())
-        .map_err(|error| VerificationError(format!("Failed to read MDD: {error}")))
+pub(crate) fn decompress_in_place(path: &Path) -> Result<(), RuntimeUpdateError> {
+    let path = path.to_str().ok_or_else(|| {
+        RuntimeUpdateError::ValidationFailed("MDD path is not valid UTF-8".to_owned())
+    })?;
+    cda_database::update_mdd_uncompressed(path)
+        .map(|_rewritten| ())
+        .map_err(|error| {
+            RuntimeUpdateError::ValidationFailed(format!("Failed to decompress MDD: {error}"))
+        })
 }

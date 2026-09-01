@@ -31,7 +31,7 @@ use cda_interfaces::{
     dlt_ctx,
     ecu_data::{EcuData, EcuDataView},
     health::HealthProvider,
-    runtime_update_api::ReloadError,
+    runtime_update_api::{ReloadError, RuntimeFileInspector},
 };
 use cda_plugin_security::SecurityPlugin;
 use cda_sovd::SovdRegistryUpdate;
@@ -234,6 +234,7 @@ async fn seed_storage_if_configured(config: &Configuration) {
 pub async fn load_vehicle_data<S: SecurityPlugin>(
     config: &Configuration,
     health: Option<&cda_health::HealthState>,
+    file_inspector: Arc<dyn RuntimeFileInspector>,
 ) -> Result<VehicleData<S>, AppError> {
     let health_providers = register_health_providers(health).await?;
     let (variant_detection_sender, variant_detection_receiver) = variant_detection_channel();
@@ -243,6 +244,7 @@ pub async fn load_vehicle_data<S: SecurityPlugin>(
     let vehicle_factory = Arc::new(CdaMainVehicleFactory::<S>::new(
         health_providers.clone(),
         variant_detection_sender.clone(),
+        file_inspector,
     ));
 
     let reload_data = match vehicle_factory.create(config).await {
@@ -341,12 +343,13 @@ pub(crate) async fn create_vehicle_model<S: SecurityPlugin>(
     config: &Configuration,
     health_providers: Option<&HashMap<String, Arc<dyn HealthProvider>>>,
     variant_detection: VariantDetectionSender,
+    file_inspector: &dyn RuntimeFileInspector,
 ) -> Result<VehicleModel<S>, AppError> {
     let mdd_paths = mdd::resolve_configured_mdd_paths(config).await;
     let db_provider: Option<&Arc<dyn HealthProvider>> =
         health_providers.and_then(|h| h.get(mdd::DB_HEALTH_COMPONENT_KEY));
     let databases =
-        Arc::new(load_databases::<S>(config, &mdd_paths, db_provider).await?);
+        Arc::new(load_databases::<S>(config, &mdd_paths, db_provider, file_inspector).await?);
     if !mdd_paths.is_empty() && databases.is_empty() {
         return Err(AppError::NoDatabasesLoaded {
             provided: mdd_paths.len(),
@@ -598,6 +601,7 @@ mod tests {
     use cda_storage::LocalStorage;
 
     use super::*;
+    use crate::mdd_inspector::MddFileInspector;
 
     fn config_for(database_dir: &std::path::Path, storage_dir: &std::path::Path) -> Configuration {
         let mut config = crate::config::default_config();
@@ -612,7 +616,7 @@ mod tests {
     ) -> Result<VehicleModel<TestSecurityPlugin>, AppError> {
         let config = config_for(database_dir, storage_dir);
         let (sender, _receiver) = variant_detection_channel();
-        create_vehicle_model::<TestSecurityPlugin>(&config, None, sender).await
+        create_vehicle_model::<TestSecurityPlugin>(&config, None, sender, &MddFileInspector).await
     }
 
     #[tokio::test]
@@ -726,6 +730,7 @@ mod tests {
                     "/../testcontainer/odx/FLXC1000.mdd"
                 ))],
                 None,
+                &MddFileInspector,
             )
             .await?,
         );
@@ -813,7 +818,7 @@ mod tests {
         let (sender, _receiver) = variant_detection_channel();
 
         let Err(error) =
-            create_vehicle_model::<TestSecurityPlugin>(&config, None, sender)
+            create_vehicle_model::<TestSecurityPlugin>(&config, None, sender, &MddFileInspector)
                 .await
         else {
             panic!("MDD files were provided but none loaded, this must be an error");

@@ -36,7 +36,7 @@ use cda_interfaces::DiagServiceError;
 use cda_plugin_security::{DefaultSecurityPluginData, mock::TestSecurityPlugin};
 use opensovd_cda_lib::{
     TransportConfigs, VehicleData, config::configfile::Configuration, create_diagnostic_gateway,
-    load_vehicle_data, mdd::load_databases,
+    load_vehicle_data, mdd::load_databases, mdd_inspector::MddFileInspector,
 };
 
 /// Vendor override for `cda_core::lookup_request_seed_service`, registered only
@@ -95,7 +95,7 @@ async fn vendor_override_is_dispatched_for_matching_concrete_type() {
     let config = Configuration::default();
     let mdd_paths = vec![test_mdd_path()];
     let databases =
-        load_databases::<TestSecurityPlugin>(&config, &mdd_paths, None)
+        load_databases::<TestSecurityPlugin>(&config, &mdd_paths, None, &MddFileInspector)
             .await
             .expect("failed to load test ECU database");
     let (_, ecu_lock) = databases.iter().next().expect("no ECU was loaded");
@@ -115,7 +115,7 @@ async fn dispatcher_falls_back_when_concrete_type_does_not_match() {
     let config = Configuration::default();
     let mdd_paths = vec![test_mdd_path()];
     let databases =
-        load_databases::<DefaultSecurityPluginData>(&config, &mdd_paths, None)
+        load_databases::<DefaultSecurityPluginData>(&config, &mdd_paths, None, &MddFileInspector)
             .await
             .expect("failed to load test ECU database");
     let (_, ecu_lock) = databases.iter().next().expect("no ECU was loaded");

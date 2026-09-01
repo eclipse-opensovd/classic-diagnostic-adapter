@@ -17,6 +17,7 @@
 //! boots. The default startup path uses [`Setup::new`] with the standard update plugin; a
 //! custom path calls [`Setup::with_update_plugin`] to inject any [`RuntimeFilesUpdatePlugin`]
 //! implementation, [`Setup::with_communication_plugin`] to replace the default
+//! `init_mode`-aware communication plugin, and [`Setup::with_file_inspector`] to replace the
 //! reader for the application's database format, before handing the `Setup` to one of the
 //! `run_*` functions.
 //!
@@ -33,6 +34,7 @@ use cda_interfaces::{
     },
     health::HealthProvider,
     http_protection::registry::HttpProtectionRegistry,
+    runtime_update_api::RuntimeFileInspector,
 };
 use cda_plugin_communication_management::{
     lifecycle::{
@@ -78,6 +80,9 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
     pub config: Arc<RwLock<Configuration>>,
     /// Runtime-only preparation and typed reload capability.
     pub update_preparation: Arc<CdaVehicleUpdatePreparation<SP>>,
+    /// The injected inspector for the application's database format. The single
+    /// instance: an OEM that supplies its own is never bypassed.
+    pub file_inspector: Arc<dyn RuntimeFileInspector>,
     pub dynamic_router: cda_sovd::dynamic_router::DynamicRouter,
     /// Read-only lock topology view; update plugins receive no publication authority.
     pub lock_provider: Arc<cda_sovd::SovdLockStateView>,
@@ -148,6 +153,9 @@ pub struct Setup<
     /// routes are not registered.
     pub(crate) build_update_plugin: Option<UPB>,
     pub(crate) build_communication_plugin: CPB,
+    /// The one construction site of the application's default file inspector.
+    /// Everything that reads a database file goes through this instance.
+    pub(crate) file_inspector: Arc<dyn RuntimeFileInspector>,
     pub(crate) initialize_tracing: bool,
     pub(crate) shutdown_signal: Option<ShutdownSignal>,
 }
@@ -167,6 +175,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Setup<SP, SL> {
             pre_load: None,
             build_update_plugin: None,
             build_communication_plugin: DefaultCommunicationPluginBuilder,
+            file_inspector: Arc::new(crate::mdd_inspector::MddFileInspector),
             initialize_tracing: true,
             shutdown_signal: None,
         }
@@ -185,6 +194,17 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
     #[must_use]
     pub fn with_shutdown_signal(mut self, shutdown_signal: ShutdownSignal) -> Self {
         self.shutdown_signal = Some(shutdown_signal);
+        self
+    }
+
+    /// Replaces the MDD file inspector used for validation, metadata, revision,
+    /// and decompression.
+    ///
+    /// Database parsing remains MDD-specific; startup and reload use this
+    /// inspector for the format-level operations it provides.
+    #[must_use]
+    pub fn with_file_inspector(mut self, file_inspector: Arc<dyn RuntimeFileInspector>) -> Self {
+        self.file_inspector = file_inspector;
         self
     }
 
@@ -237,6 +257,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
             pre_load: self.pre_load,
             build_update_plugin: Some(builder),
             build_communication_plugin: self.build_communication_plugin,
+            file_inspector: self.file_inspector,
             initialize_tracing: self.initialize_tracing,
             shutdown_signal: self.shutdown_signal,
         }
@@ -254,6 +275,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
             pre_load: self.pre_load,
             build_update_plugin: self.build_update_plugin,
             build_communication_plugin: plugin,
+            file_inspector: self.file_inspector,
             initialize_tracing: self.initialize_tracing,
             shutdown_signal: self.shutdown_signal,
         }
@@ -381,6 +403,7 @@ pub(crate) async fn setup_runtime_routes<SP, SL, UPB, CPB>(
     ws: &ApplicationState,
     build_update_plugin: Option<UPB>,
     communication_plugin: CPB,
+    file_inspector: Arc<dyn RuntimeFileInspector>,
 ) -> Result<CommunicationRuntime, AppError>
 where
     SP: SecurityPlugin,
@@ -471,6 +494,7 @@ where
     let infra = CdaRuntime {
         config: Arc::new(RwLock::new(config)),
         update_preparation,
+        file_inspector,
         dynamic_router: ws.dynamic_router.clone(),
         lock_provider: Arc::clone(&lock_state_view),
         shutdown_signal,

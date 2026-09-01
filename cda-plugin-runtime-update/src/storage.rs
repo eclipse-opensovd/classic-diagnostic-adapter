@@ -16,7 +16,7 @@ use std::{fmt::Write, sync::Arc};
 use cda_interfaces::{
     runtime_update_api::{
         BulkDataCreated, BulkDataCreatedList, BulkDataDescriptor, BulkDataList, HashAlgorithm,
-        LockStateProvider, RuntimeFilesQuery, RuntimeUpdateError,
+        LockStateProvider, RuntimeFileInspector, RuntimeFilesQuery, RuntimeUpdateError,
         RuntimeUpdateSecurityPlugin, UploadFile,
     },
     storage_api::{
@@ -79,6 +79,7 @@ pub(crate) fn compute_sha256(data: &impl RandomAccessData) -> Result<String, Run
 pub(crate) async fn list_collection_files(
     collection: &(impl Collection + DirectFileAccess),
     query: &RuntimeFilesQuery,
+    inspector: &dyn RuntimeFileInspector,
 ) -> Result<BulkDataList, RuntimeUpdateError> {
     let keys = collection.list().await?;
     let mut items = Vec::with_capacity(keys.len());
@@ -121,7 +122,7 @@ pub(crate) async fn list_collection_files(
         }
 
         if query.include_revision {
-            item.revision = crate::mdd::revision(&collection.file_path(key)?);
+            item.revision = inspector.revision(&collection.file_path(key)?);
         }
 
         items.push(item);
@@ -136,11 +137,13 @@ pub(crate) async fn list_collection_files(
 pub(crate) async fn list_current_files(
     storage: &impl Storage,
     query: &RuntimeFilesQuery,
+    inspector: &dyn RuntimeFileInspector,
 ) -> Result<BulkDataList, RuntimeUpdateError> {
     let items = get_collection_items(
         storage,
         &CollectionName::DiagnosticDatabase,
         query,
+        inspector,
     )
     .await?;
     Ok(BulkDataList {
@@ -152,11 +155,13 @@ pub(crate) async fn list_current_files(
 pub(crate) async fn list_backup_files(
     storage: &impl Storage,
     query: &RuntimeFilesQuery,
+    inspector: &dyn RuntimeFileInspector,
 ) -> Result<BulkDataList, RuntimeUpdateError> {
     let items = get_collection_items(
         storage,
         &CollectionName::DiagnosticDatabaseBackup,
         query,
+        inspector,
     )
     .await?;
     Ok(BulkDataList {
@@ -309,12 +314,14 @@ pub(crate) async fn delete_all_backup(
 pub async fn compute_nextupdate_state(
     storage: &impl Storage,
     query: &RuntimeFilesQuery,
+    inspector: &dyn RuntimeFileInspector,
 ) -> Result<BulkDataList, RuntimeUpdateError> {
     let mdd_items = get_nextupdate_or_current_items(
         storage,
         &CollectionName::DiagnosticDatabaseNextUpdate,
         &CollectionName::DiagnosticDatabase,
         query,
+        inspector,
     )
     .await?;
     let mut items = mdd_items;
@@ -336,13 +343,14 @@ async fn get_nextupdate_or_current_items(
     next_collection: &CollectionName,
     current_collection: &CollectionName,
     query: &RuntimeFilesQuery,
+    inspector: &dyn RuntimeFileInspector,
 ) -> Result<Vec<BulkDataDescriptor>, RuntimeUpdateError> {
     match storage.get_collection(next_collection).await {
-        Ok(collection) => Ok(list_collection_files(&*collection, query)
+        Ok(collection) => Ok(list_collection_files(&*collection, query, inspector)
             .await?
             .items),
         Err(StorageError::CollectionNotFound(_)) => {
-            get_collection_items(storage, current_collection, query).await
+            get_collection_items(storage, current_collection, query, inspector).await
         }
         Err(e) => Err(RuntimeUpdateError::from(e)),
     }
@@ -494,10 +502,11 @@ async fn get_collection_items(
     storage: &impl Storage,
     name: &CollectionName,
     query: &RuntimeFilesQuery,
+    inspector: &dyn RuntimeFileInspector,
 ) -> Result<Vec<BulkDataDescriptor>, RuntimeUpdateError> {
     match storage.get_collection(name).await {
         Ok(collection) => {
-            let list = list_collection_files(&*collection, query).await?;
+            let list = list_collection_files(&*collection, query, inspector).await?;
             Ok(list.items)
         }
         Err(StorageError::CollectionNotFound(_)) => Ok(vec![]),
@@ -753,7 +762,7 @@ mod tests {
 
         let query = RuntimeFilesQuery::default();
         let result =
-            list_collection_files(&*collection, &query)
+            list_collection_files(&*collection, &query, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -773,7 +782,7 @@ mod tests {
 
         let query = RuntimeFilesQuery::default();
         let result =
-            list_collection_files(&*collection, &query)
+            list_collection_files(&*collection, &query, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -800,7 +809,7 @@ mod tests {
             ..Default::default()
         };
         let result =
-            list_collection_files(&*collection, &query)
+            list_collection_files(&*collection, &query, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -825,7 +834,7 @@ mod tests {
             ..Default::default()
         };
         let result =
-            list_collection_files(&*collection, &query)
+            list_collection_files(&*collection, &query, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -850,7 +859,7 @@ mod tests {
 
         let query = RuntimeFilesQuery::default();
         let result =
-            list_collection_files(&*collection, &query)
+            list_collection_files(&*collection, &query, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -889,7 +898,7 @@ mod tests {
             created_before: None,
         };
         let result =
-            list_collection_files(&*collection, &query)
+            list_collection_files(&*collection, &query, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -918,7 +927,7 @@ mod tests {
             ..RuntimeFilesQuery::default()
         };
         let result =
-            list_collection_files(&*collection, &query)
+            list_collection_files(&*collection, &query, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -942,7 +951,7 @@ mod tests {
             ..RuntimeFilesQuery::default()
         };
         let result =
-            list_collection_files(&*collection, &query)
+            list_collection_files(&*collection, &query, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -1041,7 +1050,7 @@ mod tests {
         let query = RuntimeFilesQuery::default();
 
         let result =
-            compute_nextupdate_state(&storage, &query)
+            compute_nextupdate_state(&storage, &query, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -1061,7 +1070,7 @@ mod tests {
 
         let query = RuntimeFilesQuery::default();
         let result =
-            compute_nextupdate_state(&storage, &query)
+            compute_nextupdate_state(&storage, &query, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -1096,7 +1105,7 @@ mod tests {
             ..Default::default()
         };
         let result =
-            compute_nextupdate_state(&storage, &query)
+            compute_nextupdate_state(&storage, &query, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -1124,7 +1133,7 @@ mod tests {
 
         let query = RuntimeFilesQuery::default();
         let result =
-            compute_nextupdate_state(&storage, &query)
+            compute_nextupdate_state(&storage, &query, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -1157,7 +1166,7 @@ mod tests {
             ..Default::default()
         };
         let result =
-            compute_nextupdate_state(&storage, &query)
+            compute_nextupdate_state(&storage, &query, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
 
@@ -1186,7 +1195,7 @@ mod tests {
 
         let query = RuntimeFilesQuery::default();
         let result =
-            compute_nextupdate_state(&storage, &query)
+            compute_nextupdate_state(&storage, &query, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
         let mdd_ids: Vec<&str> = result
@@ -1221,7 +1230,7 @@ mod tests {
 
         let query = RuntimeFilesQuery::default();
         let result =
-            compute_nextupdate_state(&storage, &query)
+            compute_nextupdate_state(&storage, &query, &*crate::test_utils::test_inspector())
                 .await
                 .unwrap();
         let ids: Vec<&str> = result.items.iter().map(|i| i.id.as_str()).collect();

@@ -24,7 +24,6 @@ workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-cda-database = { workspace = true }
 cda-interfaces = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
@@ -37,9 +36,11 @@ uuid = { workspace = true, features = ["v4"] }
 schemars = { workspace = true }
 
 [dev-dependencies]
-cda-database = { workspace = true, features = ["database-builder"] }
 # Test-only: `MockUdsEcu` satisfies the `Uds` bound in the reloader tests.
 cda-interfaces = { workspace = true, features = ["test-utils"] }
+# Test-only: the unit tests exercise real MDD parsing through a test inspector,
+# so the format stays covered even though the plugin no longer depends on it.
+cda-database = { workspace = true, features = ["database-builder"] }
 # Test-only: `LocalStorage` backs the fixtures. Production code speaks only the
 # `Storage` trait, so the concrete backend is injected by the caller.
 cda-storage = { workspace = true }

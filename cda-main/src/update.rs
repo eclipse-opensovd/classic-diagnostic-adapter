@@ -132,6 +132,9 @@ where
         AppError::InitializationFailed(format!("Failed to init storage, error={e:?}"))
     })?);
 
+    // The application supplies the database format; the plugin stays agnostic.
+    let file_inspector = infra.file_inspector;
+
     let reloader_infra = ReloaderContext {
         config: infra.config,
         storage: Arc::clone(&storage),
@@ -147,8 +150,11 @@ where
     Ok(DefaultRuntimeUpdatePlugin::new(
         storage,
         reloader_plugin,
-        Arc::new(DefaultUpdateSecurityHandler::new()),
+        Arc::new(DefaultUpdateSecurityHandler::new(Arc::clone(
+            &file_inspector,
+        ))),
         Arc::clone(&infra.lock_provider),
+        Arc::clone(&file_inspector),
         infra.communication_disable,
         infra.http_protections,
         // The set of routes that stay reachable while an update holds its

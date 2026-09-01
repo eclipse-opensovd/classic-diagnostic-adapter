@@ -11,13 +11,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use cda_interfaces::{
     runtime_update_api::{
-        LockStateProvider, RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateCollections,
-        VerificationError,
+        LockStateProvider, RuntimeFileInspector, RuntimeUpdateError, RuntimeUpdateSecurityPlugin,
+        UpdateCollections, VerificationError,
     },
     storage_api::{Collection, DirectFileAccess},
 };
@@ -26,13 +26,19 @@ use cda_interfaces::{
 ///
 /// Validates vehicle lock ownership, detects lock conflicts, and verifies file
 /// integrity through the injected [`RuntimeFileInspector`].
-pub struct DefaultUpdateSecurityHandler<L: LockStateProvider>(std::marker::PhantomData<L>);
+pub struct DefaultUpdateSecurityHandler<L: LockStateProvider> {
+    inspector: Arc<dyn RuntimeFileInspector>,
+    _lock: std::marker::PhantomData<L>,
+}
 
 impl<L: LockStateProvider> DefaultUpdateSecurityHandler<L> {
     /// Creates a security handler.
     #[must_use]
-    pub fn new() -> Self {
-        Self(std::marker::PhantomData)
+    pub fn new(inspector: Arc<dyn RuntimeFileInspector>) -> Self {
+        Self {
+            inspector,
+            _lock: std::marker::PhantomData,
+        }
     }
 }
 
@@ -57,8 +63,8 @@ impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'sta
         // Example, validate that no ECUs are added or deleted
         if let (Some(pending), Some(current)) = (&collections.pending_mdd, &collections.current_mdd)
         {
-            let pending_ecus = mdd_ecu_names(pending.as_ref()).await?;
-            let current_ecus = mdd_ecu_names(current.as_ref()).await?;
+            let pending_ecus = database_ecu_names(pending.as_ref(), &*self.inspector).await?;
+            let current_ecus = database_ecu_names(current.as_ref(), &*self.inspector).await?;
 
             if pending_ecus != current_ecus {
                 tracing::warn!(
@@ -70,12 +76,13 @@ impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'sta
     }
 
     async fn check_file_integrity(&self, path: &std::path::Path) -> Result<(), VerificationError> {
-        crate::mdd::validate(path)
+        self.inspector.validate(path)
     }
 }
 
-async fn mdd_ecu_names<C: Collection + DirectFileAccess>(
+async fn database_ecu_names<C: Collection + DirectFileAccess>(
     col: &C,
+    inspector: &dyn RuntimeFileInspector,
 ) -> Result<HashSet<String>, RuntimeUpdateError> {
     let files = col
         .list()
@@ -87,7 +94,7 @@ async fn mdd_ecu_names<C: Collection + DirectFileAccess>(
             let path = col
                 .file_path(key)
                 .map_err(|e| RuntimeUpdateError::ValidationFailed(e.to_string()))?;
-            crate::mdd::ecu_name(&path)
+            inspector.ecu_name(&path)
         })
         .collect()
 }
@@ -197,6 +204,7 @@ mod tests {
     ) {
         let lock_provider = make_lock_provider(owner, has_ecu_conflicts, has_fg_conflicts);
         let handler = DefaultUpdateSecurityHandler::new(
+            crate::test_utils::test_inspector(),
         );
         (handler, lock_provider)
     }

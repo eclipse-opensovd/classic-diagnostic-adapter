@@ -40,6 +40,7 @@ pub mod cda_factory;
 pub mod config;
 pub mod error;
 pub mod mdd;
+pub mod mdd_inspector;
 pub mod setup;
 pub mod update;
 pub mod vehicle;
@@ -293,9 +294,11 @@ where
 
     tracing::debug!("Webserver is running. Loading sovd routes...");
 
+    let file_inspector = Arc::clone(&setup.file_inspector);
     let vehicle_data = match vehicle::load_vehicle_data::<SP>(
         &config,
         webserver_state.health_state.as_ref(),
+        Arc::clone(&file_inspector),
     )
     .await
     {
@@ -315,6 +318,7 @@ where
         &webserver_state,
         setup.build_update_plugin,
         setup.build_communication_plugin,
+        file_inspector,
     )
     .await?;
 

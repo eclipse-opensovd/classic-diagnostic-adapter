@@ -25,6 +25,7 @@ use cda_interfaces::{
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     file_manager::{Chunk, ChunkType},
     health::HealthProvider,
+    runtime_update_api::RuntimeFileInspector,
     storage_api::{Collection, CollectionName, DirectFileAccess, Storage},
 };
 use cda_plugin_security::SecurityPlugin;
@@ -122,13 +123,14 @@ fn get_mdd_files_and_size(files: ReadDir) -> Vec<(PathBuf, u64)> {
 /// # Errors
 /// Returns [`AppError`] if any database file fails to parse or initialize.
 #[tracing::instrument(
-    skip(config, mdd_paths, db_health_provider),
+    skip(config, mdd_paths, db_health_provider, file_inspector),
     fields(database_count = mdd_paths.len())
 )]
 pub async fn load_databases<S: SecurityPlugin>(
     config: &Configuration,
     mdd_paths: &[PathBuf],
     db_health_provider: Option<&Arc<dyn HealthProvider>>,
+    file_inspector: &dyn RuntimeFileInspector,
 ) -> Result<DatabaseMap<S>, AppError> {
     if let Some(provider) = db_health_provider {
         provider.set_status(cda_health::Status::Starting).await;
@@ -147,7 +149,7 @@ pub async fn load_databases<S: SecurityPlugin>(
 
     for path in mdd_paths {
         let (ecu_name, ecu_manager) =
-            match load_single_mdd::<S>(path, config, &ecu_config_map, &protocol) {
+            match load_single_mdd::<S>(path, config, &ecu_config_map, &protocol, file_inspector) {
                 Ok(result) => result,
                 Err(e) if config.database.ignore_invalid_mdd => {
                     tracing::warn!(path = %path.display(), error = %e, "Skipping invalid MDD file");
@@ -640,6 +642,7 @@ fn load_single_mdd<S: SecurityPlugin>(
     config: &Configuration,
     ecu_config_map: &HashMap<String, EcuConfig>,
     protocol: &Protocol,
+    file_inspector: &dyn RuntimeFileInspector,
 ) -> Result<(String, EcuManager<S>), MddLoadingError> {
     let mdd_path =
         path.to_str()
@@ -650,15 +653,22 @@ fn load_single_mdd<S: SecurityPlugin>(
             })?;
 
     // Rewrite uncompressed on first use so later loads skip LZMA. Startup and
-    // runtime reload take the same path.
+    // runtime reload use the same injected decompression operation.
     if config.flat_buf.mdd_decompress
-        && let Err(e) = cda_database::update_mdd_uncompressed(&mdd_path)
+        && let Err(e) = file_inspector.decompress_in_place(path)
     {
         return Err(MddLoadingError::DecompressFailed {
             path: mdd_path,
             reason: e.to_string(),
         });
     }
+
+    file_inspector
+        .validate(path)
+        .map_err(|error| MddLoadingError::LoadFailed {
+            path: mdd_path.clone(),
+            reason: error.to_string(),
+        })?;
 
     let (ecu_name, proto_data) = cda_database::load_proto_data(&mdd_path, PROTO_LOAD_CONFIG)
         .map_err(|e| MddLoadingError::LoadFailed {
@@ -747,9 +757,11 @@ fn insert_or_update_ecu<S: SecurityPlugin>(
 mod tests {
     use std::{
         path::PathBuf,
+        sync::atomic::{AtomicUsize, Ordering},
     };
 
     use cda_interfaces::{
+        runtime_update_api::{RuntimeFileInspector, RuntimeUpdateError, VerificationError},
         storage_api::{Collection as _, CollectionName, DirectFileAccess, Storage},
     };
     use cda_plugin_security::mock::TestSecurityPlugin;
@@ -757,6 +769,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::mdd_inspector::MddFileInspector;
 
     /// Helper: create a temp dir with `.mdd` files containing given data.
     fn create_database_dir(files: &[(&str, &[u8])]) -> tempfile::TempDir {
@@ -1085,9 +1098,29 @@ mod tests {
         }
     }
 
-    /// Step 6's decompression is a one-time rewrite: the first load rewrites the
-    /// file uncompressed, and every later load — startup or runtime reload —
-    /// finds nothing left to decompress.
+    struct CountingInspector {
+        decompressions: AtomicUsize,
+    }
+
+    impl RuntimeFileInspector for CountingInspector {
+        fn validate(&self, path: &std::path::Path) -> Result<(), VerificationError> {
+            MddFileInspector.validate(path)
+        }
+
+        fn ecu_name(&self, path: &std::path::Path) -> Result<String, RuntimeUpdateError> {
+            MddFileInspector.ecu_name(path)
+        }
+
+        fn revision(&self, path: &std::path::Path) -> Option<String> {
+            MddFileInspector.revision(path)
+        }
+
+        fn decompress_in_place(&self, path: &std::path::Path) -> Result<(), RuntimeUpdateError> {
+            self.decompressions.fetch_add(1, Ordering::SeqCst);
+            MddFileInspector.decompress_in_place(path)
+        }
+    }
+
     #[test]
     fn one_database_load_decompresses_once() {
         let temp = tempfile::tempdir().unwrap();
@@ -1100,30 +1133,17 @@ mod tests {
             &path,
         )
         .unwrap();
-        let path_str = path.to_str().unwrap().to_owned();
         let mut config = crate::config::default_config();
         config.flat_buf.mdd_decompress = true;
         let ecu_config = std::sync::Arc::new(cda_interfaces::HashMap::default());
         let protocol = cda_interfaces::Protocol::new(config.doip.protocol_name.clone());
+        let inspector = CountingInspector {
+            decompressions: AtomicUsize::new(0),
+        };
 
-        assert!(
-            cda_database::update_mdd_uncompressed(&path_str).unwrap(),
-            "precondition: the fixture starts out compressed"
-        );
-        std::fs::copy(
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../testcontainer/odx/FLXC1000.mdd"
-            ),
-            &path,
-        )
-        .unwrap();
+        load_single_mdd::<TestSecurityPlugin>(&path, &config, &ecu_config, &protocol, &inspector)
+            .unwrap();
 
-        load_single_mdd::<TestSecurityPlugin>(&path, &config, &ecu_config, &protocol).unwrap();
-
-        assert!(
-            !cda_database::update_mdd_uncompressed(&path_str).unwrap(),
-            "the load must leave nothing for a later load to decompress"
-        );
+        assert_eq!(inspector.decompressions.load(Ordering::SeqCst), 1);
     }
 }
