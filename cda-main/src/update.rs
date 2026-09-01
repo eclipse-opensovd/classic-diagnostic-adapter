@@ -28,8 +28,8 @@ use cda_storage::LocalStorage;
 use cda_transport_router::DiagnosticTransportRouter;
 
 use crate::{
-    AppError, UdsManagerType, cda_factory::CdaMainVehicleFactory,
-    config::configfile::Configuration, setup::CdaRuntime,
+    AppError, cda_factory::CdaMainVehicleFactory, config::configfile::Configuration,
+    setup::CdaRuntime, vehicle::UdsManagerType,
 };
 
 /// Trait for async plugin builders that produce a [`RuntimeFilesUpdatePlugin`].
