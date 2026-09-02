@@ -310,56 +310,15 @@ The integration test framework automatically manages the test environment by:
 
 ##### running integration tests
 
-**Using Docker (Recommended):**
-
-Docker mode spins up the ECU simulator and CDA in isolated containers:
+Docker spins up the ECU simulator and CDA in isolated containers:
 
 ```shell
 cargo test --locked --features integration-tests
 ```
-
-**Without Docker (For Development/Debugging):**
-
-Running locally allows easier debugging but requires manual setup:
-
-```shell
-# Set environment variable to disable Docker
-export CDA_INTEGRATION_TEST_USE_DOCKER=false
-
-# Optional set an IP address to bind the tester interface to
-# export CDA_INTEGRATION_TEST_TESTER_ADDRESS=
-
-# Run the tests
-cargo test --locked --features integration-tests
-```
-
-When running without Docker, the ECU simulator and CDA will run as local processes with default ports (20002 for CDA, 13400 for DoIP gateway, 8181 for ECU sim control).
-Furthermore the local setup does *not* automatically build the MDD files from ODX data, so ensure that the required MDD files are already present.
 
 ##### environment variables
 
 The integration test framework supports the following environment variables:
-
-- **`CDA_INTEGRATION_TEST_USE_DOCKER`** (default: `true`)
-  Controls whether to use Docker Compose or run services locally.
-  - `true`: Uses Docker Compose to run CDA and ECU simulator in containers
-  - `false`: Runs services as local processes (useful for debugging)
-
-  Example:
-
-  ```shell
-  export CDA_INTEGRATION_TEST_USE_DOCKER=false
-  ```
-
-- **`CDA_INTEGRATION_TEST_TESTER_ADDRESS`** (default: `0.0.0.0`)
-  Override the tester address used by the CDA when running without Docker.
-  Some systems may require using a specific interface address (e.g., `127.0.0.1` or a specific network interface IP) for proper ECU simulator connectivity.
-
-  Example:
-
-  ```shell
-  export CDA_INTEGRATION_TEST_TESTER_ADDRESS=127.0.0.1
-  ```
 
 - **`CDA_INTEGRATION_TEST_COVERAGE`** (default: `false`)
   When set to `true`, uses coverage-instrumented Docker images for integration tests.

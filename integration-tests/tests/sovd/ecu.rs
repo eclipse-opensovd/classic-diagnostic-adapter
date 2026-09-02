@@ -33,7 +33,7 @@ use crate::{
         },
         runtime::{
             TestRuntime, restart_cda, setup_integration_test, skip_for_can, skip_for_doip,
-            start_ecu_sim_for_mode, stop_ecu_sim,
+            start_ecu_sim, stop_ecu_sim,
         },
     },
 };
@@ -576,7 +576,7 @@ async fn test_variant_detection_duplicates() {
 
     // restart sim and wait for ECUs to come online,
     // status should be detected without manual variant detection
-    start_ecu_sim_for_mode(&runtime.ecu_sim).await.unwrap();
+    start_ecu_sim(&runtime.ecu_sim).await.unwrap();
 
     // wait in loop, to check if the CDA receives the spontaneous VAM when is online
     for attempt in 0..=5 {
