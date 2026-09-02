@@ -272,6 +272,23 @@ where
             _phantom: std::marker::PhantomData,
         }
     }
+
+    /// Creates new vehicle components, installs them, and makes them live.
+    ///
+    /// Nothing is torn down before the new components exist, so a failure here
+    /// leaves the live runtime untouched. The caller still rolls back, because
+    /// it already switched the persisted files.
+    async fn install_new_runtime(
+        &self,
+        cfg: Config,
+        mdd_paths: &[PathBuf],
+    ) -> Result<(), ReloadError> {
+        let components = self.factory.create(&cfg, mdd_paths).await?;
+
+        self.route_state
+            .install_routes::<_, SecurityLoader>(components)
+            .await
+    }
 }
 
 #[async_trait]
@@ -315,34 +332,6 @@ where
         }
 
         result
-    }
-}
-
-impl<Uds, Gateway, Config, SecurityLoader, VehicleFactory, S>
-    DefaultRuntimeReloaderPlugin<Uds, Gateway, Config, SecurityLoader, VehicleFactory, S>
-where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: Shutdown,
-    Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
-    SecurityLoader: SecurityPluginLoader,
-    VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
-    S: Storage + Send + Sync + 'static,
-{
-    /// Creates new vehicle components, installs them, and makes them live.
-    ///
-    /// Nothing is torn down before the new components exist, so a failure here
-    /// leaves the live runtime untouched. The caller still rolls back, because
-    /// it already switched the persisted files.
-    async fn install_new_runtime(
-        &self,
-        cfg: Config,
-        mdd_paths: &[PathBuf],
-    ) -> Result<(), ReloadError> {
-        let components = self.factory.create(&cfg, mdd_paths).await?;
-
-        self.route_state
-            .install_routes::<_, SecurityLoader>(components)
-            .await
     }
 }
 
