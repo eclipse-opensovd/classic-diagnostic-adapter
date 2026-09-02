@@ -138,10 +138,6 @@ where
         Arc::clone(&infra.communication_access),
     ));
 
-    let storage = Arc::new(LocalStorage::new(&infra.storage_dir).map_err(|e| {
-        AppError::InitializationFailed(format!("Failed to init storage, error={e:?}"))
-    })?);
-
     let reloader_infra = ReloaderContext {
         config: infra.config,
         dynamic_router: infra.dynamic_router,
@@ -154,9 +150,8 @@ where
         uds_manager: infra.uds_manager_replacer,
         diagnostic_gateway: infra.gateway_replacer,
         health: infra.health,
-        storage_dir: infra.storage_dir.clone(),
         mdd_decompress: infra.mdd_decompress,
-        storage: Arc::clone(&storage),
+        storage: Arc::clone(&infra.storage),
     };
 
     let reloader_config =
@@ -172,7 +167,7 @@ where
     >::new(reloader_config));
 
     Ok(DefaultRuntimeUpdatePlugin::new(
-        storage,
+        Arc::clone(&infra.storage),
         reloader_plugin,
         Arc::new(DefaultUpdateSecurityHandler::new()),
         Arc::clone(&infra.lock_provider),
