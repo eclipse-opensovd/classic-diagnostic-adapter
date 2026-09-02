@@ -45,7 +45,7 @@ pub enum DisableError {
 
 /// Exclusive ownership of disabled communication.
 ///
-/// Finish with one of two outcomes:
+/// Finish with one of three outcomes:
 ///
 /// * **[`release`](Self::release)** restores what the guard displaced. A guard
 ///   taken from an enabled runtime awaits transport enablement and
@@ -53,10 +53,12 @@ pub enum DisableError {
 ///   returns to disabled, so a release never enables a runtime the releaser did
 ///   not find enabled.
 ///
+/// * **[`finish`](Self::finish)** finalizes pending lifecycle reconfiguration but
+///   stays disabled regardless of what the guard displaced.
+///
 /// * **drop** relinquishes exclusivity but leaves communication disabled. It is
 ///   synchronous and cannot resume the transport, which makes it the
-///   cancellation- and panic-safe fallback. A later authorized activation may
-///   resume.
+///   cancellation-safe fallback. A later authorized activation may resume.
 #[async_trait]
 pub trait DisableGuard: Send + Sync + std::fmt::Debug {
     /// Consumes this guard and restores what it displaced.
@@ -66,6 +68,17 @@ pub trait DisableGuard: Send + Sync + std::fmt::Debug {
     /// fails, this guard is stale (already released), or the lifecycle worker is
     /// shutting down.
     async fn release(self: Box<Self>) -> Result<CommunicationState, CommunicationOperationFailure>;
+
+    /// Consumes this guard and finalizes pending lifecycle reconfiguration while
+    /// leaving communication disabled.
+    ///
+    /// Unlike [`release`](Self::release), this never restores the transport state
+    /// displaced by the guard.
+    ///
+    /// # Errors
+    /// Returns an error when lifecycle finalization fails, this guard is stale,
+    /// or the lifecycle worker is shutting down.
+    async fn finish(self: Box<Self>) -> Result<(), CommunicationOperationFailure>;
 }
 
 /// Exclusive transport-disable capability.

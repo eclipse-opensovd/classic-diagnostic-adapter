@@ -16,7 +16,7 @@ use std::fmt::Write as _;
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, HashMapExtensions,
-    UdsFunctionalGroup, UdsQuery, UdsTransport,
+    UdsQuery,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
         ComponentOperationsInfo, Ecu, FunctionalGroup, Gateway, NetworkStructure,
@@ -45,15 +45,11 @@ enum GatewayKey {
 #[async_trait]
 impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
     async fn get_ecus(&self) -> Vec<String> {
-        self.ecus.keys().cloned().collect()
+        self.ecu_data.read().await.all_ecu_names()
     }
 
     async fn get_physical_ecus(&self) -> Vec<String> {
-        self.ecus
-            .keys()
-            .filter(|ecu| **ecu != self.functional_description_database)
-            .cloned()
-            .collect()
+        self.ecu_data.read().await.physical_ecu_names()
     }
 
     async fn get_ecus_with_sds(
@@ -61,13 +57,16 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
         physical_only: bool,
         expected_sd: &SdBoolMappings,
     ) -> Vec<String> {
-        let mut base_list = if physical_only {
-            self.get_physical_ecus().await
-        } else {
-            self.get_ecus().await
+        let base_list = {
+            let data = self.ecu_data.read().await;
+            if physical_only {
+                data.physical_ecu_names()
+            } else {
+                data.all_ecu_names()
+            }
         };
         let mut filtered = Vec::new();
-        for ecu in base_list.drain(0..) {
+        for ecu in base_list {
             let sdgs = match self.get_sdgs(&ecu, None).await {
                 Ok(sdgs) => sdgs,
                 Err(e) => {
@@ -109,8 +108,9 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
         }
 
         let mut gateways: HashMap<GatewayKey, Gateway> = HashMap::new();
-
-        for ecu in self.ecus.values() {
+        let data = self.ecu_data.read().await;
+        let current_gateway = self.gateway();
+        for ecu in data.ecus().values() {
             let ecu = ecu.read().await;
             if !ecu.is_physical_ecu() {
                 continue; // skip functional descriptions
@@ -119,7 +119,8 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
 
             let network_ecu = ecu_to_network_ecu(&*ecu);
 
-            if let Some(network_address) = self.gateway.get_ecu_network_address(&ecu_name).await {
+            if let Some(network_address) = current_gateway.get_ecu_network_address(&ecu_name).await
+            {
                 // Name-identified ECU (CAN): its own entry, carrying its own
                 // transport address.
                 gateways.insert(
@@ -150,8 +151,9 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
                 gateway
                     .logical_address
                     .clone_from(&network_ecu.logical_address);
-                if let Some(gateway_network_address) =
-                    self.gateway.get_gateway_network_address(gateway_addr).await
+                if let Some(gateway_network_address) = current_gateway
+                    .get_gateway_network_address(gateway_addr)
+                    .await
                 {
                     gateway.network_address = gateway_network_address;
                 } else {
@@ -167,17 +169,17 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
         }
 
         // Build functional groups from the functional description database
-        let group_names = match self.ecus.get(&self.functional_description_database) {
+        let group_names = match data.ecus().get(data.functional_description_database()) {
             Some(func_desc_ecu) => func_desc_ecu.read().await.functional_groups(),
             None => Vec::new(),
         };
 
         let mut functional_groups = Vec::new();
         for group_name in group_names {
-            let ecu_names = self.ecus_for_functional_group(&group_name, false).await;
+            let ecu_names = data.ecus_for_functional_group(&group_name, false).await;
             let mut group_ecus = Vec::new();
             for ecu_name in &ecu_names {
-                if let Some(ecu_lock) = self.ecus.get(ecu_name) {
+                if let Some(ecu_lock) = data.ecus().get(ecu_name) {
                     let ecu = ecu_lock.read().await;
                     group_ecus.push(ecu_to_network_ecu(&*ecu));
                 }
@@ -199,7 +201,8 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
         ecu_name: &str,
         service: Option<&DiagComm>,
     ) -> Result<Vec<SdSdg>, DiagServiceError> {
-        self.uds_ecu_variant_detection_concluded(ecu_name)
+        let data = self.ecu_data.read().await;
+        self.uds_ecu_variant_detection_concluded(&data, ecu_name)
             .await?
             .read()
             .await
@@ -208,7 +211,8 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
     }
 
     async fn get_comparams(&self, ecu: &str) -> Result<ComplexComParamValue, DiagServiceError> {
-        self.uds_ecu_variant_detection_concluded(ecu)
+        let data = self.ecu_data.read().await;
+        self.uds_ecu_variant_detection_concluded(&data, ecu)
             .await?
             .read()
             .await
@@ -220,8 +224,9 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
         ecu: &str,
         security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentDataInfo>, DiagServiceError> {
+        let data = self.ecu_data.read().await;
         let items = self
-            .uds_ecu_variant_detection_concluded(ecu)
+            .uds_ecu_variant_detection_concluded(&data, ecu)
             .await?
             .read()
             .await
@@ -235,7 +240,8 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
         ecu: &str,
         security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError> {
-        self.uds_ecu_variant_detection_concluded(ecu)
+        let data = self.ecu_data.read().await;
+        self.uds_ecu_variant_detection_concluded(&data, ecu)
             .await?
             .read()
             .await
@@ -247,8 +253,9 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
         ecu: &str,
         security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentOperationsInfo>, DiagServiceError> {
+        let data = self.ecu_data.read().await;
         let items = self
-            .uds_ecu_variant_detection_concluded(ecu)
+            .uds_ecu_variant_detection_concluded(&data, ecu)
             .await?
             .read()
             .await
@@ -262,7 +269,8 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
         service_name: &str,
         security_plugin: &DynamicPlugin,
     ) -> Result<RoutineSubfunctions, DiagServiceError> {
-        self.uds_ecu_variant_detection_concluded(ecu_name)
+        let data = self.ecu_data.read().await;
+        self.uds_ecu_variant_detection_concluded(&data, ecu_name)
             .await?
             .read()
             .await
@@ -273,7 +281,8 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
         &self,
         ecu: &str,
     ) -> Result<Vec<ComponentDataInfo>, DiagServiceError> {
-        let ecu = self.uds_ecu_variant_detection_concluded(ecu).await?;
+        let data = self.ecu_data.read().await;
+        let ecu = self.uds_ecu_variant_detection_concluded(&data, ecu).await?;
         let items = ecu.read().await.get_components_single_ecu_jobs_info();
 
         Ok(items)
@@ -284,7 +293,8 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
         ecu: &str,
         job_name: &str,
     ) -> Result<single_ecu::Job, DiagServiceError> {
-        self.uds_ecu_variant_detection_concluded(ecu)
+        let data = self.ecu_data.read().await;
+        self.uds_ecu_variant_detection_concluded(&data, ecu)
             .await?
             .read()
             .await
@@ -295,11 +305,11 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
         &self,
         ecu_name: &str,
     ) -> Result<Vec<String>, DiagServiceError> {
-        let diag_manager = self
-            .uds_ecu_variant_detection_concluded(ecu_name)
-            .await?
-            .read()
-            .await;
+        let data = self.ecu_data.read().await;
+        let ecu = self
+            .uds_ecu_variant_detection_concluded(&data, ecu_name)
+            .await?;
+        let diag_manager = ecu.read().await;
 
         let reset_services = diag_manager
             .lookup_diagcomms_by_request_prefix(&[service_ids::ECU_RESET])?
@@ -316,11 +326,11 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
         ecu_name: &str,
         service: u8,
     ) -> Result<String, DiagServiceError> {
-        let diag_manager = self
-            .uds_ecu_variant_detection_concluded(ecu_name)
-            .await?
-            .read()
-            .await;
+        let data = self.ecu_data.read().await;
+        let ecu = self
+            .uds_ecu_variant_detection_concluded(&data, ecu_name)
+            .await?;
+        let diag_manager = ecu.read().await;
         diag_manager
             .get_service_state(service)
             .await
@@ -337,11 +347,24 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         data: UdsPayloadData,
     ) -> Result<Self::Response, DiagServiceError> {
-        let ecu_diag_service = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
-        let ecu = ecu_diag_service.read().await;
-        let request = ecu.lookup_service_through_func_class(func_class_name, service_id)?;
-        self.send(ecu_name, request, security_plugin, Some(data), true)
+        let communication_guard = self.acquire_communication_guard()?;
+        let ecu_data = self.ecu_data.read().await;
+        let ecu = self
+            .uds_ecu_variant_detection_concluded(&ecu_data, ecu_name)
+            .await?;
+        let request = ecu
+            .read()
             .await
+            .lookup_service_through_func_class(func_class_name, service_id)?;
+        self.send_service(
+            &communication_guard,
+            &ecu,
+            request,
+            security_plugin,
+            Some(data),
+            true,
+        )
+        .await
     }
 
     async fn ecu_lookup_service_through_func_class(
@@ -350,8 +373,12 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
         func_class_name: &str,
         service_id: u8,
     ) -> Result<DiagComm, DiagServiceError> {
-        let ecu_diag_service = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
-        let ecu = ecu_diag_service.read().await;
-        ecu.lookup_service_through_func_class(func_class_name, service_id)
+        let data = self.ecu_data.read().await;
+        let ecu = self
+            .uds_ecu_variant_detection_concluded(&data, ecu_name)
+            .await?;
+        ecu.read()
+            .await
+            .lookup_service_through_func_class(func_class_name, service_id)
     }
 }
