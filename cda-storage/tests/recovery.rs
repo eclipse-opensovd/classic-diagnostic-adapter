@@ -11,7 +11,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::io::Write;
+#![cfg(test)] // Workaround to make Clippy in pre-commit hook recognize this file as test code
+
+use std::{io::Write, path::PathBuf};
 
 use cda_interfaces::storage_api::{
     Collection, CollectionName, RandomAccessData, Storage, StorageError,
@@ -25,19 +27,12 @@ use cda_storage::LocalStorage;
 /// [[ test~storage-atomicity-recovery-discards-recording-phase-crash, Recovery discards an incomplete transaction that crashed while still recording, test ]]
 #[tokio::test]
 async fn recovery_cleans_up_incomplete_transaction() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    let collections_dir = root.join("collections");
-    let journal_dir = root.join("journal");
-    let staging_dir = journal_dir.join("staging");
-    std::fs::create_dir_all(&collections_dir).unwrap();
-    std::fs::create_dir_all(&staging_dir).unwrap();
+    let fixture = Fixture::new();
 
     // Create a WAL with RECORDING header and a single write operation.
-    let wal_path = journal_dir.join("transaction.wal");
-    cda_storage::wal::create_wal(&wal_path).unwrap();
+    cda_storage::wal::create_wal(&fixture.wal_file).unwrap();
 
-    let staged = staging_dir.join("some_file.tmp");
+    let staged = fixture.staging_dir.join("some_file.tmp");
     std::fs::write(&staged, b"orphaned data").unwrap();
     let staged_str = staged
         .to_str()
@@ -45,7 +40,7 @@ async fn recovery_cleans_up_incomplete_transaction() {
         .to_string();
 
     cda_storage::wal::append_operation(
-        &wal_path,
+        &fixture.wal_file,
         &cda_interfaces::storage_api::Operation::Write {
             collection: CollectionName::DiagnosticDatabase,
             key: "test".to_string(),
@@ -55,10 +50,10 @@ async fn recovery_cleans_up_incomplete_transaction() {
     .unwrap();
 
     // Creating a new LocalStorage should trigger recovery.
-    let storage = LocalStorage::new(root).unwrap();
+    let storage = fixture.create_storage();
 
     // The WAL and staging file should be cleaned up.
-    assert!(!wal_path.exists());
+    assert!(!fixture.wal_file.exists());
     assert!(!staged.exists());
 
     // And the collection should not have the key.
@@ -77,24 +72,17 @@ async fn recovery_cleans_up_incomplete_transaction() {
 /// [[ test~storage-atomicity-recovery-restores-overwritten-file, Recovery restores the original file from its backup after an interrupted overwrite, test ]]
 #[tokio::test]
 async fn recovery_rolls_back_partial_commit_with_bak_files() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    let collections_dir = root.join("collections");
-    let journal_dir = root.join("journal");
-    let staging_dir = journal_dir.join("staging");
-    let db_dir = collections_dir.join("diagnostic_database");
-    std::fs::create_dir_all(&db_dir).unwrap();
-    std::fs::create_dir_all(&staging_dir).unwrap();
+    let fixture = Fixture::new();
+    let db_dir = &fixture.diagnostic_database_dir;
 
     // Simulate: original file was backed up, new file was partially written.
     std::fs::write(db_dir.join("mykey.bak"), b"original data").unwrap();
     std::fs::write(db_dir.join("mykey"), b"new data").unwrap();
 
     // Create a WAL with COMMITTING status.
-    let wal_path = journal_dir.join("transaction.wal");
-    cda_storage::wal::create_wal(&wal_path).unwrap();
+    cda_storage::wal::create_wal(&fixture.wal_file).unwrap();
     cda_storage::wal::append_operation(
-        &wal_path,
+        &fixture.wal_file,
         &cda_interfaces::storage_api::Operation::Write {
             collection: CollectionName::DiagnosticDatabase,
             key: "mykey".to_string(),
@@ -102,10 +90,10 @@ async fn recovery_rolls_back_partial_commit_with_bak_files() {
         },
     )
     .unwrap();
-    cda_storage::wal::mark_committing(&wal_path).unwrap();
+    cda_storage::wal::mark_committing(&fixture.wal_file).unwrap();
 
     // Recovery should detect COMMITTING + .bak files and restore them.
-    let storage = LocalStorage::new(root).unwrap();
+    let storage = fixture.create_storage();
 
     let collection = storage
         .get_collection(&CollectionName::DiagnosticDatabase)
@@ -124,24 +112,17 @@ async fn recovery_rolls_back_partial_commit_with_bak_files() {
 /// [[ test~storage-atomicity-recovery-removes-new-file, Recovery removes a newly-written file left by an interrupted commit with no backup to restore, test ]]
 #[tokio::test]
 async fn recovery_rolls_back_new_file_writes_without_bak() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    let collections_dir = root.join("collections");
-    let journal_dir = root.join("journal");
-    let staging_dir = journal_dir.join("staging");
-    let db_dir = collections_dir.join("diagnostic_database");
-    std::fs::create_dir_all(&db_dir).unwrap();
-    std::fs::create_dir_all(&staging_dir).unwrap();
+    let fixture = Fixture::new();
+    let db_dir = &fixture.diagnostic_database_dir;
 
     // Simulate: a new file was written into the collection during a partially applied commit.
     // No .bak file exists because there was nothing to overwrite.
     std::fs::write(db_dir.join("new_key"), b"partially committed data").unwrap();
 
     // Create a WAL with COMMITTING status containing the write operation.
-    let wal_path = journal_dir.join("transaction.wal");
-    cda_storage::wal::create_wal(&wal_path).unwrap();
+    cda_storage::wal::create_wal(&fixture.wal_file).unwrap();
     cda_storage::wal::append_operation(
-        &wal_path,
+        &fixture.wal_file,
         &cda_interfaces::storage_api::Operation::Write {
             collection: CollectionName::DiagnosticDatabase,
             key: "new_key".to_string(),
@@ -149,10 +130,10 @@ async fn recovery_rolls_back_new_file_writes_without_bak() {
         },
     )
     .unwrap();
-    cda_storage::wal::mark_committing(&wal_path).unwrap();
+    cda_storage::wal::mark_committing(&fixture.wal_file).unwrap();
 
     // Recovery should detect COMMITTING, read the WAL, and remove the new file.
-    let storage = LocalStorage::new(root).unwrap();
+    let storage = fixture.create_storage();
 
     let collection = storage
         .get_collection(&CollectionName::DiagnosticDatabase)
@@ -168,32 +149,25 @@ async fn recovery_rolls_back_new_file_writes_without_bak() {
 /// [[ test~storage-atomicity-recovery-removes-new-collection, Recovery removes an empty collection directory left by an interrupted `CreateCollection` commit, test ]]
 #[tokio::test]
 async fn recovery_rolls_back_new_collection_without_bak() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    let collections_dir = root.join("collections");
-    let journal_dir = root.join("journal");
-    let staging_dir = journal_dir.join("staging");
-    std::fs::create_dir_all(&collections_dir).unwrap();
-    std::fs::create_dir_all(&staging_dir).unwrap();
+    let fixture = Fixture::new();
 
     // Simulate: a new empty collection directory was created during partial commit.
-    let new_col_dir = collections_dir.join("brand_new");
+    let new_col_dir = fixture.collections_dir.join("brand_new");
     std::fs::create_dir_all(&new_col_dir).unwrap();
 
     // Create a WAL with COMMITTING status.
-    let wal_path = journal_dir.join("transaction.wal");
-    cda_storage::wal::create_wal(&wal_path).unwrap();
+    cda_storage::wal::create_wal(&fixture.wal_file).unwrap();
     cda_storage::wal::append_operation(
-        &wal_path,
+        &fixture.wal_file,
         &cda_interfaces::storage_api::Operation::CreateCollection {
             name: CollectionName::Custom("brand_new".to_string()),
         },
     )
     .unwrap();
-    cda_storage::wal::mark_committing(&wal_path).unwrap();
+    cda_storage::wal::mark_committing(&fixture.wal_file).unwrap();
 
     // Recovery should remove the newly created collection directory.
-    let _storage = LocalStorage::new(root).unwrap();
+    let _storage = fixture.create_storage();
 
     assert!(!new_col_dir.exists());
 }
@@ -205,25 +179,18 @@ async fn recovery_rolls_back_new_collection_without_bak() {
 /// [[ test~storage-atomicity-recovery-cleans-orphaned-backups, Recovery cleans up orphaned backup files left after a successful commit, test ]]
 #[tokio::test]
 async fn recovery_handles_no_wal_with_orphaned_bak_files() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    let collections_dir = root.join("collections");
-    let journal_dir = root.join("journal");
-    let staging_dir = journal_dir.join("staging");
-    let db_dir = collections_dir.join("diagnostic_database");
-    std::fs::create_dir_all(&db_dir).unwrap();
-    std::fs::create_dir_all(&staging_dir).unwrap();
+    let fixture = Fixture::new();
+    let db_dir = &fixture.diagnostic_database_dir;
 
     // The new committed data is in place, but old .bak files remain.
     std::fs::write(db_dir.join("mykey"), b"new committed data").unwrap();
     std::fs::write(db_dir.join("mykey.bak"), b"old data").unwrap();
 
     // No WAL file exists (it was successfully deleted as point of no return).
-    let wal_path = journal_dir.join("transaction.wal");
-    assert!(!wal_path.exists());
+    assert!(!fixture.wal_file.exists());
 
     // Recovery should delete the orphaned .bak and keep the committed data.
-    let storage = LocalStorage::new(root).unwrap();
+    let storage = fixture.create_storage();
 
     assert!(!db_dir.join("mykey.bak").exists());
     let collection = storage
@@ -244,20 +211,13 @@ async fn recovery_handles_no_wal_with_orphaned_bak_files() {
 /// [[ test~storage-atomicity-recovery-discards-corrupt-wal, Recovery discards a WAL with a corrupt checksum during the recording phase, test ]]
 #[tokio::test]
 async fn recovery_discards_wal_with_corrupt_checksum() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    let collections_dir = root.join("collections");
-    let journal_dir = root.join("journal");
-    let staging_dir = journal_dir.join("staging");
-    std::fs::create_dir_all(&collections_dir).unwrap();
-    std::fs::create_dir_all(&staging_dir).unwrap();
+    let fixture = Fixture::new();
 
-    let wal_path = journal_dir.join("transaction.wal");
-    cda_storage::wal::create_wal(&wal_path).unwrap();
+    cda_storage::wal::create_wal(&fixture.wal_file).unwrap();
 
     // Append a valid entry.
     cda_storage::wal::append_operation(
-        &wal_path,
+        &fixture.wal_file,
         &cda_interfaces::storage_api::Operation::CreateCollection {
             name: CollectionName::Custom("valid_collection".to_string()),
         },
@@ -267,15 +227,15 @@ async fn recovery_discards_wal_with_corrupt_checksum() {
     // Append garbage bytes to simulate a torn write (corrupt checksum).
     let mut file = std::fs::OpenOptions::new()
         .append(true)
-        .open(&wal_path)
+        .open(&fixture.wal_file)
         .unwrap();
     file.write_all(&[0xFF; 20]).unwrap();
 
     // Recovery should succeed, the corrupt entry is simply ignored.
-    let _storage = LocalStorage::new(root).unwrap();
+    let _storage = fixture.create_storage();
 
     // The WAL should be cleaned up.
-    assert!(!wal_path.exists());
+    assert!(!fixture.wal_file.exists());
 }
 
 /// Simulates a crash during commit of a multi-operation transaction where a `CreateCollection`
@@ -287,33 +247,26 @@ async fn recovery_discards_wal_with_corrupt_checksum() {
 /// [[ test~storage-atomicity-recovery-removes-orphaned-collection-dir, Recovery fully rolls back a multi-operation transaction that created a collection and wrote into it, test ]]
 #[tokio::test]
 async fn recovery_create_collection_with_write_removes_orphaned_dir() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    let collections_dir = root.join("collections");
-    let journal_dir = root.join("journal");
-    let staging_dir = journal_dir.join("staging");
-    std::fs::create_dir_all(&collections_dir).unwrap();
-    std::fs::create_dir_all(&staging_dir).unwrap();
+    let fixture = Fixture::new();
 
     // Simulate partial commit state: the collection directory was created AND a file was
     // written into it before the crash.
-    let new_col_dir = collections_dir.join("fresh_collection");
+    let new_col_dir = fixture.collections_dir.join("fresh_collection");
     std::fs::create_dir_all(&new_col_dir).unwrap();
     std::fs::write(new_col_dir.join("data_file"), b"written during commit").unwrap();
 
     // WAL with COMMITTING status containing both operations in natural order:
     // CreateCollection first, then Write to that collection.
-    let wal_path = journal_dir.join("transaction.wal");
-    cda_storage::wal::create_wal(&wal_path).unwrap();
+    cda_storage::wal::create_wal(&fixture.wal_file).unwrap();
     cda_storage::wal::append_operation(
-        &wal_path,
+        &fixture.wal_file,
         &cda_interfaces::storage_api::Operation::CreateCollection {
             name: CollectionName::Custom("fresh_collection".to_string()),
         },
     )
     .unwrap();
     cda_storage::wal::append_operation(
-        &wal_path,
+        &fixture.wal_file,
         &cda_interfaces::storage_api::Operation::Write {
             collection: CollectionName::Custom("fresh_collection".to_string()),
             key: "data_file".to_string(),
@@ -321,10 +274,10 @@ async fn recovery_create_collection_with_write_removes_orphaned_dir() {
         },
     )
     .unwrap();
-    cda_storage::wal::mark_committing(&wal_path).unwrap();
+    cda_storage::wal::mark_committing(&fixture.wal_file).unwrap();
 
     // Recovery should fully roll back - the collection did not exist before this transaction.
-    let _storage = LocalStorage::new(root).unwrap();
+    let _storage = fixture.create_storage();
 
     // The collection directory must be completely gone after recovery.
     assert!(
@@ -338,20 +291,13 @@ async fn recovery_create_collection_with_write_removes_orphaned_dir() {
 /// that untouched current collection rather than treating it as an artifact of the failed copy.
 #[tokio::test]
 async fn recovery_preserves_untouched_existing_copy_destination() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    let collections_dir = root.join("collections");
-    let journal_dir = root.join("journal");
-    let staging_dir = journal_dir.join("staging");
-    let current_dir = collections_dir.join("diagnostic_database");
-    std::fs::create_dir_all(&current_dir).unwrap();
-    std::fs::create_dir_all(&staging_dir).unwrap();
+    let fixture = Fixture::new();
+    let current_dir = &fixture.diagnostic_database_dir;
     std::fs::write(current_dir.join("ecu1.mdd"), b"current data").unwrap();
 
-    let wal_path = journal_dir.join("transaction.wal");
-    cda_storage::wal::create_wal(&wal_path).unwrap();
+    cda_storage::wal::create_wal(&fixture.wal_file).unwrap();
     cda_storage::wal::append_operation(
-        &wal_path,
+        &fixture.wal_file,
         &cda_interfaces::storage_api::Operation::CopyCollection {
             source: CollectionName::DiagnosticDatabaseNextUpdate,
             dest: CollectionName::DiagnosticDatabase,
@@ -359,9 +305,9 @@ async fn recovery_preserves_untouched_existing_copy_destination() {
         },
     )
     .unwrap();
-    cda_storage::wal::mark_committing(&wal_path).unwrap();
+    cda_storage::wal::mark_committing(&fixture.wal_file).unwrap();
 
-    let storage = LocalStorage::new(root).unwrap();
+    let storage = fixture.create_storage();
     let current = storage
         .get_collection(&CollectionName::DiagnosticDatabase)
         .await
@@ -370,4 +316,44 @@ async fn recovery_preserves_untouched_existing_copy_destination() {
     let mut data = vec![0; "current data".len()];
     handle.read_at(0, &mut data).unwrap();
     assert_eq!(data, b"current data");
+}
+
+struct Fixture {
+    root_dir: tempfile::TempDir,
+    collections_dir: PathBuf,
+    staging_dir: PathBuf,
+    diagnostic_database_dir: PathBuf,
+    wal_file: PathBuf,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let root_dir = tempfile::tempdir().unwrap();
+        let root = root_dir.path();
+
+        let collections_dir = root.join("collections");
+        std::fs::create_dir_all(&collections_dir).unwrap();
+
+        let journal_dir = root.join("journal");
+
+        let staging_dir = journal_dir.join("staging");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+
+        let diagnostic_database_dir = collections_dir.join("diagnostic_database");
+        std::fs::create_dir_all(&diagnostic_database_dir).unwrap();
+
+        let wal_file = journal_dir.join("transaction.wal");
+
+        Self {
+            root_dir,
+            collections_dir,
+            staging_dir,
+            diagnostic_database_dir,
+            wal_file,
+        }
+    }
+
+    fn create_storage(&self) -> LocalStorage {
+        LocalStorage::new(self.root_dir.path()).unwrap()
+    }
 }
