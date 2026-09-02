@@ -158,9 +158,12 @@ pub(crate) fn acquire_communication_activity(
 /// operations, `FgServiceExecution` for functional-group operations).
 pub(crate) trait ExecutionStatus {
     fn execution_status(&self) -> &sovd_ecu::operations::ExecutionStatus;
-    /// Returns `true` if a request for this execution is currently being processed.
-    /// Used to avoid sending multiple UDS requests simultaneously for the same execution.
+    /// Returns `true` if an HTTP handler currently has exclusive processing access to this
+    /// execution. Used to avoid sending multiple UDS requests simultaneously for the same
+    /// execution.
     fn is_in_flight(&self) -> bool;
+    /// Sets whether an HTTP handler currently has exclusive processing access to this execution.
+    /// This is independent of the diagnostic execution status.
     fn set_in_flight(&mut self, in_flight: bool);
     /// Should return `false` if an execution was created as a placeholder,
     /// but not finalized.
@@ -438,39 +441,75 @@ impl LockStateProvider for SovdLockStateProvider {
     }
 }
 
+/// Resets an execution's request-level concurrency marker when processing ends or is cancelled.
+pub(crate) struct ExecutionRequestGuard<'a, T: ExecutionStatus> {
+    executions: &'a ExecutionLock<T>,
+    service: String,
+    exec_id: Uuid,
+    snapshot: T,
+}
+
+impl<T: ExecutionStatus> ExecutionRequestGuard<'_, T> {
+    pub(crate) fn snapshot(&self) -> &T {
+        &self.snapshot
+    }
+}
+
+impl<T: ExecutionStatus> Drop for ExecutionRequestGuard<'_, T> {
+    fn drop(&mut self) {
+        if let Some(exec) = lock_write(self.executions)
+            .get_mut(&self.service)
+            .and_then(|entries| entries.get_mut(&self.exec_id))
+        {
+            exec.set_in_flight(false);
+        }
+    }
+}
+
 /// Acquires a write lock on `executions`, looks up `exec_id` under the given
-/// `service` key, marks it `in_flight = true`, and returns a clone of the
-/// execution.  Returns `Err(ErrorWrapper)` (with the lock released) on
-/// not-found or in-flight conflict.
-pub(crate) fn guard_execution<T: ExecutionStatus + Clone>(
-    executions: &ExecutionLock<T>,
+/// `service` key, marks it `in_flight = true`, and returns a guard containing a
+/// snapshot of the execution. Returns `Err(ErrorWrapper)` on not-found or conflict.
+pub(crate) fn guard_execution<'a, T: ExecutionStatus + Clone>(
+    executions: &'a ExecutionLock<T>,
     service: &str,
     exec_id: Uuid,
     include_schema: bool,
     conflict_msg: &str,
-) -> Result<T, error::ErrorWrapper> {
-    let mut guard = lock_write(executions);
-    let op_map = guard
-        .get_mut(service)
-        .and_then(|m| m.get_mut(&exec_id))
-        // Treat placeholders (is_created == false) as non-existent.
-        .filter(|e| e.is_created());
-    match op_map {
-        None => Err(error::ErrorWrapper {
-            error: error::ApiError::NotFound(Some(format!(
-                "Execution with id {exec_id} not found"
-            ))),
-            include_schema,
-        }),
-        Some(exec) if exec.is_in_flight() => Err(error::ErrorWrapper {
-            error: error::ApiError::Conflict(conflict_msg.to_owned()),
-            include_schema,
-        }),
-        Some(exec) => {
-            exec.set_in_flight(true);
-            Ok(exec.clone())
+) -> Result<ExecutionRequestGuard<'a, T>, error::ErrorWrapper> {
+    let snapshot = {
+        let mut guard = lock_write(executions);
+        let op_map = guard
+            .get_mut(service)
+            .and_then(|m| m.get_mut(&exec_id))
+            // Treat placeholders (is_created == false) as non-existent.
+            .filter(|e| e.is_created());
+        match op_map {
+            None => {
+                return Err(error::ErrorWrapper {
+                    error: error::ApiError::NotFound(Some(format!(
+                        "Execution with id {exec_id} not found"
+                    ))),
+                    include_schema,
+                });
+            }
+            Some(exec) if exec.is_in_flight() => {
+                return Err(error::ErrorWrapper {
+                    error: error::ApiError::Conflict(conflict_msg.to_owned()),
+                    include_schema,
+                });
+            }
+            Some(exec) => {
+                exec.set_in_flight(true);
+                exec.clone()
+            }
         }
-    }
+    };
+    Ok(ExecutionRequestGuard {
+        executions,
+        service: service.to_owned(),
+        exec_id,
+        snapshot,
+    })
 }
 
 /// Checks for a running-execution conflict and, if none exists,
@@ -1346,15 +1385,9 @@ pub(crate) mod tests {
     }
 
     struct CountingCommunicationAccess {
-        active: Arc<AtomicUsize>,
-    }
-
-    struct CountingGuard(Arc<AtomicUsize>);
-
-    impl Drop for CountingGuard {
-        fn drop(&mut self) {
-            self.0.fetch_sub(1, Ordering::SeqCst);
-        }
+        /// Used as counter for active instances.
+        /// As tests hold this too active 'access' instances are `Arc::strong_count` - 1
+        active: Arc<()>,
     }
 
     impl CommunicationAccess for CountingCommunicationAccess {
@@ -1363,10 +1396,7 @@ pub(crate) mod tests {
         }
 
         fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
-            self.active.fetch_add(1, Ordering::SeqCst);
-            Ok(CommunicationGuard::new(CountingGuard(Arc::clone(
-                &self.active,
-            ))))
+            Ok(CommunicationGuard::new(Arc::clone(&self.active)))
         }
 
         fn request_activate(&self, _cause: ActivationCause) -> CommunicationState {
@@ -1430,11 +1460,52 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn request_guard_drop_resets_in_flight() {
+        let exec_id = Uuid::new_v4();
+        let mut entries = IndexMap::new();
+        entries.insert(
+            exec_id,
+            ServiceExecution {
+                parameters: serde_json::Map::new(),
+                status: sovd_ecu::operations::ExecutionStatus::Running,
+                in_flight: false,
+                is_created: true,
+                communication_lease: None,
+            },
+        );
+        let executions = StdRwLock::new(HashMap::from_iter([("routine".to_owned(), entries)]));
+
+        let Ok(request_guard) = guard_execution(
+            &executions,
+            "routine",
+            exec_id,
+            false,
+            "execution already in flight",
+        ) else {
+            panic!("execution must be guarded");
+        };
+        assert!(
+            lock_read(&executions)
+                .get("routine")
+                .and_then(|entries| entries.get(&exec_id))
+                .is_some_and(|execution| execution.in_flight)
+        );
+
+        drop(request_guard);
+
+        assert!(
+            lock_read(&executions)
+                .get("routine")
+                .and_then(|entries| entries.get(&exec_id))
+                .is_some_and(|execution| !execution.in_flight)
+        );
+    }
+
+    #[test]
     fn reservation_drop_releases_execution_and_lease() {
         let executions = Arc::new(StdRwLock::new(HashMap::default()));
-        let active = Arc::new(AtomicUsize::new(0));
         let access = CountingCommunicationAccess {
-            active: Arc::clone(&active),
+            active: Arc::new(()),
         };
 
         let Ok(reservation) = acquire_and_reserve_execution::<ServiceExecution>(
@@ -1448,7 +1519,7 @@ pub(crate) mod tests {
         };
         let id = reservation.exec_id;
 
-        assert_eq!(active.load(Ordering::SeqCst), 1);
+        assert_eq!(Arc::strong_count(&access.active), 2);
         assert!(
             lock_read(&executions)
                 .get("routine")
@@ -1457,15 +1528,14 @@ pub(crate) mod tests {
 
         drop(reservation);
 
-        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(Arc::strong_count(&access.active), 1);
         assert!(lock_read(&executions).get("routine").is_none());
     }
 
     #[test]
     fn comparam_execution_removal_releases_lease() {
-        let active = Arc::new(AtomicUsize::new(0));
         let access = CountingCommunicationAccess {
-            active: Arc::clone(&active),
+            active: Arc::new(()),
         };
         let Ok(communication_guard) = access.acquire() else {
             panic!("enabled communication must provide a guard");
@@ -1484,17 +1554,16 @@ pub(crate) mod tests {
             ),
         );
 
-        assert_eq!(active.load(Ordering::SeqCst), 1);
+        assert_eq!(Arc::strong_count(&access.active), 2);
         executions.shift_remove(&id);
-        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(Arc::strong_count(&access.active), 1);
     }
 
     #[test]
     fn async_handoff_preserves_execution_and_releases_lease_on_completion() {
         let executions = Arc::new(StdRwLock::new(HashMap::default()));
-        let active = Arc::new(AtomicUsize::new(0));
         let access = CountingCommunicationAccess {
-            active: Arc::clone(&active),
+            active: Arc::new(()),
         };
         let Ok(reservation) = acquire_and_reserve_execution::<ServiceExecution>(
             &access,
@@ -1512,7 +1581,7 @@ pub(crate) mod tests {
                 .insert("result".to_owned(), serde_json::json!("ok"));
         });
 
-        assert_eq!(active.load(Ordering::SeqCst), 1);
+        assert_eq!(Arc::strong_count(&access.active), 2);
         let mut executions_guard = lock_write(&executions);
         let execution = executions_guard
             .get_mut("routine")
@@ -1522,7 +1591,7 @@ pub(crate) mod tests {
         execution.complete();
         drop(executions_guard);
 
-        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(Arc::strong_count(&access.active), 1);
         assert!(
             lock_read(&executions)
                 .get("routine")
@@ -1546,9 +1615,8 @@ pub(crate) mod tests {
         let mut execution_map = HashMap::default();
         execution_map.insert("routine".to_owned(), entries);
         let executions = Arc::new(StdRwLock::new(execution_map));
-        let active = Arc::new(AtomicUsize::new(0));
         let access = CountingCommunicationAccess {
-            active: Arc::clone(&active),
+            active: Arc::new(()),
         };
 
         let result = acquire_and_reserve_execution::<ServiceExecution>(
@@ -1559,7 +1627,7 @@ pub(crate) mod tests {
         };
 
         assert!(matches!(error.error, ApiError::Conflict(_)));
-        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(Arc::strong_count(&access.active), 1);
     }
 
     pub fn create_test_webserver_state<T: UdsEcu + Clone, U: FileManager>(
