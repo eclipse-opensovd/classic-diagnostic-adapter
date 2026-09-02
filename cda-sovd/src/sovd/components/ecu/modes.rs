@@ -15,7 +15,7 @@ use std::time::Duration;
 use aide::transform::TransformOperation;
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::Query,
     http::StatusCode,
     response::{IntoResponse as _, Response},
 };
@@ -23,7 +23,6 @@ use axum_extra::extract::WithRejection;
 use cda_interfaces::{
     HashMap, UdsEcu,
     diagservices::{DiagServiceResponse, DiagServiceResponseType},
-    file_manager::FileManager,
 };
 use schemars::Schema;
 use serde::Serialize;
@@ -38,7 +37,7 @@ use sovd_interfaces::{
 use crate::{
     Locks,
     sovd::{
-        WebserverEcuState, create_schema,
+        EcuContext, WebserverEcuState, create_schema,
         error::{ApiError, ErrorWrapper, api_error_from_diag_response},
         locks::validate_lock,
     },
@@ -219,15 +218,15 @@ pub(crate) mod session {
             mode_expiration = ?request_body.mode_expiration
         )
         )]
-    pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn put<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(WebserverEcuState {
+        EcuContext(WebserverEcuState {
             ecu_name,
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): EcuContext<T>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::security_and_session::put::Request>,
             ApiError,
@@ -311,10 +310,10 @@ pub(crate) mod session {
             .with(openapi::error_bad_gateway)
     }
 
-    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone>(
         UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+        EcuContext(WebserverEcuState { ecu_name, uds, .. }): EcuContext<T>,
     ) -> Response {
         handle_mode_get(
             &uds,
@@ -362,21 +361,21 @@ pub(crate) mod security {
     use super::*;
     use crate::{openapi, sovd::error::ErrorWrapper};
 
-    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(WebserverEcuState {
+        EcuContext(WebserverEcuState {
             ecu_name,
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): EcuContext<T>,
     ) -> Response {
         handle_mode_get(
             &uds,
             &ecu_name,
             service_ids::SECURITY_ACCESS,
-            Some((locks.as_ref(), security_plugin)),
+            Some((&locks, security_plugin)),
             query.include_schema,
             |value, schema| sovd_modes::security_and_session::get::Response {
                 name: Some(SECURITY_NAME.to_owned()),
@@ -424,15 +423,15 @@ pub(crate) mod security {
         }
     }
 
-    pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn put<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(WebserverEcuState {
+        EcuContext(WebserverEcuState {
             ecu_name,
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): EcuContext<T>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::security_and_session::put::Request>,
             ApiError,
@@ -586,13 +585,9 @@ pub(crate) mod security {
 
 pub(crate) mod commctrl {
     use aide::{UseApi, transform::TransformOperation};
-    use axum::{
-        Json,
-        extract::{Query, State},
-        response::Response,
-    };
+    use axum::{Json, extract::Query, response::Response};
     use axum_extra::extract::WithRejection;
-    use cda_interfaces::{SchemaProvider, UdsEcu, file_manager::FileManager, service_ids};
+    use cda_interfaces::{SchemaProvider, UdsEcu, service_ids};
     use cda_plugin_security::Secured;
     use sovd_interfaces::{
         common::modes::{COMM_CONTROL_ID, COMM_CONTROL_NAME},
@@ -602,16 +597,16 @@ pub(crate) mod commctrl {
     use crate::{
         openapi,
         sovd::{
-            WebserverEcuState,
+            EcuContext, WebserverEcuState,
             components::ecu::modes::{handle_mode_change, handle_mode_get},
             error::ApiError,
         },
     };
 
-    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone>(
         UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+        EcuContext(WebserverEcuState { ecu_name, uds, .. }): EcuContext<T>,
     ) -> Response {
         handle_mode_get(
             &uds,
@@ -643,15 +638,15 @@ pub(crate) mod commctrl {
             .with(openapi::error_not_found)
     }
 
-    pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn put<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(WebserverEcuState {
+        EcuContext(WebserverEcuState {
             ecu_name,
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): EcuContext<T>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::commctrl::put::Request>,
             ApiError,
@@ -693,13 +688,9 @@ pub(crate) mod commctrl {
 
 pub(crate) mod dtcsetting {
     use aide::{UseApi, transform::TransformOperation};
-    use axum::{
-        Json,
-        extract::{Query, State},
-        response::Response,
-    };
+    use axum::{Json, extract::Query, response::Response};
     use axum_extra::extract::WithRejection;
-    use cda_interfaces::{SchemaProvider, UdsEcu, file_manager::FileManager, service_ids};
+    use cda_interfaces::{SchemaProvider, UdsEcu, service_ids};
     use cda_plugin_security::Secured;
     use sovd_interfaces::{
         common::modes::{DTC_SETTING_ID, DTC_SETTING_NAME},
@@ -709,16 +700,16 @@ pub(crate) mod dtcsetting {
     use crate::{
         openapi,
         sovd::{
-            WebserverEcuState,
+            EcuContext, WebserverEcuState,
             components::ecu::modes::{handle_mode_change, handle_mode_get},
             error::ApiError,
         },
     };
 
-    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone>(
         UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+        EcuContext(WebserverEcuState { ecu_name, uds, .. }): EcuContext<T>,
     ) -> Response {
         handle_mode_get(
             &uds,
@@ -750,15 +741,15 @@ pub(crate) mod dtcsetting {
             .with(openapi::error_not_found)
     }
 
-    pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn put<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(WebserverEcuState {
+        EcuContext(WebserverEcuState {
             ecu_name,
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): EcuContext<T>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::dtcsetting::put::Request>,
             ApiError,

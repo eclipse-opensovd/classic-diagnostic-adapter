@@ -16,8 +16,11 @@ pub use security::DefaultUpdateSecurityHandler;
 
 pub mod config;
 pub mod default_runtime_reloader_plugin;
-pub use default_runtime_reloader_plugin::{DefaultReloadContext, RuntimeReloaderConfig};
+pub use default_runtime_reloader_plugin::{
+    DefaultReloadContext, DefaultRuntimeReloaderPlugin, RuntimeReloaderConfig,
+};
 pub mod default_runtime_update_plugin;
+pub(crate) mod mdd;
 pub mod operations;
 pub mod security;
 pub mod storage;
@@ -25,18 +28,15 @@ pub mod storage;
 /// Shared test utilities for the runtime update plugin tests.
 #[cfg(test)]
 pub(crate) mod test_utils {
-    use std::{
-        path::PathBuf,
-        sync::{Arc, Mutex},
-    };
+    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use bytes::Bytes;
     use cda_interfaces::{
         communication_control::{TransportControl, TransportState, error::CommControlError},
         runtime_update_api::{
-            LockStateProvider, ReloadError, RuntimeReloaderPlugin, RuntimeUpdateError, UploadFile,
-            VerificationError,
+            LockStateProvider, RecoveryPhase, ReloadError, ReloadFailure, RuntimeReloaderPlugin,
+            RuntimeUpdateError, UploadFile, VerificationError,
         },
         storage_api::{
             Collection, CollectionName, DirectFileAccess, ReadableStream, Storage, Transaction,
@@ -115,17 +115,17 @@ pub(crate) mod test_utils {
         cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
         for MockSecurityHandler
     {
-        async fn check_apply_allowed(
+        async fn check_execution_allowed(
             &self,
             lock_state_provider: &L,
             _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
         ) -> Result<(), RuntimeUpdateError> {
-            let owner = lock_state_provider.vehicle_lock_owner_sub().await;
-            match owner {
-                None => Err(RuntimeUpdateError::NoLock(
+            if lock_state_provider.vehicle_lock_owner_sub().await.is_some() {
+                Ok(())
+            } else {
+                Err(RuntimeUpdateError::NoLock(
                     "No vehicle lock held".to_string(),
-                )),
-                Some(_) => Ok(()),
+                ))
             }
         }
 
@@ -211,7 +211,7 @@ pub(crate) mod test_utils {
     }
 
     pub struct RecordingReloadHandler {
-        pub reload_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
+        pub reload_calls: Arc<Mutex<Vec<()>>>,
     }
 
     impl RecordingReloadHandler {
@@ -224,8 +224,8 @@ pub(crate) mod test_utils {
 
     #[async_trait]
     impl RuntimeReloaderPlugin for RecordingReloadHandler {
-        async fn reload_databases(&self, paths: Vec<PathBuf>) -> Result<(), ReloadError> {
-            self.reload_calls.lock().unwrap().push(paths);
+        async fn reload_databases(&self) -> Result<(), ReloadFailure> {
+            self.reload_calls.lock().unwrap().push(());
             Ok(())
         }
     }
@@ -235,7 +235,7 @@ pub(crate) mod test_utils {
 
     #[async_trait]
     impl RuntimeReloaderPlugin for NoopReloadHandler {
-        async fn reload_databases(&self, _mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
+        async fn reload_databases(&self) -> Result<(), ReloadFailure> {
             Ok(())
         }
     }
@@ -247,20 +247,14 @@ pub(crate) mod test_utils {
 
     #[async_trait]
     impl RuntimeReloaderPlugin for FailingReloadHandler {
-        async fn reload_databases(&self, _mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
-            Err(ReloadError::General("Simulated reload failure".to_string()))
-        }
-    }
-
-    /// A [`RuntimeReloaderPlugin`] whose database reload panics, to exercise the
-    /// supervisor path for an execution task that ends without writing a
-    /// terminal status.
-    pub struct PanickingReloadHandler;
-
-    #[async_trait]
-    impl RuntimeReloaderPlugin for PanickingReloadHandler {
-        async fn reload_databases(&self, _mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
-            panic!("Simulated reload panic");
+        async fn reload_databases(&self) -> Result<(), ReloadFailure> {
+            Err(ReloadFailure::RecoveryRequired {
+                original: ReloadError::General("Simulated reload failure".to_string()),
+                recovery: ReloadError::ReplacementFailure(
+                    "Persistent/live coherence could not be proven".to_owned(),
+                ),
+                phase: RecoveryPhase::CandidatePreparation,
+            })
         }
     }
 }
@@ -275,8 +269,8 @@ mod tests {
     use async_trait::async_trait;
     use cda_interfaces::runtime_update_api::{
         BulkDataCreatedList, BulkDataList, ExclusiveRuntimePlugin, ExecutionMode,
-        RuntimeFilesQuery, RuntimeFilesUpdatePlugin, RuntimeUpdateError, UpdateExecution,
-        UploadFile,
+        RuntimeFileCatalog, RuntimeFileStore, RuntimeFilesQuery, RuntimeFilesUpdatePlugin,
+        RuntimeUpdateError, RuntimeUpdateExecutor, UpdateExecution, UploadFile,
     };
     use tokio::sync::{Barrier, Notify};
 
@@ -294,7 +288,7 @@ mod tests {
     type Notifier = Arc<Notify>;
 
     #[async_trait]
-    impl RuntimeFilesUpdatePlugin for DelayPlugin {
+    impl RuntimeFileCatalog for DelayPlugin {
         async fn list_current(
             &self,
             _query: &RuntimeFilesQuery,
@@ -328,7 +322,10 @@ mod tests {
                 schema: None,
             })
         }
+    }
 
+    #[async_trait]
+    impl RuntimeFileStore for DelayPlugin {
         async fn upload(
             &self,
             _files: Vec<UploadFile>,
@@ -355,7 +352,10 @@ mod tests {
         async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
             Ok(vec![])
         }
+    }
 
+    #[async_trait]
+    impl RuntimeUpdateExecutor for DelayPlugin {
         async fn start_execution(
             &self,
             _mode: ExecutionMode,
@@ -509,5 +509,17 @@ mod tests {
         // Release the read (list_current waits on read_notify)
         read_notify.notify_waiters();
         t2.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn exclusive_wrapper_forwards_exact_execution_context() {
+        let (plugin, _, _, _, _) = make_plugin(1, 1);
+        assert_eq!(
+            plugin
+                .start_execution(ExecutionMode::Cleanup)
+                .await
+                .unwrap(),
+            "exec-1"
+        );
     }
 }

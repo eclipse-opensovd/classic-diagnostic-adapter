@@ -29,6 +29,16 @@ impl OwnedHttpProtection {
             id: Some(id),
         }
     }
+    /// Leaves the protection registered for the rest of the process.
+    ///
+    /// For a runtime that could not be restored to a known-good state: the
+    /// record has to outlive its owner so every guarded request keeps being
+    /// refused until an operator restarts the process. Consumes the handle,
+    /// because after this there is no way to lift the protection again.
+    pub fn retain(mut self) {
+        self.id = None;
+    }
+
     fn remove(&mut self) {
         if let Some(id) = self.id.take()
             && !self.registry.remove(id)

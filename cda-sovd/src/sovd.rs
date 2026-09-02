@@ -11,7 +11,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex as StdMutex},
+    time::Duration,
+};
 
 pub mod request_guard;
 
@@ -33,13 +37,14 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    Connectivity, FunctionalDescriptionConfig, HashMap, HashMapExtensions as _, SchemaProvider,
-    UdsEcu, VariantState,
+    Connectivity, FunctionalDescriptionConfig, HashMap, HashMapExtensions as _, ReloadComponent,
+    SchemaProvider, UdsEcu, VariantState,
     communication_control::{ActivationCause, CommunicationAccess, CommunicationGuard},
     datatypes::ComponentsConfig,
     diagservices::{FieldParseError, UdsPayloadData},
-    file_manager::FileManager,
-    runtime_update_api::LockStateProvider,
+    file_manager::EmbeddedFilesProvider,
+    runtime_update_api::{LockStateProvider, ReservedVehicleDatabaseLocks},
+    util::std_ext,
 };
 use cda_plugin_security::{SecurityPluginLoader, security_plugin_middleware};
 use error::{ApiError, api_error_from_diag_response};
@@ -52,7 +57,7 @@ use sovd_interfaces::{
     components::{ComponentsResponse, ecu as sovd_ecu},
     error::DataError,
 };
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use uuid::Uuid;
 
 use crate::{
@@ -97,17 +102,12 @@ impl IntoSovd for cda_interfaces::EcuState {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum SovdError {
-    #[error("Failed to create route: {0}")]
-    RouteError(String),
-}
-
 #[derive(Clone)]
-pub(crate) struct WebserverEcuState<T: UdsEcu + Clone, U: FileManager> {
+pub(crate) struct WebserverEcuState<T: UdsEcu + Clone> {
     ecu_name: String,
     uds: T,
-    locks: Arc<Locks>,
+    locks: ResolvedLocks,
+    lock_provider: Arc<SovdLockStateView>,
     // Map of Execution Id -> ComParamMap
     comparam_executions: Arc<RwLock<IndexMap<Uuid, sovd_ecu::operations::comparams::Execution>>>,
     // Guards replace sampled execution activity as the source of update exclusion.
@@ -116,7 +116,322 @@ pub(crate) struct WebserverEcuState<T: UdsEcu + Clone, U: FileManager> {
     // Map of Service Name -> (Execution Id -> ServiceExecution) for ECU routine operations
     pub(crate) service_executions: Arc<RwLock<HashMap<String, IndexMap<Uuid, ServiceExecution>>>>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
-    mdd_embedded_files: Arc<U>,
+}
+
+/// Per-ECU execution state retained while the same live database identity remains present.
+#[derive(Default)]
+pub(crate) struct EcuRegistryEntry {
+    comparam_executions: Arc<RwLock<IndexMap<Uuid, sovd_ecu::operations::comparams::Execution>>>,
+    communication_activities: Arc<Mutex<HashMap<Uuid, CommunicationGuard>>>,
+    service_executions: Arc<RwLock<HashMap<String, IndexMap<Uuid, ServiceExecution>>>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct LiveEntity {
+    database_name: String,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct LiveVehicleData {
+    ecus: HashMap<String, LiveEntity>,
+    functional_groups: HashMap<String, LiveEntity>,
+}
+
+impl LiveVehicleData {
+    pub(crate) fn ecu_index(&self) -> &HashMap<String, LiveEntity> {
+        &self.ecus
+    }
+
+    pub(crate) fn functional_group_index(&self) -> &HashMap<String, LiveEntity> {
+        &self.functional_groups
+    }
+}
+
+#[derive(Default)]
+struct SovdRegistryState {
+    ecus: HashMap<String, Arc<EcuRegistryEntry>>,
+    functional_groups: HashMap<String, Arc<functions::functional_groups::FgRegistryEntry>>,
+    live: LiveVehicleData,
+}
+
+/// ECU and functional-group identities prepared for one SOVD registry commit.
+pub struct SovdRegistryUpdate {
+    ecus: HashMap<String, String>,
+    functional_groups: HashMap<String, String>,
+}
+
+impl SovdRegistryUpdate {
+    #[must_use]
+    pub fn new(ecus: HashMap<String, String>, functional_groups: HashMap<String, String>) -> Self {
+        Self {
+            ecus,
+            functional_groups,
+        }
+    }
+}
+
+/// Owns execution state for the currently live ECU and functional-group identities.
+/// Route keys are normalized at every registry boundary.
+#[derive(Clone, Default)]
+pub(crate) struct SovdRegistry {
+    state: Arc<StdMutex<SovdRegistryState>>,
+}
+
+/// Cloneable read-only view of live SOVD identities and execution state.
+#[derive(Clone)]
+pub struct SovdRegistryView {
+    state: Arc<StdMutex<SovdRegistryState>>,
+}
+
+impl From<SovdRegistry> for SovdRegistryView {
+    fn from(owner: SovdRegistry) -> Self {
+        owner.view()
+    }
+}
+
+impl From<&SovdRegistry> for SovdRegistryView {
+    fn from(owner: &SovdRegistry) -> Self {
+        owner.view()
+    }
+}
+
+/// Converts startup wiring into the read-only registry retained by handlers.
+pub trait IntoSovdRegistryView {
+    /// Installs startup identities when needed and returns the runtime view.
+    fn into_registry_view(
+        self,
+        ecus: HashMap<String, String>,
+        functional_groups: HashMap<String, String>,
+    ) -> SovdRegistryView;
+}
+
+impl IntoSovdRegistryView for SovdRegistry {
+    fn into_registry_view(
+        self,
+        ecus: HashMap<String, String>,
+        functional_groups: HashMap<String, String>,
+    ) -> SovdRegistryView {
+        self.apply(ecus, functional_groups);
+        self.view()
+    }
+}
+
+impl IntoSovdRegistryView for SovdRegistryView {
+    fn into_registry_view(
+        self,
+        _ecus: HashMap<String, String>,
+        _functional_groups: HashMap<String, String>,
+    ) -> SovdRegistryView {
+        self
+    }
+}
+
+/// Registry capabilities returned to application wiring.
+pub struct SovdRegistryParts {
+    /// Read-only runtime view.
+    pub registry: SovdRegistryView,
+    /// Opaque authority to replace the registry, retained by update wiring.
+    pub reload: Arc<dyn ReloadComponent<SovdRegistryUpdate>>,
+}
+
+/// Creates the private SOVD registry owner and separates its capabilities.
+#[must_use]
+pub fn new_sovd_registry(initial: SovdRegistryUpdate) -> SovdRegistryParts {
+    let owner = Arc::new(SovdRegistry::with_initial(initial));
+    SovdRegistryParts {
+        registry: owner.view(),
+        reload: Arc::clone(&owner) as Arc<dyn ReloadComponent<SovdRegistryUpdate>>,
+    }
+}
+
+impl SovdRegistryView {
+    pub(crate) fn live(&self) -> LiveVehicleData {
+        std_ext::lock_mutex(&self.state).live.clone()
+    }
+
+    /// Resolves an live ECU's database name and live execution state under
+    /// one lock, so the two can never come from different installations.
+    pub(crate) fn resolve_ecu(&self, route_name: &str) -> Option<(String, Arc<EcuRegistryEntry>)> {
+        let key = route_name.to_lowercase();
+        let state = std_ext::lock_mutex(&self.state);
+        let database_name = state.live.ecus.get(&key)?.database_name.clone();
+        Some((database_name, Arc::clone(state.ecus.get(&key)?)))
+    }
+
+    /// Functional-group counterpart of [`resolve_ecu`](Self::resolve_ecu).
+    pub(crate) fn resolve_functional_group(
+        &self,
+        route_name: &str,
+    ) -> Option<(String, Arc<functions::functional_groups::FgRegistryEntry>)> {
+        let key = route_name.to_lowercase();
+        let state = std_ext::lock_mutex(&self.state);
+        let database_name = state
+            .live
+            .functional_groups
+            .get(&key)?
+            .database_name
+            .clone();
+        Some((
+            database_name,
+            Arc::clone(state.functional_groups.get(&key)?),
+        ))
+    }
+}
+
+impl SovdRegistry {
+    /// Creates an owner with the startup identity set already live.
+    #[must_use]
+    pub(crate) fn with_initial(update: SovdRegistryUpdate) -> Self {
+        let owner = Self::default();
+        owner.apply(update.ecus, update.functional_groups);
+        owner
+    }
+
+    /// Returns a cloneable view without authority to replace or publish.
+    #[must_use]
+    pub fn view(&self) -> SovdRegistryView {
+        SovdRegistryView {
+            state: Arc::clone(&self.state),
+        }
+    }
+    fn prepare_update(
+        current: &SovdRegistryState,
+        update: &SovdRegistryUpdate,
+    ) -> SovdRegistryState {
+        // An entry that stays live keeps its `Arc`, and therefore its live
+        // execution state; one that was absent gets a fresh default.
+        fn prepare_kind<T: Default>(
+            current: &HashMap<String, Arc<T>>,
+            names: &HashMap<String, String>,
+        ) -> (HashMap<String, Arc<T>>, HashMap<String, LiveEntity>) {
+            let mut live = HashMap::default();
+            let mut entries = HashMap::default();
+            for (key, database_name) in names {
+                let key = key.to_lowercase();
+                let state = current
+                    .get(&key)
+                    .map_or_else(|| Arc::new(T::default()), Arc::clone);
+                entries.insert(key.clone(), state);
+                live.insert(
+                    key,
+                    LiveEntity {
+                        database_name: database_name.clone(),
+                    },
+                );
+            }
+            (entries, live)
+        }
+
+        let (ecus, live_ecus) = prepare_kind(&current.ecus, &update.ecus);
+        let (functional_groups, live_groups) =
+            prepare_kind(&current.functional_groups, &update.functional_groups);
+        SovdRegistryState {
+            ecus,
+            functional_groups,
+            live: LiveVehicleData {
+                ecus: live_ecus,
+                functional_groups: live_groups,
+            },
+        }
+    }
+
+    pub(crate) fn apply(
+        &self,
+        ecus: HashMap<String, String>,
+        functional_groups: HashMap<String, String>,
+    ) -> LiveVehicleData {
+        let mut state = std_ext::lock_mutex(&self.state);
+        let update = SovdRegistryUpdate::new(ecus, functional_groups);
+        let replacement = Self::prepare_update(&state, &update);
+        let live = replacement.live.clone();
+        *state = replacement;
+        live
+    }
+
+    #[cfg(test)]
+    fn ecu(&self, route_name: &str) -> Option<Arc<EcuRegistryEntry>> {
+        self.view().resolve_ecu(route_name).map(|(_, entry)| entry)
+    }
+
+    #[cfg(test)]
+    fn functional_group(
+        &self,
+        route_name: &str,
+    ) -> Option<Arc<functions::functional_groups::FgRegistryEntry>> {
+        self.view()
+            .resolve_functional_group(route_name)
+            .map(|(_, entry)| entry)
+    }
+}
+
+#[async_trait]
+impl ReloadComponent<SovdRegistryUpdate> for SovdRegistry {
+    async fn apply(&self, data: SovdRegistryUpdate) {
+        SovdRegistry::apply(self, data.ecus, data.functional_groups);
+    }
+}
+
+/// Extracts live per-ECU state for the templated component route.
+pub(crate) struct EcuContext<T: UdsEcu + Clone>(pub(crate) WebserverEcuState<T>);
+
+#[derive(serde::Deserialize)]
+struct ComponentIdParam {
+    component_id: String,
+}
+
+/// Rejection returned when `component_id` names no currently loaded ECU.
+/// Mirrors [`error::sovd_not_found_handler`] so a removed ECU stays
+/// indistinguishable from a route that never existed.
+pub(crate) enum EcuContextRejection {
+    NotFound(Uri),
+}
+
+impl IntoResponse for EcuContextRejection {
+    fn into_response(self) -> Response {
+        match self {
+            Self::NotFound(uri) => error::not_found_response(&uri),
+        }
+    }
+}
+
+// No-op body: `component_id` is an artifact of routing, not part of the
+// documented operation, which emits one concrete path per ECU.
+impl<T: UdsEcu + Clone> aide::OperationInput for EcuContext<T> {}
+
+impl<T: UdsEcu + Clone> axum::extract::FromRequestParts<WebserverState<T>> for EcuContext<T> {
+    type Rejection = EcuContextRejection;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &WebserverState<T>,
+    ) -> Result<Self, Self::Rejection> {
+        let request_uri = parts
+            .extensions
+            .get::<axum::extract::OriginalUri>()
+            .map_or_else(|| parts.uri.clone(), |uri| uri.0.clone());
+        // A named field, not `Path<String>`: nesting composes path params from every
+        // nest boundary a request crosses, so more than one may be in scope.
+        let axum::extract::Path(ComponentIdParam { component_id }) =
+            axum::extract::Path::<ComponentIdParam>::from_request_parts(parts, state)
+                .await
+                .map_err(|_| EcuContextRejection::NotFound(request_uri.clone()))?;
+        let route_name = component_id.to_lowercase();
+        let locks = state.lock_provider.current_locks().await;
+        let Some((ecu_name, entry)) = state.registry.resolve_ecu(&route_name) else {
+            return Err(EcuContextRejection::NotFound(request_uri));
+        };
+        Ok(EcuContext(WebserverEcuState {
+            ecu_name,
+            uds: state.uds.clone(),
+            locks,
+            lock_provider: Arc::clone(&state.lock_provider),
+            comparam_executions: Arc::clone(&entry.comparam_executions),
+            communication_activities: Arc::clone(&entry.communication_activities),
+            communication_access: Arc::clone(&state.communication_access),
+            service_executions: Arc::clone(&entry.service_executions),
+            flash_data: Arc::clone(&state.flash_data),
+        }))
+    }
 }
 
 async fn release_communication_activity(
@@ -274,43 +589,232 @@ impl ExecutionStatus for FgServiceExecution {
     }
 }
 
-/// Implementation of [`LockStateProvider`] that reads from the in-memory [`Locks`] state.
-pub struct SovdLockStateProvider {
-    locks: Arc<RwLock<Arc<Locks>>>,
+/// A request-scoped resolution that prevents topology publication while it is in use.
+#[derive(Clone)]
+pub struct ResolvedLocks {
+    _admission: Option<Arc<OwnedRwLockReadGuard<()>>>,
+    guard: Option<Arc<OwnedRwLockReadGuard<Locks>>>,
+    untracked: Option<Arc<Locks>>,
+}
+
+impl ResolvedLocks {
+    fn untracked(locks: Arc<Locks>) -> Self {
+        Self {
+            _admission: None,
+            guard: None,
+            untracked: Some(locks),
+        }
+    }
+}
+
+impl std::ops::Deref for ResolvedLocks {
+    type Target = Locks;
+
+    fn deref(&self) -> &Self::Target {
+        if let Some(guard) = &self.guard {
+            guard
+        } else {
+            self.untracked
+                .as_deref()
+                .expect("resolved locks are present")
+        }
+    }
+}
+
+/// A validated lock topology holding the live write guard it will replace.
+///
+/// Acquiring the guard and validating the replacement are the fallible,
+/// asynchronous half; `apply` is the synchronous, infallible half.
+struct ReservedLockTopology {
+    live: OwnedRwLockWriteGuard<Locks>,
+    /// `None` when the live topology already matches, so applying is a no-op.
+    replacement: Option<Locks>,
+    /// Held so no second reservation can be taken before this one installs.
+    _reservation: OwnedRwLockWriteGuard<()>,
+}
+
+impl ReservedVehicleDatabaseLocks for ReservedLockTopology {
+    fn apply(mut self: Box<Self>) {
+        if let Some(replacement) = self.replacement.take() {
+            *self.live = replacement;
+        }
+    }
+}
+
+/// Stable owner of the live SOVD lock topology.
+pub(crate) struct SovdLockStateProvider {
+    locks: Arc<RwLock<Locks>>,
+    vehicle_lock: locks::LockType,
+    admission: Arc<RwLock<()>>,
+    #[cfg(test)]
+    resolution_barrier: Arc<StdMutex<Option<Arc<tokio::sync::Barrier>>>>,
+}
+
+/// Cloneable runtime view of SOVD locks without topology publication authority.
+#[derive(Clone)]
+pub struct SovdLockStateView {
+    locks: Arc<RwLock<Locks>>,
+    vehicle_lock: locks::LockType,
+    admission: Arc<RwLock<()>>,
+    #[cfg(test)]
+    resolution_barrier: Arc<StdMutex<Option<Arc<tokio::sync::Barrier>>>>,
+}
+
+/// Lock-topology capabilities returned to application wiring.
+pub struct SovdLockStateParts {
+    /// Read-only runtime and security-policy view.
+    pub lock_state: Arc<SovdLockStateView>,
+    /// Opaque update validation and replacement authority.
+    pub updater: Arc<dyn cda_interfaces::runtime_update_api::VehicleDatabaseLockUpdater>,
+}
+
+/// Creates the private lock-topology owner and separates its capabilities.
+#[must_use]
+pub fn new_sovd_lock_state(ecu_names: Vec<String>) -> SovdLockStateParts {
+    let owner = Arc::new(SovdLockStateProvider::new(ecu_names));
+    SovdLockStateParts {
+        lock_state: Arc::new(owner.view()),
+        updater: Arc::clone(&owner)
+            as Arc<dyn cda_interfaces::runtime_update_api::VehicleDatabaseLockUpdater>,
+    }
+}
+
+/// Converts setup capabilities into the read-only lock view retained by handlers.
+pub trait IntoSovdLockStateView {
+    /// Returns the runtime view without authority to replace the topology.
+    fn into_lock_view(self) -> Arc<SovdLockStateView>;
+}
+
+impl IntoSovdLockStateView for Arc<SovdLockStateProvider> {
+    fn into_lock_view(self) -> Arc<SovdLockStateView> {
+        Arc::new(self.view())
+    }
+}
+
+impl IntoSovdLockStateView for Arc<SovdLockStateView> {
+    fn into_lock_view(self) -> Arc<SovdLockStateView> {
+        self
+    }
+}
+
+impl SovdLockStateView {
+    #[must_use]
+    pub fn vehicle_lock(&self) -> &locks::LockType {
+        &self.vehicle_lock
+    }
+
+    /// Resolves the topology current at request time and retains its read guard.
+    pub async fn current_locks(&self) -> ResolvedLocks {
+        #[cfg(test)]
+        let barrier = std_ext::lock_mutex(&self.resolution_barrier).take();
+        #[cfg(test)]
+        if let Some(barrier) = barrier {
+            barrier.wait().await;
+        }
+        let admission = Arc::new(Arc::clone(&self.admission).read_owned().await);
+        let guard = Arc::new(Arc::clone(&self.locks).read_owned().await);
+        ResolvedLocks {
+            _admission: Some(admission),
+            guard: Some(guard),
+            untracked: None,
+        }
+    }
 }
 
 impl SovdLockStateProvider {
-    /// Creates a new provider wrapping the given shared [`Locks`] state.
+    /// Creates startup topology A from the initial physical ECU names.
     #[must_use]
-    pub fn new(locks: Arc<Locks>) -> Self {
+    pub fn new(ecu_names: Vec<String>) -> Self {
+        let locks = Locks::new(ecu_names);
         Self {
+            vehicle_lock: locks.vehicle.clone(),
             locks: Arc::new(RwLock::new(locks)),
+            admission: Arc::new(RwLock::new(())),
+            #[cfg(test)]
+            resolution_barrier: Arc::new(StdMutex::new(None)),
         }
     }
 
-    /// Updates the ECU and functional-group entries in the current locks in-place,
-    /// preserving only the vehicle lock.
-    ///
-    /// # Errors
-    /// Returns an error if any ECU or functional-group lock is currently held.
-    pub async fn update_entries(
-        &self,
-        new_ecu_names: Vec<String>,
-    ) -> Result<(), locks::LockUpdateError> {
-        let locks = self.locks.read().await.clone();
-        locks.update_entries(new_ecu_names).await
+    /// Returns a cloneable view without authority to replace the data.
+    #[must_use]
+    pub fn view(&self) -> SovdLockStateView {
+        SovdLockStateView {
+            locks: Arc::clone(&self.locks),
+            vehicle_lock: self.vehicle_lock.clone(),
+            admission: Arc::clone(&self.admission),
+            #[cfg(test)]
+            resolution_barrier: Arc::clone(&self.resolution_barrier),
+        }
     }
 
-    pub async fn current_locks(&self) -> Arc<Locks> {
-        self.locks.read().await.clone()
+    #[cfg(test)]
+    pub(crate) fn set_resolution_barrier(&self, barrier: Arc<tokio::sync::Barrier>) {
+        *std_ext::lock_mutex(&self.resolution_barrier) = Some(barrier);
+    }
+
+    /// Resolves the topology that is current at request time.
+    #[cfg(test)]
+    pub async fn current_locks(&self) -> ResolvedLocks {
+        self.view().current_locks().await
     }
 }
 
 #[async_trait]
-impl LockStateProvider for SovdLockStateProvider {
+impl cda_interfaces::runtime_update_api::VehicleDatabaseLockUpdater for SovdLockStateProvider {
+    async fn reserve_lock_resources(
+        &self,
+        ecu_names: Vec<String>,
+    ) -> Result<
+        Box<dyn ReservedVehicleDatabaseLocks>,
+        cda_interfaces::runtime_update_api::ReloadError,
+    > {
+        let reservation = Arc::clone(&self.admission).write_owned().await;
+        let live = Arc::clone(&self.locks).write_owned().await;
+        let replacement = if live.has_ecu_topology(&ecu_names).await {
+            None
+        } else {
+            live.validate_replacement().await.map_err(|error| {
+                cda_interfaces::runtime_update_api::ReloadError::General(format!(
+                    "Failed to validate runtime locks: {error}"
+                ))
+            })?;
+            Some(live.replacement(ecu_names))
+        };
+        Ok(Box::new(ReservedLockTopology {
+            live,
+            replacement,
+            _reservation: reservation,
+        }))
+    }
+
+    async fn validate_lock_resources(
+        &self,
+        ecu_names: &[String],
+    ) -> Result<(), cda_interfaces::runtime_update_api::ReloadError> {
+        let live = Arc::clone(&self.locks).read_owned().await;
+        if live.has_ecu_topology(ecu_names).await {
+            return Ok(());
+        }
+        live.validate_replacement().await.map_err(|error| {
+            cda_interfaces::runtime_update_api::ReloadError::General(format!(
+                "Failed to validate runtime locks: {error}"
+            ))
+        })
+    }
+
+    async fn update_lock_resources(
+        &self,
+        ecu_names: Vec<String>,
+    ) -> Result<(), cda_interfaces::runtime_update_api::ReloadError> {
+        self.reserve_lock_resources(ecu_names).await?.apply();
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl LockStateProvider for SovdLockStateView {
     async fn vehicle_lock_owner_sub(&self) -> Option<String> {
-        let locks = self.locks.read().await.clone();
-        let vehicle_lock = locks.vehicle.lock_ro().await;
+        let vehicle_lock = self.vehicle_lock.lock_ro().await;
         match &vehicle_lock {
             ReadLock::OptionLock(l) => l.as_ref().map(|l| l.owner().to_owned()),
             ReadLock::HashMapLock(_) => None,
@@ -318,10 +822,21 @@ impl LockStateProvider for SovdLockStateProvider {
     }
 
     async fn has_non_vehicle_locks(&self) -> bool {
-        let locks = self.locks.read().await.clone();
+        let locks = self.current_locks().await;
         let ecu_lock = locks.ecu.lock_ro().await;
         let fg_lock = locks.functional_group.lock_ro().await;
         ecu_lock.is_any_locked() || fg_lock.is_any_locked()
+    }
+}
+
+#[async_trait]
+impl LockStateProvider for SovdLockStateProvider {
+    async fn vehicle_lock_owner_sub(&self) -> Option<String> {
+        self.view().vehicle_lock_owner_sub().await
+    }
+
+    async fn has_non_vehicle_locks(&self) -> bool {
+        self.view().has_non_vehicle_locks().await
     }
 }
 
@@ -474,10 +989,11 @@ pub(crate) async fn remove_reserved_execution<E: ExecutionStatus>(
 #[derive(Clone)]
 pub(crate) struct WebserverState<T: UdsEcu + Clone> {
     uds: T,
-    locks: Arc<Locks>,
+    lock_provider: Arc<SovdLockStateView>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
     components_config: Arc<RwLock<ComponentsConfig>>,
     communication_access: Arc<dyn CommunicationAccess>,
+    registry: SovdRegistryView,
 }
 
 pub(crate) fn resource_response(
@@ -506,48 +1022,59 @@ pub(crate) fn resource_response(
     (StatusCode::OK, Json(components)).into_response()
 }
 
-pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: SecurityPluginLoader>(
+pub async fn route<
+    T: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone,
+    S: SecurityPluginLoader,
+>(
     functional_group_config: FunctionalDescriptionConfig,
     components_config: ComponentsConfig,
     uds: &T,
     flash_files_path: String,
-    mut file_manager: HashMap<String, U>,
-    locks: Arc<Locks>,
+    lock_provider: impl IntoSovdLockStateView,
     communication_access: Arc<dyn CommunicationAccess>,
+    registry: impl IntoSovdRegistryView,
 ) -> Router {
     let flash_data = Arc::new(RwLock::new(sovd_interfaces::sovd2uds::FileList {
         files: Vec::new(),
         path: Some(PathBuf::from(flash_files_path)),
         schema: None,
     }));
+    let ecus = uds
+        .get_physical_ecus()
+        .await
+        .into_iter()
+        .map(|name| (name.to_lowercase(), name))
+        .collect();
+    let functional_groups = crate::openapi::functional_group_index(uds, &functional_group_config)
+        .await
+        .unwrap_or_else(|reason| {
+            tracing::warn!(reason, "No functional groups available");
+            HashMap::default()
+        });
+    let registry = registry.into_registry_view(ecus, functional_groups);
     let state = WebserverState {
         uds: uds.clone(),
-        locks,
+        lock_provider: lock_provider.into_lock_view(),
         flash_data: Arc::clone(&flash_data),
         components_config: Arc::new(RwLock::new(components_config)),
         communication_access,
+        registry,
     };
 
-    let router = components_route::<T, U>(state.clone(), &mut file_manager).await;
+    let router = components_route::<T>(state.clone());
 
-    vehicle_route::<T, S>(state, router, functional_group_config)
-        .await
+    vehicle_route::<T, S>(state, router)
         .layer(middleware::from_fn(security_plugin_middleware::<S>))
         .with_state(uds.clone())
 }
 
-async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoader>(
+fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoader>(
     state: WebserverState<T>,
     router: Router<WebserverState<T>>,
-    functional_group_config: FunctionalDescriptionConfig,
 ) -> Router<T> {
     let router = router.nest_api_service(
         "/vehicle/v15/functions",
-        functions::functional_groups::create_functional_group_routes(
-            state.clone(),
-            functional_group_config,
-        )
-        .await,
+        functions::functional_groups::create_functional_group_routes(state.clone()),
     );
     router
         .api_route(
@@ -564,14 +1091,14 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
                     locks::vehicle::lock::docs_delete,
                 ),
         )
-        .route("/vehicle/v15/apps", routing::get(apps::get))
-        .route(
+        .api_route("/vehicle/v15/apps", routing::get_with(apps::get, |op| op))
+        .api_route(
             "/vehicle/v15/apps/sovd2uds",
-            routing::get(apps::sovd2uds::get),
+            routing::get_with(apps::sovd2uds::get, |op| op),
         )
-        .route(
+        .api_route(
             "/vehicle/v15/apps/sovd2uds/bulk-data",
-            routing::get(apps::sovd2uds::bulk_data::get),
+            routing::get_with(apps::sovd2uds::bulk_data::get, |op| op),
         )
         .api_route(
             "/vehicle/v15/apps/sovd2uds/bulk-data/flashfiles",
@@ -580,7 +1107,10 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
                 apps::sovd2uds::bulk_data::flash_files::docs_get,
             ),
         )
-        .route("/vehicle/v15/authorize", routing::post(S::authorize))
+        .api_route(
+            "/vehicle/v15/authorize",
+            routing::post_with(S::authorize, |op| op),
+        )
         .with_state(state)
         .api_route(
             "/vehicle/v15/apps/sovd2uds/data/networkstructure",
@@ -656,56 +1186,32 @@ fn docs_components(op: TransformOperation) -> TransformOperation {
         })
 }
 
-async fn components_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
+fn components_route<T: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone>(
     state: WebserverState<T>,
-    file_manager: &mut HashMap<String, U>,
 ) -> Router<WebserverState<T>> {
-    let mut router = Router::new().api_route(
+    let router = Router::new().api_route(
         "/vehicle/v15/components",
         get_with(get_components, docs_components),
     );
-    let mut ecus = state.uds.get_physical_ecus().await;
-    for ecu_name in ecus.drain(0..) {
-        match ecu_route::<T, U>(&ecu_name, &state, file_manager) {
-            Ok((ecu_path, nested)) => {
-                router = router.nest_api_service(&ecu_path, nested);
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to create route for ECU '{ecu_name}'");
-            }
-        }
-    }
-    router.with_state(state)
+    router
+        .nest_api_service(
+            "/vehicle/v15/components/{component_id}",
+            ecu_route::<T>(state.clone()),
+        )
+        .with_state(state)
 }
 
+/// [`EcuContext`] resolves `{component_id}` per request, so this route table is
+/// identical regardless of which ECUs are loaded and is built once.
+/// `nest_api_service` requires a fully resolved router, so `state` is applied here.
 #[allow(
     clippy::too_many_lines,
     reason = "Route creation kept together for structural clarity"
 )]
-fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
-    ecu_name: &str,
-    state: &WebserverState<T>,
-    file_manager: &mut HashMap<String, U>,
-) -> Result<(String, Router), SovdError> {
-    let ecu_lower = ecu_name.to_lowercase();
-    let ecu_state = WebserverEcuState {
-        ecu_name: ecu_lower.clone(),
-        uds: state.uds.clone(),
-        locks: Arc::<Locks>::clone(&state.locks),
-        comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
-        communication_activities: Arc::new(Mutex::new(HashMap::default())),
-        communication_access: Arc::clone(&state.communication_access),
-        service_executions: Arc::new(RwLock::new(HashMap::default())),
-        flash_data: Arc::clone(&state.flash_data),
-        mdd_embedded_files: Arc::new(file_manager.remove(&ecu_lower).ok_or_else(|| {
-            SovdError::RouteError(format!(
-                "FileManager for ECU '{ecu_name}' not found in provided FileManager map"
-            ))
-        })?),
-    };
-    let ecu_path = format!("/vehicle/v15/components/{ecu_lower}");
-
-    let router = Router::new()
+fn ecu_route<T: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone>(
+    state: WebserverState<T>,
+) -> Router {
+    Router::new()
         .api_route(
             "/",
             routing::get_with(components::ecu::get, components::ecu::docs_get)
@@ -857,9 +1363,9 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
                 x_single_ecu_jobs::single_ecu::name::docs_get,
             ),
         )
-        .route(
+        .api_route(
             "/x-sovd2uds-download",
-            routing::get(x_sovd2uds_download::get),
+            routing::get_with(x_sovd2uds_download::get, |op| op),
         )
         .api_route(
             "/x-sovd2uds-download/requestdownload",
@@ -897,9 +1403,9 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
                 x_sovd2uds_download::transferexit::docs_put,
             ),
         )
-        .route(
+        .api_route(
             "/x-sovd2uds-bulk-data",
-            routing::get(x_sovd2uds_bulk_data::get),
+            routing::get_with(x_sovd2uds_bulk_data::get, |op| op),
         )
         .api_route(
             "/x-sovd2uds-bulk-data/mdd-embedded-files",
@@ -925,10 +1431,7 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
             routing::get_with(faults::id::get, faults::id::docs_get)
                 .delete_with(faults::id::delete, faults::id::docs_delete),
         )
-        .with_state(ecu_state)
-        .with_path_items(|op| op.tag(ecu_name));
-
-    Ok((ecu_path, router))
+        .with_state(state)
 }
 
 fn get_payload_data<'a, T>(
@@ -1225,7 +1728,7 @@ pub(crate) mod tests {
             ActivationCause, CommunicationAccess, CommunicationError, CommunicationState,
             VariantDetectionMode,
         },
-        file_manager::FileManager,
+        runtime_update_api::VehicleDatabaseLockUpdater,
     };
     use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
     use sovd_interfaces::sovd2uds::FileList;
@@ -1258,6 +1761,85 @@ pub(crate) mod tests {
         fn variant_detection(&self) -> VariantDetectionMode {
             VariantDetectionMode::Always
         }
+    }
+
+    fn live_names(names: &[&str]) -> HashMap<String, String> {
+        names
+            .iter()
+            .map(|name| (name.to_lowercase(), (*name).to_owned()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn registry_preserves_only_continuously_live_ecu_and_group_state() {
+        let registry = SovdRegistry::default();
+        registry.apply(
+            [("MyEcU".to_owned(), "MyEcu".to_owned())]
+                .into_iter()
+                .collect(),
+            [("MyGrOuP".to_owned(), "MyGroup".to_owned())]
+                .into_iter()
+                .collect(),
+        );
+        let ecu_state = registry.ecu("MYECU").unwrap();
+        let group_state = registry.functional_group("MYGROUP").unwrap();
+        let execution_id = Uuid::new_v4();
+        ecu_state.service_executions.write().await.insert(
+            "routine".to_owned(),
+            [(
+                execution_id,
+                ServiceExecution {
+                    parameters: serde_json::Map::new(),
+                    status: sovd_ecu::operations::ExecutionStatus::Completed,
+                    in_flight: false,
+                    is_created: true,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        registry.apply(live_names(&["MYECU"]), live_names(&["MYGROUP"]));
+        assert!(Arc::ptr_eq(&ecu_state, &registry.ecu("myecu").unwrap()));
+        assert!(Arc::ptr_eq(
+            &group_state,
+            &registry.functional_group("mygroup").unwrap()
+        ));
+        assert!(
+            registry
+                .ecu("myecu")
+                .unwrap()
+                .service_executions
+                .read()
+                .await
+                .get("routine")
+                .is_some_and(|executions| executions.contains_key(&execution_id))
+        );
+
+        registry.apply(HashMap::default(), HashMap::default());
+        assert!(registry.ecu("myecu").is_none());
+        assert!(registry.functional_group("mygroup").is_none());
+
+        registry.apply(live_names(&["myecu"]), live_names(&["mygroup"]));
+        let readded_ecu = registry.ecu("MYECU").unwrap();
+        assert!(!Arc::ptr_eq(&ecu_state, &readded_ecu));
+        assert!(readded_ecu.service_executions.read().await.is_empty());
+        assert!(!Arc::ptr_eq(
+            &group_state,
+            &registry.functional_group("MYGROUP").unwrap()
+        ));
+    }
+
+    #[test]
+    fn registry_growth_is_bounded_across_remove_readd_cycles() {
+        let registry = SovdRegistry::default();
+        for _ in 0..100 {
+            registry.apply(live_names(&["ECU"]), live_names(&["GROUP"]));
+            registry.apply(HashMap::default(), HashMap::default());
+        }
+        let state = std_ext::lock_mutex(&registry.state);
+        assert!(state.ecus.is_empty());
+        assert!(state.functional_groups.is_empty());
     }
 
     #[test]
@@ -1352,15 +1934,94 @@ pub(crate) mod tests {
         assert!(activities.lock().await.is_empty());
     }
 
-    pub fn create_test_webserver_state<T: UdsEcu + Clone, U: FileManager>(
+    async fn ecu_lock_names(locks: &Locks) -> Vec<String> {
+        let ReadLock::HashMapLock(entries) = locks.ecu.lock_ro().await else {
+            panic!("ECU lock has the wrong shape");
+        };
+        let mut names: Vec<_> = entries.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    #[tokio::test]
+    async fn lock_preflight_reservation_blocks_new_request_resolution() {
+        let provider = Arc::new(SovdLockStateProvider::new(vec!["A".to_owned()]));
+        let reservation = provider
+            .reserve_lock_resources(vec!["B".to_owned()])
+            .await
+            .unwrap();
+        let resolving = {
+            let provider = Arc::clone(&provider);
+            tokio::spawn(async move { provider.current_locks().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!resolving.is_finished());
+
+        drop(reservation);
+        let resolved = resolving.await.unwrap();
+        assert_eq!(ecu_lock_names(&resolved).await, ["A"]);
+    }
+
+    #[tokio::test]
+    async fn stable_vehicle_lock_bypasses_topology_admission() {
+        let provider = Arc::new(SovdLockStateProvider::new(vec!["A".to_owned()]));
+        let view = provider.view();
+        let reservation = provider
+            .reserve_lock_resources(vec!["B".to_owned()])
+            .await
+            .unwrap();
+        let resolving = {
+            let provider = Arc::clone(&provider);
+            tokio::spawn(async move { provider.current_locks().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!resolving.is_finished());
+
+        tokio::time::timeout(Duration::from_millis(100), view.vehicle_lock().lock_ro())
+            .await
+            .expect("the stable vehicle lock must not wait for topology admission");
+
+        drop(reservation);
+        resolving.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn held_ecu_lock_rejects_topology_preparation() {
+        let provider = SovdLockStateProvider::new(vec!["A".to_owned()]);
+        let current = provider.current_locks().await;
+        crate::sovd::locks::insert_test_ecu_lock(&current, "A").await;
+        drop(current);
+
+        let Err(error) = provider.reserve_lock_resources(vec!["B".to_owned()]).await else {
+            panic!("held ECU lock must reject topology preflight")
+        };
+        assert!(error.to_string().contains("ECU"), "{error}");
+        assert_eq!(
+            ecu_lock_names(&*provider.current_locks().await).await,
+            ["A"]
+        );
+
+        // Persistent recovery reserves the previous A state. Its lock topology
+        // is already live, so the held A lock does not block recovery.
+        provider
+            .reserve_lock_resources(vec!["A".to_owned()])
+            .await
+            .expect("recovery to the live topology is always admitted")
+            .apply();
+        assert_eq!(
+            ecu_lock_names(&*provider.current_locks().await).await,
+            ["A"]
+        );
+    }
+
+    pub fn create_test_webserver_state<T: UdsEcu + Clone>(
         ecu_name: String,
         uds: T,
-        file_manager: U,
-    ) -> WebserverEcuState<T, U> {
+    ) -> WebserverEcuState<T> {
         WebserverEcuState {
             ecu_name: ecu_name.clone(),
             uds,
-            locks: Arc::new(Locks {
+            locks: ResolvedLocks::untracked(Arc::new(Locks {
                 vehicle: LockType::Vehicle(Arc::new(RwLock::new(None))),
                 ecu: LockType::Ecu(Arc::new(RwLock::new(
                     [(ecu_name, None)].into_iter().collect(),
@@ -1368,7 +2029,8 @@ pub(crate) mod tests {
                 functional_group: LockType::FunctionalGroup(Arc::new(RwLock::new(
                     HashMap::default(),
                 ))),
-            }),
+            })),
+            lock_provider: Arc::new(SovdLockStateProvider::new(Vec::new()).view()),
             comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
             communication_activities: Arc::new(Mutex::new(HashMap::default())),
             communication_access: enabled_communication_access_for_test(),
@@ -1378,7 +2040,6 @@ pub(crate) mod tests {
                 path: Some(PathBuf::new()),
                 schema: None,
             })),
-            mdd_embedded_files: Arc::new(file_manager),
         }
     }
 }

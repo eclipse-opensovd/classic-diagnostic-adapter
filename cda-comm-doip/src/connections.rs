@@ -36,7 +36,8 @@ pub(crate) type ConnectionResetReason = String;
 /// Runtime state for managing active gateway connections and ECU mappings.
 pub(crate) struct GatewayState<T> {
     pub doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>>,
-    pub ecus: Arc<HashMap<String, RwLock<T>>>,
+    pub ecus: Arc<HashMap<String, Arc<RwLock<T>>>>,
+    pub connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     pub gateway_ecu_map: HashMap<u16, Vec<u16>>,
     pub connection_tasks: Arc<ConnectionTasks>,
 }
@@ -96,7 +97,7 @@ impl From<EcuError> for DiagServiceError {
 }
 
 #[tracing::instrument(
-    skip(transport, state, connectivity_handler),
+    skip(transport, state),
     fields(
         tester_ip = transport.tester_ip.clone(),
         port = transport.port,
@@ -111,7 +112,6 @@ pub(crate) async fn handle_gateway_connection<T>(
     discovered_gateway: DiscoveredGateway,
     transport: &DoipTransportConfig,
     state: &GatewayState<T>,
-    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
 ) -> Result<u16, EcuError>
 where
     T: EcuAddresses + DoipComParams,
@@ -182,7 +182,7 @@ where
         },
         ecus: ecu_ids.clone(),
         ecu_names: ecu_names_for_gateway.clone(),
-        connectivity_handler: Arc::clone(&connectivity_handler),
+        connectivity_handler: Arc::clone(&state.connectivity_handler),
     };
     let GatewayConnectionHandles { sender, receivers } =
         match connection_handler(gateway, Arc::clone(&state.connection_tasks)).await {
@@ -211,7 +211,8 @@ where
 
     // Notify connectivity handler that ECUs behind this gateway are now online.
     // This sets their state to Online so the pre-send variant detection guard works correctly.
-    connectivity_handler
+    state
+        .connectivity_handler
         .on_gateway_connected(&ecu_names_for_gateway)
         .await;
 

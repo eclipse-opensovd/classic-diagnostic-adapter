@@ -29,6 +29,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     ) -> Result<(), DiagServiceError> {
         match control_msg.mode {
             TesterPresentMode::Start => {
+                let data = self.ecu_data.read().await;
                 let mut tester_presents = self.tester_present_tasks.write().await;
                 if tester_presents.get(&control_msg.ecu).is_some() {
                     return Err(DiagServiceError::InvalidRequest(format!(
@@ -40,7 +41,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 let interval = if let Some(i) = control_msg.interval {
                     i
                 } else {
-                    self.uds_ecu_db(&control_msg.ecu)?
+                    Self::ecu_in(&data, &control_msg.ecu)?
                         .read()
                         .await
                         .tester_present_time()
@@ -77,24 +78,32 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                             let _ = schedule.tick().await;
                             // Skip sending if the ECU is not online; the loop will
                             // naturally resume once the ECU is detected online again.
-                            if let Ok(ecu) = uds.uds_ecu_db(&control_msg.ecu) {
-                                let ecu_state =
-                                    ecu.read().await.runtime_state().status().connectivity;
-                                if ecu_state != Connectivity::Online {
-                                    tracing::debug!(
-                                        ecu = %control_msg.ecu,
-                                        ecu_state = %ecu_state,
-                                        "Skipping tester present for ECU that is not online"
+                            let data = uds.ecu_data.read().await;
+                            let ecu = match Self::ecu_in(&data, &control_msg.ecu) {
+                                Ok(ecu) => ecu,
+                                Err(e) => {
+                                    tracing::error!(
+                                        error = %e,
+                                        "Failed to send tester present"
                                     );
                                     continue;
                                 }
+                            };
+                            let ecu_state = ecu.read().await.runtime_state().status().connectivity;
+                            if ecu_state != Connectivity::Online {
+                                tracing::debug!(
+                                    ecu = %control_msg.ecu,
+                                    ecu_state = %ecu_state,
+                                    "Skipping tester present for ECU that is not online"
+                                );
+                                continue;
                             }
 
                             // abort sending if it takes longer than `interval` and log an
                             // error, but try to continue sending tester present afterwards.
                             if let Ok(r) = tokio::time::timeout(
                                 interval,
-                                uds.send_tester_present(&control_msg),
+                                uds.send_tester_present(&ecu, &control_msg),
                             )
                             .await
                             {
@@ -142,17 +151,18 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     /// Send a single tester present message to the ECU.
     async fn send_tester_present(
         &self,
+        ecu: &tokio::sync::RwLock<T>,
         control_msg: &TesterPresentControlMessage,
     ) -> Result<(), DiagServiceError> {
         let payload = {
-            let ecu = self.uds_ecu_db(&control_msg.ecu)?;
+            let ecu_read = ecu.read().await;
             let target_address = match &control_msg.type_ {
-                TesterPresentType::Functional(_) => ecu.read().await.logical_functional_address(),
-                TesterPresentType::Ecu(_) => ecu.read().await.logical_address(),
+                TesterPresentType::Functional(_) => ecu_read.logical_functional_address(),
+                TesterPresentType::Ecu(_) => ecu_read.logical_address(),
             };
             ServicePayload {
                 data: vec![service_ids::TESTER_PRESENT, SUPPRESS_POSITIVE_RESPONSE_BIT],
-                source_address: ecu.read().await.tester_address(),
+                source_address: ecu_read.tester_address(),
                 target_address,
                 new_session: None,
                 new_security: None,
@@ -160,13 +170,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         };
 
         match self
-            .send_with_raw_payload(
-                &control_msg.ecu,
-                payload,
-                None,
-                false,
-                CommunicationReadiness::Enforce,
-            )
+            .send_with_raw_payload(ecu, payload, None, false, CommunicationReadiness::Enforce)
             .await
         {
             Ok(_) => Ok(()),

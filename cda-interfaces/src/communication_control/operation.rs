@@ -50,19 +50,18 @@ pub enum DetectionCause {
 
 /// A lifecycle operation controlled by the communication framework.
 ///
-/// An activation runs three ordered stages: the physical transport, the
-/// registered [`CommunicationLifecycle`](super::CommunicationLifecycle) hooks,
-/// then the registered
-/// [`CommunicationVariantDetection`](super::CommunicationVariantDetection)
-/// implementation. The activation-shaped operations differ only in which stages
-/// they run:
+/// An activation prepares every registered lifecycle reconfiguration
+/// participant and hook, publishes their state through one synchronous commit
+/// barrier, enables the transport, initializes the hooks, then runs
+/// [`CommunicationVariantDetection`](super::CommunicationVariantDetection).
+/// Activation-shaped operations differ only in which stages they run:
 ///
-/// | Operation         | Transport | Hooks        | Detector                       |
-/// |-------------------|-----------|--------------|--------------------------------|
-/// | `Enable`          | enable    | `initialize` | no                             |
-/// | `EnableAndDetect` | enable    | `initialize` | yes, subject to `VariantDetectionMode` |
-/// | `Detect`          | untouched | untouched    | yes                            |
-/// | `Resume`          | enable    | `initialize` | whatever the enable it resumes did |
+/// | Operation | Prepare + commit | Transport | `initialize` | Detector |
+/// |-----------|------------------|-----------|--------------|----------|
+/// | `Enable` | yes | enable | yes | no |
+/// | `EnableAndDetect` | yes | enable | yes | yes, subject to `VariantDetectionMode` |
+/// | `Detect` | untouched | untouched | untouched | yes |
+/// | `Resume` | yes | restore displaced state | if enabled | whatever the enable it resumes did |
 ///
 /// Which of them a caller may request in a given `init_mode` is the selected
 /// communication plugin's policy.
@@ -91,6 +90,8 @@ pub enum CommunicationOperation {
     Disable,
     /// Resume physical transport after a disable lease is released.
     Resume,
+    /// Finalize pending lifecycle reconfiguration while remaining disabled.
+    FinishDisableLease,
     /// Run whole-vehicle variant detection against an already-live transport.
     ///
     /// Touches neither the transport nor the lifecycle hooks, and is therefore

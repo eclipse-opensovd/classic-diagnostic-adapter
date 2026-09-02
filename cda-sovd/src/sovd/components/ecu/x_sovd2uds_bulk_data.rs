@@ -41,27 +41,28 @@ pub(crate) mod mdd_embedded_files {
     use aide::transform::TransformOperation;
     use axum::{
         Json,
-        extract::{Path, Query, State},
+        extract::{Path, Query},
         response::{IntoResponse, Response},
     };
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{
         UdsEcu,
-        file_manager::{ChunkMetaData, FileManager},
+        file_manager::{ChunkMetaData, EmbeddedFilesProvider},
     };
     use http::{StatusCode, header};
     use sovd_interfaces::components::ecu::x::sovd2uds;
 
-    use crate::sovd::{WebserverEcuState, create_schema, error::ApiError};
+    use crate::sovd::{
+        EcuContext, WebserverEcuState, create_schema,
+        error::{ApiError, ErrorWrapper},
+    };
 
-    pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn get<T: UdsEcu + EmbeddedFilesProvider + Clone>(
         WithRejection(Query(query), _): WithRejection<
             Query<sovd2uds::bulk_data::embedded_files::get::Query>,
             ApiError,
         >,
-        State(WebserverEcuState {
-            mdd_embedded_files, ..
-        }): State<WebserverEcuState<T, U>>,
+        EcuContext(WebserverEcuState { ecu_name, uds, .. }): EcuContext<T>,
     ) -> Response {
         let schema = if query.include_schema {
             Some(create_schema!(
@@ -70,10 +71,18 @@ pub(crate) mod mdd_embedded_files {
         } else {
             None
         };
+        let files = match uds.embedded_files_list(&ecu_name).await {
+            Ok(files) => files,
+            Err(e) => {
+                return ErrorWrapper {
+                    error: ApiError::from(e),
+                    include_schema: query.include_schema,
+                }
+                .into_response();
+            }
+        };
         let items = sovd2uds::bulk_data::embedded_files::get::Response {
-            items: mdd_embedded_files
-                .list()
-                .await
+            items: files
                 .iter()
                 .map(|(id, meta)| sovd_interfaces::sovd2uds::BulkDataDescriptor {
                     hash: None,
@@ -115,20 +124,18 @@ pub(crate) mod mdd_embedded_files {
 
     pub(crate) mod id {
         use super::{
-            ApiError, FileManager, IntoResponse, Path, Response, State, StatusCode,
+            ApiError, EcuContext, EmbeddedFilesProvider, IntoResponse, Path, Response, StatusCode,
             TransformOperation, UdsEcu, WebserverEcuState, content_type_from_meta, header,
         };
         use crate::{
             openapi,
             sovd::{components::IdPathParam, error::ErrorWrapper},
         };
-        pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+        pub(crate) async fn get<T: UdsEcu + EmbeddedFilesProvider + Clone>(
             Path(id): Path<IdPathParam>,
-            State(WebserverEcuState {
-                mdd_embedded_files, ..
-            }): State<WebserverEcuState<T, U>>,
+            EcuContext(WebserverEcuState { ecu_name, uds, .. }): EcuContext<T>,
         ) -> Response {
-            match mdd_embedded_files.get(&id).await {
+            match uds.embedded_file(&ecu_name, &id).await {
                 Ok((meta, payload)) => (
                     StatusCode::OK,
                     [(header::CONTENT_TYPE, content_type_from_meta(&meta))],

@@ -116,7 +116,15 @@ impl<S: EcuGateway, T: EcuManager> UdsSession for UdsManager<S, T> {
             .lookup_session_change(session)
             .await?;
         let result = self
-            .send_with_optional_timeout(ecu_name, dc, security_plugin, None, true, None)
+            .send_with_optional_timeout(
+                ecu_name,
+                &ecu_diag_service,
+                dc,
+                security_plugin,
+                None,
+                true,
+                None,
+            )
             .await?;
         match result.response_type() {
             DiagServiceResponseType::Positive => {
@@ -139,7 +147,7 @@ impl<S: EcuGateway, T: EcuManager> UdsSession for UdsManager<S, T> {
             old_task.abort();
         }
 
-        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
+        let ecu_diag_service = self.uds_ecu_db(ecu_name).await?;
         let default_session = ecu_diag_service.read().await.default_session()?;
         let current_session = ecu_diag_service.read().await.session().await?;
 

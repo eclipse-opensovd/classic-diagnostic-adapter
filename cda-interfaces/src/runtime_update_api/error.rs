@@ -20,6 +20,7 @@
 // terms of the Apache License Version 2.0 which is available at
 // https://www.apache.org/licenses/LICENSE-2.0
 
+use super::RecoveryPhase;
 use crate::storage_api::StorageError as CdaStorageError;
 
 #[derive(Debug, thiserror::Error)]
@@ -45,7 +46,7 @@ pub enum RuntimeUpdateError {
     #[error("Another transaction is already active")]
     TransactionBusy,
     #[error("Reload failed: {0}")]
-    ReloadFailed(String),
+    ReloadFailed(#[from] ReloadFailure),
     #[error("An execution is already in progress")]
     ExecutionConflict,
     #[error("File not found: {0}")]
@@ -76,7 +77,7 @@ impl From<CdaStorageError> for RuntimeUpdateError {
 #[error("Verification failed: {0}")]
 pub struct VerificationError(pub String);
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ReloadError {
     #[error("Reload error: {0}")]
     General(String),
@@ -84,14 +85,23 @@ pub enum ReloadError {
     CommunicationFailure(String),
     #[error("Component replacement failed: {0}")]
     ReplacementFailure(String),
+    /// MDD files were provided, yet none of them loaded. On a reload this
+    /// means a total loss of diagnostic function and grants a rollback.
+    #[error("No databases loaded: {0}")]
+    NoDatabasesLoaded(String),
 }
 
-impl From<ReloadError> for RuntimeUpdateError {
-    fn from(error: ReloadError) -> Self {
-        match error {
-            ReloadError::CommunicationFailure(message) => Self::CommunicationFailure(message),
-            ReloadError::ReplacementFailure(message) => Self::ReplacementFailure(message),
-            ReloadError::General(message) => Self::ReloadFailed(message),
-        }
-    }
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ReloadFailure {
+    #[error("Requested reload failed but the previous state was restored: {original}")]
+    RejectedAndRestored { original: ReloadError },
+    #[error(
+        "Requested reload failed and coherence could not be restored at {phase:?}: {original}; \
+         {recovery}"
+    )]
+    RecoveryRequired {
+        original: ReloadError,
+        recovery: ReloadError,
+        phase: RecoveryPhase,
+    },
 }

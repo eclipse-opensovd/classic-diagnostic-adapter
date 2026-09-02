@@ -293,6 +293,11 @@ pub trait UdsQuery: UdsTransport {
     /// Returns a list of loaded ECUs, filtering out the functional description.
     /// The same constraints as [get_ecus](UdsQuery::get_ecus) apply.
     async fn get_physical_ecus(&self) -> Vec<String>;
+    /// Whether `name` is a currently loaded physical ECU.
+    ///
+    /// Same filtering as [`get_physical_ecus`](UdsQuery::get_physical_ecus), but
+    /// without materializing the name list: this is on the per-request path of
+    /// every templated component route.
     /// Returns a list of loaded ECUs, filtering by a specific SD
     /// Additionally it can be specified if all ecus or physical only should be returned.
     /// The same constraints as [get_ecus](UdsQuery::get_ecus) apply.
@@ -717,6 +722,11 @@ pub mod mock {
         }
 
         #[async_trait]
+        impl crate::Shutdown for UdsEcu {
+            async fn shutdown(&self);
+        }
+
+        #[async_trait]
         impl UdsSession for UdsEcu {
             async fn set_ecu_session(
                 &self,
@@ -836,7 +846,7 @@ pub mod mock {
         impl UdsQuery for UdsEcu {
             async fn get_ecus(&self) -> Vec<String>;
             async fn get_physical_ecus(&self) -> Vec<String>;
-            async fn get_ecus_with_sds(
+                    async fn get_ecus_with_sds(
                 &self,
                 physical_only: bool,
                 sd: &SdBoolMappings) -> Vec<String>;
@@ -1014,6 +1024,32 @@ pub mod mock {
             _functional_group_name: &str,
         ) -> impl std::future::Future<Output = Result<SchemaDescription, DiagServiceError>> + Send
         {
+            std::future::ready(Err(DiagServiceError::NotFound(String::new())))
+        }
+    }
+
+    use crate::file_manager::EmbeddedFilesProvider;
+
+    impl EmbeddedFilesProvider for MockUdsEcu {
+        fn embedded_files_list(
+            &self,
+            _ecu_name: &str,
+        ) -> impl std::future::Future<
+            Output = Result<
+                crate::HashMap<String, crate::file_manager::ChunkMetaData>,
+                DiagServiceError,
+            >,
+        > + Send {
+            std::future::ready(Err(DiagServiceError::NotFound(String::new())))
+        }
+
+        fn embedded_file(
+            &self,
+            _ecu_name: &str,
+            _id: &str,
+        ) -> impl std::future::Future<
+            Output = Result<(crate::file_manager::ChunkMetaData, Vec<u8>), DiagServiceError>,
+        > + Send {
             std::future::ready(Err(DiagServiceError::NotFound(String::new())))
         }
     }

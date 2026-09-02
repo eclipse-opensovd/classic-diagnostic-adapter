@@ -12,9 +12,6 @@
  */
 use std::{sync::Arc, time::Duration};
 
-use cda_comm_can::CanDiagGateway;
-use cda_comm_doip::DoipDiagGateway;
-use cda_core::EcuManager;
 use cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin;
 use cda_plugin_runtime_update::{
     DefaultRuntimeUpdatePlugin, DefaultUpdateSecurityHandler,
@@ -23,14 +20,10 @@ use cda_plugin_runtime_update::{
     },
 };
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
-use cda_sovd::SovdLockStateProvider;
+use cda_sovd::SovdLockStateView;
 use cda_storage::LocalStorage;
-use cda_transport_router::DiagnosticTransportRouter;
 
-use crate::{
-    AppError, cda_factory::CdaMainVehicleFactory, config::configfile::Configuration,
-    setup::CdaRuntime, vehicle::UdsManagerType,
-};
+use crate::{AppError, config::configfile::Configuration, setup::CdaRuntime};
 
 /// Trait for async plugin builders that produce a [`RuntimeFilesUpdatePlugin`].
 ///
@@ -96,7 +89,7 @@ where
 pub async fn add_runtime_update_routes<S, P>(
     dynamic_router: &cda_sovd::dynamic_router::DynamicRouter,
     plugin: P,
-    lock_provider: Arc<SovdLockStateProvider>,
+    lock_provider: Arc<SovdLockStateView>,
     upload_body_limit_bytes: usize,
     update_retry_after: Duration,
 ) where
@@ -104,7 +97,7 @@ pub async fn add_runtime_update_routes<S, P>(
     P: RuntimeFilesUpdatePlugin,
 {
     let service = Arc::new(plugin.with_exclusive_access());
-    cda_sovd::add_runtime_update_routes::<S, _, SovdLockStateProvider>(
+    cda_sovd::add_runtime_update_routes::<S, _, SovdLockStateView>(
         dynamic_router,
         service,
         lock_provider,
@@ -125,18 +118,15 @@ pub async fn add_runtime_update_routes<S, P>(
 ///
 /// # Errors
 /// Returns [`AppError::RuntimeUpdateError`] if plugin initialization fails.
-pub async fn create_default_update_plugin<SP, SL>(
+pub async fn create_default_update_plugin<SP>(
     infra: CdaRuntime<SP>,
 ) -> Result<impl RuntimeFilesUpdatePlugin, AppError>
 where
     SP: SecurityPlugin,
-    SL: SecurityPluginLoader,
 {
-    let health_for_factory = infra.health.clone();
-    let factory = Arc::new(CdaMainVehicleFactory::<SP>::new(
-        health_for_factory,
-        Arc::clone(&infra.communication_access),
-    ));
+    // The process's factory, not a second one: a reload must build its data the
+    // same way startup did.
+    let preparation = Arc::clone(&infra.update_preparation);
 
     let storage = Arc::new(LocalStorage::new(&infra.storage_dir).map_err(|e| {
         AppError::InitializationFailed(format!("Failed to init storage, error={e:?}"))
@@ -144,42 +134,26 @@ where
 
     let reloader_infra = ReloaderContext {
         config: infra.config,
-        dynamic_router: infra.dynamic_router,
-        vehicle_route_handle: infra.vehicle_route_handle,
-        flash_files_path: infra.flash_files_path,
-        components_config: infra.components_config,
-        lock_provider: Arc::clone(&infra.lock_provider),
-        shutdown_signal: infra.shutdown_signal,
-        communication_access: Arc::clone(&infra.communication_access),
-        uds_manager: infra.uds_manager_replacer,
-        diagnostic_gateway: infra.gateway_replacer,
-        health: infra.health,
-        storage_dir: infra.storage_dir.clone(),
-        mdd_decompress: infra.mdd_decompress,
         storage: Arc::clone(&storage),
     };
 
     let reloader_config =
-        cda_plugin_runtime_update::RuntimeReloaderConfig::new(reloader_infra, factory);
+        cda_plugin_runtime_update::RuntimeReloaderConfig::new(reloader_infra, preparation);
 
-    let reloader_plugin = Arc::new(DefaultRuntimeReloaderPlugin::<
-        UdsManagerType<SP>,
-        DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
-        Configuration,
-        SL,
-        _,
-        LocalStorage,
-    >::new(reloader_config));
+    let reloader_plugin = Arc::new(
+        DefaultRuntimeReloaderPlugin::<Configuration, _, LocalStorage>::new(reloader_config),
+    );
 
     Ok(DefaultRuntimeUpdatePlugin::new(
         storage,
         reloader_plugin,
         Arc::new(DefaultUpdateSecurityHandler::new()),
         Arc::clone(&infra.lock_provider),
-        infra.mdd_decompress,
         infra.communication_disable,
-        Arc::clone(&infra.communication_access),
         infra.http_protections,
+        // The set of routes that stay reachable while an update holds its
+        // protection is a SOVD fact, so the application supplies it.
+        cda_sovd::routes_accessible_during_update(),
         infra.update_retry_after,
         infra.post_update_mode,
     ))

@@ -16,16 +16,17 @@ use std::{sync::Arc, time::Duration};
 use cda_interfaces::{
     HashMap,
     communication_control::{
-        ActivationCause, CommunicationAccess, DisableCommunication, DisableError, DisableGuard,
-        DisableReason, PostUpdateCommunicationMode,
+        DisableCommunication, DisableError, DisableGuard, DisableReason,
+        PostUpdateCommunicationMode,
     },
     http_protection::registry::{
-        HttpProtectionConfig, HttpProtectionReason, HttpProtectionRegistry, HttpStatusCode,
-        OwnedHttpProtection,
+        HttpProtectionConfig, HttpProtectionReason, HttpProtectionRegistry, HttpRouteMatcher,
+        HttpStatusCode, OwnedHttpProtection,
     },
     runtime_update_api::{
-        ExecutionMode, ExecutionStatus, LockStateProvider, RuntimeReloaderPlugin,
-        RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateCollections, UpdateExecution,
+        ExecutionFailure, ExecutionMode, ExecutionStatus, LockStateProvider, ReloadFailure,
+        RuntimeReloaderPlugin, RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateCollections,
+        UpdateExecution,
     },
     storage_api::{CollectionName, Storage},
 };
@@ -37,21 +38,23 @@ pub(crate) struct ExecutionParams<'a, S, R: ?Sized, T, L> {
     pub(crate) reload_handler: &'a Arc<R>,
     pub(crate) executions: &'a Arc<RwLock<HashMap<String, UpdateExecution>>>,
     pub(crate) communication_disable: &'a Arc<dyn DisableCommunication>,
-    pub(crate) communication_access: &'a Arc<dyn CommunicationAccess>,
     pub(crate) http_protections: &'a HttpProtectionRegistry,
+    pub(crate) update_exempt_routes: &'a [HttpRouteMatcher],
     pub(crate) update_retry_after: Duration,
     pub(crate) post_update_mode: PostUpdateCommunicationMode,
-    pub(crate) mdd_decompress: bool,
     pub(crate) lock_state_provider: &'a L,
 }
 
-fn http_protection_config_for_update(retry_after: Duration) -> HttpProtectionConfig {
+fn http_protection_config_for_update(
+    retry_after: Duration,
+    exempt_routes: &[HttpRouteMatcher],
+) -> HttpProtectionConfig {
     HttpProtectionConfig::new(
         HttpProtectionReason::UpdateInProgress,
         HttpStatusCode::CONFLICT,
         "Update in progress",
     )
-    .with_exempt_routes(cda_sovd::routes_accessible_during_update())
+    .with_exempt_routes(exempt_routes.to_vec())
     .with_retry_after(retry_after)
 }
 
@@ -68,7 +71,9 @@ where
     let (protection, disable_lease) = acquire_execution_guards(params).await?;
     let collections = match load_update_collections(&**params.storage).await {
         Ok(collections) => collections,
-        Err(error) => return Err(reject_execution(error, protection, disable_lease).await),
+        Err(error) => {
+            return Err(reject_execution(error, protection, disable_lease, mode).await);
+        }
     };
     let (protection, disable_lease) =
         validate_execution_preconditions(params, mode, &collections, protection, disable_lease)
@@ -76,16 +81,15 @@ where
     let execution_id = register_execution(params.executions, mode).await;
 
     spawn_execution(
-        mode,
-        execution_id.clone(),
-        Arc::clone(params.storage),
-        Arc::clone(params.reload_handler),
-        Arc::clone(params.executions),
-        params.mdd_decompress,
-        params.post_update_mode.clone(),
-        Arc::clone(params.communication_access),
-        disable_lease,
-        protection,
+        SpawnExecution {
+            mode,
+            execution_id: execution_id.clone(),
+            storage: Arc::clone(params.storage),
+            reload_handler: Arc::clone(params.reload_handler),
+            executions: Arc::clone(params.executions),
+            post_update_mode: params.post_update_mode.clone(),
+        },
+        ExecutionGuards::new(protection, disable_lease),
     );
 
     Ok(execution_id)
@@ -96,7 +100,10 @@ async fn acquire_execution_guards<S, R: ?Sized, T, L>(
 ) -> Result<(OwnedHttpProtection, Box<dyn DisableGuard>), RuntimeUpdateError> {
     let protection = params
         .http_protections
-        .protect(http_protection_config_for_update(params.update_retry_after))
+        .protect(http_protection_config_for_update(
+            params.update_retry_after,
+            params.update_exempt_routes,
+        ))
         .map_err(|error| {
             // Built in-process, so this is a programming error. Refuse the
             // execution rather than run it unprotected.
@@ -156,24 +163,27 @@ where
 {
     if let Err(error) = params
         .security_handler
-        .check_apply_allowed(params.lock_state_provider, collections)
+        .check_execution_allowed(params.lock_state_provider, collections)
         .await
     {
-        return Err(reject_execution(error, protection, disable_lease).await);
+        return Err(reject_execution(error, protection, disable_lease, mode).await);
     }
 
     if mode == ExecutionMode::Rollback {
-        match crate::storage::is_backup_empty(&**params.storage).await {
-            Ok(true) => {
+        match crate::storage::backup_snapshot_exists(&**params.storage).await {
+            Ok(false) => {
                 return Err(reject_execution(
                     RuntimeUpdateError::NoBackup,
                     protection,
                     disable_lease,
+                    mode,
                 )
                 .await);
             }
-            Err(error) => return Err(reject_execution(error, protection, disable_lease).await),
-            Ok(false) => {}
+            Err(error) => {
+                return Err(reject_execution(error, protection, disable_lease, mode).await);
+            }
+            Ok(true) => {}
         }
     }
 
@@ -187,6 +197,7 @@ where
             RuntimeUpdateError::NoPendingUpdate,
             protection,
             disable_lease,
+            mode,
         )
         .await);
     }
@@ -198,20 +209,30 @@ async fn reject_execution(
     error: RuntimeUpdateError,
     protection: OwnedHttpProtection,
     disable_lease: Box<dyn DisableGuard>,
+    mode: ExecutionMode,
 ) -> RuntimeUpdateError {
-    // Resume first, drop the update protection second, as `spawn_execution`'s
-    // completion path does. The other order leaves a window with neither the
-    // protection nor a restored transport, where requests get a handler-level
-    // communication error instead of the `409` the caller retries against.
-    if let Err(release_failure) = disable_lease.release().await {
-        tracing::error!(
-            error = %error,
-            release_failure = %release_failure,
-            "Failed to resume transport after rejecting runtime update"
-        );
+    // Restore communication before dropping HTTP protection so ordinary requests cannot enter
+    // while the transport is still unavailable.
+    match disable_lease.release().await {
+        Ok(_) => {
+            drop(protection);
+            error
+        }
+        Err(release_failure) => {
+            // Nothing was applied, so the runtime is coherent; only communication
+            // is left down until a later authorized activation.
+            tracing::error!(
+                error = %error,
+                release_failure = %release_failure,
+                ?mode,
+                "Failed to resume transport after rejecting runtime update"
+            );
+            drop(protection);
+            RuntimeUpdateError::CommunicationFailure(
+                "Communication could not be restored after rejecting the update".to_owned(),
+            )
+        }
     }
-    drop(protection);
-    error
 }
 
 async fn register_execution(
@@ -232,107 +253,200 @@ async fn register_execution(
     execution_id
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "Spawned task inputs must be owned"
-)]
-fn spawn_execution<S, R>(
+struct SpawnExecution<S, R: ?Sized> {
     mode: ExecutionMode,
     execution_id: String,
     storage: Arc<S>,
     reload_handler: Arc<R>,
     executions: Arc<RwLock<HashMap<String, UpdateExecution>>>,
-    mdd_decompress: bool,
     post_update_mode: PostUpdateCommunicationMode,
-    communication_access: Arc<dyn CommunicationAccess>,
-    disable_lease: Box<dyn DisableGuard>,
-    protection: OwnedHttpProtection,
+}
+
+struct ExecutionGuards {
+    protection: Option<OwnedHttpProtection>,
+    disable_lease: Option<Box<dyn DisableGuard>>,
+}
+
+impl ExecutionGuards {
+    fn new(protection: OwnedHttpProtection, disable_lease: Box<dyn DisableGuard>) -> Self {
+        Self {
+            protection: Some(protection),
+            disable_lease: Some(disable_lease),
+        }
+    }
+}
+
+/// How an execution hands the runtime back.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Finalization {
+    /// The live database is known good. Settle communication and lift the
+    /// update's protection so ordinary traffic resumes.
+    Settle {
+        /// Leave communication disabled for an explicit activation instead of
+        /// restoring what the lease displaced.
+        defer: bool,
+    },
+    /// The previous database could not be restored, so nothing about the live
+    /// state is trustworthy. Communication stays disabled and the protection
+    /// stays registered until an operator restarts the process.
+    Quarantine,
+}
+
+/// Finishes the execution: settle communication and drop the HTTP protection.
+///
+/// A failed settle is logged, not compensated. The reload itself already
+/// committed or rolled back inside `reload_databases`, so what is live is
+/// coherent either way; only communication is left down for a later activation.
+async fn finish_execution<S, R>(
+    task: &SpawnExecution<S, R>,
+    guards: &mut ExecutionGuards,
+    finalization: Finalization,
 ) where
     S: Storage + Send + Sync + 'static,
     R: RuntimeReloaderPlugin + ?Sized,
 {
-    let supervised_executions = Arc::clone(&executions);
-    let supervised_execution_id = execution_id.clone();
+    let lease = guards
+        .disable_lease
+        .take()
+        .expect("update owns its disable lease until finalization");
+    let settled = match finalization {
+        Finalization::Settle { defer: false } => lease.release().await.map(|_| ()),
+        Finalization::Settle { defer: true } | Finalization::Quarantine => lease.finish().await,
+    };
+    if let Err(failure) = settled {
+        tracing::error!(
+            execution_id = %task.execution_id,
+            mode = ?task.mode,
+            %failure,
+            "Update finished but communication could not be settled; it stays disabled until an \
+             authorized activation"
+        );
+    }
+
+    let protection = guards
+        .protection
+        .take()
+        .expect("update owns its HTTP protection until finalization");
+    match finalization {
+        Finalization::Settle { .. } => drop(protection),
+        // Deliberately never lifted: a degraded runtime must keep refusing
+        // requests, and only a restart clears this.
+        Finalization::Quarantine => protection.retain(),
+    }
+}
+
+async fn run_execution_frame<S, R>(task: &SpawnExecution<S, R>, guards: &mut ExecutionGuards)
+where
+    S: Storage + Send + Sync + 'static,
+    R: RuntimeReloaderPlugin + ?Sized,
+{
+    let outcome = execute_operation(task.mode, &*task.storage, &*task.reload_handler).await;
+    let (status, finalization) = match &outcome {
+        Ok(()) => (
+            ExecutionStatus::Completed,
+            Finalization::Settle {
+                defer: matches!(task.mode, ExecutionMode::Apply | ExecutionMode::Rollback)
+                    && matches!(task.post_update_mode, PostUpdateCommunicationMode::Deferred),
+            },
+        ),
+        Err(RuntimeUpdateError::ReloadFailed(ReloadFailure::RecoveryRequired {
+            original,
+            recovery,
+            phase,
+        })) => {
+            tracing::error!(
+                execution_id = %task.execution_id,
+                mode = ?task.mode,
+                ?phase,
+                %original,
+                %recovery,
+                "Runtime update failed and the previous database could not be restored; the \
+                 runtime is degraded and needs a restart"
+            );
+            (
+                ExecutionStatus::Failed(ExecutionFailure::fatal(format!(
+                    "Runtime update failed in {phase:?} and the previous database could not be \
+                     restored: {original}; recovery failed: {recovery}"
+                ))),
+                Finalization::Quarantine,
+            )
+        }
+        Err(error) => {
+            tracing::error!(
+                execution_id = %task.execution_id,
+                mode = ?task.mode,
+                %error,
+                "Runtime update failed; the previous database is still live"
+            );
+            (
+                ExecutionStatus::Failed(ExecutionFailure::ordinary(error.to_string())),
+                Finalization::Settle { defer: false },
+            )
+        }
+    };
+
+    finish_execution(task, guards, finalization).await;
+    // Publish last: clients treat a terminal status as permission to resume ordinary traffic.
+    publish_terminal_status(&task.executions, &task.execution_id, task.mode, status).await;
+}
+
+fn spawn_execution<S, R>(task: SpawnExecution<S, R>, mut guards: ExecutionGuards)
+where
+    S: Storage + Send + Sync + 'static,
+    R: RuntimeReloaderPlugin + ?Sized,
+{
+    let mode = task.mode;
+    let supervised_executions = Arc::clone(&task.executions);
+    let supervised_execution_id = task.execution_id.clone();
 
     let handle = cda_interfaces::spawn_named!(&format!("runtime-update-{mode:?}"), async move {
-        let result = execute_operation(mode, &*storage, &*reload_handler, mdd_decompress).await;
-
-        if let Err(error) = &result {
-            tracing::error!(
-                execution_id = %execution_id,
-                mode = ?mode,
-                error = %error,
-                "Runtime update execution failed"
-            );
-        }
-
-        // Only a successful Apply/Rollback defers. A failed update or a Cleanup
-        // leaves communication as it found it.
-        let should_defer = result.is_ok()
-            && matches!(mode, ExecutionMode::Apply | ExecutionMode::Rollback)
-            && matches!(post_update_mode, PostUpdateCommunicationMode::Deferred);
-        if should_defer {
-            drop(disable_lease);
-        } else {
-            if let Err(failure) = disable_lease.release().await {
-                tracing::error!(
-                    execution_id = %execution_id,
-                    mode = ?mode,
-                    error = %failure,
-                    "Failed to resume transport after runtime update"
-                );
-            }
-            // Releasing only restores what the lease displaced, so an update
-            // started from a deferred runtime comes back deferred. Requesting
-            // the configured end state through `CommunicationAccess` leaves
-            // `init_mode` the final word, and is a no-op when the release
-            // already resumed.
-            communication_access.request_activate(ActivationCause::DisableRelease);
-        }
-        drop(protection);
-
-        // Published last. A client resumes normal traffic once it reads the
-        // terminal status, so publishing before the release above would let a
-        // caller that saw `completed` get the update's `409` on its next
-        // request.
-        let mut map = executions.write().await;
-        if let Some(execution) = map.get_mut(&execution_id) {
-            execution.status = match result {
-                Ok(()) => ExecutionStatus::Completed,
-                Err(ref error) => ExecutionStatus::Failed(error.to_string()),
-            };
-        } else {
-            tracing::error!(
-                execution_id = %execution_id,
-                mode = ?mode,
-                "Runtime update execution completed without an execution record"
-            );
-        }
-        drop(map);
+        run_execution_frame(&task, &mut guards).await;
     });
 
     // A panic in `execute_operation` unwinds past the status write and leaves
     // the execution record `Running` forever. This supervisor awaits the
     // `JoinHandle` and marks the execution `Failed` when the task ended without
-    // a terminal status.
-    cda_interfaces::spawn_named!(&format!("runtime-update-{mode:?}-supervisor"), async move {
-        if let Err(join_error) = handle.await {
-            tracing::error!(
-                execution_id = %supervised_execution_id,
-                mode = ?mode,
-                error = %join_error,
-                "runtime update task ended without completing normally"
-            );
-            let mut map = supervised_executions.write().await;
-            if let Some(execution) = map.get_mut(&supervised_execution_id)
-                && execution.status == ExecutionStatus::Running
-            {
-                execution.status = ExecutionStatus::Failed(format!(
-                    "execution task ended abnormally: {join_error}"
-                ));
+    // a terminal status. The class is fatal: unwinding skipped finalization, so
+    // whether the swap completed is unknown.
+    drop(cda_interfaces::spawn_named!(
+        &format!("runtime-update-{mode:?}-supervisor"),
+        async move {
+            if let Err(join_error) = handle.await {
+                tracing::error!(
+                    execution_id = %supervised_execution_id,
+                    mode = ?mode,
+                    error = %join_error,
+                    "runtime update task ended without completing normally"
+                );
+                let mut map = supervised_executions.write().await;
+                if let Some(execution) = map.get_mut(&supervised_execution_id)
+                    && execution.status == ExecutionStatus::Running
+                {
+                    execution.status = ExecutionStatus::Failed(ExecutionFailure::fatal(format!(
+                        "execution task ended abnormally: {join_error}"
+                    )));
+                }
             }
         }
-    });
+    ));
+}
+
+async fn publish_terminal_status(
+    executions: &Arc<RwLock<HashMap<String, UpdateExecution>>>,
+    execution_id: &str,
+    mode: ExecutionMode,
+    status: ExecutionStatus,
+) {
+    let mut map = executions.write().await;
+    if let Some(execution) = map.get_mut(execution_id) {
+        execution.status = status;
+    } else {
+        tracing::error!(
+            execution_id,
+            mode = ?mode,
+            "Runtime update execution completed without an execution record"
+        );
+    }
 }
 
 pub(crate) async fn get_execution_status(
@@ -347,7 +461,6 @@ async fn execute_operation<S, R>(
     mode: ExecutionMode,
     storage: &S,
     reload_handler: &R,
-    mdd_decompress: bool,
 ) -> Result<(), RuntimeUpdateError>
 where
     S: Storage + Send + Sync + 'static,
@@ -355,7 +468,7 @@ where
 {
     match mode {
         ExecutionMode::Apply => {
-            crate::operations::apply::execute_apply(storage, reload_handler, mdd_decompress).await
+            crate::operations::apply::execute_apply(storage, reload_handler).await
         }
         ExecutionMode::Rollback => {
             crate::operations::rollback::execute_rollback(storage, reload_handler).await
@@ -371,16 +484,19 @@ mod tests {
     use cda_interfaces::{
         HashMap,
         communication_control::{
-            CommunicationAccess, PostUpdateCommunicationMode, TransportControl, TransportState,
+            CommunicationOperation, CommunicationOperationFailure, CommunicationState,
+            DisableGuard, PostUpdateCommunicationMode, TransportControl, TransportState,
             error::CommControlError,
         },
         http_protection::registry::{HttpProtectionRegistry, HttpRestrictionGuard},
-        runtime_update_api::{ExecutionMode, ExecutionStatus, RuntimeUpdateError, UpdateExecution},
-        storage_api::CollectionName,
+        runtime_update_api::{
+            ExecutionFailure, ExecutionFailureClass, ExecutionMode, ExecutionStatus, RecoveryPhase,
+            ReloadError, ReloadFailure, RuntimeReloaderPlugin, RuntimeUpdateError, UpdateExecution,
+        },
+        storage_api::{Collection as _, CollectionName, Storage as _},
     };
     use cda_plugin_communication_management::lifecycle::{
         communication_disable_for_test, disable::DisableCommunication,
-        enabled_communication_access_for_test,
     };
     use cda_storage::LocalStorage;
     use tokio::sync::RwLock;
@@ -410,6 +526,39 @@ mod tests {
     struct ResumeGate {
         entered: tokio::sync::mpsc::UnboundedReceiver<()>,
         gate: Arc<tokio::sync::Semaphore>,
+    }
+
+    #[derive(Debug)]
+    struct FailingFinalizationGuard;
+
+    #[async_trait::async_trait]
+    impl DisableGuard for FailingFinalizationGuard {
+        async fn release(
+            self: Box<Self>,
+        ) -> Result<CommunicationState, CommunicationOperationFailure> {
+            Err(CommunicationOperationFailure::TransitionFailure {
+                operation: CommunicationOperation::Resume,
+            })
+        }
+
+        async fn finish(self: Box<Self>) -> Result<(), CommunicationOperationFailure> {
+            Err(CommunicationOperationFailure::TransitionFailure {
+                operation: CommunicationOperation::FinishDisableLease,
+            })
+        }
+    }
+
+    struct RecoveryPreparationFails;
+
+    #[async_trait::async_trait]
+    impl RuntimeReloaderPlugin for RecoveryPreparationFails {
+        async fn reload_databases(&self) -> Result<(), ReloadFailure> {
+            Err(ReloadFailure::RecoveryRequired {
+                original: ReloadError::ReplacementFailure("candidate state rejected".to_owned()),
+                recovery: ReloadError::ReplacementFailure("restored state rejected".to_owned()),
+                phase: RecoveryPhase::RestoredPreparation,
+            })
+        }
     }
 
     impl GatedTransport {
@@ -474,7 +623,6 @@ mod tests {
         lock_provider: MockLockProvider,
         executions: Arc<RwLock<HashMap<String, UpdateExecution>>>,
         communication_disable: Arc<dyn DisableCommunication>,
-        communication_access: Arc<dyn CommunicationAccess>,
         http_restriction_manager: HttpProtectionRegistry,
         _dir: tempfile::TempDir,
     }
@@ -490,16 +638,15 @@ mod tests {
             MockLockProvider,
         > {
             super::ExecutionParams {
-                communication_access: &self.communication_access,
                 storage: &self.storage,
                 security_handler: &self.security_handler,
                 reload_handler: &self.reload_handler,
                 executions: &self.executions,
                 communication_disable: &self.communication_disable,
                 http_protections: &self.http_restriction_manager,
+                update_exempt_routes: &[],
                 update_retry_after: Duration::from_secs(1),
                 post_update_mode: PostUpdateCommunicationMode::Enabled,
-                mdd_decompress: false,
                 lock_state_provider: &self.lock_provider,
             }
         }
@@ -518,7 +665,6 @@ mod tests {
             },
             executions: Arc::new(RwLock::new(HashMap::default())),
             communication_disable,
-            communication_access: enabled_communication_access_for_test(),
             http_restriction_manager: mgr,
             _dir: dir,
         }
@@ -580,6 +726,16 @@ mod tests {
             .await
             .unwrap();
         assert!(!exec_id.is_empty());
+        assert_eq!(
+            poll_until_terminal(&f.executions, &exec_id).await,
+            ExecutionStatus::Completed
+        );
+        let backup = f
+            .storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
+            .await
+            .unwrap();
+        assert!(backup.is_empty().await.unwrap());
     }
 
     #[tokio::test]
@@ -617,6 +773,193 @@ mod tests {
 
         let status = poll_until_terminal(&f.executions, &exec_id).await;
         assert_eq!(status, ExecutionStatus::Completed);
+    }
+
+    /// A failed settle does not undo the update: the reload already committed,
+    /// so the execution completes and only communication is left down.
+    async fn assert_finalization_failure_does_not_fail_the_execution(
+        post_update_mode: PostUpdateCommunicationMode,
+    ) {
+        let f = make_fixture();
+        write_test_file(
+            &f.storage,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+            "ecu.mdd",
+            b"mdd_data",
+        )
+        .await;
+        let execution_id = super::register_execution(&f.executions, ExecutionMode::Apply).await;
+        let protection = f
+            .http_restriction_manager
+            .protect(super::http_protection_config_for_update(
+                Duration::from_secs(1),
+                &[],
+            ))
+            .unwrap();
+        super::spawn_execution(
+            super::SpawnExecution {
+                mode: ExecutionMode::Apply,
+                execution_id: execution_id.clone(),
+                storage: Arc::clone(&f.storage),
+                reload_handler: Arc::clone(&f.reload_handler),
+                executions: Arc::clone(&f.executions),
+                post_update_mode,
+            },
+            super::ExecutionGuards::new(protection, Box::new(FailingFinalizationGuard)),
+        );
+
+        let status = poll_until_terminal(&f.executions, &execution_id).await;
+        assert_eq!(status, ExecutionStatus::Completed);
+        let current = f
+            .storage
+            .get_collection(&CollectionName::DiagnosticDatabase)
+            .await
+            .unwrap();
+        assert_eq!(current.list().await.unwrap(), ["ecu.mdd"]);
+        // Guards are released even though the settle failed: nothing is left
+        // holding the runtime.
+        assert!(!f.http_restriction_manager.is_active());
+    }
+
+    #[tokio::test]
+    async fn failed_release_does_not_fail_the_execution() {
+        assert_finalization_failure_does_not_fail_the_execution(
+            PostUpdateCommunicationMode::Enabled,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn failed_finish_does_not_fail_the_execution() {
+        assert_finalization_failure_does_not_fail_the_execution(
+            PostUpdateCommunicationMode::Deferred,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn failed_rejection_finalization_readmits_http_traffic() {
+        let f = make_fixture();
+        let protection = f
+            .http_restriction_manager
+            .protect(super::http_protection_config_for_update(
+                Duration::from_secs(1),
+                &[],
+            ))
+            .unwrap();
+
+        let error = super::reject_execution(
+            RuntimeUpdateError::NoPendingUpdate,
+            protection,
+            Box::new(FailingFinalizationGuard),
+            ExecutionMode::Apply,
+        )
+        .await;
+
+        // Nothing was applied, so the runtime stays coherent and ordinary HTTP
+        // is readmitted; only communication is left down.
+        assert!(matches!(error, RuntimeUpdateError::CommunicationFailure(_)));
+        assert!(!f.http_restriction_manager.is_active());
+    }
+
+    #[tokio::test]
+    async fn failed_compensation_retains_protection_and_requires_recovery() {
+        let f = make_fixture();
+        write_test_file(
+            &f.storage,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+            "ecu.mdd",
+            b"candidate",
+        )
+        .await;
+        let execution_id = super::register_execution(&f.executions, ExecutionMode::Apply).await;
+        let protection = f
+            .http_restriction_manager
+            .protect(super::http_protection_config_for_update(
+                Duration::from_secs(1),
+                &[],
+            ))
+            .unwrap();
+        super::spawn_execution(
+            super::SpawnExecution {
+                mode: ExecutionMode::Apply,
+                execution_id: execution_id.clone(),
+                storage: Arc::clone(&f.storage),
+                reload_handler: Arc::new(RecoveryPreparationFails),
+                executions: Arc::clone(&f.executions),
+                post_update_mode: PostUpdateCommunicationMode::Enabled,
+            },
+            super::ExecutionGuards::new(protection, Box::new(FailingFinalizationGuard)),
+        );
+
+        // The reload could not restore the previous database, so nothing about
+        // the live state is trustworthy. The protection stays registered and
+        // only a restart clears it.
+        let status = poll_until_terminal(&f.executions, &execution_id).await;
+        assert!(
+            matches!(
+                status,
+                ExecutionStatus::Failed(ExecutionFailure {
+                    class: ExecutionFailureClass::Fatal,
+                    ..
+                })
+            ),
+            "an unrecoverable reload must report a fatal failure, got {status:?}"
+        );
+        assert!(
+            f.http_restriction_manager.is_active(),
+            "a runtime that could not be restored must keep refusing requests"
+        );
+    }
+
+    /// A rollback whose settle fails still rolled back: the backup is live and
+    /// the execution completes.
+    #[tokio::test]
+    async fn failed_rollback_finalization_still_restores_the_backup() {
+        let f = make_fixture();
+        write_test_file(
+            &f.storage,
+            &CollectionName::DiagnosticDatabaseBackup,
+            "ecu.mdd",
+            b"backup_data",
+        )
+        .await;
+        write_test_file(
+            &f.storage,
+            &CollectionName::DiagnosticDatabase,
+            "current.mdd",
+            b"current_data",
+        )
+        .await;
+        let execution_id = super::register_execution(&f.executions, ExecutionMode::Rollback).await;
+        let protection = f
+            .http_restriction_manager
+            .protect(super::http_protection_config_for_update(
+                Duration::from_secs(1),
+                &[],
+            ))
+            .unwrap();
+        super::spawn_execution(
+            super::SpawnExecution {
+                mode: ExecutionMode::Rollback,
+                execution_id: execution_id.clone(),
+                storage: Arc::clone(&f.storage),
+                reload_handler: Arc::clone(&f.reload_handler),
+                executions: Arc::clone(&f.executions),
+                post_update_mode: PostUpdateCommunicationMode::Deferred,
+            },
+            super::ExecutionGuards::new(protection, Box::new(FailingFinalizationGuard)),
+        );
+
+        let status = poll_until_terminal(&f.executions, &execution_id).await;
+        assert_eq!(status, ExecutionStatus::Completed);
+        let current = f
+            .storage
+            .get_collection(&CollectionName::DiagnosticDatabase)
+            .await
+            .unwrap();
+        assert_eq!(current.list().await.unwrap(), ["ecu.mdd"]);
+        assert!(!f.http_restriction_manager.is_active());
     }
 
     #[tokio::test]
@@ -716,18 +1059,16 @@ mod tests {
         )
         .await;
         let failing_reload_handler = Arc::new(crate::test_utils::FailingReloadHandler);
-        let communication_access = enabled_communication_access_for_test();
         let params = super::ExecutionParams {
-            communication_access: &communication_access,
             storage: &f.storage,
             security_handler: &f.security_handler,
             reload_handler: &failing_reload_handler,
             executions: &f.executions,
             communication_disable: &f.communication_disable,
             http_protections: &f.http_restriction_manager,
+            update_exempt_routes: &[],
             update_retry_after: Duration::from_secs(1),
             post_update_mode: PostUpdateCommunicationMode::Enabled,
-            mdd_decompress: false,
             lock_state_provider: &f.lock_provider,
         };
 
@@ -735,49 +1076,16 @@ mod tests {
             .await
             .unwrap();
 
-        let status = poll_until_terminal(&f.executions, &exec_id).await;
-        assert!(matches!(status, ExecutionStatus::Failed(_)));
-        // After failure the spawned task re-enables, removing the restriction.
-        assert!(!f.http_restriction_manager.is_active());
-    }
-
-    #[tokio::test]
-    async fn execution_transitions_to_failed_when_task_panics() {
-        let f = make_fixture();
-        write_test_file(
-            &f.storage,
-            &CollectionName::DiagnosticDatabaseNextUpdate,
-            "ecu.mdd",
-            b"mdd_data",
-        )
-        .await;
-        let panicking_reload_handler = Arc::new(crate::test_utils::PanickingReloadHandler);
-        let communication_access = enabled_communication_access_for_test();
-        let params = super::ExecutionParams {
-            communication_access: &communication_access,
-            storage: &f.storage,
-            security_handler: &f.security_handler,
-            reload_handler: &panicking_reload_handler,
-            executions: &f.executions,
-            communication_disable: &f.communication_disable,
-            http_protections: &f.http_restriction_manager,
-            update_retry_after: Duration::from_secs(1),
-            post_update_mode: PostUpdateCommunicationMode::Enabled,
-            mdd_decompress: false,
-            lock_state_provider: &f.lock_provider,
-        };
-
-        let exec_id = super::start_execution(&params, ExecutionMode::Apply)
-            .await
-            .unwrap();
-
-        // Without the supervisor task the execution task's panic would leave no
-        // terminal status, and this would hang until poll_until_terminal's
-        // deadline.
         let status = poll_until_terminal(&f.executions, &exec_id).await;
         assert!(
-            matches!(status, ExecutionStatus::Failed(_)),
-            "expected Failed after the execution task panicked, got: {status:?}"
+            matches!(
+                status,
+                ExecutionStatus::Failed(ExecutionFailure {
+                    class: ExecutionFailureClass::Fatal,
+                    ..
+                })
+            ),
+            "an unrecoverable reload must report a fatal failure, got {status:?}"
         );
     }
 }

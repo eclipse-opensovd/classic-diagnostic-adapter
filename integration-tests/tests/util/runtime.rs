@@ -512,7 +512,6 @@ pub(crate) fn start_cda(config: Configuration) {
                 |infra: opensovd_cda_lib::setup::CdaRuntime<DefaultSecurityPluginData>| async {
                     opensovd_cda_lib::update::create_default_update_plugin::<
                         DefaultSecurityPluginData,
-                        DefaultSecurityPlugin,
                     >(infra)
                     .await
                 },
@@ -1132,7 +1131,7 @@ fn docker_compose_stop(container: &str) -> Result<(), TestingError> {
     check_command_success(status, "docker compose stop failed")
 }
 
-fn use_docker() -> bool {
+pub(crate) fn use_docker() -> bool {
     std::env::var(CDA_INTEGRATION_TEST_USE_DOCKER).map_or(true, |s| s == "true")
 }
 

@@ -14,7 +14,7 @@
 use aide::{UseApi, transform::TransformOperation};
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::Query,
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
@@ -23,7 +23,7 @@ use cda_plugin_security::Secured;
 use http::StatusCode;
 use sovd_interfaces::functions::functional_groups::operations::OperationCollectionItem;
 
-use super::WebserverFgState;
+use super::{FgContext, WebserverFgState};
 use crate::sovd::{
     create_schema,
     error::{ApiError, ErrorWrapper},
@@ -35,11 +35,11 @@ pub(crate) async fn get<T: UdsEcu + Clone>(
         Query<sovd_interfaces::functions::functional_groups::operations::get::Query>,
         ApiError,
     >,
-    State(WebserverFgState {
+    FgContext(WebserverFgState {
         uds,
         functional_group_name,
         ..
-    }): State<WebserverFgState<T>>,
+    }): FgContext<T>,
 ) -> Response {
     let security_plugin: DynamicPlugin = security_plugin;
     match uds
@@ -92,7 +92,7 @@ pub(crate) mod docs_endpoint {
     use aide::{UseApi, openapi::OpenApi, transform::TransformOperation};
     use axum::{
         Json,
-        extract::{Path, State},
+        extract::Path,
         response::{IntoResponse, Response},
     };
     use cda_interfaces::{
@@ -101,7 +101,7 @@ pub(crate) mod docs_endpoint {
     use cda_plugin_security::Secured;
     use http::StatusCode;
 
-    use super::super::WebserverFgState;
+    use super::super::{FgContext, WebserverFgState};
     use crate::{
         openapi,
         sovd::{
@@ -115,11 +115,11 @@ pub(crate) mod docs_endpoint {
     pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         Path(FgOperationDocsPathParam { service }): Path<FgOperationDocsPathParam>,
-        State(WebserverFgState {
+        FgContext(WebserverFgState {
             uds,
             functional_group_name,
             ..
-        }): State<WebserverFgState<T>>,
+        }): FgContext<T>,
     ) -> Response {
         let security_plugin: DynamicPlugin = security_plugin;
         let ops_info = match uds
@@ -191,7 +191,7 @@ pub(crate) mod diag_service {
     use axum::{
         Json,
         body::Bytes,
-        extract::{OriginalUri, Path, Query, State},
+        extract::{OriginalUri, Path, Query},
         http::{HeaderMap, StatusCode, Uri, header},
         response::{IntoResponse, Response},
     };
@@ -206,7 +206,7 @@ pub(crate) mod diag_service {
     use tokio::sync::RwLock;
     use uuid::Uuid;
 
-    use super::super::WebserverFgState;
+    use super::super::{FgContext, WebserverFgState};
     use crate::{
         create_schema, openapi,
         sovd::{
@@ -298,7 +298,7 @@ pub(crate) mod diag_service {
         use aide::{UseApi, transform::TransformOperation};
         use axum::{
             Json,
-            extract::{Path, Query, State},
+            extract::{Path, Query},
             response::{IntoResponse, Response},
         };
         use axum_extra::extract::WithRejection;
@@ -307,7 +307,7 @@ pub(crate) mod diag_service {
         use http::StatusCode;
         use sovd_interfaces::common::operations::OperationIdItem;
 
-        use super::super::super::WebserverFgState;
+        use super::super::super::{FgContext, WebserverFgState};
         use crate::sovd::{components::ecu::DiagServicePathParam, create_schema, error::ApiError};
 
         pub(crate) async fn get<T: UdsEcu + Clone>(
@@ -317,7 +317,7 @@ pub(crate) mod diag_service {
                 ApiError,
             >,
             Path(DiagServicePathParam { service: operation }): Path<DiagServicePathParam>,
-            State(WebserverFgState { fg_executions, .. }): State<WebserverFgState<T>>,
+            FgContext(WebserverFgState { fg_executions, .. }): FgContext<T>,
         ) -> Response {
             let operation = operation.to_lowercase();
             let schema = if query.include_schema {
@@ -368,7 +368,7 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::functions::functional_groups::operations::service::Query>,
             ApiError,
         >,
-        State(WebserverFgState {
+        FgContext(WebserverFgState {
             uds,
             locks,
             functional_group_name,
@@ -376,7 +376,7 @@ pub(crate) mod diag_service {
             communication_activities,
             communication_access,
             ..
-        }): State<WebserverFgState<T>>,
+        }): FgContext<T>,
         body: Bytes,
     ) -> Response {
         let include_schema = query.include_schema;
@@ -572,14 +572,14 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::components::ecu::operations::OperationDeleteQuery>,
             ApiError,
         >,
-        State(WebserverFgState {
+        FgContext(WebserverFgState {
             uds,
             locks,
             functional_group_name,
             fg_executions,
             communication_activities,
             ..
-        }): State<WebserverFgState<T>>,
+        }): FgContext<T>,
     ) -> Response {
         let include_schema = query.include_schema;
         let suppress_service = query.suppress_service;
@@ -740,7 +740,7 @@ pub(crate) mod diag_service {
         use aide::{UseApi, transform::TransformOperation};
         use axum::{
             Json,
-            extract::{Path, Query, State},
+            extract::{Path, Query},
             response::{IntoResponse, Response},
         };
         use axum_extra::extract::WithRejection;
@@ -759,8 +759,8 @@ pub(crate) mod diag_service {
         use uuid::Uuid;
 
         use super::{
-            super::super::WebserverFgState, EcuResponsesData, OperationAndIdPathParam,
-            handle_ecu_responses,
+            super::super::{FgContext, WebserverFgState},
+            EcuResponsesData, OperationAndIdPathParam, handle_ecu_responses,
         };
         use crate::{
             create_schema, openapi,
@@ -800,14 +800,14 @@ pub(crate) mod diag_service {
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(OperationAndIdPathParam { operation, id }): Path<OperationAndIdPathParam>,
             WithRejection(Query(query), _): WithRejection<Query<OperationQuery>, ApiError>,
-            State(WebserverFgState {
+            FgContext(WebserverFgState {
                 uds,
                 locks,
                 functional_group_name,
                 fg_executions,
                 communication_activities,
                 ..
-            }): State<WebserverFgState<T>>,
+            }): FgContext<T>,
         ) -> Response {
             let include_schema = query.include_schema;
 
@@ -1081,7 +1081,7 @@ pub(crate) mod diag_service {
         use std::sync::Arc;
 
         use aide::UseApi;
-        use axum::{body::Bytes, extract::State, http::StatusCode};
+        use axum::{body::Bytes, http::StatusCode};
         use axum_extra::extract::WithRejection;
         use cda_interfaces::{
             DiagServiceError,
@@ -1199,7 +1199,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
             .await;
@@ -1256,7 +1256,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
             .await;
@@ -1314,7 +1314,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, true)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
             .await;
@@ -1371,7 +1371,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
             .await;
@@ -1439,7 +1439,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
             .await;
@@ -1516,7 +1516,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
             .await;
@@ -1595,7 +1595,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_delete_query(false)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
             )
             .await;
 
@@ -1622,7 +1622,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_delete_query(false)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
             )
             .await;
 
@@ -1666,7 +1666,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_delete_query(false)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
             )
             .await;
 
@@ -1717,7 +1717,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_delete_query_with_force(false, true)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
             )
             .await;
 
@@ -1768,7 +1768,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_delete_query(true)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
             )
             .await;
 
@@ -1833,7 +1833,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
             .await;
@@ -1883,7 +1883,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
             .await;
@@ -1953,7 +1953,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
             .await;
@@ -2009,7 +2009,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_delete_query_with_force(false, false)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
             )
             .await;
 
@@ -2077,7 +2077,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_delete_query_with_force(false, true)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
             )
             .await;
 
@@ -2172,7 +2172,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_get_query(false, false)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
             )
             .await;
 
@@ -2240,7 +2240,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_get_query(false, true)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
             )
             .await;
 
@@ -2293,7 +2293,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_get_query(false, false)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
             )
             .await;
 
@@ -2345,7 +2345,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_get_query(false, false)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
             )
             .await;
 
@@ -2418,7 +2418,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_get_query(false, false)),
                     std::marker::PhantomData,
                 ),
-                State(state),
+                FgContext(state),
             )
             .await;
 
@@ -2471,7 +2471,7 @@ pub(crate) mod diag_service {
 #[cfg(test)]
 mod tests {
     use aide::UseApi;
-    use axum::{extract::State, http::StatusCode};
+    use axum::http::StatusCode;
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{datatypes::ComponentOperationsInfo, mock::MockUdsEcu};
     use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
@@ -2505,7 +2505,7 @@ mod tests {
                 ),
                 std::marker::PhantomData,
             ),
-            State(state),
+            FgContext(state),
         )
         .await;
 
@@ -2558,7 +2558,7 @@ mod tests {
                 ),
                 std::marker::PhantomData,
             ),
-            State(state),
+            FgContext(state),
         )
         .await;
 
@@ -2607,7 +2607,7 @@ mod tests {
                 ),
                 std::marker::PhantomData,
             ),
-            State(state),
+            FgContext(state),
         )
         .await;
 

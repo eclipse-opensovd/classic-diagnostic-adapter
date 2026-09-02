@@ -16,25 +16,21 @@
 //! [`Setup`] is the public entry-point for applications that need to customize how the CDA
 //! boots. The default startup path uses [`Setup::new`] with the standard update plugin; a
 //! custom path calls [`Setup::with_update_plugin`] to inject any [`RuntimeFilesUpdatePlugin`]
-//! implementation and [`Setup::with_communication_plugin`] to replace the default
-//! `init_mode`-aware communication plugin, before handing the `Setup` to one of the
+//! implementation, [`Setup::with_communication_plugin`] to replace the default
+//! reader for the application's database format, before handing the `Setup` to one of the
 //! `run_*` functions.
 //!
 //! [`RuntimeFilesUpdatePlugin`]: cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin
 
 use std::{future::Future, sync::Arc, time::Duration};
 
-use cda_comm_can::CanDiagGateway;
-use cda_comm_doip::DoipDiagGateway;
-use cda_core::EcuManager;
 use cda_interfaces::{
     HashMap, ShutdownSignal,
     communication_control::{
         ActivationCause, CommunicationAccess, CommunicationInitMode, CommunicationLifecycle,
-        CommunicationVariantDetection, PostUpdateCommunicationMode, VariantDetectionMode,
-        error::CommControlError,
+        CommunicationVariantDetection, PostUpdateCommunicationMode, TransportControl,
+        VariantDetectionMode,
     },
-    component_slot::{ComponentSlot, ReplaceComponent},
     health::HealthProvider,
     http_protection::registry::HttpProtectionRegistry,
 };
@@ -50,12 +46,12 @@ use cda_plugin_communication_management::{
     },
 };
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
-use cda_transport_router::DiagnosticTransportRouter;
 use futures::future::BoxFuture;
 use tokio::sync::RwLock;
 
 use crate::{
     ApplicationState,
+    cda_factory::{DatabaseReloadPreparation, ReloadTargets},
     config::configfile::Configuration,
     error::AppError,
     update::{UpdatePluginBuilder, add_runtime_update_routes},
@@ -73,25 +69,18 @@ pub(crate) type PreLoadHook = Box<
 
 /// Runtime context produced during CDA initialization and provided to update-plugin builders.
 ///
-/// `gateway_replacer` and `uds_manager_replacer` are replace-only. An update plugin can
-/// install a freshly built component, but has no read access, and therefore no operational
-/// authority, over the live gateway or UDS manager.
+/// The runtime update factory returns a consumed preparation whose typed
+/// values are already bound to their actual component owners. No aggregate
+/// writable vehicle-data handle crosses this boundary.
 pub struct CdaRuntime<SP: SecurityPlugin> {
     pub config: Arc<RwLock<Configuration>>,
-    pub uds_manager_replacer: Arc<dyn ReplaceComponent<UdsManagerType<SP>>>,
-    pub gateway_replacer: Arc<
-        dyn ReplaceComponent<
-            DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
-        >,
-    >,
+    /// Runtime-only preparation and typed reload capability.
+    pub update_preparation: Arc<DatabaseReloadPreparation<SP>>,
     pub dynamic_router: cda_sovd::dynamic_router::DynamicRouter,
-    pub vehicle_route_handle: cda_sovd::RouteHandle,
-    pub lock_provider: Arc<cda_sovd::SovdLockStateProvider>,
-    pub flash_files_path: String,
-    pub components_config: cda_interfaces::datatypes::ComponentsConfig,
+    /// Read-only lock topology view; update plugins receive no publication authority.
+    pub lock_provider: Arc<cda_sovd::SovdLockStateView>,
     pub health: Option<HashMap<String, Arc<dyn HealthProvider>>>,
     pub storage_dir: String,
-    pub mdd_decompress: bool,
     pub shutdown_signal: ShutdownSignal,
     /// Transport behavior to restore after a runtime database update completes.
     pub post_update_mode: PostUpdateCommunicationMode,
@@ -106,39 +95,6 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
     /// Retry hint surfaced on the HTTP `Retry-After` header while a runtime
     /// update holds communication exclusively.
     pub update_retry_after: Duration,
-}
-
-/// Bridges the `RwLock`-wrapped `UdsManager` to both communication-framework
-/// hook traits. The `UdsManager` implements each half itself, so this only
-/// forwards through the lock.
-struct UdsCommunicationHooks<SP: SecurityPlugin> {
-    uds_manager: ComponentSlot<UdsManagerType<SP>>,
-}
-
-#[async_trait::async_trait]
-impl<SP: SecurityPlugin> CommunicationLifecycle for UdsCommunicationHooks<SP> {
-    fn name(&self) -> &'static str {
-        "variant-detection-listener"
-    }
-
-    async fn initialize(&self) -> Result<(), CommControlError> {
-        self.uds_manager.read().await.initialize().await
-    }
-
-    async fn deinitialize(&self) {
-        self.uds_manager.read().await.deinitialize().await;
-    }
-}
-
-#[async_trait::async_trait]
-impl<SP: SecurityPlugin> CommunicationVariantDetection for UdsCommunicationHooks<SP> {
-    fn name(&self) -> &'static str {
-        "variant-detection"
-    }
-
-    async fn detect(&self) -> Result<(), CommControlError> {
-        self.uds_manager.read().await.detect().await
-    }
 }
 
 /// Builder for customizing the CDA startup sequence.
@@ -251,10 +207,10 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
 
     /// Configures a custom runtime update plugin.
     ///
-    /// `builder` will be called after vehicle data is loaded and routes are registered. It
-    /// receives the complete [`CdaRuntime`] context so it can access the UDS manager, `DoIP`
-    /// gateway, storage directory, lock provider, and every other piece of infrastructure it
-    /// needs.
+    /// `builder` is called after vehicle data is loaded and routes are registered.
+    /// It receives the [`CdaRuntime`] capabilities exposed to update plugins,
+    /// including application preparation, storage configuration, lock policy,
+    /// communication lifecycle, and HTTP protection.
     ///
     /// The returned plugin is wrapped in [`ExclusiveRuntimePlugin`] (read/write mutual
     /// exclusion) and mounted on the standard runtime-update HTTP endpoints automatically.
@@ -308,11 +264,9 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
 /// Diagnostic operations request activation directly (see
 /// `CommunicationAccess::request_activate`), so `http_protections` is left to the
 /// runtime-update plugin's own protection.
-async fn build_communication_runtime_and_access<SP, CPB>(
+async fn build_communication_runtime_and_access<CPB>(
     ws: &ApplicationState,
-    gateway: ComponentSlot<
-        DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
-    >,
+    transport_control: Arc<dyn TransportControl>,
     communication_plugin: CPB,
     init_mode: CommunicationInitMode,
     variant_detection: VariantDetectionMode,
@@ -320,7 +274,6 @@ async fn build_communication_runtime_and_access<SP, CPB>(
     http_protections: &HttpProtectionRegistry,
 ) -> Result<(CommunicationRuntime, Arc<dyn CommunicationAccess>), AppError>
 where
-    SP: SecurityPlugin,
     CPB: CommunicationPluginBuilder,
 {
     cda_sovd::install_http_restriction_guard(
@@ -329,7 +282,6 @@ where
     )
     .await;
 
-    let transport_control = gateway.transport_control();
     let communication_runtime = build_communication_runtime(
         communication_plugin,
         transport_control,
@@ -346,30 +298,25 @@ where
     Ok((communication_runtime, communication_access))
 }
 
-/// Registers the UDS manager's two communication hooks through the authoritative
-/// plugin.
-///
-/// Both halves come from one adapter but register separately. The listener runs
-/// on every transport enable, while detection is the optional last stage that
-/// `trigger_detection()` can run on its own.
+/// Registers the UDS lifecycle hooks.
 async fn register_communication_hooks<SP>(
     plugin: &Arc<dyn CommunicationPlugin>,
-    uds_manager: &ComponentSlot<UdsManagerType<SP>>,
+    uds_manager: &UdsManagerType<SP>,
 ) -> Result<(), AppError>
 where
     SP: SecurityPlugin,
 {
-    let hooks = Arc::new(UdsCommunicationHooks {
-        uds_manager: uds_manager.clone(),
-    });
     plugin
-        .register_lifecycle_hook(Arc::clone(&hooks) as Arc<dyn CommunicationLifecycle>)
+        .register_lifecycle_hook(Arc::new(uds_manager.clone()) as Arc<dyn CommunicationLifecycle>)
         .await
         .map_err(|error| AppError::InitializationFailed(error.to_string()))?;
     plugin
-        .register_variant_detection(hooks as Arc<dyn CommunicationVariantDetection>)
+        .register_variant_detection(
+            Arc::new(uds_manager.clone()) as Arc<dyn CommunicationVariantDetection>
+        )
         .await
-        .map_err(|error| AppError::InitializationFailed(error.to_string()))
+        .map_err(|error| AppError::InitializationFailed(error.to_string()))?;
+    Ok(())
 }
 
 /// `Always` initializes whole-vehicle communication eagerly at startup and propagates
@@ -396,7 +343,7 @@ async fn setup_update_plugin<SP, SL, UPB>(
     ws: &ApplicationState,
     build_update_plugin: Option<UPB>,
     infra: CdaRuntime<SP>,
-    lock_provider: Arc<cda_sovd::SovdLockStateProvider>,
+    lock_provider: Arc<cda_sovd::SovdLockStateView>,
     upload_body_limit_bytes: usize,
     update_retry_after: Duration,
 ) -> Result<(), AppError>
@@ -439,9 +386,7 @@ where
     UPB: UpdatePluginBuilder<SP>,
     CPB: CommunicationPluginBuilder,
 {
-    let flash_files_path = config.flash_files_path.clone();
-    let components_config = config.components.clone();
-    let mdd_decompress = config.flat_buf.mdd_decompress;
+    let functional_group_config = config.functional_description.clone();
 
     let runtime_update_config = config.runtime_update_config.clone();
     let update_retry_after = Duration::from_secs(runtime_update_config.retry_after_seconds);
@@ -449,17 +394,20 @@ where
         Duration::from_secs(config.communication.deferred_retry_after_seconds);
     let post_update_mode = config.communication.post_update_mode.clone();
 
-    let lock_provider: Arc<cda_sovd::SovdLockStateProvider> = Arc::new(
-        cda_sovd::SovdLockStateProvider::new(Arc::clone(&vehicle_data.locks)),
-    );
+    let lock_provider = Arc::clone(&vehicle_data.lock_provider);
+    let lock_state_view = Arc::clone(&lock_provider);
 
     let shutdown_signal = cda_interfaces::shutdown_signal(ws.shutdown_signal.clone());
-    let gateway = vehicle_data.diagnostic_gateway.clone();
     let http_protections = HttpProtectionRegistry::new();
 
+    // The very gateway `finish_vehicle_components` hands to `UdsManager::new`
+    // below: it is built once and never replaced, so this handle stays valid
+    // across reloads.
+    let transport_control: Arc<dyn TransportControl> =
+        Arc::clone(&vehicle_data.diagnostic_gateway) as Arc<dyn TransportControl>;
     let (communication_runtime, communication_access) = build_communication_runtime_and_access(
         ws,
-        vehicle_data.diagnostic_gateway.clone(),
+        transport_control,
         communication_plugin,
         config.communication.init_mode,
         config.communication.variant_detection,
@@ -469,31 +417,44 @@ where
     .await?;
     let plugin = Arc::clone(&communication_runtime.plugin);
 
-    let components = crate::vehicle::finish_vehicle_components(
-        vehicle_data.prepared,
+    let sovd_parts = cda_sovd::new_sovd_registry(vehicle_data.initial_sovd_registry);
+    let sovd_registry = sovd_parts.registry;
+    let sovd_reload = sovd_parts.reload;
+    let update_preparation = Arc::new(DatabaseReloadPreparation::new(
+        Arc::clone(&vehicle_data.database_loader),
+        ReloadTargets {
+            locks: Arc::clone(&vehicle_data.lock_updater),
+            uds: Arc::clone(&vehicle_data.uds_reload),
+            #[cfg(feature = "can")]
+            can: vehicle_data.can_reload.clone(),
+            sovd: sovd_reload,
+        },
+    ));
+    let uds_manager = crate::vehicle::finish_vehicle_components(
+        Arc::clone(&vehicle_data.diagnostic_gateway),
+        vehicle_data.ecu_data,
+        vehicle_data.variant_detection_receiver,
         &config,
         Arc::clone(&communication_access),
     );
-    let uds_manager = ComponentSlot::new(components.uds_manager);
-    let file_managers = components.file_managers;
-
     register_communication_hooks(&plugin, &uds_manager).await?;
 
     let communication_disable: Arc<dyn DisableCommunication> =
         Arc::new(CommunicationDisableView::new(Arc::clone(&plugin)));
 
-    // Routes are published only after the plugin, initializers, and narrow views are ready.
-    let vehicle_route_handle = cda_sovd::add_vehicle_routes::<_, _, SL>(
+    // Routes and OpenAPI share one process-lifetime registry. Reloads update
+    // component-owned data and never rebuild this index or route tree.
+    let _ = cda_sovd::add_vehicle_routes::<_, SL>(
         &ws.dynamic_router,
         cda_sovd::VehicleConfig {
             flash_files_path: config.flash_files_path.clone(),
-            functional_group_config: config.functional_description.clone(),
+            functional_group_config: functional_group_config.clone(),
             components_config: config.components.clone(),
         },
         cda_sovd::VehicleResources {
-            ecu_uds: uds_manager.read().await.clone(),
-            file_managers,
-            locks: Arc::clone(&vehicle_data.locks),
+            ecu_uds: uds_manager.clone(),
+            lock_provider: Arc::clone(&lock_state_view),
+            registry: sovd_registry.clone(),
             communication_access: Arc::clone(&communication_access),
         },
     )
@@ -503,35 +464,30 @@ where
 
     let infra = CdaRuntime {
         config: Arc::new(RwLock::new(config)),
+        update_preparation,
         dynamic_router: ws.dynamic_router.clone(),
-        vehicle_route_handle,
-        flash_files_path,
-        components_config,
-        lock_provider: Arc::clone(&lock_provider),
+        lock_provider: Arc::clone(&lock_state_view),
         shutdown_signal,
         post_update_mode,
         communication_access,
         communication_disable,
         http_protections,
         update_retry_after,
-        uds_manager_replacer: uds_manager.replacer(),
-        gateway_replacer: gateway.replacer(),
         health: vehicle_data.health_providers,
         storage_dir: runtime_update_config.storage_dir.clone(),
-        mdd_decompress,
     };
 
     setup_update_plugin::<SP, SL, _>(
         ws,
         build_update_plugin,
         infra,
-        lock_provider,
+        lock_state_view,
         runtime_update_config.upload_body_limit_bytes,
         update_retry_after,
     )
     .await?;
 
-    cda_sovd::add_openapi_routes(&ws.dynamic_router).await;
+    cda_sovd::add_openapi_routes(&ws.dynamic_router, sovd_registry).await;
 
     Ok(communication_runtime)
 }
@@ -539,8 +495,8 @@ where
 #[cfg(test)]
 mod tests {
     use cda_interfaces::runtime_update_api::{
-        BulkDataCreatedList, BulkDataList, ExecutionMode, RuntimeFilesQuery,
-        RuntimeFilesUpdatePlugin, RuntimeUpdateError, UpdateExecution,
+        BulkDataCreatedList, BulkDataList, ExecutionMode, RuntimeFileCatalog, RuntimeFileStore,
+        RuntimeFilesQuery, RuntimeUpdateError, RuntimeUpdateExecutor, UpdateExecution,
     };
     use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 
@@ -551,7 +507,7 @@ mod tests {
     struct NoOpPlugin;
 
     #[async_trait::async_trait]
-    impl RuntimeFilesUpdatePlugin for NoOpPlugin {
+    impl RuntimeFileCatalog for NoOpPlugin {
         async fn list_current(
             &self,
             _q: &RuntimeFilesQuery,
@@ -572,7 +528,10 @@ mod tests {
         ) -> Result<BulkDataList, RuntimeUpdateError> {
             Ok(BulkDataList::default())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl RuntimeFileStore for NoOpPlugin {
         async fn upload(
             &self,
             _files: Vec<cda_interfaces::runtime_update_api::UploadFile>,
@@ -591,7 +550,10 @@ mod tests {
         async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
             Ok(vec![])
         }
+    }
 
+    #[async_trait::async_trait]
+    impl RuntimeUpdateExecutor for NoOpPlugin {
         async fn start_execution(
             &self,
             _mode: ExecutionMode,

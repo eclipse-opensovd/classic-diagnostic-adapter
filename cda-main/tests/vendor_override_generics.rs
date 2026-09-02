@@ -34,7 +34,10 @@ use std::path::PathBuf;
 use cda_core::EcuManager;
 use cda_interfaces::DiagServiceError;
 use cda_plugin_security::{DefaultSecurityPluginData, mock::TestSecurityPlugin};
-use opensovd_cda_lib::{config::configfile::Configuration, mdd::load_databases};
+use opensovd_cda_lib::{
+    TransportConfigs, VehicleData, config::configfile::Configuration, create_diagnostic_gateway,
+    load_vehicle_data, mdd::load_databases,
+};
 
 /// Vendor override for `cda_core::lookup_request_seed_service`, registered only
 /// for `EcuManager<TestSecurityPlugin>`.
@@ -47,6 +50,14 @@ fn lookup_request_seed_vendor_override(
     Err(DiagServiceError::InvalidRequest(
         "vendor override called".to_owned(),
     ))
+}
+
+fn crate_root_api_compile_checks<CreateGateway, LoadVehicleData>(
+    _: Option<TransportConfigs<'static>>,
+    _: Option<VehicleData<TestSecurityPlugin>>,
+    _: CreateGateway,
+    _: LoadVehicleData,
+) {
 }
 
 fn test_mdd_path() -> PathBuf {
@@ -74,12 +85,18 @@ fn describe_result(result: &Result<cda_interfaces::SecurityAccess, DiagServiceEr
 
 #[tokio::test]
 async fn vendor_override_is_dispatched_for_matching_concrete_type() {
+    crate_root_api_compile_checks(
+        None,
+        None,
+        create_diagnostic_gateway::<TestSecurityPlugin>,
+        load_vehicle_data::<TestSecurityPlugin>,
+    );
+
     let config = Configuration::default();
     let mdd_paths = vec![test_mdd_path()];
-    let (databases, _file_managers) =
-        load_databases::<TestSecurityPlugin>(&config, &mdd_paths, None)
-            .await
-            .expect("failed to load test ECU database");
+    let databases = load_databases::<TestSecurityPlugin>(&config, &mdd_paths, None)
+        .await
+        .expect("failed to load test ECU database");
     let (_, ecu_lock) = databases.iter().next().expect("no ECU was loaded");
     let ecu_manager = ecu_lock.read().await;
 
@@ -96,10 +113,9 @@ async fn vendor_override_is_dispatched_for_matching_concrete_type() {
 async fn dispatcher_falls_back_when_concrete_type_does_not_match() {
     let config = Configuration::default();
     let mdd_paths = vec![test_mdd_path()];
-    let (databases, _file_managers) =
-        load_databases::<DefaultSecurityPluginData>(&config, &mdd_paths, None)
-            .await
-            .expect("failed to load test ECU database");
+    let databases = load_databases::<DefaultSecurityPluginData>(&config, &mdd_paths, None)
+        .await
+        .expect("failed to load test ECU database");
     let (_, ecu_lock) = databases.iter().next().expect("no ECU was loaded");
     let ecu_manager = ecu_lock.read().await;
 

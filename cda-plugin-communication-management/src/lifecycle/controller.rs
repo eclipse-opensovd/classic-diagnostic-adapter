@@ -720,6 +720,19 @@ impl CommunicationHandle {
         .await
     }
 
+    pub(super) async fn submit_finish(
+        &self,
+        id: DisableLeaseId,
+    ) -> Result<
+        oneshot::Receiver<Result<(), CommunicationOperationFailure>>,
+        CommunicationOperationFailure,
+    > {
+        self.submit(CommunicationOperation::FinishDisableLease, |reply| {
+            LifecycleCommand::FinishDisableLease { id, reply }
+        })
+        .await
+    }
+
     pub(super) fn defer_disable(
         &self,
         id: DisableLeaseId,
@@ -772,6 +785,7 @@ impl CommunicationHandle {
                 | CommunicationState::Disabled
                 | CommunicationState::Disabling
                 | CommunicationState::DisabledExclusive
+                | CommunicationState::RecoveryRequired(_)
                 | CommunicationState::Error(_) => CommunicationOperation::Disable,
             };
             state.disable_owner = None;
@@ -1173,12 +1187,33 @@ mod tests {
         let second = handle.disable(DisableReason::RuntimeUpdate).await.unwrap();
         // The stale id must be rejected without disturbing the current lease.
         let reply = handle.submit_release(stale_id).await.unwrap();
-        assert!(matches!(
+        assert_eq!(
             reply.await.unwrap(),
-            Err(CommunicationOperationFailure::TransitionFailure { .. })
-        ));
+            Err(CommunicationOperationFailure::TransitionFailure {
+                operation: CommunicationOperation::Resume,
+            })
+        );
         assert_eq!(handle.state(), CommunicationState::DisabledExclusive);
         assert_eq!(second.release().await, Ok(CommunicationState::Enabled));
+    }
+
+    #[tokio::test]
+    async fn stale_lease_finish_reports_the_exact_finish_operation() {
+        let (handle, _) = handle();
+        let first = handle.disable(DisableReason::RuntimeUpdate).await.unwrap();
+        let stale_id = first.identity().unwrap();
+        assert_eq!(first.finish().await, Ok(()));
+
+        let second = handle.disable(DisableReason::RuntimeUpdate).await.unwrap();
+        let reply = handle.submit_finish(stale_id).await.unwrap();
+        assert_eq!(
+            reply.await.unwrap(),
+            Err(CommunicationOperationFailure::TransitionFailure {
+                operation: CommunicationOperation::FinishDisableLease,
+            })
+        );
+        assert_eq!(handle.state(), CommunicationState::DisabledExclusive);
+        assert_eq!(second.finish().await, Ok(()));
     }
 
     /// A `release()` future abandoned before its first poll must still defer. It
@@ -1468,6 +1503,56 @@ mod tests {
         assert_eq!(lease.release().await, Ok(CommunicationState::Enabled));
         assert_eq!(handle.state(), CommunicationState::Enabled);
         assert_eq!(control.enables.load(Ordering::Relaxed), 2);
+    }
+
+    /// `finish` must never enable the transport, even though this lease was taken
+    /// from an enabled runtime.
+    #[tokio::test]
+    async fn finish_stays_disabled_and_leaves_the_runtime_reusable() {
+        let (handle, control) = handle();
+        assert_eq!(
+            handle.enable_and_detect().await,
+            Ok(CommunicationState::Enabled)
+        );
+        assert_eq!(control.enables.load(Ordering::Relaxed), 1);
+
+        let lease = handle
+            .disable(DisableReason::RuntimeUpdate)
+            .await
+            .expect("disable must succeed once no guard is active");
+        assert_eq!(handle.state(), CommunicationState::DisabledExclusive);
+
+        assert_eq!(lease.finish().await, Ok(()));
+
+        assert_eq!(handle.state(), CommunicationState::Disabled);
+        assert_eq!(
+            control.enables.load(Ordering::Relaxed),
+            1,
+            "finish must not re-enable the transport"
+        );
+
+        assert_eq!(
+            handle.enable_and_detect().await,
+            Ok(CommunicationState::Enabled)
+        );
+        assert_eq!(control.enables.load(Ordering::Relaxed), 2);
+    }
+
+    /// A lease taken from an already-disabled runtime also stays disabled under
+    /// `finish`.
+    #[tokio::test]
+    async fn finish_from_already_disabled_stays_disabled() {
+        let (handle, _control) = handle();
+
+        let lease = handle
+            .disable(DisableReason::RuntimeUpdate)
+            .await
+            .expect("disable must succeed from Disabled");
+        assert_eq!(handle.state(), CommunicationState::DisabledExclusive);
+
+        assert_eq!(lease.finish().await, Ok(()));
+
+        assert_eq!(handle.state(), CommunicationState::Disabled);
     }
 
     #[derive(Default)]

@@ -29,7 +29,7 @@ path = "src/lib.rs"
 cda-interfaces = { workspace = true }
 # external
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "rt", "macros"] }
 tracing = { workspace = true }
 
 [features]

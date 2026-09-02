@@ -10,94 +10,139 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use cda_comm_can::CanDiagGateway;
-use cda_comm_doip::DoipDiagGateway;
-use cda_core::EcuManager;
 use cda_interfaces::{
-    HashMap,
-    communication_control::CommunicationAccess,
+    HashMap, ReloadComponent, VariantDetectionSender,
     health::HealthProvider,
-    runtime_update_api::{ReloadError, VehicleComponentFactory, VehicleComponents},
+    runtime_update_api::{ApplicationUpdatePreparation, ReloadError, VehicleDatabaseLockUpdater},
 };
 use cda_plugin_security::SecurityPlugin;
-use cda_transport_router::DiagnosticTransportRouter;
 
-use crate::{config::configfile::Configuration, vehicle::UdsManagerType};
+use crate::{
+    config::configfile::Configuration,
+    vehicle::{VehicleDatabases, load_vehicle_databases},
+};
 
-/// Concrete [`VehicleComponentFactory`] that delegates to
-/// [`crate::vehicle::create_vehicle_components`].
+/// Loads the diagnostic databases that are currently on disk.
 ///
-/// Used by [`cda_plugin_runtime_update::default_runtime_reloader_plugin::DefaultRuntimeReloaderPlugin`]
-/// and called every time the diagnostic databases are reloaded.
-pub struct CdaMainVehicleFactory<SP>
+/// Startup and reload load them the same way, so a reload cannot produce
+/// state that startup would not have produced from the same files.
+pub struct VehicleDatabaseLoader<SP>
 where
     SP: SecurityPlugin,
 {
     health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
-    communication_access: Arc<dyn CommunicationAccess>,
+    variant_detection: VariantDetectionSender,
     _phantom: std::marker::PhantomData<SP>,
 }
 
-impl<SP> CdaMainVehicleFactory<SP>
+impl<SP> VehicleDatabaseLoader<SP>
 where
     SP: SecurityPlugin,
 {
     #[must_use]
     pub fn new(
         health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
-        communication_access: Arc<dyn CommunicationAccess>,
+        variant_detection: VariantDetectionSender,
     ) -> Self {
         Self {
             health_providers,
-            communication_access,
+            variant_detection,
             _phantom: std::marker::PhantomData,
+        }
+    }
+
+    pub(crate) async fn create(
+        &self,
+        config: &Configuration,
+    ) -> Result<VehicleDatabases<SP>, ReloadError> {
+        Ok(load_vehicle_databases::<SP>(
+            config,
+            self.health_providers.as_ref(),
+            self.variant_detection.clone(),
+        )
+        .await?)
+    }
+}
+
+/// The components a database reload replaces, in the order they are applied.
+///
+/// Held directly rather than behind a registration list: the set is fixed by
+/// what the application is built from, and the apply order is a property of
+/// this sequence rather than of the order someone happened to register in.
+pub struct ReloadTargets<SP: SecurityPlugin> {
+    /// Lock resources, reserved before anything is replaced so a conflicting
+    /// lock aborts the reload while the live data is still intact.
+    pub locks: Arc<dyn VehicleDatabaseLockUpdater>,
+    pub uds: Arc<dyn ReloadComponent<cda_comm_uds::VehicleEcuData<cda_core::EcuManager<SP>>>>,
+    /// `None` when the application is built or configured without CAN.
+    #[cfg(feature = "can")]
+    pub can: Option<Arc<dyn ReloadComponent<cda_comm_can::CanTopology>>>,
+    pub sovd: Arc<dyn ReloadComponent<cda_sovd::SovdRegistryUpdate>>,
+}
+
+/// Rebuilds runtime state from the databases a runtime update just applied.
+///
+/// The MDD files have already been swapped on disk when this runs; what it
+/// prepares is the in-memory state derived from them.
+pub struct DatabaseReloadPreparation<SP: SecurityPlugin> {
+    database_loader: Arc<VehicleDatabaseLoader<SP>>,
+    targets: ReloadTargets<SP>,
+}
+
+impl<SP: SecurityPlugin> DatabaseReloadPreparation<SP> {
+    #[must_use]
+    pub fn new(
+        database_loader: Arc<VehicleDatabaseLoader<SP>>,
+        targets: ReloadTargets<SP>,
+    ) -> Self {
+        Self {
+            database_loader,
+            targets,
         }
     }
 }
 
 #[async_trait]
-impl<SP>
-    VehicleComponentFactory<
-        Configuration,
-        UdsManagerType<SP>,
-        DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
-    > for CdaMainVehicleFactory<SP>
+impl<SP> ApplicationUpdatePreparation<Configuration> for DatabaseReloadPreparation<SP>
 where
     SP: SecurityPlugin,
 {
-    type FileManager = cda_database::FileManager;
+    async fn prepare_update(&self, config: &Configuration) -> Result<(), ReloadError> {
+        let databases = self.database_loader.create(config).await?;
 
-    async fn create(
-        &self,
-        config: &Configuration,
-        mdd_paths: &[PathBuf],
-    ) -> Result<
-        VehicleComponents<
-            UdsManagerType<SP>,
-            DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
-            Self::FileManager,
-        >,
-        ReloadError,
-    > {
-        let crate_components = crate::vehicle::create_vehicle_components::<SP>(
-            config,
-            mdd_paths,
-            self.health_providers.as_ref(),
-            Arc::clone(&self.communication_access),
-        )
-        .await
-        .map_err(|e| {
-            ReloadError::ReplacementFailure(format!("Failed to create new vehicle components: {e}"))
-        })?;
+        // Everything that can fail happens first, against live data that is
+        // still untouched, so a failure here leaves the runtime as it was.
+        let ecu_data = databases.ecu_data(config);
+        let lock_reservation = self
+            .targets
+            .locks
+            .reserve_lock_resources(ecu_data.ecu_names())
+            .await?;
+        let sovd_registry = databases.sovd_registry(config).await;
+        #[cfg(feature = "can")]
+        let can_topology = match (&self.targets.can, databases.can_topology(config).await?) {
+            (Some(owner), Some(topology)) => Some((owner, topology)),
+            (None, None) => None,
+            _ => {
+                return Err(ReloadError::ReplacementFailure(
+                    "Prepared CAN topology does not match the configured CAN owner".to_owned(),
+                ));
+            }
+        };
 
-        Ok(VehicleComponents {
-            uds_manager: crate_components.uds_manager,
-            diagnostic_gateway: crate_components.diagnostic_gateway,
-            file_managers: crate_components.file_managers,
-            functional_group_config: config.functional_description.clone(),
-        })
+        // Nothing below can fail. It runs under the caller's exclusive disable
+        // lease, with the transport down and ordinary HTTP refused, so no
+        // reader observes a half-replaced runtime.
+        lock_reservation.apply();
+        self.targets.uds.apply(ecu_data).await;
+        #[cfg(feature = "can")]
+        if let Some((owner, topology)) = can_topology {
+            owner.apply(topology).await;
+        }
+        self.targets.sovd.apply(sovd_registry).await;
+        Ok(())
     }
 }

@@ -12,71 +12,90 @@
  */
 
 use cda_interfaces::{
-    runtime_update_api::{RuntimeReloaderPlugin, RuntimeUpdateError},
-    storage_api::{Collection, CollectionName, Storage, Transaction},
+    runtime_update_api::{ReloadFailure, RuntimeReloaderPlugin, RuntimeUpdateError},
+    storage_api::{CollectionName, Storage, StorageError},
 };
 
-use crate::operations::{delete_collection_ignore_missing, reload_database_if_present};
+use crate::operations::delete_collection_ignore_missing;
 
-async fn restore_from_backup<S: Storage, C: Collection>(
+async fn restore_from_backup<S: Storage>(
     storage: &S,
-    tx: &mut Transaction,
     backup: &CollectionName,
     current: &CollectionName,
     next_update: &CollectionName,
-    backup_col: &C,
 ) -> Result<(), RuntimeUpdateError> {
-    storage.copy_collection(tx, backup, current).await?;
-    delete_collection_ignore_missing(storage, tx, next_update).await?;
-    backup_col.delete_all(tx).await?;
+    // Preserve B first. The storage interface cannot use a destination created
+    // earlier in the same transaction as a later copy source, so this durable
+    // shuttle commit precedes the atomic A/B replacement. A crash here leaves
+    // both original current and backup untouched and an extra recoverable copy.
+    let mut preserve = storage.begin_transaction()?;
+    storage
+        .copy_collection(&mut preserve, current, next_update)
+        .await?;
+    preserve.commit().await?;
+
+    let mut swap = storage.begin_transaction()?;
+    storage.copy_collection(&mut swap, backup, current).await?;
+    storage
+        .copy_collection(&mut swap, next_update, backup)
+        .await?;
+    delete_collection_ignore_missing(storage, &mut swap, next_update).await?;
+    swap.commit().await?;
     Ok(())
 }
 
-/// Roll back the entire update from the backup.
+/// Swaps backup A into current while preserving displaced current B as the new
+/// backup, then clears the temporary next-update shuttle. Storage-only: a caller
+/// needing A live prepares it afterwards. If A preparation fails, another swap
+/// restores B and retains A as the deterministic rollback candidate.
+///
 /// # Errors
-/// Returns [`RuntimeUpdateError`] if restore or reload fails.
+/// Returns [`RuntimeUpdateError::NoBackup`] if there is nothing to restore.
+pub async fn restore_backup<S: Storage>(storage: &S) -> Result<(), RuntimeUpdateError> {
+    match storage
+        .get_collection(&CollectionName::DiagnosticDatabaseBackup)
+        .await
+    {
+        Ok(_) => {}
+        Err(StorageError::CollectionNotFound(_)) => return Err(RuntimeUpdateError::NoBackup),
+        Err(error) => return Err(error.into()),
+    }
+    // The swap needs a source collection even on first recovery.
+    storage
+        .get_or_create_collection(&CollectionName::DiagnosticDatabase)
+        .await?;
+
+    restore_from_backup(
+        storage,
+        &CollectionName::DiagnosticDatabaseBackup,
+        &CollectionName::DiagnosticDatabase,
+        &CollectionName::DiagnosticDatabaseNextUpdate,
+    )
+    .await
+}
+
+pub(crate) async fn reload_after_database_swap<R: RuntimeReloaderPlugin + ?Sized>(
+    reload_handler: &R,
+) -> Result<(), ReloadFailure> {
+    reload_handler.reload_databases().await
+}
+
+/// Roll back the entire update from the backup, then reload from it.
+/// # Errors
+/// Returns [`RuntimeUpdateError`] if the persistent restore or runtime reload fails.
 pub async fn execute_rollback<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
     storage: &S,
     reload_handler: &R,
 ) -> Result<(), RuntimeUpdateError> {
-    let mdd_backup_col = storage
-        .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
-        .await?;
-    let mdd_backup_empty = mdd_backup_col.is_empty().await?;
-
-    // Guard also checked synchronously in `start_execution` before the task is spawned,
-    // so 404 is returned before 202 is sent. Kept here for correctness if called directly.
-    if mdd_backup_empty {
-        return Err(RuntimeUpdateError::NoBackup);
-    }
-
-    let mut tx = storage.begin_transaction()?;
-
-    if !mdd_backup_empty {
-        restore_from_backup(
-            storage,
-            &mut tx,
-            &CollectionName::DiagnosticDatabaseBackup,
-            &CollectionName::DiagnosticDatabase,
-            &CollectionName::DiagnosticDatabaseNextUpdate,
-            mdd_backup_col.as_ref(),
-        )
-        .await?;
-    }
-
-    tx.commit().await?;
-
-    if !mdd_backup_empty {
-        reload_database_if_present(storage, reload_handler, false).await?;
-    }
-
+    restore_backup(storage).await?;
+    reload_after_database_swap(reload_handler).await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use cda_interfaces::{
-        runtime_update_api::RuntimeUpdateError,
+        runtime_update_api::{ReloadFailure, RuntimeUpdateError},
         storage_api::{
             Collection as _, CollectionName, RandomAccessData as _, Storage as _, StorageError,
         },
@@ -84,7 +103,8 @@ mod tests {
 
     use super::execute_rollback;
     use crate::test_utils::{
-        NoopReloadHandler, RecordingReloadHandler, init_collection, make_storage,
+        FailingReloadHandler, NoopReloadHandler, RecordingReloadHandler, init_collection,
+        make_storage,
     };
 
     #[tokio::test]
@@ -155,13 +175,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rollback_clears_diagnostic_database_backup() {
+    async fn rollback_retains_diagnostic_database_backup_until_install_finishes() {
         let (storage, _dir) = make_storage();
 
         init_collection(
             &storage,
             &CollectionName::DiagnosticDatabaseBackup,
             &[("ecu1.mdd", b"backup")],
+        )
+        .await;
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabase,
+            &[("current.mdd", b"current")],
         )
         .await;
 
@@ -173,18 +199,37 @@ mod tests {
             .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
             .await
             .unwrap();
-        assert!(backup_col.is_empty().await.unwrap());
+        assert!(!backup_col.is_empty().await.unwrap());
     }
 
     #[tokio::test]
-    async fn rollback_with_empty_backup_returns_no_backup_error() {
+    async fn rollback_restores_present_empty_backup() {
         let (storage, _dir) = make_storage();
+        storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
+            .await
+            .unwrap();
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabase,
+            &[("current.mdd", b"current")],
+        )
+        .await;
 
-        let result = execute_rollback(&storage, &NoopReloadHandler).await;
-        assert!(
-            matches!(result, Err(RuntimeUpdateError::NoBackup)),
-            "expected NoBackup, got: {result:?}"
-        );
+        execute_rollback(&storage, &NoopReloadHandler)
+            .await
+            .unwrap();
+
+        let current = storage
+            .get_collection(&CollectionName::DiagnosticDatabase)
+            .await
+            .unwrap();
+        assert!(current.list().await.unwrap().is_empty());
+        let backup = storage
+            .get_collection(&CollectionName::DiagnosticDatabaseBackup)
+            .await
+            .unwrap();
+        assert_eq!(backup.list().await.unwrap(), vec!["current.mdd"]);
     }
 
     #[tokio::test]
@@ -212,7 +257,49 @@ mod tests {
         let result = execute_rollback(&storage, &NoopReloadHandler).await;
         assert!(
             matches!(result, Err(RuntimeUpdateError::NoBackup)),
-            "expected NoBackup when both backup collections are empty, got: {result:?}"
+            "expected NoBackup when the backup collection is absent, got: {result:?}"
         );
+        assert!(matches!(
+            storage
+                .get_collection(&CollectionName::DiagnosticDatabaseBackup)
+                .await,
+            Err(StorageError::CollectionNotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_rollback_reload_reports_recovery_required_without_an_unproven_restore() {
+        let (storage, _dir) = make_storage();
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabaseBackup,
+            &[("ecu1.mdd", b"backup")],
+        )
+        .await;
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabase,
+            &[("current.mdd", b"current")],
+        )
+        .await;
+
+        let result = execute_rollback(&storage, &FailingReloadHandler).await;
+
+        assert!(matches!(
+            result,
+            Err(RuntimeUpdateError::ReloadFailed(
+                ReloadFailure::RecoveryRequired { .. }
+            ))
+        ));
+        let current = storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
+            .await
+            .unwrap();
+        assert_eq!(current.list().await.unwrap(), vec!["ecu1.mdd"]);
+        let backup = storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
+            .await
+            .unwrap();
+        assert_eq!(backup.list().await.unwrap(), vec!["current.mdd"]);
     }
 }

@@ -28,6 +28,22 @@ use crate::mdd_data::load_chunk;
 pub struct FileManager {
     mdd_path: String,
     files: Arc<RwLock<HashMap<String, CacheEntry>>>,
+    // Shared, so the task outlives every clone but not the last one.
+    _eviction: Option<Arc<EvictionTask>>,
+}
+
+/// Stops the cache-eviction task once the last [`FileManager`] clone is gone.
+///
+/// A runtime update builds a fresh `FileManager` per ECU and drops the previous
+/// one. The eviction task loops forever and holds the cache alive, so without
+/// this the replaced load's tasks, and the file payloads they cached, would
+/// stay resident for the rest of the process.
+struct EvictionTask(tokio::task::JoinHandle<()>);
+
+impl Drop for EvictionTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 struct CacheEntry {
@@ -52,6 +68,10 @@ impl FileManager {
         )]
         let cache_lifetime = Duration::from_secs(60 * 5);
 
+        // Every EcuManager owns a FileManager, including ones without embedded files
+        // (e.g. the functional description), so don't spawn an eviction task for nothing.
+        let has_files = !files.is_empty();
+
         let files = Arc::new(RwLock::new(
             files
                 .into_iter()
@@ -67,45 +87,56 @@ impl FileManager {
                 .collect::<HashMap<_, _>>(),
         ));
 
-        let files_clone = Arc::clone(&files);
-        cda_interfaces::spawn_named!(&format!("filemanager-cache-{mdd_name}"), async move {
-            loop {
-                let next_expiration = {
-                    let now = Instant::now();
-                    let mut files_lock = files_clone.write().await;
-                    files_lock
-                        .values_mut()
-                        .filter_map(|entry| {
-                            entry.last_accessed.map(|last_accessed| {
-                                let elapsed = now.duration_since(last_accessed);
-                                if let Some(lifetime) = cache_lifetime.checked_sub(elapsed) {
-                                    Some(lifetime)
-                                } else {
-                                    tracing::debug!(
-                                        file_name = %entry.chunk.meta_data.name,
-                                        elapsed = ?elapsed,
-                                        cache_lifetime = ?cache_lifetime,
-                                        "Removing expired cache entry for file"
-                                    );
-                                    entry.chunk.payload = None;
-                                    None
-                                }
-                            })
-                        })
-                        .flatten()
-                        .min()
-                };
+        let eviction = has_files.then(|| {
+            let files_clone = Arc::clone(&files);
+            let task = cda_interfaces::spawn_named!(
+                &format!("filemanager-cache-{mdd_name}"),
+                async move {
+                    loop {
+                        let next_expiration = {
+                            let now = Instant::now();
+                            let mut files_lock = files_clone.write().await;
+                            files_lock
+                                .values_mut()
+                                .filter_map(|entry| {
+                                    entry.last_accessed.map(|last_accessed| {
+                                        let elapsed = now.duration_since(last_accessed);
+                                        if let Some(lifetime) = cache_lifetime.checked_sub(elapsed)
+                                        {
+                                            Some(lifetime)
+                                        } else {
+                                            tracing::debug!(
+                                                file_name = %entry.chunk.meta_data.name,
+                                                elapsed = ?elapsed,
+                                                cache_lifetime = ?cache_lifetime,
+                                                "Removing expired cache entry for file"
+                                            );
+                                            entry.chunk.payload = None;
+                                            None
+                                        }
+                                    })
+                                })
+                                .flatten()
+                                .min()
+                        };
 
-                let sleep_time = if let Some(duration) = next_expiration {
-                    duration
-                } else {
-                    cache_lifetime
-                };
-                cda_interfaces::util::tokio_ext::sleep_for(sleep_time).await;
-            }
+                        let sleep_time = if let Some(duration) = next_expiration {
+                            duration
+                        } else {
+                            cache_lifetime
+                        };
+                        cda_interfaces::util::tokio_ext::sleep_for(sleep_time).await;
+                    }
+                }
+            );
+            Arc::new(EvictionTask(task))
         });
 
-        Self { mdd_path, files }
+        Self {
+            mdd_path,
+            files,
+            _eviction: eviction,
+        }
     }
 }
 

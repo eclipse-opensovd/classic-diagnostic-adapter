@@ -23,13 +23,14 @@ pub mod error;
 pub mod keepalive;
 mod probe;
 mod rediscovery;
+mod topology;
 
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    CanComParamProvider, CanId, DiagServiceError, EcuAddresses, FunctionalTransport, HashMap,
-    NetworkTopology, PhysicalTransport, RouteStatus, ServicePayload, Shutdown,
+    DiagServiceError, EcuAddresses, FunctionalTransport, NetworkTopology, PhysicalTransport,
+    ReloadComponent, Reloadable, ReloadableOwner, RouteStatus, ServicePayload, Shutdown,
     TransmissionParameters, TransportProbe, TransportResponse, VariantDetectionRequest,
     VariantDetectionSender,
     communication_control::{
@@ -39,6 +40,7 @@ use cda_interfaces::{
 };
 use tokio::sync::{RwLock, mpsc};
 
+pub use self::topology::{CanEcuAddressing, CanTopology, derive_can_topology};
 use self::{
     background::BackgroundTask,
     connection::CanEcuConnection,
@@ -54,22 +56,34 @@ fn deadline_in(timeout: Duration) -> tokio::time::Instant {
     now.checked_add(timeout).unwrap_or(now)
 }
 
+/// Opaque composition result for an installable CAN gateway.
+pub struct CanGatewayParts {
+    pub gateway: CanDiagGateway,
+    pub reload: Arc<dyn ReloadComponent<CanTopology>>,
+}
+
 /// CAN bus diagnostic gateway implementing the `EcuGateway` trait.
+///
+/// Runtime handles carry no authority to replace the topology:
+///
+/// ```compile_fail
+/// # use cda_comm_can::{CanDiagGateway, CanTopology};
+/// # use cda_interfaces::;
+/// # fn cannot_stage(gateway: &CanDiagGateway, topology: CanTopology) {
+/// gateway.stage(topology);
+/// # }
+/// ```
 ///
 /// This gateway handles communication with ECUs over CAN bus using ISO-TP
 /// (ISO 15765-2) for transport layer segmentation.
 pub struct CanDiagGateway {
     /// CAN interface name
     interface: String,
-    /// Map of ECU name (lowercase) to CAN connection info. Never written
-    /// after construction, so no lock is needed.
-    connections: Arc<HashMap<String, Arc<CanEcuConnection>>>,
+    /// Read per use because the gateway outlives any one topology.
+    topology: Reloadable<CanTopology>,
+    /// Capability that excludes runtime updates for topology-derived operations.
     /// Set of ECU names that responded to discovery
     discovered_ecus: Arc<RwLock<cda_interfaces::HashSet<String>>>,
-    /// Owned mapping from logical address to ECU name (lowercase).
-    /// Populated once during construction so that runtime lookups never
-    /// need to touch the shared ECU `RwLock`s.
-    logical_address_to_ecu: Arc<HashMap<u16, String>>,
     /// Response timeout duration
     response_timeout: Duration,
     /// Probe timeout duration
@@ -81,8 +95,6 @@ pub struct CanDiagGateway {
     probe_retry_delay: Duration,
     /// Ordered list of discovery probes to try per ECU.
     probe_sequence: Arc<Vec<ProbeRequest>>,
-    /// Functional CAN ID used when restarting the optional keepalive task.
-    functional_id: CanId,
     /// Configured keepalive interval. Zero disables keepalive.
     keepalive_interval: Duration,
     /// Notifies variant detection after discovery and rediscovery.
@@ -99,331 +111,75 @@ struct CanGatewayOperation {
 }
 
 impl CanDiagGateway {
-    /// Creates a new CAN diagnostic gateway.
+    /// Creates the CAN diagnostic gateway.
     ///
-    /// This constructor sets up the gateway and performs initial ECU discovery.
-    /// Discovered ECUs are sent through the `variant_detection` channel to trigger
-    /// variant detection.
-    ///
-    /// The shared `ecus` map is only borrowed during construction to extract
-    /// CAN IDs and build an owned address-to-name lookup table. It is **not**
-    /// stored, so no runtime `RwLock` contention with the UDS layer can occur.
+    /// Passive: no socket is opened and no ECU is probed until `enable()`.
     ///
     /// # Arguments
     /// * `config` - CAN configuration
-    /// * `ecus` - Map of ECU names to ECU managers (borrowed, not stored)
+    /// * `topology`: shared derived topology, resolved per use
     /// * `variant_detection` - Channel to notify about discovered ECUs
     ///
     /// # Errors
-    /// Returns error if the CAN interface cannot be opened or configured.
+    /// Returns [`CanGatewaySetupError`] if the configured probe sequence is
+    /// unusable.
     #[tracing::instrument(
-        skip(config, ecus, variant_detection),
+        skip(config, topology, variant_detection),
         fields(
             interface = %config.interface,
-            ecu_count = ecus.len(),
             dlt_context = dlt_ctx!("CAN"),
         )
     )]
-    pub async fn new<T: EcuAddresses + CanComParamProvider>(
+    pub fn new(
         config: &CanConfig,
-        ecus: &HashMap<String, RwLock<T>>,
+        topology: CanTopology,
         variant_detection: VariantDetectionSender,
     ) -> Result<Self, CanGatewaySetupError> {
-        tracing::info!("Initializing CanDiagGateway");
+        Self::new_managed(config, topology, variant_detection).map(|parts| parts.gateway)
+    }
 
+    /// Creates a gateway plus opaque typed reload and lifecycle capabilities.
+    ///
+    /// # Errors
+    /// Returns [`CanGatewaySetupError`] when the probe configuration is invalid.
+    pub fn new_managed(
+        config: &CanConfig,
+        topology: CanTopology,
+        variant_detection: VariantDetectionSender,
+    ) -> Result<CanGatewayParts, CanGatewaySetupError> {
+        tracing::info!("Initializing CanDiagGateway");
         let probe_sequence = Self::build_probe_sequence(config)?;
 
-        // Functional broadcast ID for the TesterPresent keep-alive: prefer the
-        // MDD com-params (CP_CanFuncReqId), fall back to the ISO 15765-4
-        // default 0x7DF. May be an 11-bit standard or a 29-bit extended ID
-        // (e.g. 0x18DB33F1 for normal fixed addressing). Resolved before the
-        // connections so their IDs can be checked against it.
-        let mut functional_id = Self::validate_can_id(
-            "<functional>",
-            "default",
-            keepalive::DEFAULT_FUNCTIONAL_BROADCAST_ID,
-        )?;
-        for ecu_lock in ecus.values() {
-            // Already range-validated at MDD extraction.
-            if let Some(id) = ecu_lock.read().await.can_functional_id() {
-                functional_id = id;
-                break;
-            }
-        }
-
-        let mut connections: HashMap<String, Arc<CanEcuConnection>> = HashMap::default();
-        let mut logical_address_to_ecu: HashMap<u16, String> = HashMap::default();
-
-        // Initialize connections from explicit mappings first
-        for mapping in &config.ecu_mappings {
-            let request_id =
-                Self::validate_can_id(&mapping.ecu_name, "request_id", mapping.request_id)?;
-            let response_id =
-                Self::validate_can_id(&mapping.ecu_name, "response_id", mapping.response_id)?;
-            // Reserved IDs (broadcast, keep-alive RX) cannot address an
-            // ECU; config values are user-controlled, so fail setup.
-            for (field, id) in [("request_id", request_id), ("response_id", response_id)] {
-                if Self::is_reserved_can_id(id, functional_id) {
-                    return Err(CanGatewaySetupError::InvalidConfiguration(format!(
-                        "ECU {}: {field} {id} collides with the functional broadcast ID \
-                         ({functional_id}) or a reserved keep-alive ID",
-                        mapping.ecu_name
-                    )));
-                }
-            }
-            let ecu_name = mapping.ecu_name.to_lowercase();
-            if let Some(ecu_lock) = ecus.get(&ecu_name) {
-                let ecu = ecu_lock.read().await;
-                let logical_addr = ecu.logical_address();
-
-                let conn = CanEcuConnection::new(
-                    mapping.ecu_name.clone(),
-                    config.interface.clone(),
-                    request_id,
-                    response_id,
-                );
-
-                tracing::debug!(
-                    ecu = %mapping.ecu_name,
-                    logical_addr = logical_addr,
-                    request_id = %request_id,
-                    response_id = %response_id,
-                    "Added CAN connection from config mapping"
-                );
-
-                Self::register_logical_address(
-                    &mut logical_address_to_ecu,
-                    logical_addr,
-                    &ecu_name,
-                );
-                connections.insert(ecu_name, Arc::new(conn));
-            } else {
-                tracing::warn!(
-                    ecu = %mapping.ecu_name,
-                    "ECU mapping specified but ECU not found in database"
-                );
-            }
-        }
-
-        Self::add_connections_from_com_params(
-            config,
-            ecus,
-            functional_id,
-            &mut connections,
-            &mut logical_address_to_ecu,
-        )
-        .await;
-
-        Self::validate_can_pins(config, ecus, &connections)?;
-
-        // Fail fast on configurations that cannot work: a [can] section with
-        // no usable ECU addressing means every request would fail at runtime
-        // with nothing pointing at the actual mistake.
-        if connections.is_empty() {
-            return Err(CanGatewaySetupError::NoEcuMappings);
-        }
-
+        let reloader = Arc::new(ReloadableOwner::new(topology));
         let gateway = Self {
             interface: config.interface.clone(),
-            connections: Arc::new(connections),
+            topology: reloader.reader(),
             discovered_ecus: Arc::new(RwLock::new(cda_interfaces::HashSet::default())),
-            logical_address_to_ecu: Arc::new(logical_address_to_ecu),
             response_timeout: Duration::from_millis(config.response_timeout_ms),
             probe_timeout: Duration::from_millis(config.probe_timeout_ms),
             probe_retries: config.probe_retries,
             probe_retry_delay: Duration::from_millis(config.probe_retry_delay_ms),
             probe_sequence: Arc::new(probe_sequence),
-            functional_id,
             keepalive_interval: Duration::from_millis(config.keepalive_interval_ms),
             variant_detection,
             lifecycle: Arc::new(GatewayLifecycle::new(TransportState::Disabled)),
         };
-
-        Ok(gateway)
-    }
-
-    /// Adds connections for ECUs whose CAN addressing comes from the MDD
-    /// com-params (ECUs with an explicit `[[can.ecu_mappings]]` entry are
-    /// skipped - config overrides the database).
-    ///
-    /// Unlike config mappings, database values are not under the user's
-    /// control, so a bad value skips the ECU (with a warning) instead of
-    /// failing setup: one malformed MDD must not take down diagnostics for
-    /// the whole vehicle. Several ECU descriptions may legitimately share
-    /// one ID pair - candidate models of the same physical node (e.g. the
-    /// radio variants of a duplicate group); each gets its own connection
-    /// and variant detection decides which one is actually installed,
-    /// exactly like `DoIP` address duplicates.
-    async fn add_connections_from_com_params<T: EcuAddresses + CanComParamProvider>(
-        config: &CanConfig,
-        ecus: &HashMap<String, RwLock<T>>,
-        functional_id: CanId,
-        connections: &mut HashMap<String, Arc<CanEcuConnection>>,
-        logical_address_to_ecu: &mut HashMap<u16, String>,
-    ) {
-        for (name, ecu_lock) in ecus {
-            let ecu = ecu_lock.read().await;
-            let logical_addr = ecu.logical_address();
-            let ecu_name = name.to_lowercase();
-
-            if connections.contains_key(&ecu_name) {
-                continue;
-            }
-            // Normal for DoIP-only ECUs in a mixed fleet, so debug level;
-            // an all-miss CAN-only setup still fails via NoEcuMappings.
-            let Some(ids) = ecu.can_ids() else {
-                tracing::debug!(
-                    ecu = %name,
-                    "No CAN addressing in MDD com-params and no [[can.ecu_mappings]] entry, \
-                     ECU gets no CAN connection"
-                );
-                continue;
-            };
-
-            if ids.request == ids.response {
-                tracing::warn!(
-                    ecu = %name,
-                    can_id = %ids.request,
-                    "MDD CAN addressing uses the same ID for request and response, skipping \
-                     this ECU (a [[can.ecu_mappings]] entry can override)"
-                );
-                continue;
-            }
-            // Same reserved-ID rule, but MDD values are not
-            // user-controlled: warn and skip instead of failing setup.
-            if Self::is_reserved_can_id(ids.request, functional_id)
-                || Self::is_reserved_can_id(ids.response, functional_id)
-            {
-                tracing::warn!(
-                    ecu = %name,
-                    request_id = %ids.request,
-                    response_id = %ids.response,
-                    functional_id = %functional_id,
-                    "MDD CAN addressing collides with the functional broadcast ID or a \
-                     reserved keep-alive ID, skipping this ECU (a [[can.ecu_mappings]] entry \
-                     can override)"
-                );
-                continue;
-            }
-            let conn = CanEcuConnection::new(
-                name.clone(),
-                config.interface.clone(),
-                ids.request,
-                ids.response,
-            );
-            tracing::debug!(
-                ecu = %name,
-                logical_addr = logical_addr,
-                request_id = %ids.request,
-                response_id = %ids.response,
-                "Added CAN connection from MDD COM params"
-            );
-            Self::register_logical_address(logical_address_to_ecu, logical_addr, &ecu_name);
-            connections.insert(ecu_name, Arc::new(conn));
-        }
-    }
-
-    /// Transport pins to CAN are validated here rather than in the config
-    /// sanity check: whether an ECU has CAN addressing may only be known
-    /// once the database is loaded (MDD com-params), which the config layer
-    /// cannot see.
-    ///
-    /// A pin for an ECU that is not in the loaded database at all is moot,
-    /// not an error: the configuration legitimately outlives the currently
-    /// loaded fleet (runtime file updates add and remove ECU databases while
-    /// the config stays put), and an absent ECU has no routes the pin could
-    /// misdirect.
-    fn validate_can_pins<T>(
-        config: &CanConfig,
-        ecus: &HashMap<String, RwLock<T>>,
-        connections: &HashMap<String, Arc<CanEcuConnection>>,
-    ) -> Result<(), CanGatewaySetupError> {
-        for pinned in config
-            .transport_overrides
-            .iter()
-            .filter(|o| o.transport == cda_interfaces::TransportType::Can)
-        {
-            let ecu_name = pinned.ecu_name.to_lowercase();
-            if connections.contains_key(&ecu_name) {
-                continue;
-            }
-            if !ecus.contains_key(&ecu_name) {
-                tracing::debug!(
-                    ecu = %pinned.ecu_name,
-                    "Transport pin to CAN for an ECU without a loaded database, ignoring"
-                );
-                continue;
-            }
-            return Err(CanGatewaySetupError::InvalidConfiguration(format!(
-                "transport_overrides pins ECU '{}' to CAN, but it has neither a \
-                 [[can.ecu_mappings]] entry nor CAN addressing in its MDD com-params",
-                pinned.ecu_name
-            )));
-        }
-        Ok(())
-    }
-
-    /// Records the logical-address -> ECU lookup used by the
-    /// address-oriented `EcuGateway` methods (network structure, discovery
-    /// checks). ECUs of CAN-only databases have no `DoIP` addressing and all
-    /// carry the unresolved fallback address `0x0000` - registering that
-    /// would map the shared "address" onto whichever ECU came last, so those
-    /// ECUs stay unregistered here and are served by the name-based paths
-    /// only.
-    fn register_logical_address(
-        logical_address_to_ecu: &mut HashMap<u16, String>,
-        logical_addr: u16,
-        ecu_name: &str,
-    ) {
-        if logical_addr == 0 {
-            tracing::debug!(
-                ecu = %ecu_name,
-                "No resolved logical address; ECU reachable via name-based lookups only"
-            );
-            return;
-        }
-        logical_address_to_ecu.insert(logical_addr, ecu_name.to_owned());
-    }
-
-    /// IDs no ECU pair may use: the functional broadcast ID and the
-    /// reserved RX IDs backing the keep-alive socket.
-    fn is_reserved_can_id(id: CanId, functional_id: CanId) -> bool {
-        id == functional_id
-            || id.raw() == keepalive::UNUSED_RX_ID_STANDARD
-            || id.raw() == keepalive::UNUSED_RX_ID_EXTENDED
-    }
-
-    /// Converts a raw configured/com-param CAN ID into a validated [`CanId`]
-    /// at setup time, attaching the ECU/field context to range errors. Both
-    /// 11-bit standard and 29-bit extended (e.g. ISO 15765-4 normal fixed
-    /// addressing `0x18DA10F1`) identifiers are accepted.
-    fn validate_can_id(
-        ecu_name: &str,
-        field: &str,
-        id: u32,
-    ) -> Result<CanId, CanGatewaySetupError> {
-        CanId::try_from(id).map_err(|e| {
-            CanGatewaySetupError::InvalidConfiguration(format!("ECU {ecu_name}: {field}: {e}"))
+        Ok(CanGatewayParts {
+            gateway,
+            reload: reloader as Arc<dyn ReloadComponent<CanTopology>>,
         })
     }
 
     /// Checks if an ECU was discovered by logical address.
     ///
-    /// Uses the owned `logical_address_to_ecu` map instead of iterating the
-    /// shared ECU `RwLock`s, avoiding potential deadlocks.
+    /// Uses the topology's address lookup instead of iterating the shared ECU
+    /// `RwLock`s, avoiding potential deadlocks.
     pub async fn is_ecu_discovered(&self, logical_addr: u16) -> bool {
-        if let Some(ecu_name) = self.logical_address_to_ecu.get(&logical_addr) {
+        let topology = self.topology.read().await;
+        if let Some(ecu_name) = topology.ecu_for_logical_address(logical_addr) {
             return self.discovered_ecus.read().await.contains(ecu_name);
         }
         false
-    }
-
-    /// Resolves a logical address to an ECU name from the owned lookup table.
-    fn logical_address_for_ecu(&self, ecu_name: &str) -> u16 {
-        self.logical_address_to_ecu
-            .iter()
-            .find_map(|(addr, name)| if name == ecu_name { Some(*addr) } else { None })
-            .unwrap_or(0)
     }
 
     /// Checks if a specific ECU was discovered by name.
@@ -431,9 +187,21 @@ impl CanDiagGateway {
         self.discovered_ecus.read().await.contains(ecu_name)
     }
 
-    /// Gets a connection for the given ECU name.
-    fn get_connection(&self, ecu_name: &str) -> Option<Arc<CanEcuConnection>> {
-        self.connections.get(ecu_name).cloned()
+    async fn probe_ecu_with_topology(&self, topology: &CanTopology, ecu_name: &str) -> bool {
+        let ecu_name = ecu_name.to_lowercase();
+        let Some(conn) = topology.connection(&ecu_name).map(CanEcuConnection::new) else {
+            return false;
+        };
+        let logical_addr = topology
+            .logical_address_for_ecu(&ecu_name)
+            .unwrap_or_default();
+        if self.probe_connection(&conn, logical_addr).await.is_ok() {
+            self.discovered_ecus.write().await.insert(ecu_name);
+            true
+        } else {
+            self.discovered_ecus.write().await.remove(&ecu_name);
+            false
+        }
     }
 }
 
@@ -451,9 +219,12 @@ impl PhysicalTransport for CanDiagGateway {
         expect_uds_reply: bool,
     ) -> Result<tokio::task::JoinHandle<()>, DiagServiceError> {
         let ecu_name = transmission_params.ecu_name.to_lowercase();
-        let conn = self
-            .get_connection(&ecu_name)
+        let topology = self.topology.read().await;
+        let conn = topology
+            .connection(&ecu_name)
+            .map(CanEcuConnection::new)
             .ok_or_else(|| DiagServiceError::EcuOffline(transmission_params.ecu_name.clone()))?;
+        drop(topology);
 
         // Check if ECU was discovered
         if !self.is_ecu_discovered_by_name(&ecu_name).await {
@@ -624,9 +395,9 @@ impl PhysicalTransport for CanDiagGateway {
         _ecu_db: &RwLock<E>,
     ) -> Result<(), DiagServiceError> {
         let ecu_name = ecu_name.to_lowercase();
-
-        // All lookups use owned data - no shared ECU RwLock is touched.
-        if !self.connections.contains_key(&ecu_name) {
+        let topology = self.topology.read().await;
+        // All lookups use the derived topology; no shared ECU RwLock is touched.
+        if !topology.has_connection(&ecu_name) {
             return Err(DiagServiceError::EcuOffline(ecu_name.clone()));
         }
         if self.is_ecu_discovered_by_name(&ecu_name).await {
@@ -635,7 +406,7 @@ impl PhysicalTransport for CanDiagGateway {
         // On-demand re-detection: the ECU may have come online after the
         // startup discovery (or dropped off and rebooted). One bounded probe
         // per call; on success the ECU is marked discovered again.
-        if self.probe_ecu(&ecu_name).await {
+        if self.probe_ecu_with_topology(&topology, &ecu_name).await {
             Ok(())
         } else {
             Err(DiagServiceError::EcuOffline(ecu_name.clone()))
@@ -645,23 +416,21 @@ impl PhysicalTransport for CanDiagGateway {
 
 impl NetworkTopology for CanDiagGateway {
     async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
-        let ecu_name = self.logical_address_to_ecu.get(&logical_address)?;
+        let topology = self.topology.read().await;
+        let ecu_name = topology.ecu_for_logical_address(logical_address)?;
         if !self.is_ecu_discovered_by_name(ecu_name).await {
             return None;
         }
-        self.connections
-            .get(ecu_name)
-            .map(|conn| conn.network_address())
+        topology
+            .connection(ecu_name)
+            .map(|addressing| addressing.network_address())
     }
 
-    fn get_ecu_network_address(
-        &self,
-        ecu_name: &str,
-    ) -> impl Future<Output = Option<String>> + Send {
-        let result = self
-            .get_connection(&ecu_name.to_lowercase())
-            .map(|conn| conn.network_address());
-        std::future::ready(result)
+    async fn get_ecu_network_address(&self, ecu_name: &str) -> Option<String> {
+        let topology = self.topology.read().await;
+        topology
+            .connection(&ecu_name.to_lowercase())
+            .map(|addressing| addressing.network_address())
     }
 }
 
@@ -695,7 +464,8 @@ impl FunctionalTransport for CanDiagGateway {
 impl TransportProbe for CanDiagGateway {
     async fn route_status(&self, ecu_name: &str) -> RouteStatus {
         let ecu_name = ecu_name.to_lowercase();
-        if !self.connections.contains_key(&ecu_name) {
+        let topology = self.topology.read().await;
+        if !topology.has_connection(&ecu_name) {
             return RouteStatus::NotConfigured;
         }
         if self.discovered_ecus.read().await.contains(&ecu_name) {
@@ -707,18 +477,8 @@ impl TransportProbe for CanDiagGateway {
     }
 
     async fn probe_ecu(&self, ecu_name: &str) -> bool {
-        let ecu_name = ecu_name.to_lowercase();
-        let Some(conn) = self.connections.get(&ecu_name).cloned() else {
-            return false;
-        };
-        let logical_addr = self.logical_address_for_ecu(&ecu_name);
-        if self.probe_connection(&conn, logical_addr).await.is_ok() {
-            self.discovered_ecus.write().await.insert(ecu_name);
-            true
-        } else {
-            self.discovered_ecus.write().await.remove(&ecu_name);
-            false
-        }
+        let topology = self.topology.read().await;
+        self.probe_ecu_with_topology(&topology, ecu_name).await
     }
 }
 
@@ -743,9 +503,10 @@ impl TransportControl for CanDiagGateway {
             .coordinator
             .transition(TransportState::Enabling)
             .await;
-
-        let socket_check = self
-            .connections
+        let topology = self.topology.read().await;
+        let functional_id = topology.functional_id();
+        let socket_check = topology
+            .connections()
             .values()
             .next()
             .ok_or_else(|| {
@@ -754,13 +515,15 @@ impl TransportControl for CanDiagGateway {
                     self.interface
                 ))
             })
-            .and_then(|connection| {
-                connection.verify_socket_openable().map_err(|error| {
-                    CommControlError::InitFailed(format!(
-                        "Failed to open CAN interface {}: {error}",
-                        self.interface
-                    ))
-                })
+            .and_then(|addressing| {
+                CanEcuConnection::new(Arc::clone(addressing))
+                    .verify_socket_openable()
+                    .map_err(|error| {
+                        CommControlError::InitFailed(format!(
+                            "Failed to open CAN interface {}: {error}",
+                            self.interface
+                        ))
+                    })
             });
 
         if let Err(error) = socket_check {
@@ -771,7 +534,7 @@ impl TransportControl for CanDiagGateway {
             return Err(error);
         }
 
-        let discovered = self.discover_ecus().await;
+        let discovered = self.discover_ecus_with_topology(&topology).await;
         if discovered.is_empty() {
             tracing::info!("No ECUs discovered on CAN bus during probe");
         } else {
@@ -800,7 +563,7 @@ impl TransportControl for CanDiagGateway {
         if !self.keepalive_interval.is_zero() {
             operation.keepalive = Some(keepalive::start_keepalive_broadcast(
                 self.interface.clone(),
-                self.functional_id,
+                functional_id,
                 self.keepalive_interval,
             ));
         }
@@ -847,15 +610,13 @@ impl Clone for CanDiagGateway {
     fn clone(&self) -> Self {
         Self {
             interface: self.interface.clone(),
-            connections: Arc::clone(&self.connections),
+            topology: self.topology.clone(),
             discovered_ecus: Arc::clone(&self.discovered_ecus),
-            logical_address_to_ecu: Arc::clone(&self.logical_address_to_ecu),
             response_timeout: self.response_timeout,
             probe_timeout: self.probe_timeout,
             probe_retries: self.probe_retries,
             probe_retry_delay: self.probe_retry_delay,
             probe_sequence: Arc::clone(&self.probe_sequence),
-            functional_id: self.functional_id,
             keepalive_interval: self.keepalive_interval,
             variant_detection: self.variant_detection.clone(),
             lifecycle: Arc::clone(&self.lifecycle),
@@ -871,29 +632,25 @@ impl CanDiagGateway {
         self.discovered_ecus.write().await.clear();
     }
 
+    async fn test_functional_id(&self) -> cda_interfaces::CanId {
+        self.topology.read().await.functional_id()
+    }
+
     /// Builds a gateway instance for unit tests without touching any CAN
     /// interface: no init check, no discovery, keep-alive disabled.
-    pub(crate) fn test_instance(
-        connections: Vec<(&str, CanEcuConnection)>,
-        discovered: Vec<&str>,
-    ) -> Self {
-        let connections: HashMap<String, Arc<CanEcuConnection>> = connections
-            .into_iter()
-            .map(|(name, conn)| (name.to_lowercase(), Arc::new(conn)))
-            .collect();
+    pub(crate) fn test_instance(topology: CanTopology, discovered: Vec<&str>) -> Self {
         let discovered: cda_interfaces::HashSet<String> =
             discovered.into_iter().map(str::to_lowercase).collect();
+        let owner = ReloadableOwner::new(topology);
         Self {
             interface: "test0".to_owned(),
-            connections: Arc::new(connections),
+            topology: owner.reader(),
             discovered_ecus: Arc::new(RwLock::new(discovered)),
-            logical_address_to_ecu: Arc::new(HashMap::default()),
             response_timeout: Duration::from_millis(100),
             probe_timeout: Duration::from_millis(10),
             probe_retries: 0,
             probe_retry_delay: Duration::from_millis(10),
             probe_sequence: Arc::new(vec![ProbeRequest::tester_present()]),
-            functional_id: CanId::try_from(0x7DF).expect("valid test CAN ID"),
             keepalive_interval: Duration::ZERO,
             variant_detection: VariantDetectionSender::new(mpsc::channel(1).0),
             lifecycle: Arc::new(GatewayLifecycle::new(TransportState::Enabled)),
@@ -902,34 +659,228 @@ impl CanDiagGateway {
 }
 
 #[cfg(test)]
+pub(crate) fn shared_topology(connections: Vec<(&str, CanEcuAddressing)>) -> CanTopology {
+    let connections = connections
+        .into_iter()
+        .map(|(name, addressing)| (name.to_lowercase(), Arc::new(addressing)))
+        .collect();
+    CanTopology::new(
+        connections,
+        cda_interfaces::HashMap::default(),
+        cda_interfaces::CanId::try_from(0x7DF).expect("valid test CAN ID"),
+    )
+}
+
+#[cfg(test)]
 mod tests {
+    use cda_interfaces::{CanComParamProvider, CanId, CanIds, EcuAddresses, HashMap};
+
     use super::*;
 
-    #[test]
-    fn reserved_ids_cover_broadcast_and_keepalive_rx() {
-        let functional = CanId::try_from(0x7DF).expect("valid ID");
-        for reserved in [0x7DF, 0x7FF, 0x1FFF_FFFF] {
-            assert!(CanDiagGateway::is_reserved_can_id(
-                CanId::try_from(reserved).expect("valid ID"),
-                functional
-            ));
+    struct TestEcu {
+        name: String,
+        logical_address: u16,
+        can_ids: CanIds,
+    }
+
+    impl EcuAddresses for TestEcu {
+        fn tester_address(&self) -> u16 {
+            0x0E80
         }
-        assert!(!CanDiagGateway::is_reserved_can_id(
-            CanId::try_from(0x7E0).expect("valid ID"),
-            functional
+        fn logical_address(&self) -> u16 {
+            self.logical_address
+        }
+        fn logical_gateway_address(&self) -> u16 {
+            self.logical_address
+        }
+        fn logical_functional_address(&self) -> u16 {
+            0xE400
+        }
+        fn ecu_name(&self) -> String {
+            self.name.clone()
+        }
+        fn logical_address_eq<T: EcuAddresses>(&self, other: &T) -> bool {
+            self.logical_address() == other.logical_address()
+        }
+    }
+
+    impl CanComParamProvider for TestEcu {
+        fn can_ids(&self) -> Option<CanIds> {
+            Some(self.can_ids)
+        }
+        fn can_functional_id(&self) -> Option<CanId> {
+            None
+        }
+    }
+
+    /// One ECU database keyed the way the loader keys them: lowercase name.
+    fn ecu_map(ecus: Vec<(&str, u16, u32, u32)>) -> Arc<HashMap<String, Arc<RwLock<TestEcu>>>> {
+        Arc::new(
+            ecus.into_iter()
+                .map(|(name, logical_address, request, response)| {
+                    (
+                        name.to_lowercase(),
+                        Arc::new(RwLock::new(TestEcu {
+                            name: name.to_owned(),
+                            logical_address,
+                            can_ids: CanIds::try_from_raw(request, response)
+                                .expect("valid test CAN IDs"),
+                        })),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    async fn build_topology(
+        config: &CanConfig,
+        ecus: &HashMap<String, Arc<RwLock<TestEcu>>>,
+    ) -> CanTopology {
+        derive_can_topology(config, ecus)
+            .await
+            .expect("derive test topology")
+    }
+
+    #[tokio::test]
+    async fn invalid_probe_config_precedes_missing_topology() {
+        let config = CanConfig {
+            default_probes: false,
+            ..CanConfig::default()
+        };
+        let ecus = ecu_map(Vec::new());
+
+        let error = derive_can_topology(&config, &ecus)
+            .await
+            .expect_err("invalid probe configuration must fail first");
+
+        assert!(matches!(
+            error,
+            CanGatewaySetupError::InvalidConfiguration(message)
+                if message == "can.default_probes = false requires at least one [[can.probe_fallbacks]] entry"
         ));
     }
 
-    #[test]
-    fn validate_can_id_accepts_standard_and_extended() {
-        // 11-bit standard and 29-bit extended (ISO 15765-4) IDs are both
-        // valid; anything wider must fail setup instead of being truncated
-        // when the ISO-TP socket is opened.
-        assert!(CanDiagGateway::validate_can_id("ecu1", "request_id", 0x7E0).is_ok());
-        assert!(CanDiagGateway::validate_can_id("ecu1", "request_id", 0x7FF).is_ok());
-        assert!(CanDiagGateway::validate_can_id("ecu1", "request_id", 0x18DA_10F1).is_ok());
-        assert!(CanDiagGateway::validate_can_id("ecu1", "request_id", 0x1FFF_FFFF).is_ok());
-        assert!(CanDiagGateway::validate_can_id("ecu1", "request_id", 0x2000_0000).is_err());
-        assert!(CanDiagGateway::validate_can_id("ecu1", "request_id", u32::MAX).is_err());
+    /// The gateway must route on the current topology rather than one
+    /// captured at construction.
+    #[tokio::test]
+    async fn applying_a_topology_changes_can_routing() {
+        let config = CanConfig {
+            interface: "test0".to_owned(),
+            ..CanConfig::default()
+        };
+        let first = ecu_map(vec![("ecu1", 0x1000, 0x700, 0x708)]);
+        let can_topology = build_topology(&config, &first).await;
+
+        let parts = CanDiagGateway::new_managed(
+            &config,
+            can_topology,
+            VariantDetectionSender::new(mpsc::channel(1).0),
+        )
+        .expect("build test gateway");
+        let gateway = parts.gateway;
+
+        assert_eq!(
+            gateway.route_status("ecu1").await,
+            RouteStatus::ProbeRequired
+        );
+        assert_eq!(
+            gateway.route_status("ecu2").await,
+            RouteStatus::NotConfigured
+        );
+        assert!(gateway.get_ecu_network_address("ecu1").await.is_some());
+
+        let second = ecu_map(vec![("ecu2", 0x1001, 0x710, 0x718)]);
+        parts
+            .reload
+            .apply(build_topology(&config, &second).await)
+            .await;
+
+        // Same gateway instance, new topology.
+        assert_eq!(
+            gateway.route_status("ecu2").await,
+            RouteStatus::ProbeRequired
+        );
+        assert_eq!(
+            gateway.route_status("ecu1").await,
+            RouteStatus::NotConfigured
+        );
+        assert!(gateway.get_ecu_network_address("ecu1").await.is_none());
+        assert_eq!(
+            gateway.get_ecu_network_address("ecu2").await,
+            Some(format!(
+                "test0:{}->{}",
+                CanId::try_from(0x710).expect("valid ID"),
+                CanId::try_from(0x718).expect("valid ID")
+            ))
+        );
+    }
+
+    /// Changing an existing ECU's CAN IDs must reach the live gateway.
+    #[tokio::test]
+    async fn changed_can_ids_reach_the_live_gateway() {
+        let config = CanConfig {
+            interface: "test0".to_owned(),
+            ..CanConfig::default()
+        };
+        let first = ecu_map(vec![("ecu1", 0x1000, 0x700, 0x708)]);
+        let can_topology = build_topology(&config, &first).await;
+        let parts = CanDiagGateway::new_managed(
+            &config,
+            can_topology,
+            VariantDetectionSender::new(mpsc::channel(1).0),
+        )
+        .expect("build test gateway");
+        let gateway = parts.gateway;
+
+        let before = gateway.get_ecu_network_address("ecu1").await;
+
+        let second = ecu_map(vec![("ecu1", 0x1000, 0x7E0, 0x7E8)]);
+        parts
+            .reload
+            .apply(build_topology(&config, &second).await)
+            .await;
+
+        let after = gateway.get_ecu_network_address("ecu1").await;
+        assert!(after.is_some());
+        assert_ne!(before, after);
+    }
+
+    fn marker_topology(id: u32) -> CanTopology {
+        CanTopology::new(
+            HashMap::default(),
+            HashMap::default(),
+            CanId::try_from(id).unwrap(),
+        )
+    }
+
+    fn marker_gateway(id: u32) -> CanGatewayParts {
+        CanDiagGateway::new_managed(
+            &CanConfig::default(),
+            marker_topology(id),
+            VariantDetectionSender::new(mpsc::channel(1).0),
+        )
+        .unwrap()
+    }
+
+    /// Applying a new topology is what the running gateway reads next.
+    #[tokio::test]
+    async fn applying_a_topology_updates_what_the_gateway_reads() {
+        let parts = marker_gateway(0x700);
+        let gateway = parts.gateway;
+        assert_eq!(gateway.test_functional_id().await.raw(), 0x700);
+
+        parts.reload.apply(marker_topology(0x701)).await;
+        assert_eq!(gateway.test_functional_id().await.raw(), 0x701);
+
+        parts.reload.apply(marker_topology(0x702)).await;
+        assert_eq!(gateway.test_functional_id().await.raw(), 0x702);
+    }
+
+    #[tokio::test]
+    async fn can_commit_without_staged_topology_is_noop() {
+        let parts = marker_gateway(0x700);
+        let gateway = parts.gateway;
+        let current = gateway.test_functional_id().await;
+        assert_eq!(current, gateway.test_functional_id().await);
     }
 }

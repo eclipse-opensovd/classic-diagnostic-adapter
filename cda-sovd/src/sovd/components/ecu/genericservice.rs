@@ -12,21 +12,21 @@
  */
 
 use aide::UseApi;
-use axum::{body::Bytes, extract::State, response::Response};
-use cda_interfaces::{UdsEcu, diagservices::UdsPayloadData, file_manager::FileManager};
+use axum::{body::Bytes, response::Response};
+use cda_interfaces::{UdsEcu, diagservices::UdsPayloadData};
 use cda_plugin_security::Secured;
 use http::{HeaderMap, header};
 
 use super::{ApiError, DynamicPlugin, ErrorWrapper, IntoResponse, StatusCode, TransformOperation};
 use crate::{
     openapi,
-    sovd::{WebserverEcuState, get_octet_stream_payload},
+    sovd::{EcuContext, WebserverEcuState, get_octet_stream_payload},
 };
 
-pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
+pub(crate) async fn put<T: UdsEcu + Clone>(
     headers: HeaderMap,
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+    EcuContext(WebserverEcuState { ecu_name, uds, .. }): EcuContext<T>,
     body: Bytes,
 ) -> Response {
     match headers.get(header::ACCEPT) {

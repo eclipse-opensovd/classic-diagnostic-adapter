@@ -33,7 +33,7 @@ use tokio::sync::RwLock;
 use crate::{
     AppError,
     config::configfile::{Configuration, EcuConfig},
-    vehicle::{DatabaseMap, FileManagerMap},
+    vehicle::DatabaseMap,
 };
 
 pub(crate) const DB_HEALTH_COMPONENT_KEY: &str = "database";
@@ -94,7 +94,6 @@ struct EcuLoadContext<'a> {
 /// Result of building an ECU manager and associated metadata.
 struct EcuLoadResult<S: SecurityPlugin> {
     manager: EcuManager<S>,
-    files: Vec<Chunk>,
 }
 
 pub(crate) type LoadedEcuMap<S> = HashMap<String, (EcuManager<S>, EcuMetadata)>;
@@ -130,7 +129,7 @@ pub async fn load_databases<S: SecurityPlugin>(
     config: &Configuration,
     mdd_paths: &[PathBuf],
     db_health_provider: Option<&Arc<dyn HealthProvider>>,
-) -> Result<(DatabaseMap<S>, FileManagerMap), AppError> {
+) -> Result<DatabaseMap<S>, AppError> {
     if let Some(provider) = db_health_provider {
         provider.set_status(cda_health::Status::Starting).await;
     }
@@ -145,10 +144,9 @@ pub async fn load_databases<S: SecurityPlugin>(
     let protocol = cda_interfaces::Protocol::new(config.doip.protocol_name.clone());
 
     let mut loaded_ecus: LoadedEcuMap<S> = HashMap::new();
-    let mut file_managers_map: HashMap<String, FileManager> = HashMap::new();
 
     for path in mdd_paths {
-        let (ecu_name, ecu_manager, file_manager) =
+        let (ecu_name, ecu_manager) =
             match load_single_mdd::<S>(path, config, &ecu_config_map, &protocol) {
                 Ok(result) => result,
                 Err(e) if config.database.ignore_invalid_mdd => {
@@ -173,7 +171,6 @@ pub async fn load_databases<S: SecurityPlugin>(
                 valid: true,
             },
         );
-        file_managers_map.insert(ecu_name, file_manager);
     }
 
     let databases: DatabaseMap<S> = loaded_ecus
@@ -181,18 +178,12 @@ pub async fn load_databases<S: SecurityPlugin>(
         .filter(|(_, (_, meta))| meta.valid)
         .map(
             |(k, (ecu_manager, _)): (String, (EcuManager<S>, EcuMetadata))| {
-                (k.to_lowercase(), RwLock::new(ecu_manager))
+                (k.to_lowercase(), Arc::new(RwLock::new(ecu_manager)))
             },
         )
         .collect();
 
     mark_duplicate_ecus_by_address(&databases).await;
-
-    let file_managers: FileManagerMap = file_managers_map
-        .into_iter()
-        .filter(|(k, _): &(String, FileManager)| databases.contains_key(&k.to_lowercase()))
-        .map(|(k, v): (String, FileManager)| (k.to_lowercase(), v))
-        .collect();
 
     handle_ecu_config_keys(&ecu_config_map, &databases, config.strict.ecu_config())?;
 
@@ -216,16 +207,13 @@ pub async fn load_databases<S: SecurityPlugin>(
         provider.set_status(status).await;
     }
 
-    Ok((databases, file_managers))
+    Ok(databases)
 }
 
 /// Returns paths to MDD files, preferring files found in the CDA storage at `storage_dir`.
 /// Falls back to the configured `database.seed_dir` directory if storage is unavailable or empty.
 pub async fn resolve_mdd_paths(storage_dir: &str, database_dir: &str) -> Vec<PathBuf> {
-    let storage_paths = load_mdd_paths_from_storage(storage_dir).await;
-    if let Some(storage_paths) = storage_paths
-        && !storage_paths.is_empty()
-    {
+    if let Some(storage_paths) = load_mdd_paths_from_storage(storage_dir).await {
         tracing::info!(
             count = storage_paths.len(),
             storage_dir,
@@ -264,10 +252,11 @@ async fn load_mdd_paths_from_storage(storage_dir: &str) -> Option<Vec<PathBuf>> 
     };
 
     let collection = match storage
-        .get_or_create_collection(&CollectionName::DiagnosticDatabase)
+        .get_collection(&CollectionName::DiagnosticDatabase)
         .await
     {
         Ok(c) => c,
+        Err(cda_interfaces::storage_api::StorageError::CollectionNotFound(_)) => return None,
         Err(e) => {
             tracing::debug!(error = %e, "Cannot access DiagnosticDatabase collection");
             return None;
@@ -346,7 +335,7 @@ pub async fn seed_storage_if_nonexistent_from_mdd_files(storage_dir: &str, mdd_f
 
 pub(crate) fn handle_ecu_config_keys<S: SecurityPlugin>(
     ecu_config_map: &HashMap<String, EcuConfig>,
-    databases: &HashMap<String, RwLock<EcuManager<S>>>,
+    databases: &HashMap<String, Arc<RwLock<EcuManager<S>>>>,
     strict: bool,
 ) -> Result<(), AppError> {
     let mut unmatched = Vec::new();
@@ -391,7 +380,7 @@ enum DuplicateTargetKey {
 /// marks them as duplicates of each other by calling
 /// `set_duplicating_ecu_names` on each affected manager.
 async fn mark_duplicate_ecus_by_address<S: SecurityPlugin>(
-    databases: &HashMap<String, RwLock<EcuManager<S>>>,
+    databases: &HashMap<String, Arc<RwLock<EcuManager<S>>>>,
 ) {
     use cda_interfaces::CanComParamProvider as _;
 
@@ -494,6 +483,7 @@ fn create_ecu_manager<S: SecurityPlugin>(
     ecu_type: EcuManagerType,
     effective_com_params: &ComParams,
     ctx: &EcuLoadContext<'_>,
+    embedded_files: FileManager,
 ) -> Option<EcuManager<S>> {
     EcuManager::new(
         diag_database,
@@ -506,6 +496,7 @@ fn create_ecu_manager<S: SecurityPlugin>(
             strict_parameter_validation: ctx.strict_parameter_validation,
         },
         ctx.func_description_cfg,
+        embedded_files,
     )
     .map_err(|e| {
         tracing::error!(
@@ -557,19 +548,22 @@ fn load_ecu_from_file<S: SecurityPlugin>(
     } else {
         EcuManagerType::Ecu
     };
+    // Built here so the handle can be stored on the manager itself: a separate
+    // map has no way to stay in sync with it across a reload.
+    let embedded_files = FileManager::new(ctx.mdd_path.clone(), extract_file_chunks(proto_data));
     let manager = create_ecu_manager(
         diag_database,
         protocol,
         ecu_type,
         &effective_com_params,
         ctx,
+        embedded_files,
     )?;
-    let files = extract_file_chunks(proto_data);
 
-    Some(EcuLoadResult { manager, files })
+    Some(EcuLoadResult { manager })
 }
 
-/// Loads a single MDD file and returns the ECU name, manager, and file manager.
+/// Loads a single MDD file and returns the ECU name and manager.
 ///
 /// # Errors
 ///
@@ -579,7 +573,7 @@ fn load_single_mdd<S: SecurityPlugin>(
     config: &Configuration,
     ecu_config_map: &HashMap<String, EcuConfig>,
     protocol: &Protocol,
-) -> Result<(String, EcuManager<S>, FileManager), MddLoadingError> {
+) -> Result<(String, EcuManager<S>), MddLoadingError> {
     let mdd_path =
         path.to_str()
             .map(ToOwned::to_owned)
@@ -632,8 +626,7 @@ fn load_single_mdd<S: SecurityPlugin>(
         }
     })?;
 
-    let file_manager = FileManager::new(mdd_path, result.files);
-    Ok((ecu_name, result.manager, file_manager))
+    Ok((ecu_name, result.manager))
 }
 
 /// Inserts or updates an ECU entry in the loaded map, handling duplicate names

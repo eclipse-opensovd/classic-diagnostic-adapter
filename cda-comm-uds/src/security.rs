@@ -34,7 +34,7 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
             old_task.abort();
         }
 
-        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
+        let ecu_diag_service = self.uds_ecu_db(ecu_name).await?;
         let default_security_access = ecu_diag_service.read().await.default_security_access()?;
         let current_security_access = ecu_diag_service.read().await.security_access().await?;
 

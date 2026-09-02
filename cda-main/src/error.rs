@@ -15,8 +15,10 @@ use std::fmt;
 
 use cda_comm_doip::DoipGatewaySetupError;
 use cda_interfaces::{
-    DiagServiceError, communication_control::CommunicationOperationFailure,
-    config::ConfigSanityError, runtime_update_api::RuntimeUpdateError,
+    DiagServiceError,
+    communication_control::CommunicationOperationFailure,
+    config::ConfigSanityError,
+    runtime_update_api::{ReloadError, RuntimeUpdateError},
 };
 use cda_tracing::TracingSetupError;
 
@@ -35,6 +37,10 @@ pub enum AppError {
     },
     #[error("Data error `{0}`")]
     DataError(String),
+    /// `provided` MDD files resolved, yet not one database loaded. Distinct
+    /// from an empty set, which is a legitimate state.
+    #[error("No database loaded although {provided} MDD file(s) were provided")]
+    NoDatabasesLoaded { provided: usize },
     #[error("Error during execution `{0}`")]
     RuntimeError(String),
     #[error("Not found: `{0}`")]
@@ -159,6 +165,16 @@ impl From<ConfigSanityError> for AppError {
 impl From<RuntimeUpdateError> for AppError {
     fn from(value: RuntimeUpdateError) -> Self {
         AppError::InitializationFailed(value.to_string())
+    }
+}
+
+impl From<AppError> for ReloadError {
+    fn from(error: AppError) -> Self {
+        let message = error.to_string();
+        match error {
+            AppError::NoDatabasesLoaded { .. } => Self::NoDatabasesLoaded(message),
+            _ => Self::ReplacementFailure(format!("Failed to create vehicle data: {message}")),
+        }
     }
 }
 

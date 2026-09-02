@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use crate::HashMap;
+use crate::{DiagServiceError, HashMap};
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub enum ChunkType {
@@ -67,6 +67,43 @@ pub trait FileManager: Clone + Send + Sync + 'static {
         &self,
         id: &str,
     ) -> impl Future<Output = Result<(ChunkMetaData, Vec<u8>), MddError>> + Send;
+}
+
+/// Files embedded in an ECU's database, served by the bulk-data endpoints.
+///
+/// Separate from [`FileManager`] only because that trait requires `Clone`,
+/// which `EcuManager` does not provide.
+pub trait EmbeddedFiles: Send + Sync {
+    fn list(&self) -> impl Future<Output = HashMap<String, ChunkMetaData>> + Send;
+
+    /// # Errors
+    /// If the file with the given ID does not exist, it returns an `MddError::InvalidParameter`.
+    /// Also returns the errors from `load_data` if the chunk data cannot be read or
+    /// parsed correctly.
+    fn get(
+        &self,
+        id: &str,
+    ) -> impl Future<Output = Result<(ChunkMetaData, Vec<u8>), MddError>> + Send;
+}
+
+/// Manager-level access to [`EmbeddedFiles`], resolving `ecu_name` to the live ECU
+/// handle rather than a value captured at route-build time.
+pub trait EmbeddedFilesProvider {
+    /// # Errors
+    /// Returns [`DiagServiceError::NotFound`] if `ecu_name` does not exist.
+    fn embedded_files_list(
+        &self,
+        ecu_name: &str,
+    ) -> impl Future<Output = Result<HashMap<String, ChunkMetaData>, DiagServiceError>> + Send;
+
+    /// # Errors
+    /// Returns [`DiagServiceError::NotFound`] if `ecu_name` does not exist, or if no
+    /// embedded file with `id` exists in its database.
+    fn embedded_file(
+        &self,
+        ecu_name: &str,
+        id: &str,
+    ) -> impl Future<Output = Result<(ChunkMetaData, Vec<u8>), DiagServiceError>> + Send;
 }
 
 #[cfg(feature = "test-utils")]

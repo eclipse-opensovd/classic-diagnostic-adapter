@@ -10,383 +10,330 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    HashMap, SchemaProvider, Shutdown, ShutdownSignal, UdsEcu,
-    communication_control::CommunicationAccess,
-    component_slot::ReplaceComponent,
-    datatypes::ComponentsConfig,
-    health::HealthProvider,
     runtime_update_api::{
-        ReloadError, RuntimeReloaderPlugin, VehicleComponentFactory, VehicleComponents,
+        ApplicationUpdatePreparation, RecoveryPhase, ReloadError, ReloadFailure,
+        RuntimeReloaderPlugin,
     },
     storage_api::Storage,
 };
-use cda_plugin_security::SecurityPluginLoader;
-use cda_sovd::{SovdLockStateProvider, dynamic_router::DynamicRouter};
 use tokio::sync::RwLock;
 
-/// Context for the runtime reload operation.
-///
-/// This struct contains all the components needed to reload runtime databases
-/// and configuration. It bundles the infrastructure required by the reloader plugin.
-///
-/// `uds_manager` and `diagnostic_gateway` are replace-only capabilities. This plugin can
-/// install a freshly built component but has no read access to the live one, and therefore
-/// no operational authority over it.
-pub struct DefaultReloadContext<Uds, Gateway, Config, S>
+/// Application-independent capabilities needed by the default runtime reloader.
+pub struct DefaultReloadContext<Config, S>
 where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: Shutdown,
-    Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     S: Storage + Send + Sync + 'static,
 {
-    /// Application configuration
     pub config: Arc<RwLock<Config>>,
-
-    /// Replace-only capability over the vehicle diagnostic manager
-    pub uds_manager: Arc<dyn ReplaceComponent<Uds>>,
-
-    /// Replace-only capability over the diagnostic gateway across all configured transports
-    pub diagnostic_gateway: Arc<dyn ReplaceComponent<Gateway>>,
-
-    /// Dynamic router for hot-swapping routes
-    pub dynamic_router: DynamicRouter,
-
-    /// Handle for vehicle route registration/replacement
-    pub vehicle_route_handle: cda_sovd::RouteHandle,
-
-    /// Lock state provider for SOVD locks
-    pub lock_provider: Arc<SovdLockStateProvider>,
-
-    /// Path for flash files
-    pub flash_files_path: String,
-
-    /// Component configuration
-    pub components_config: ComponentsConfig,
-
-    /// Health providers for monitoring
-    pub health: Option<HashMap<String, Arc<dyn HealthProvider>>>,
-
-    /// Storage directory for runtime update files
-    pub storage_dir: String,
-
-    /// Whether to decompress MDD files after apply
-    pub mdd_decompress: bool,
-
-    /// Shutdown signal for graceful termination
-    pub shutdown_signal: ShutdownSignal,
-
-    /// Shared coordinator used by rebuilt SOVD routes.
-    pub communication_access: Arc<dyn CommunicationAccess>,
-
-    /// Persistent storage used to execute automatic rollback when installing the
-    /// newly built components fails.
     pub storage: Arc<S>,
 }
 
-/// Shared state for installing vehicle routes.
-///
-/// Contains exactly the fields needed for route installation, allowing both
-/// [`DefaultRuntimeReloaderPlugin`] and rollback handlers to share a single
-/// implementation of `install_routes` without duplicating logic or fields.
-pub struct RouteInstallState<Uds, Gateway>
-where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: Shutdown,
-{
-    lock_provider: Arc<SovdLockStateProvider>,
-    dynamic_router: DynamicRouter,
-    vehicle_route_handle: cda_sovd::RouteHandle,
-    flash_files_path: String,
-    components_config: ComponentsConfig,
-    communication_access: Arc<dyn CommunicationAccess>,
-    uds_manager: Arc<dyn ReplaceComponent<Uds>>,
-    diagnostic_gateway: Arc<dyn ReplaceComponent<Gateway>>,
-}
-
-impl<Uds, Gateway> RouteInstallState<Uds, Gateway>
-where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: Shutdown,
-{
-    async fn install_routes<M, SecurityLoader>(
-        &self,
-        components: VehicleComponents<Uds, Gateway, M>,
-    ) -> Result<(), ReloadError>
-    where
-        M: cda_interfaces::file_manager::FileManager,
-        SecurityLoader: SecurityPluginLoader,
-    {
-        let VehicleComponents {
-            uds_manager: new_uds,
-            diagnostic_gateway: new_gateway,
-            file_managers,
-            functional_group_config,
-        } = components;
-
-        let ecu_names = new_uds.get_physical_ecus().await;
-        if let Err(e) = self.lock_provider.update_entries(ecu_names).await {
-            // These never went live, and would hold their transport resources
-            // until process exit.
-            new_gateway.shutdown().await;
-            new_uds.shutdown().await;
-            return Err(ReloadError::General(format!(
-                "Failed to update runtime locks: {e}"
-            )));
-        }
-        let current_locks = self.lock_provider.current_locks().await;
-
-        let vehicle_router = cda_sovd::build_vehicle_routes::<_, _, SecurityLoader>(
-            cda_sovd::VehicleConfig {
-                flash_files_path: self.flash_files_path.clone(),
-                functional_group_config,
-                components_config: self.components_config.clone(),
-            },
-            cda_sovd::VehicleResources {
-                ecu_uds: new_uds.clone(),
-                file_managers,
-                locks: current_locks,
-                communication_access: Arc::clone(&self.communication_access),
-            },
-        )
-        .await;
-
-        if let Err(e) = self
-            .dynamic_router
-            .replace_routes(&self.vehicle_route_handle, vehicle_router)
-            .await
-        {
-            new_gateway.shutdown().await;
-            new_uds.shutdown().await;
-            return Err(ReloadError::ReplacementFailure(format!(
-                "Failed to replace vehicle routes: {e}"
-            )));
-        }
-
-        // Swapped only now. The routes installed above already hold their own
-        // clone of the new `uds_manager`, so the old one can be shut down. Doing
-        // this before `replace_routes` would leave the still-installed old
-        // routes, among them update-exempt ones like `POST /vehicle/v15/locks`,
-        // holding an already shut-down component.
-        self.diagnostic_gateway.replace(new_gateway).await;
-        self.uds_manager.replace(new_uds).await;
-
-        Ok(())
-    }
-}
-
-/// Default reload handler for runtime database updates.
-///
-/// Implements [`RuntimeReloaderPlugin`] by:
-/// - Delegating component creation to a [`VehicleComponentFactory`]
-/// - Replacing running routes via the [`DynamicRouter`]
-/// - Rolling back from the persistent backup when installation fails
-///
-/// Transport disable/enable is owned by `start_execution` in the runtime-update
-/// plugin. `reload_databases` only replaces components.
-pub struct DefaultRuntimeReloaderPlugin<Uds, Gateway, Config, SecurityLoader, VehicleFactory, S>
-where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: Shutdown,
-    Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
-    SecurityLoader: SecurityPluginLoader,
-    VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
-    S: Storage + Send + Sync + 'static,
-{
-    config: Arc<RwLock<Config>>,
-    route_state: Arc<RouteInstallState<Uds, Gateway>>,
-    factory: Arc<VehicleFactory>,
-    storage: Arc<S>,
-    _phantom: std::marker::PhantomData<SecurityLoader>,
-}
-
 /// Configuration for creating a [`DefaultRuntimeReloaderPlugin`].
-///
-/// This bundles the [`DefaultReloadContext`] with a [`VehicleComponentFactory`]
-/// to simplify plugin construction.
-pub struct RuntimeReloaderConfig<Uds, Gateway, Config, VehicleFactory, S>
+pub struct RuntimeReloaderConfig<Config, Preparation, S>
 where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: Shutdown,
-    Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
-    VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
     S: Storage + Send + Sync + 'static,
 {
-    /// Runtime context containing all CDA components.
-    pub infrastructure: DefaultReloadContext<Uds, Gateway, Config, S>,
-    /// Factory for creating vehicle components on reload.
-    pub factory: Arc<VehicleFactory>,
+    pub infrastructure: DefaultReloadContext<Config, S>,
+    pub preparation: Arc<Preparation>,
 }
 
-impl<Uds, Gateway, Config, VehicleFactory, S>
-    RuntimeReloaderConfig<Uds, Gateway, Config, VehicleFactory, S>
+impl<Config, Preparation, S> RuntimeReloaderConfig<Config, Preparation, S>
 where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: Shutdown,
-    Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
-    VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
     S: Storage + Send + Sync + 'static,
 {
-    /// Creates a new [`RuntimeReloaderConfig`] from context and a factory.
     #[must_use]
     pub fn new(
-        infrastructure: DefaultReloadContext<Uds, Gateway, Config, S>,
-        factory: Arc<VehicleFactory>,
+        infrastructure: DefaultReloadContext<Config, S>,
+        preparation: Arc<Preparation>,
     ) -> Self {
         Self {
             infrastructure,
-            factory,
+            preparation,
         }
     }
 }
 
-impl<Uds, Gateway, Config, SecurityLoader, VehicleFactory, S>
-    DefaultRuntimeReloaderPlugin<Uds, Gateway, Config, SecurityLoader, VehicleFactory, S>
+/// Delegates construction and typed component delivery to the application.
+pub struct DefaultRuntimeReloaderPlugin<Config, Preparation, S>
 where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: Shutdown,
-    Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
-    SecurityLoader: SecurityPluginLoader,
-    VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
     S: Storage + Send + Sync + 'static,
-{
-    /// Creates a new [`DefaultRuntimeReloaderPlugin`] from a [`RuntimeReloaderConfig`].
-    #[must_use]
-    pub fn new(config: RuntimeReloaderConfig<Uds, Gateway, Config, VehicleFactory, S>) -> Self {
-        let route_state = Arc::new(RouteInstallState {
-            lock_provider: config.infrastructure.lock_provider,
-            dynamic_router: config.infrastructure.dynamic_router,
-            vehicle_route_handle: config.infrastructure.vehicle_route_handle,
-            flash_files_path: config.infrastructure.flash_files_path,
-            components_config: config.infrastructure.components_config,
-            communication_access: config.infrastructure.communication_access,
-            uds_manager: config.infrastructure.uds_manager,
-            diagnostic_gateway: config.infrastructure.diagnostic_gateway,
-        });
-
-        Self {
-            config: config.infrastructure.config,
-            route_state,
-            factory: config.factory,
-            storage: config.infrastructure.storage,
-            _phantom: std::marker::PhantomData,
-        }
-    }
-}
-
-#[async_trait]
-impl<Uds, Gateway, Config, SecurityLoader, VehicleFactory, S> RuntimeReloaderPlugin
-    for DefaultRuntimeReloaderPlugin<Uds, Gateway, Config, SecurityLoader, VehicleFactory, S>
-where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: Shutdown,
-    Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
-    SecurityLoader: SecurityPluginLoader,
-    VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
-    S: Storage + Send + Sync + 'static,
-{
-    async fn reload_databases(&self, mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
-        let cfg = self.config.read().await.clone();
-        let result = self.install_new_runtime(cfg, &mdd_paths).await;
-
-        if let Err(ref install_err) = result {
-            // The apply/rollback already switched the persisted files to
-            // `mdd_paths`, which would boot the failed runtime on the next start.
-            tracing::error!(
-                error = %install_err,
-                "Runtime installation failed; rolling back from persistent backup"
-            );
-
-            let rollback_handler = RollbackHandler {
-                config: Arc::clone(&self.config),
-                factory: Arc::clone(&self.factory),
-                route_state: Arc::clone(&self.route_state),
-                _phantom: std::marker::PhantomData::<SecurityLoader>,
-            };
-            match crate::operations::rollback::execute_rollback(&*self.storage, &rollback_handler)
-                .await
-            {
-                Ok(()) => tracing::info!("Automatic rollback completed successfully"),
-                Err(rollback_err) => tracing::error!(
-                    rollback_error = %rollback_err,
-                    "Automatic rollback also failed; CDA is degraded and requires a restart"
-                ),
-            }
-        }
-
-        result
-    }
-}
-
-impl<Uds, Gateway, Config, SecurityLoader, VehicleFactory, S>
-    DefaultRuntimeReloaderPlugin<Uds, Gateway, Config, SecurityLoader, VehicleFactory, S>
-where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: Shutdown,
-    Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
-    SecurityLoader: SecurityPluginLoader,
-    VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
-    S: Storage + Send + Sync + 'static,
-{
-    /// Creates new vehicle components, installs them, and makes them live.
-    ///
-    /// Nothing is torn down before the new components exist, so a failure here
-    /// leaves the live runtime untouched. The caller still rolls back, because
-    /// it already switched the persisted files.
-    async fn install_new_runtime(
-        &self,
-        cfg: Config,
-        mdd_paths: &[PathBuf],
-    ) -> Result<(), ReloadError> {
-        let components = self.factory.create(&cfg, mdd_paths).await?;
-
-        self.route_state
-            .install_routes::<_, SecurityLoader>(components)
-            .await
-    }
-}
-
-/// Reload handler used for the automatic rollback triggered by a failed install.
-///
-/// Identical to the install path of [`DefaultRuntimeReloaderPlugin`], but without
-/// its rollback-on-failure branch. This prevents infinite recursion during rollback.
-struct RollbackHandler<Uds, Gateway, Config, SecurityLoader, VehicleFactory>
-where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: Shutdown,
-    Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
-    SecurityLoader: SecurityPluginLoader,
-    VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
 {
     config: Arc<RwLock<Config>>,
-    factory: Arc<VehicleFactory>,
-    route_state: Arc<RouteInstallState<Uds, Gateway>>,
-    _phantom: std::marker::PhantomData<SecurityLoader>,
+    preparation: Arc<Preparation>,
+    storage: Arc<S>,
+}
+
+impl<Config, Preparation, S> DefaultRuntimeReloaderPlugin<Config, Preparation, S>
+where
+    Config: Clone + Send + Sync + 'static,
+    Preparation: ApplicationUpdatePreparation<Config>,
+    S: Storage + Send + Sync + 'static,
+{
+    #[must_use]
+    pub fn new(config: RuntimeReloaderConfig<Config, Preparation, S>) -> Self {
+        Self {
+            config: config.infrastructure.config,
+            preparation: config.preparation,
+            storage: config.infrastructure.storage,
+        }
+    }
+
+    async fn prepare_once(&self, config: &Config) -> Result<(), ReloadError> {
+        self.preparation.prepare_update(config).await
+    }
 }
 
 #[async_trait]
-impl<Uds, Gateway, Config, SecurityLoader, VehicleFactory> RuntimeReloaderPlugin
-    for RollbackHandler<Uds, Gateway, Config, SecurityLoader, VehicleFactory>
+impl<Config, Preparation, S> RuntimeReloaderPlugin
+    for DefaultRuntimeReloaderPlugin<Config, Preparation, S>
 where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: Shutdown,
-    Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
-    SecurityLoader: SecurityPluginLoader,
-    VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
+    Config: Clone + Send + Sync + 'static,
+    Preparation: ApplicationUpdatePreparation<Config>,
+    S: Storage + Send + Sync + 'static,
 {
-    async fn reload_databases(&self, mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
-        let cfg = self.config.read().await.clone();
-        let components = self.factory.create(&cfg, &mdd_paths).await.map_err(|e| {
-            ReloadError::ReplacementFailure(format!(
-                "Failed to create runtime during rollback: {e}"
-            ))
-        })?;
+    async fn reload_databases(&self) -> Result<(), ReloadFailure> {
+        let config = self.config.read().await.clone();
+        let original = match self.prepare_once(&config).await {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
 
-        self.route_state
-            .install_routes::<_, SecurityLoader>(components)
+        tracing::error!(error = %original, "Runtime preparation failed; restoring persistent backup");
+        if let Err(recovery) = crate::operations::rollback::restore_backup(&*self.storage).await {
+            return Err(ReloadFailure::RecoveryRequired {
+                original,
+                recovery: ReloadError::ReplacementFailure(format!(
+                    "Recovery failed while restoring backup: {recovery}"
+                )),
+                phase: RecoveryPhase::PersistentRestore,
+            });
+        }
+
+        match self.prepare_once(&config).await {
+            Ok(()) => Err(ReloadFailure::RejectedAndRestored { original }),
+            Err(recovery) => Err(ReloadFailure::RecoveryRequired {
+                original,
+                recovery,
+                phase: RecoveryPhase::RestoredPreparation,
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use cda_interfaces::{
+        runtime_update_api::{ApplicationUpdatePreparation, RuntimeUpdateError},
+        storage_api::{
+            Collection as _, CollectionName, DirectFileAccess as _, RandomAccessData as _,
+        },
+    };
+    use cda_storage::LocalStorage;
+
+    use super::*;
+
+    const A_VALID: &[u8] = b"A-valid";
+    const A_INVALID: &[u8] = b"A-invalid";
+    const B_VALID: &[u8] = b"B-valid";
+    const B_INVALID: &[u8] = b"B-invalid";
+
+    struct BytePreparation {
+        fail_a: AtomicBool,
+        fail_b: AtomicBool,
+        staged: Arc<Mutex<Vec<Vec<u8>>>>,
+        storage: Arc<LocalStorage>,
+    }
+
+    #[async_trait]
+    impl ApplicationUpdatePreparation<()> for BytePreparation {
+        async fn prepare_update(&self, _config: &()) -> Result<(), ReloadError> {
+            let current = self
+                .storage
+                .get_collection(&CollectionName::DiagnosticDatabase)
+                .await
+                .map_err(|error| ReloadError::ReplacementFailure(error.to_string()))?;
+            let path = current
+                .file_path("ecu.mdd")
+                .map_err(|error| ReloadError::ReplacementFailure(error.to_string()))?;
+            let bytes = std::fs::read(path).map_err(|error| {
+                ReloadError::ReplacementFailure(format!("factory read failed: {error}"))
+            })?;
+            let fails = if bytes.starts_with(b"A-") {
+                self.fail_a.load(Ordering::SeqCst)
+            } else {
+                self.fail_b.load(Ordering::SeqCst)
+            };
+            if fails {
+                return Err(ReloadError::ReplacementFailure(format!(
+                    "factory rejected {}",
+                    String::from_utf8_lossy(&bytes)
+                )));
+            }
+            self.staged.lock().unwrap().push(bytes);
+            Ok(())
+        }
+    }
+
+    type StageLog = Arc<Mutex<Vec<Vec<u8>>>>;
+    type TestPlugin = DefaultRuntimeReloaderPlugin<(), BytePreparation, LocalStorage>;
+
+    fn plugin(
+        storage: Arc<LocalStorage>,
+        fail_a: bool,
+        fail_b: bool,
+    ) -> (TestPlugin, Arc<BytePreparation>, StageLog) {
+        let staged = Arc::new(Mutex::new(Vec::new()));
+        let preparation = Arc::new(BytePreparation {
+            fail_a: AtomicBool::new(fail_a),
+            fail_b: AtomicBool::new(fail_b),
+            staged: Arc::clone(&staged),
+            storage: Arc::clone(&storage),
+        });
+        let config = RuntimeReloaderConfig::new(
+            DefaultReloadContext {
+                config: Arc::new(RwLock::new(())),
+                storage,
+            },
+            Arc::clone(&preparation),
+        );
+        (
+            DefaultRuntimeReloaderPlugin::new(config),
+            preparation,
+            staged,
+        )
+    }
+
+    async fn seed(storage: &LocalStorage, current: &[u8], backup: &[u8]) {
+        crate::test_utils::init_collection(
+            storage,
+            &CollectionName::DiagnosticDatabase,
+            &[("ecu.mdd", current)],
+        )
+        .await;
+        crate::test_utils::init_collection(
+            storage,
+            &CollectionName::DiagnosticDatabaseBackup,
+            &[("ecu.mdd", backup)],
+        )
+        .await;
+    }
+
+    async fn bytes(storage: &LocalStorage, collection: CollectionName) -> Vec<u8> {
+        let collection = storage.get_or_create_collection(&collection).await.unwrap();
+        let data = collection.read("ecu.mdd").await.unwrap();
+        let mut bytes = vec![0; usize::try_from(data.data_size().unwrap()).unwrap()];
+        data.read_at(0, &mut bytes).unwrap();
+        bytes
+    }
+
+    #[tokio::test]
+    async fn explicit_rollback_invalid_a_restores_valid_b_and_preserves_a_candidate() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(LocalStorage::new(directory.path()).unwrap());
+        seed(&storage, B_VALID, A_INVALID).await;
+        let (plugin, _, staged) = plugin(Arc::clone(&storage), true, false);
+
+        let result = crate::operations::rollback::execute_rollback(&*storage, &plugin).await;
+        assert!(matches!(
+            result,
+            Err(RuntimeUpdateError::ReloadFailed(
+                ReloadFailure::RejectedAndRestored { original }
+            )) if original.to_string().contains("A-invalid")
+        ));
+        assert_eq!(*staged.lock().unwrap(), vec![B_VALID.to_vec()]);
+        assert_eq!(
+            bytes(&storage, CollectionName::DiagnosticDatabase).await,
+            B_VALID
+        );
+        assert_eq!(
+            bytes(&storage, CollectionName::DiagnosticDatabaseBackup).await,
+            A_INVALID
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_rollback_valid_a_preserves_displaced_valid_b_as_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(LocalStorage::new(directory.path()).unwrap());
+        seed(&storage, B_VALID, A_VALID).await;
+        let (plugin, _, staged) = plugin(Arc::clone(&storage), false, false);
+
+        crate::operations::rollback::execute_rollback(&*storage, &plugin)
             .await
+            .unwrap();
+        assert_eq!(*staged.lock().unwrap(), vec![A_VALID.to_vec()]);
+        assert_eq!(
+            bytes(&storage, CollectionName::DiagnosticDatabase).await,
+            A_VALID
+        );
+        assert_eq!(
+            bytes(&storage, CollectionName::DiagnosticDatabaseBackup).await,
+            B_VALID
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_rollback_reports_a_and_b_failure_and_keeps_b_current() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(LocalStorage::new(directory.path()).unwrap());
+        seed(&storage, B_INVALID, A_INVALID).await;
+        let (plugin, _, staged) = plugin(Arc::clone(&storage), true, true);
+
+        let result = crate::operations::rollback::execute_rollback(&*storage, &plugin).await;
+        let Err(RuntimeUpdateError::ReloadFailed(ReloadFailure::RecoveryRequired {
+            original,
+            recovery,
+            ..
+        })) = result
+        else {
+            panic!("both invalid states must require recovery")
+        };
+        let message = format!("{original}; {recovery}");
+        assert!(message.contains("A-invalid"), "{message}");
+        assert!(message.contains("B-invalid"), "{message}");
+        assert!(staged.lock().unwrap().is_empty());
+        assert_eq!(
+            bytes(&storage, CollectionName::DiagnosticDatabase).await,
+            B_INVALID
+        );
+        assert_eq!(
+            bytes(&storage, CollectionName::DiagnosticDatabaseBackup).await,
+            A_INVALID
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_rollback_retry_is_deterministic_after_b_becomes_usable() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(LocalStorage::new(directory.path()).unwrap());
+        seed(&storage, B_INVALID, A_INVALID).await;
+        let (plugin, preparation, staged) = plugin(Arc::clone(&storage), true, true);
+
+        let _ = crate::operations::rollback::execute_rollback(&*storage, &plugin).await;
+        preparation.fail_b.store(false, Ordering::SeqCst);
+        let result = crate::operations::rollback::execute_rollback(&*storage, &plugin).await;
+        assert!(matches!(
+            result,
+            Err(RuntimeUpdateError::ReloadFailed(
+                ReloadFailure::RejectedAndRestored { original }
+            )) if original.to_string().contains("A-invalid")
+        ));
+        assert_eq!(*staged.lock().unwrap(), vec![B_INVALID.to_vec()]);
+        assert_eq!(
+            bytes(&storage, CollectionName::DiagnosticDatabase).await,
+            B_INVALID
+        );
+        assert_eq!(
+            bytes(&storage, CollectionName::DiagnosticDatabaseBackup).await,
+            A_INVALID
+        );
     }
 }
