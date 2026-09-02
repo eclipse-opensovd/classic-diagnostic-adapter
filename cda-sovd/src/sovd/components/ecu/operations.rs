@@ -1638,15 +1638,9 @@ pub(crate) mod service {
 
                 // suppress_service: skip the UDS send, return stored state directly
                 if query.suppress_service {
-                    if let Some(exec) = lock_write(&service_executions)
-                        .get_mut(&service)
-                        .and_then(|m| m.get_mut(&exec_id))
-                    {
-                        exec.in_flight = false;
-                    }
                     return get_by_id_response(
-                        stored.status,
-                        stored.parameters,
+                        stored.snapshot().status.clone(),
+                        stored.snapshot().parameters.clone(),
                         vec![],
                         include_schema,
                     );
@@ -1668,13 +1662,6 @@ pub(crate) mod service {
                         true,
                     )
                     .await;
-
-                if let Some(exec) = lock_write(&service_executions)
-                    .get_mut(&service)
-                    .and_then(|m| m.get_mut(&exec_id))
-                {
-                    exec.in_flight = false;
-                }
 
                 match uds_result {
                     Err(e) => {
@@ -1739,15 +1726,16 @@ pub(crate) mod service {
                     Err(e) => return e.into_response(),
                 };
 
-                if let Err(e) = guard_execution(
+                let _request_guard = match guard_execution(
                     &service_executions,
                     &service,
                     exec_id,
                     include_schema,
                     &format!("Execution {exec_id} is already being stopped"),
                 ) {
-                    return e.into_response();
-                }
+                    Ok(guard) => guard,
+                    Err(error) => return error.into_response(),
+                };
 
                 let diag_service = DiagComm {
                     name: service.clone(),
@@ -1817,12 +1805,6 @@ pub(crate) mod service {
                                 op_map.shift_remove(&exec_id);
                             }
                             return StatusCode::NO_CONTENT.into_response();
-                        } else if let Some(exec) = lock_write(&service_executions)
-                            .get_mut(&service)
-                            .and_then(|m| m.get_mut(&exec_id))
-                        {
-                            // reset in_flight flag of the execution
-                            exec.in_flight = false;
                         }
 
                         match result {

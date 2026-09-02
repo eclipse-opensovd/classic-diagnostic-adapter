@@ -577,15 +577,16 @@ pub(crate) mod diag_service {
             }
         };
 
-        if let Err(e) = guard_execution(
+        let _request_guard = match guard_execution(
             &fg_executions,
             &operation,
             exec_id,
             include_schema,
             &format!("Execution {exec_id} is already in flight"),
         ) {
-            return e.into_response();
-        }
+            Ok(guard) => guard,
+            Err(error) => return error.into_response(),
+        };
 
         // If suppress_service, skip sending STOP to ECUs - just remove and return 204.
         if suppress_service {
@@ -635,12 +636,7 @@ pub(crate) mod diag_service {
             }
             build_operation_response(response_data, errors, include_schema)
         } else {
-            // force=false and Stop had errors - reset in_flight, keep execution alive for retry.
-            if let Some(op_map) = lock_write(&fg_executions).get_mut(&operation)
-                && let Some(exec) = op_map.get_mut(&exec_id)
-            {
-                exec.in_flight = false;
-            }
+            // force=false and Stop had errors - keep execution alive for retry.
             build_operation_response(response_data, errors, include_schema)
         }
     }
@@ -738,6 +734,7 @@ pub(crate) mod diag_service {
             sovd::{
                 FgServiceExecution,
                 error::{ApiError, ErrorWrapper, VendorErrorCode},
+                guard_execution,
                 locks::validate_fg_lock,
             },
         };
@@ -803,50 +800,22 @@ pub(crate) mod diag_service {
                 }
             };
 
-            // Guard: look up execution and mark in_flight.
-            let stored = {
-                let mut guard = lock_write(&fg_executions);
-                let Some(op_map) = guard.get_mut(&operation) else {
-                    return ErrorWrapper {
-                        error: ApiError::NotFound(Some(format!(
-                            "Execution with id {exec_id} not found"
-                        ))),
-                        include_schema,
-                    }
-                    .into_response();
-                };
-                match op_map.get_mut(&exec_id) {
-                    None => {
-                        return ErrorWrapper {
-                            error: ApiError::NotFound(Some(format!(
-                                "Execution with id {exec_id} not found"
-                            ))),
-                            include_schema,
-                        }
-                        .into_response();
-                    }
-                    Some(exec) if exec.in_flight => {
-                        return ErrorWrapper {
-                            error: ApiError::Conflict(format!(
-                                "Execution {exec_id} is already in flight"
-                            )),
-                            include_schema,
-                        }
-                        .into_response();
-                    }
-                    Some(exec) => {
-                        exec.in_flight = true;
-                        exec.clone()
-                    }
-                }
+            let stored = match guard_execution(
+                &fg_executions,
+                &operation,
+                exec_id,
+                include_schema,
+                &format!("Execution {exec_id} is already in flight"),
+            ) {
+                Ok(guard) => guard,
+                Err(error) => return error.into_response(),
             };
 
             // suppress_service: skip UDS send, return stored state directly.
             if query.suppress_service {
-                clear_in_flight(&fg_executions, &operation, exec_id);
                 return fg_get_by_id_response(
-                    stored.status,
-                    stored.parameters,
+                    stored.snapshot().status.clone(),
+                    stored.snapshot().parameters.clone(),
                     vec![],
                     include_schema,
                 );
@@ -865,7 +834,6 @@ pub(crate) mod diag_service {
             {
                 Ok(sf) => sf.has_request_results,
                 Err(e) => {
-                    clear_in_flight(&fg_executions, &operation, exec_id);
                     return ErrorWrapper {
                         error: e.into(),
                         include_schema,
@@ -877,10 +845,9 @@ pub(crate) mod diag_service {
             // When there is no RequestResults subfunction, return the stored
             // execution state together with an error entry.
             if !has_request_results {
-                clear_in_flight(&fg_executions, &operation, exec_id);
                 return fg_get_by_id_response(
-                    stored.status,
-                    stored.parameters,
+                    stored.snapshot().status.clone(),
+                    stored.snapshot().parameters.clone(),
                     vec![sovd_interfaces::error::DataError {
                         path: "/".to_owned(),
                         error: sovd_interfaces::error::ApiErrorResponse {
@@ -909,19 +876,6 @@ pub(crate) mod diag_service {
                 include_schema,
             )
             .await
-        }
-
-        /// Marks the execution as no longer in flight.
-        fn clear_in_flight(
-            fg_executions: &RwLock<HashMap<String, IndexMap<Uuid, FgServiceExecution>>>,
-            operation: &str,
-            exec_id: Uuid,
-        ) {
-            if let Some(op_map) = lock_write(fg_executions).get_mut(operation)
-                && let Some(exec) = op_map.get_mut(&exec_id)
-            {
-                exec.in_flight = false;
-            }
         }
 
         /// Context for functional group request results, grouping execution-related state.
@@ -983,7 +937,6 @@ pub(crate) mod diag_service {
                     && let Some(exec) = op_map.get_mut(&exec_id)
                 {
                     exec.parameters.clone_from(&response_data);
-                    exec.in_flight = false;
                     if status == ExecutionStatus::Completed {
                         exec.complete();
                     }
