@@ -161,6 +161,24 @@ pub(crate) mod test_utils {
         b"[server]\nport = 8080\n".to_vec()
     }
 
+    /// Smallest byte sequence `mmap_and_decode_mdd` accepts, naming `ecu_name`.
+    ///
+    /// Anything written under a `.mdd` key has to be readable: an execution
+    /// refuses databases it cannot parse before it moves any state.
+    #[must_use]
+    pub fn readable_mdd_bytes(ecu_name: &str) -> Vec<u8> {
+        let magic: &[u8] = &[
+            0x4D, 0x44, 0x44, 0x20, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x20, 0x30, 0x20,
+            0x20, 0x20, 0x20, 0x20, 0x20, 0x00,
+        ];
+        let name_bytes = ecu_name.as_bytes();
+        let mut bytes = magic.to_vec();
+        bytes.push(0x1A);
+        bytes.push(u8::try_from(name_bytes.len()).expect("test ECU name fits in a byte"));
+        bytes.extend_from_slice(name_bytes);
+        bytes
+    }
+
     pub async fn write_test_file(
         storage: &LocalStorage,
         collection_name: &CollectionName,
