@@ -121,9 +121,9 @@ pub mod chunk {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Signature {
-    /// used signature algorithm, just a string since the handling in the CDA can be dynamic through a plugin
+    /// used signature algorithm identifier, just a string since the handling in the CDA can be dynamic through a plugin
     #[prost(string, tag = "1")]
-    pub algorithm: ::prost::alloc::string::String,
+    pub algorithm_identifier: ::prost::alloc::string::String,
     /// key identifier to identify the key used for the signature - this allows you to add multiple signatures (e.g. dev and prod)
     #[prost(bytes = "vec", optional, tag = "2")]
     pub key_identifier: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
@@ -141,25 +141,38 @@ pub struct Signature {
     pub certificates: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct MddFile {
+pub struct EcuInfo {
     #[prost(string, tag = "1")]
-    pub version: ::prost::alloc::string::String,
-    #[prost(enumeration = "mdd_file::FeatureFlag", repeated, tag = "2")]
-    pub feature_flags: ::prost::alloc::vec::Vec<i32>,
-    #[prost(string, tag = "3")]
     pub ecu_name: ::prost::alloc::string::String,
-    #[prost(string, optional, tag = "4")]
+    #[prost(string, optional, tag = "2")]
     pub revision: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(map = "string, string", tag = "5")]
+    #[prost(map = "string, string", tag = "3")]
     pub metadata: ::std::collections::HashMap<
         ::prost::alloc::string::String,
         ::prost::alloc::string::String,
     >,
-    #[prost(message, repeated, tag = "6")]
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MddFile {
+    /// file format version when changes are format-compatible with the previous version, otherwise
+    /// the MAGIC needs to be changed
+    #[prost(string, tag = "1")]
+    pub version: ::prost::alloc::string::String,
+    #[prost(enumeration = "mdd_file::FileFeatureFlag", repeated, tag = "2")]
+    pub feature_flags: ::prost::alloc::vec::Vec<i32>,
+    #[prost(message, repeated, tag = "3")]
+    pub ecu_infos: ::prost::alloc::vec::Vec<EcuInfo>,
+    #[prost(map = "string, string", tag = "4")]
+    pub metadata: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::prost::alloc::string::String,
+    >,
+    #[prost(message, repeated, tag = "5")]
     pub chunks: ::prost::alloc::vec::Vec<Chunk>,
     /// Instead of individually signing each chunk, you sign all of them together
-    #[prost(message, optional, tag = "7")]
-    pub chunks_signature: ::core::option::Option<Signature>,
+    /// repeated to allow using multiple signature algorithms
+    #[prost(message, repeated, tag = "6")]
+    pub chunks_signature: ::prost::alloc::vec::Vec<Signature>,
 }
 /// Nested message and enum types in `MDDFile`.
 pub mod mdd_file {
@@ -175,11 +188,11 @@ pub mod mdd_file {
         ::prost::Enumeration
     )]
     #[repr(i32)]
-    pub enum FeatureFlag {
+    pub enum FileFeatureFlag {
         /// Not used yet
         Reserved = 0,
     }
-    impl FeatureFlag {
+    impl FileFeatureFlag {
         /// String value of the enum field names used in the ProtoBuf definition.
         ///
         /// The values are not transformed in any way and thus are considered stable

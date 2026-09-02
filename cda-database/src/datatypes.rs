@@ -36,7 +36,7 @@ pub use service::*;
 use crate::{
     DatabaseConfig, datatypes,
     flatbuf::diagnostic_description::dataformat,
-    mdd_data::{self, read_ecudata},
+    mdd_data::{self, read_odxdata},
 };
 
 /// Short-name of a protocol layer, the key used for all protocol matching.
@@ -528,17 +528,20 @@ pub enum LogicalAddressType {
 }
 
 #[self_referencing]
-struct EcuData {
+struct OdxDataHolder {
     blob: bytes::Bytes,
 
     #[borrows(blob)]
     #[covariant]
-    pub data: dataformat::EcuData<'this>,
+    pub data: dataformat::OdxData<'this>,
 }
 
 pub struct DiagnosticDatabase {
     ecu_database_path: String,
-    ecu_data: Option<EcuData>,
+    /// Short-name of the ECU this database represents within the (possibly
+    /// multi-ECU) `OdxData` root parsed from `ecu_data`.
+    ecu_name: String,
+    ecu_data: Option<OdxDataHolder>,
     flatbuf_config: FlatbBufConfig,
     config: DatabaseConfig,
 }
@@ -553,12 +556,14 @@ impl DiagnosticDatabase {
     /// Returns an error if the blob cannot be parsed as valid `FlatBuffers` data.
     pub fn new_from_vec(
         ecu_database_path: String,
+        ecu_name: String,
         ecu_data_blob: Vec<u8>,
         flatbuf_config: FlatbBufConfig,
         settings: DatabaseConfig,
     ) -> Result<Self, DiagServiceError> {
         Self::new_from_bytes(
             ecu_database_path,
+            ecu_name,
             bytes::Bytes::from(ecu_data_blob),
             flatbuf_config,
             settings,
@@ -571,20 +576,28 @@ impl DiagnosticDatabase {
     /// so the underlying memory is file-backed
     /// and can be evicted by the kernel under memory pressure.
     ///
+    /// The `ecu_data_blob` is a single `OdxData` flatbuffer root which may
+    /// contain data for multiple ECUs; `ecu_name` selects which one this
+    /// `DiagnosticDatabase` represents. Multiple `DiagnosticDatabase`
+    /// instances backed by clones (cheap, refcounted) of the same blob but
+    /// different `ecu_name` are expected when a single MDD file describes
+    /// several ECUs.
+    ///
     /// # Errors
     /// Returns an error if the blob cannot be parsed as valid `FlatBuffers` data.
     pub fn new_from_bytes(
         ecu_database_path: String,
+        ecu_name: String,
         ecu_data_blob: bytes::Bytes,
         flatbuf_config: FlatbBufConfig,
         config: DatabaseConfig,
     ) -> Result<Self, DiagServiceError> {
-        let ecu_data = EcuDataTryBuilder {
+        let ecu_data = OdxDataHolderTryBuilder {
             blob: ecu_data_blob,
             data_builder: |blob| {
-                read_ecudata(blob.as_ref(), &flatbuf_config).map_err(|e| {
+                read_odxdata(blob.as_ref(), &flatbuf_config).map_err(|e| {
                     DiagServiceError::InvalidDatabase(format!(
-                        "Failed to read ECU data from blob: {e}"
+                        "Failed to read ODX data from blob: {e}"
                     ))
                 })
             },
@@ -593,6 +606,7 @@ impl DiagnosticDatabase {
 
         let db = DiagnosticDatabase {
             ecu_database_path,
+            ecu_name,
             ecu_data: Some(ecu_data),
             flatbuf_config,
             config,
@@ -627,10 +641,11 @@ impl DiagnosticDatabase {
     pub fn load(&mut self) -> Result<(), DiagServiceError> {
         // If the decompress feature is enabled, decompression already happened
         // before 'new' of DiagnosticDatabase, so we can just load the data from the path.
-        let (_ecu_name, blob) = mdd_data::load_ecudata(&self.ecu_database_path)
+        let (_ecu_infos, blob) = mdd_data::load_ecudata(&self.ecu_database_path)
             .map_err(|e| DiagServiceError::InvalidDatabase(e.to_string()))?;
         *self = DiagnosticDatabase::new_from_bytes(
             self.ecu_database_path.clone(),
+            self.ecu_name.clone(),
             blob,
             self.flatbuf_config.clone(),
             self.config.clone(),
@@ -688,14 +703,46 @@ impl DiagnosticDatabase {
         }
     }
 
-    /// Get the ECU data, which is the root of the database
+    /// Get the parsed `OdxData` root, which may contain data for one or more
+    /// ECUs plus cross-cutting `SharedData`.
     /// # Errors
-    /// `DiagServiceError::InvalidDatabase` if ECU data is not loaded
-    pub fn ecu_data(&self) -> Result<&dataformat::EcuData<'_>, DiagServiceError> {
+    /// `DiagServiceError::InvalidDatabase` if ODX data is not loaded
+    pub fn odx_data(&self) -> Result<&dataformat::OdxData<'_>, DiagServiceError> {
         self.ecu_data
             .as_ref()
-            .ok_or_else(|| DiagServiceError::InvalidDatabase("ECU data not loaded".to_owned()))
+            .ok_or_else(|| DiagServiceError::InvalidDatabase("ODX data not loaded".to_owned()))
             .map(|ecu_data| ecu_data.borrow_data())
+    }
+
+    /// Get the ECU data for this database's `ecu_name`, which is the
+    /// (per-ECU) root of the database.
+    /// # Errors
+    /// `DiagServiceError::InvalidDatabase` if ECU data is not loaded or this
+    /// database's ECU is not present in the parsed `OdxData`.
+    pub fn ecu_data(&self) -> Result<dataformat::EcuData<'_>, DiagServiceError> {
+        let odx_data = self.odx_data()?;
+        odx_data
+            .ecus()
+            .into_iter()
+            .flatten()
+            .find(|ecu| ecu.ecu_name() == Some(self.ecu_name.as_str()))
+            .ok_or_else(|| {
+                DiagServiceError::InvalidDatabase(format!(
+                    "ECU '{}' not found in ODX data",
+                    self.ecu_name
+                ))
+            })
+    }
+
+    /// Get the cross-cutting `SharedData` (functional groups, ECU shared
+    /// data), which is shared across all ECUs in this `OdxData` file.
+    /// # Errors
+    /// `DiagServiceError::InvalidDatabase` if ODX data is not loaded or no
+    /// shared data is present.
+    pub fn shared_data(&self) -> Result<dataformat::SharedData<'_>, DiagServiceError> {
+        self.odx_data()?
+            .shared()
+            .ok_or_else(|| DiagServiceError::InvalidDatabase("No shared data found".to_owned()))
     }
 
     /// Get the ECU name from the ECU data
@@ -721,7 +768,10 @@ impl DiagnosticDatabase {
                 .filter_map(|variant| variant.diag_layer())
                 .map(datatypes::DiagLayer)
                 .collect::<Vec<_>>())
-        } else if let Some(functional_groups) = ecu_data.functional_groups()
+        } else if let Some(functional_groups) = self
+            .shared_data()
+            .ok()
+            .and_then(|shared| shared.functional_groups())
             && !functional_groups.is_empty()
         {
             Ok(functional_groups
@@ -746,6 +796,10 @@ impl DiagnosticDatabase {
     /// `DiagServiceError::InvalidDatabase` if ECU data is not loaded
     pub fn protocols(&self) -> Result<Vec<dataformat::Protocol<'_>>, DiagServiceError> {
         let ecu_data = self.ecu_data()?;
+        let functional_groups = self
+            .shared_data()
+            .ok()
+            .and_then(|shared| shared.functional_groups());
 
         let from_variants = ecu_data
             .variants()
@@ -754,8 +808,7 @@ impl DiagnosticDatabase {
             .flat_map(|v| v.parent_refs().into_iter().flatten())
             .filter_map(|pr| pr.ref__as_protocol());
 
-        let from_fgs = ecu_data
-            .functional_groups()
+        let from_fgs = functional_groups
             .into_iter()
             .flat_map(|fgs| fgs.iter())
             .flat_map(|fg| fg.parent_refs().into_iter().flatten())
@@ -767,8 +820,7 @@ impl DiagnosticDatabase {
             .flat_map(|v| v.iter())
             .filter_map(|v| v.diag_layer());
 
-        let fg_diag_layers = ecu_data
-            .functional_groups()
+        let fg_diag_layers = functional_groups
             .into_iter()
             .flat_map(|fgs| fgs.iter())
             .filter_map(|fg| fg.diag_layer());
@@ -902,8 +954,7 @@ impl DiagnosticDatabase {
     pub fn functional_groups(
         &self,
     ) -> Result<Vec<dataformat::FunctionalGroup<'_>>, DiagServiceError> {
-        let ecu_data = self.ecu_data()?;
-        ecu_data
+        self.shared_data()?
             .functional_groups()
             .map(|groups| groups.iter().collect())
             .ok_or_else(|| {

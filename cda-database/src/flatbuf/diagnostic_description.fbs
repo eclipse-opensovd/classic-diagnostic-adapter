@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -702,6 +702,7 @@ table Variant {
     is_base_variant: bool = false;
     variant_pattern: [VariantPattern];
     parent_refs: [ParentRef];
+    revision: string;
 }
 
 table SimpleValue {
@@ -841,13 +842,9 @@ enum FeatureFlag: byte {
 }
 
 table EcuData {
-    version: string;
     ecu_name: string;
     revision: string;
-    metadata: [KeyValue];
-    feature_flags: [FeatureFlag];
     variants: [Variant];
-    functional_groups: [FunctionalGroup];
     dtcs: [DTC];
 }
 
@@ -856,4 +853,22 @@ table KeyValue {
     value: string;
 }
 
-root_type EcuData;
+// Cross-cutting diagnostic layers that are shared across multiple ECUs.
+table SharedData {
+    functional_groups: [FunctionalGroup];
+    ecu_shared_data: [EcuSharedData];
+}
+
+table OdxData {
+    version: string;
+    // List of all ECU short-names contained in this description. Mirrors the
+    // ecu_name list in the MDD file header, so the list can be verified
+    // against the signed chunk content e.g. when updating.
+    ecu_names: [string];
+    metadata: [KeyValue];
+    feature_flags: [FeatureFlag];
+    ecus: [EcuData];
+    shared: SharedData;
+}
+
+root_type OdxData;
