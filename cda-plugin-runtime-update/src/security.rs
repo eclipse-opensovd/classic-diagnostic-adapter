@@ -59,7 +59,9 @@ impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'sta
             .vehicle_lock_owner_id()
             .await
             .ok_or_else(|| RuntimeUpdateError::NoLock("No vehicle lock owned".to_owned()))?;
-        // Example, validate that no ECUs are added or deleted
+        // Example, validate that no ECUs are added or deleted. This only warns:
+        // the incoming databases were already checked for readability by the
+        // framework, so nothing here gates the execution.
         if let (Some(pending), Some(current)) = (&collections.pending_mdd, &collections.current_mdd)
         {
             let pending_ecus = mdd_ecu_names(pending.as_ref()).await?;
@@ -150,19 +152,6 @@ mod tests {
         .await
     }
 
-    fn make_mdd_bytes(ecu_name: &str) -> Vec<u8> {
-        let magic: &[u8] = &[
-            0x4D, 0x44, 0x44, 0x20, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x20, 0x30, 0x20,
-            0x20, 0x20, 0x20, 0x20, 0x20, 0x00,
-        ];
-        let name_bytes = ecu_name.as_bytes();
-        let mut bytes = magic.to_vec();
-        bytes.push(0x1A);
-        bytes.push(u8::try_from(name_bytes.len()).unwrap());
-        bytes.extend_from_slice(name_bytes);
-        bytes
-    }
-
     async fn write_mdd_to_collection(
         storage: &LocalStorage,
         name: &CollectionName,
@@ -171,7 +160,7 @@ mod tests {
     ) {
         let col = storage.get_or_create_collection(name).await.unwrap();
         let mut tx = storage.begin_transaction().unwrap();
-        let bytes = make_mdd_bytes(ecu_name);
+        let bytes = crate::test_utils::readable_mdd_bytes(ecu_name);
         let mut cursor: &[u8] = &bytes;
         col.write(&mut tx, key, &mut cursor).await.unwrap();
         tx.commit().await.unwrap();
@@ -185,6 +174,10 @@ mod tests {
                 .ok(),
             current_mdd: storage
                 .get_collection(&CollectionName::DiagnosticDatabase)
+                .await
+                .ok(),
+            backup_mdd: storage
+                .get_collection(&CollectionName::DiagnosticDatabaseBackup)
                 .await
                 .ok(),
         }
