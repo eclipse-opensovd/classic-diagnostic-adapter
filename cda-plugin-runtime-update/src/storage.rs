@@ -129,7 +129,16 @@ pub(crate) async fn list_collection_files(
             })?;
             item.revision = cda_database::mmap_and_decode_mdd(path_str)
                 .ok()
-                .and_then(|mdd| mdd.revision);
+                .and_then(|mdd| {
+                    if mdd.ecu_infos.len() > 1 {
+                        tracing::warn!(
+                            key = %key,
+                            ecu_count = mdd.ecu_infos.len(),
+                            "MDD file contains multiple ECUs; using revision of the first ECU"
+                        );
+                    }
+                    mdd.ecu_infos.into_iter().next().and_then(|e| e.revision)
+                });
         }
 
         items.push(item);

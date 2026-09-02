@@ -2474,6 +2474,7 @@ name = "opensovd-cda"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "cda-comm-can",
  "cda-comm-doip",
  "cda-comm-uds",
