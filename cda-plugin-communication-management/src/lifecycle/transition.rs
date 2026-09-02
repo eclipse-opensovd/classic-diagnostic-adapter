@@ -135,10 +135,13 @@ pub(crate) fn decide(
         // Releasing this lease restores the live transport.
         (CommunicationState::Enabled, LifecycleRequest::Disable) => claim_disable(state, true),
 
-        // Releasing a lease from `Disabled` remains `Disabled`.
-        (CommunicationState::Disabled, LifecycleRequest::Disable) => claim_disable(state, false),
+        // Releasing a lease from a disabled or fail-closed runtime remains disabled.
+        (
+            CommunicationState::Disabled | CommunicationState::RecoveryRequired(_),
+            LifecycleRequest::Disable,
+        ) => claim_disable(state, false),
 
-        // Recovery from an error starts a new activation.
+        // Recovery from an ordinary error starts a new activation.
         (CommunicationState::Disabled | CommunicationState::Error(_), LifecycleRequest::Enable) => {
             LifecycleDecision::Claim(CommunicationOperation::Enable)
         }
@@ -149,6 +152,7 @@ pub(crate) fn decide(
         // Detection needs an enabled transport and never brings one up.
         (
             CommunicationState::Disabled
+            | CommunicationState::RecoveryRequired(_)
             | CommunicationState::Error(_)
             | CommunicationState::Enabling(_),
             LifecycleRequest::Detect,
@@ -177,8 +181,12 @@ pub(crate) fn decide(
             }
         }
 
-        // No lease can be granted or resumed from these states.
+        // No activation, unrelated lease, or resume can escape fail-closed recovery.
         (
+            CommunicationState::RecoveryRequired(_),
+            LifecycleRequest::Enable | LifecycleRequest::EnableAndDetect,
+        )
+        | (
             CommunicationState::Error(_)
             | CommunicationState::Enabling(_)
             | CommunicationState::Disabling
@@ -188,6 +196,7 @@ pub(crate) fn decide(
         | (
             CommunicationState::Enabled
             | CommunicationState::Disabled
+            | CommunicationState::RecoveryRequired(_)
             | CommunicationState::Enabling(_)
             | CommunicationState::Disabling
             | CommunicationState::Error(_),
@@ -221,7 +230,9 @@ pub(crate) fn guard_admission(state: &CommunicationState) -> Result<(), Communic
         CommunicationState::Enabling(_) => Err(CommunicationError::Enabling),
         CommunicationState::Disabling => Err(CommunicationError::Disabling),
         CommunicationState::DisabledExclusive => Err(CommunicationError::DisabledExclusive),
-        CommunicationState::Error(failure) => Err(CommunicationError::Failed(failure.clone())),
+        CommunicationState::RecoveryRequired(failure) | CommunicationState::Error(failure) => {
+            Err(CommunicationError::Failed(failure.clone()))
+        }
     }
 }
 

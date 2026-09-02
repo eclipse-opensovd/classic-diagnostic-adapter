@@ -69,6 +69,11 @@ pub async fn seed_storage_collection_if_nonexistent(
         count = count.saturating_add(1);
     }
 
+    // Nothing to seed, so the transaction is abandoned rather than committed:
+    // committing would create an empty collection, and an existing collection
+    // is authoritative over the configured database directory forever after.
+    // A deployment that boots once with an empty seed directory must still
+    // pick up files placed there later.
     if count == 0 {
         return Some(0);
     }

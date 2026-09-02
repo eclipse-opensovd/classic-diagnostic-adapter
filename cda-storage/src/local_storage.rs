@@ -390,8 +390,7 @@ impl LocalStorageCommitter {
 
                         // Backup existing file if present.
                         if target.exists() {
-                            let backup = append_extension(&target, BACKUP_EXTENSION);
-                            std::fs::rename(&target, &backup)?;
+                            clear_for_replacement(&target)?;
                         }
 
                         // Move staged file into place.
@@ -400,8 +399,7 @@ impl LocalStorageCommitter {
                     Operation::Delete { collection, key } => {
                         let target = self.collections_dir.join(collection.as_str()).join(key);
                         if target.exists() {
-                            let backup = append_extension(&target, BACKUP_EXTENSION);
-                            std::fs::rename(&target, &backup)?;
+                            clear_for_replacement(&target)?;
                         }
                     }
                     Operation::DeleteAll { collection } => {
@@ -417,8 +415,7 @@ impl LocalStorageCommitter {
                     Operation::DeleteCollection { name } => {
                         let dir = self.collections_dir.join(name.as_str());
                         if dir.exists() {
-                            let backup = append_extension(&dir, BACKUP_EXTENSION);
-                            std::fs::rename(&dir, &backup)?;
+                            clear_for_replacement(&dir)?;
                         }
                     }
                     Operation::CopyCollection { source, dest, .. } => {
@@ -427,8 +424,7 @@ impl LocalStorageCommitter {
 
                         // Back up an existing destination before creating the replacement.
                         if dest_dir.exists() {
-                            let backup = append_extension(&dest_dir, BACKUP_EXTENSION);
-                            std::fs::rename(&dest_dir, &backup)?;
+                            clear_for_replacement(&dest_dir)?;
                         }
 
                         // Create a fresh directory to provide replace rather than merge semantics.
@@ -449,14 +445,49 @@ fn append_extension(path: &Path, ext: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Rename every file in a directory to have a `.bak` extension.
+/// Move `path` aside under its `.bak` name so the operation can replace or delete it.
+///
+/// `path.bak` is the transaction's savepoint: it holds what `path` contained *before the
+/// transaction started*, because that is the only state a failed commit can roll back to. A path
+/// touched twice in one transaction therefore keeps the snapshot its first touch took - what a
+/// later touch displaces is mid-transaction state that a rollback discards anyway.
+///
+/// Renaming unconditionally breaks that. For a key `k` holding `v0`:
+///
+/// ```text
+/// op1  write k = v1   rename(k, k.bak)   k.bak = v0   correct snapshot
+/// op2  delete k       rename(k, k.bak)   k.bak = v1   snapshot clobbered
+/// op3  fails          rollback restores  k     = v1   a value the failed transaction produced
+/// ```
+///
+/// The caller is told nothing was applied while `k` holds the result of op1. A collection
+/// directory fails loudly instead of corrupting silently - renaming onto a non-empty directory
+/// is `ENOTEMPTY` - but it is the same defect.
+///
+/// So once a snapshot exists the displaced entry is removed rather than renamed over it. That is
+/// safe because it is state this transaction produced: a successful commit was going to discard
+/// it, and a failed one restores `path` from the preserved `.bak`.
+fn clear_for_replacement(path: &Path) -> Result<(), StorageError> {
+    let backup = append_extension(path, BACKUP_EXTENSION);
+    if backup.exists() {
+        if path.is_dir() {
+            std::fs::remove_dir_all(path)?;
+        } else {
+            std::fs::remove_file(path)?;
+        }
+    } else {
+        std::fs::rename(path, &backup)?;
+    }
+    Ok(())
+}
+
+/// Back up every file in a directory under its `.bak` name.
 fn backup_all_files_in_dir(dir: &Path) -> Result<(), StorageError> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         if path.is_file() {
-            let backup = append_extension(&path, BACKUP_EXTENSION);
-            std::fs::rename(&path, &backup)?;
+            clear_for_replacement(&path)?;
         }
     }
     Ok(())
@@ -594,4 +625,47 @@ fn cleanup_directory_contents(dir: &Path) -> Result<(), StorageError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Repeated backups of the same file keep the snapshot taken before the transaction.
+    #[test]
+    fn clear_for_replacement_keeps_first_file_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("k");
+        let backup = append_extension(&key, BACKUP_EXTENSION);
+
+        std::fs::write(&key, b"v0").unwrap();
+        clear_for_replacement(&key).unwrap();
+        assert!(!key.exists());
+        assert_eq!(std::fs::read(&backup).unwrap(), b"v0");
+
+        std::fs::write(&key, b"v1").unwrap();
+        clear_for_replacement(&key).unwrap();
+        assert!(!key.exists());
+        assert_eq!(std::fs::read(&backup).unwrap(), b"v0");
+    }
+
+    /// The same holds for directories, which a second rename would reject as non-empty.
+    #[test]
+    fn clear_for_replacement_keeps_first_directory_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let collection = dir.path().join("d");
+        let backup = append_extension(&collection, BACKUP_EXTENSION);
+
+        std::fs::create_dir(&collection).unwrap();
+        std::fs::write(collection.join("f"), b"original").unwrap();
+        clear_for_replacement(&collection).unwrap();
+        assert!(!collection.exists());
+        assert_eq!(std::fs::read(backup.join("f")).unwrap(), b"original");
+
+        std::fs::create_dir(&collection).unwrap();
+        std::fs::write(collection.join("f"), b"midway").unwrap();
+        clear_for_replacement(&collection).unwrap();
+        assert!(!collection.exists());
+        assert_eq!(std::fs::read(backup.join("f")).unwrap(), b"original");
+    }
 }

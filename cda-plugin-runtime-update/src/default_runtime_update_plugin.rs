@@ -11,24 +11,42 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use cda_interfaces::{
     HashMap,
-    communication_control::{CommunicationAccess, PostUpdateCommunicationMode},
-    http_protection::registry::HttpProtectionRegistry,
+    communication_control::{DisableCommunication, PostUpdateCommunicationMode},
+    http_protection::registry::{HttpProtectionRegistry, HttpRouteMatcher},
     runtime_update_api::{
-        BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider, RuntimeFilesQuery,
-        RuntimeFilesUpdatePlugin, RuntimeReloaderPlugin, RuntimeUpdateError,
-        RuntimeUpdateSecurityPlugin, UpdateExecution, UploadFile,
+        BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider, RuntimeFileCatalog,
+        RuntimeFileStore, RuntimeFilesQuery, RuntimeReloaderPlugin, RuntimeUpdateError,
+        RuntimeUpdateExecutor, RuntimeUpdateSecurityPlugin, UpdateExecution, UploadFile,
     },
     storage_api::Storage,
 };
-use cda_plugin_communication_management::lifecycle::disable::DisableCommunication;
-use tokio::sync::RwLock;
+use tokio::{sync::RwLock, task::JoinHandle};
 
-/// Default implementation of [`RuntimeFilesUpdatePlugin`] with injectable security and storage.
+/// Upper bound on how long shutdown waits for an in-flight runtime update to
+/// reach its own finalization.
+///
+/// The wait exists because the execution must not be aborted (see the
+/// [`Shutdown`](cda_interfaces::Shutdown) implementation). The bound is a hard
+/// cap on shutdown, not a budget the slowest healthy update is guaranteed to
+/// fit in: a large collection copy on slow storage can exceed it and be cut
+/// off. That is accepted, because shutdown must not be held up.
+///
+/// Being cut off costs the report, not the data. The swap runs in a
+/// journalled transaction that startup recovery completes or rolls back, so
+/// the database is still left fully before or fully after. What is lost is the
+/// in-memory execution record, so no terminal status survives the restart.
+const UPDATE_SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+
+/// Default implementation of [`RuntimeFileCatalog`], [`RuntimeFileStore`] and
+/// [`RuntimeUpdateExecutor`], with injectable security and storage.
 pub struct DefaultRuntimeUpdatePlugin<
     Store: Storage,
     UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
@@ -44,15 +62,24 @@ pub struct DefaultRuntimeUpdatePlugin<
     lock_provider: Arc<Lock>,
     /// Tracking map for in-progress executions: `exec_id` -> `DbUpdateExecution`
     executions: Arc<RwLock<HashMap<String, UpdateExecution>>>,
-    /// If true, call `update_mdd_uncompressed()` after Apply for each MDD file
-    mdd_decompress: bool,
+    /// Format-specific reads (validate, revision, ECU name), so the plugin
+    /// carries no database format of its own.
     communication_disable: Arc<dyn DisableCommunication>,
-    /// Used to request the configured post-update communication state. Only a
-    /// request, because `init_mode` decides whether it is honoured.
-    communication_access: Arc<dyn CommunicationAccess>,
     http_protections: HttpProtectionRegistry,
+    update_exempt_routes: Vec<HttpRouteMatcher>,
     update_retry_after: Duration,
     post_update_mode: PostUpdateCommunicationMode,
+    /// Supervisor task of the execution that is in flight, so shutdown can
+    /// await it instead of letting it be cut off.
+    ///
+    /// A single slot is enough because at most one execution is ever live: an
+    /// execution takes the exclusive communication disable lease in
+    /// `start_execution` and holds it until its own finalization, and a second
+    /// `start_execution` inside that window is refused with
+    /// `DisableError::Conflict`, surfaced as
+    /// [`RuntimeUpdateError::ExecutionConflict`]. Storing a new supervisor
+    /// therefore only ever displaces a finished one.
+    execution_supervisor: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl<
@@ -68,10 +95,7 @@ impl<
     /// * `reload_handler` - Notified after apply/rollback to hot-reload databases
     /// * `security_handler` - Validates authorization and file integrity
     /// * `lock_provider` - Provides lock state for security validation
-    /// * `mdd_decompress` - Whether to decompress MDD files after apply
     /// * `communication_disable` - Used to acquire exclusive transport disable ownership
-    /// * `communication_access` - Used to request the configured post-update
-    ///   communication state, subject to `init_mode`
     /// * `update_retry_after` - Retry-After duration while an update owns protection
     /// * `post_update_mode` - Communication state to restore after an update
     #[allow(
@@ -84,10 +108,9 @@ impl<
         reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
         security_handler: Arc<UpdateSecurityPlugin>,
         lock_provider: Arc<Lock>,
-        mdd_decompress: bool,
         communication_disable: Arc<dyn DisableCommunication>,
-        communication_access: Arc<dyn CommunicationAccess>,
         http_protections: HttpProtectionRegistry,
+        update_exempt_routes: Vec<HttpRouteMatcher>,
         update_retry_after: Duration,
         post_update_mode: PostUpdateCommunicationMode,
     ) -> Self {
@@ -97,12 +120,12 @@ impl<
             security_handler,
             lock_provider,
             executions: Arc::new(RwLock::new(HashMap::default())),
-            mdd_decompress,
             communication_disable,
-            communication_access,
             http_protections,
+            update_exempt_routes,
             update_retry_after,
             post_update_mode,
+            execution_supervisor: Mutex::new(None),
         }
     }
 }
@@ -112,7 +135,55 @@ impl<
     Store: Storage + Send + Sync + 'static,
     UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
     Lock: LockStateProvider,
-> RuntimeFilesUpdatePlugin for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
+> cda_interfaces::Shutdown for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
+{
+    /// Awaits an in-flight execution; never aborts one.
+    ///
+    /// The execution holds the communication disable lease and is midway
+    /// through swapping the live database, so cutting it leaves exactly the
+    /// torn state the update path exists to avoid. The wait is bounded by
+    /// `UPDATE_SHUTDOWN_GRACE`; on elapse a warning is logged and shutdown
+    /// proceeds. Taking the handle out makes it idempotent.
+    ///
+    /// # TODO
+    ///
+    /// This is not hooked up yet, because there is no good place to do so at the
+    /// moment. It must be done in the context of #533.
+    /// It is implemented here already, to have the general plugin architecture in place.
+    async fn shutdown(&self) {
+        let Some(supervisor) =
+            cda_interfaces::util::std_ext::lock_mutex(&self.execution_supervisor).take()
+        else {
+            return;
+        };
+
+        match tokio::time::timeout(UPDATE_SHUTDOWN_GRACE, supervisor).await {
+            Ok(Ok(())) => {}
+            Ok(Err(join_error)) => {
+                // The supervisor already reported the execution as abnormally
+                // terminated; nothing is left to wait for.
+                tracing::debug!(
+                    error = %join_error,
+                    "Runtime update supervisor ended abnormally during shutdown"
+                );
+            }
+            Err(_elapsed) => {
+                tracing::warn!(
+                    grace_period = ?UPDATE_SHUTDOWN_GRACE,
+                    "Runtime update did not finish within the shutdown grace period; shutting \
+                     down while it is still running"
+                );
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl<
+    Store: Storage + Send + Sync + 'static,
+    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    Lock: LockStateProvider,
+> RuntimeFileCatalog for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
 {
     async fn list_current(
         &self,
@@ -134,7 +205,15 @@ impl<
     ) -> Result<BulkDataList, RuntimeUpdateError> {
         crate::storage::list_backup_files(&*self.storage, query).await
     }
+}
 
+#[async_trait]
+impl<
+    Store: Storage + Send + Sync + 'static,
+    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    Lock: LockStateProvider,
+> RuntimeFileStore for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
+{
     async fn upload(
         &self,
         files: Vec<UploadFile>,
@@ -153,7 +232,15 @@ impl<
     async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
         crate::storage::delete_all_backup(&*self.storage).await
     }
+}
 
+#[async_trait]
+impl<
+    Store: Storage + Send + Sync + 'static,
+    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    Lock: LockStateProvider,
+> RuntimeUpdateExecutor for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
+{
     async fn start_execution(&self, mode: ExecutionMode) -> Result<String, RuntimeUpdateError> {
         let params = crate::operations::executions::ExecutionParams {
             storage: &self.storage,
@@ -161,12 +248,12 @@ impl<
             reload_handler: &self.reloader_plugin,
             executions: &self.executions,
             communication_disable: &self.communication_disable,
-            communication_access: &self.communication_access,
             http_protections: &self.http_protections,
+            update_exempt_routes: &self.update_exempt_routes,
             update_retry_after: self.update_retry_after,
             post_update_mode: self.post_update_mode.clone(),
-            mdd_decompress: self.mdd_decompress,
             lock_state_provider: &*self.lock_provider,
+            execution_supervisor: &self.execution_supervisor,
         };
         crate::operations::executions::start_execution(&params, mode).await
     }
@@ -184,19 +271,21 @@ impl<
 mod tests {
     use std::{sync::Arc, time::Duration};
 
+    use async_trait::async_trait;
     use cda_interfaces::{
+        Shutdown,
         communication_control::{CommunicationState, PostUpdateCommunicationMode},
         http_protection::registry::HttpProtectionRegistry,
         runtime_update_api::{
-            ExecutionMode, HashAlgorithm, RuntimeFilesQuery, RuntimeFilesUpdatePlugin,
-            RuntimeUpdateError,
+            ExecutionMode, ExecutionStatus, HashAlgorithm, RejectedSetDisposition, ReloadFailure,
+            RuntimeFileCatalog, RuntimeFileStore, RuntimeFilesQuery, RuntimeReloaderPlugin,
+            RuntimeUpdateError, RuntimeUpdateExecutor,
         },
         storage_api::CollectionName,
     };
     use cda_plugin_communication_management::lifecycle::{
         communication_disable_for_test,
         disable::{DisableCommunication, DisableReason},
-        enabled_communication_access_for_test,
     };
     use cda_storage::LocalStorage;
 
@@ -223,22 +312,33 @@ mod tests {
         DefaultRuntimeUpdatePlugin<LocalStorage, MockSecurityHandler, MockLockProvider>,
         Arc<dyn DisableCommunication>,
     ) {
+        make_state_with_reloader(storage, owner, has_conflicts, Arc::new(NoopReloadHandler))
+    }
+
+    fn make_state_with_reloader(
+        storage: LocalStorage,
+        owner: Option<&str>,
+        has_conflicts: bool,
+        reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
+    ) -> (
+        DefaultRuntimeUpdatePlugin<LocalStorage, MockSecurityHandler, MockLockProvider>,
+        Arc<dyn DisableCommunication>,
+    ) {
         let transport = StubTransport::new();
         let http_protections = HttpProtectionRegistry::new();
         let communication_disable = communication_disable_for_test(transport, false);
 
         let plugin = DefaultRuntimeUpdatePlugin::new(
             Arc::new(storage),
-            Arc::new(NoopReloadHandler),
+            reloader_plugin,
             Arc::new(MockSecurityHandler::new()),
             Arc::new(MockLockProvider {
                 owner: owner.map(ToOwned::to_owned),
                 has_conflicts,
             }),
-            false,
             Arc::clone(&communication_disable),
-            enabled_communication_access_for_test(),
             http_protections,
+            Vec::new(),
             Duration::from_secs(1),
             PostUpdateCommunicationMode::Enabled,
         );
@@ -547,5 +647,136 @@ mod tests {
         // Releasing a lease taken from `Disabled` leaves communication
         // deferred rather than enabling it.
         assert_eq!(lease.release().await, Ok(CommunicationState::Disabled));
+    }
+
+    /// A reloader that parks inside `reload_databases` until the test lets it
+    /// through, holding an execution in flight long enough to observe what
+    /// shutdown does with it.
+    struct GatedReloadHandler {
+        entered: tokio::sync::mpsc::UnboundedSender<()>,
+        gate: Arc<tokio::sync::Semaphore>,
+    }
+
+    /// Test-side handle to [`GatedReloadHandler`]'s reload.
+    struct ReloadGate {
+        entered: tokio::sync::mpsc::UnboundedReceiver<()>,
+        gate: Arc<tokio::sync::Semaphore>,
+    }
+
+    impl GatedReloadHandler {
+        fn new() -> (Arc<Self>, ReloadGate) {
+            let (entered_tx, entered_rx) = tokio::sync::mpsc::unbounded_channel();
+            let gate = Arc::new(tokio::sync::Semaphore::new(0));
+            let handler = Arc::new(Self {
+                entered: entered_tx,
+                gate: Arc::clone(&gate),
+            });
+            let reload = ReloadGate {
+                entered: entered_rx,
+                gate,
+            };
+            (handler, reload)
+        }
+    }
+
+    impl ReloadGate {
+        /// Resolves once the reload has started and is parked on the gate.
+        async fn entered(&mut self) {
+            self.entered
+                .recv()
+                .await
+                .expect("the reload must be reached");
+        }
+
+        /// Lets the parked reload run to completion.
+        fn release(&self) {
+            self.gate.add_permits(1);
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeReloaderPlugin for GatedReloadHandler {
+        async fn reload_databases(
+            &self,
+            _on_reject: RejectedSetDisposition,
+        ) -> Result<(), ReloadFailure> {
+            let _ = self.entered.send(());
+            let _permit = self
+                .gate
+                .acquire()
+                .await
+                .expect("gate must not be closed while a reload is parked on it");
+            Ok(())
+        }
+    }
+
+    /// An execution mid storage-swap must not be cut off by shutdown: it holds
+    /// the communication disable lease and has already replaced part of the
+    /// live database, so shutdown waits for it to finalize itself.
+    #[tokio::test]
+    async fn shutdown_waits_for_an_execution_that_is_still_running() {
+        let (storage, _dir) = make_storage();
+        write_test_file(
+            &storage,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+            "ecu.mdd",
+            b"mdd_data",
+        )
+        .await;
+        let (reloader, mut reload) = GatedReloadHandler::new();
+        let (plugin, _disable_comm) =
+            make_state_with_reloader(storage, Some("test-user"), false, reloader);
+        let plugin = Arc::new(plugin);
+
+        plugin
+            .start_execution(ExecutionMode::Apply)
+            .await
+            .expect("the apply must start");
+        reload.entered().await;
+
+        let mut shutting_down = tokio::task::spawn({
+            let plugin = Arc::clone(&plugin);
+            async move { plugin.shutdown().await }
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut shutting_down)
+                .await
+                .is_err(),
+            "shutdown must not return while the execution is still swapping the database"
+        );
+
+        reload.release();
+        tokio::time::timeout(Duration::from_secs(5), shutting_down)
+            .await
+            .expect("shutdown must return once the execution has finished")
+            .expect("the shutdown task must not panic");
+
+        let executions = plugin.list_executions().await;
+        let status = executions.first().map(|execution| &execution.status);
+        assert!(
+            matches!(status, Some(ExecutionStatus::Completed)),
+            "shutdown must have waited for the execution to reach a terminal status, got \
+             {status:?}"
+        );
+    }
+
+    /// Taking the handle out is what makes shutdown idempotent, so a second
+    /// call must still return rather than wait on nothing.
+    #[tokio::test]
+    async fn shutdown_is_idempotent() {
+        let (storage, _dir) = make_storage();
+        let plugin = make_plugin(storage);
+
+        plugin
+            .start_execution(ExecutionMode::Cleanup)
+            .await
+            .expect("the cleanup must start");
+
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(1), plugin.shutdown())
+                .await
+                .expect("shutdown must not block once the execution has finished");
+        }
     }
 }

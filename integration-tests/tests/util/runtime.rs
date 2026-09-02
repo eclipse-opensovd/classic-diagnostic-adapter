@@ -512,7 +512,6 @@ pub(crate) fn start_cda(config: Configuration) {
                 |infra: opensovd_cda_lib::setup::CdaRuntime<DefaultSecurityPluginData>| async {
                     opensovd_cda_lib::update::create_default_update_plugin::<
                         DefaultSecurityPluginData,
-                        DefaultSecurityPlugin,
                     >(infra)
                     .await
                 },

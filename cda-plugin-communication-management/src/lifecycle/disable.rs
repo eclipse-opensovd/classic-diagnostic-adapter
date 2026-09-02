@@ -167,6 +167,31 @@ impl DisableLease {
         reply.await.unwrap_or_else(|_| Err(stale_resume_failure()))
     }
 
+    /// Consumes this lease, running the reconfiguration phase without resuming
+    /// the transport. Inherent, so a concrete lease needs no boxing. See
+    /// [`DisableGuard::finish`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when lifecycle finalization or reconfiguration fails, this lease
+    /// is stale (already released or finished), or the lifecycle worker is shutting
+    /// down.
+    pub async fn finish(mut self) -> Result<(), CommunicationOperationFailure> {
+        let Some(id) = self.id else {
+            return Err(stale_finish_failure());
+        };
+        let reply = match self.handle.submit_finish(id).await {
+            Ok(reply) => reply,
+            // Not accepted into the worker mailbox (shutdown). `self.id` stays
+            // `Some`, so `Drop` performs the synchronous defer.
+            Err(failure) => return Err(failure),
+        };
+        // The worker now owns this finish and completes it even if this task
+        // is canceled below, so clear `id` to make a racing `Drop` a no-op.
+        self.id = None;
+        reply.await.unwrap_or_else(|_| Err(stale_finish_failure()))
+    }
+
     /// Exposes the opaque ID to tests that verify a stale lease cannot release a
     /// later disable cycle.
     #[cfg(test)]
@@ -179,6 +204,10 @@ impl DisableLease {
 impl DisableGuard for DisableLease {
     async fn release(self: Box<Self>) -> Result<CommunicationState, CommunicationOperationFailure> {
         DisableLease::release(*self).await
+    }
+
+    async fn finish(self: Box<Self>) -> Result<(), CommunicationOperationFailure> {
+        DisableLease::finish(*self).await
     }
 }
 
@@ -199,5 +228,11 @@ impl Drop for DisableLease {
 pub(crate) fn stale_resume_failure() -> CommunicationOperationFailure {
     CommunicationOperationFailure::TransitionFailure {
         operation: CommunicationOperation::Resume,
+    }
+}
+
+pub(crate) fn stale_finish_failure() -> CommunicationOperationFailure {
+    CommunicationOperationFailure::TransitionFailure {
+        operation: CommunicationOperation::FinishDisableLease,
     }
 }

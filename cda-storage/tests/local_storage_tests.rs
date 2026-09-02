@@ -952,3 +952,38 @@ async fn list_normalizes_mixed_case_filenames_to_match_metadata_and_read() {
     handle.read_at(0, &mut buf).unwrap();
     assert_eq!(&buf, b"mixed case data");
 }
+
+#[tokio::test]
+async fn copy_into_and_delete_same_collection_in_one_transaction() {
+    let (storage, _dir) = create_test_storage();
+    let source = CollectionName::DiagnosticDatabase;
+    let shuttle = CollectionName::DiagnosticDatabaseNextUpdate;
+
+    let source_col = storage.get_or_create_collection(&source).await.unwrap();
+    let shuttle_col = storage.get_or_create_collection(&shuttle).await.unwrap();
+    let mut tx = storage.begin_transaction().unwrap();
+    let mut moved: &[u8] = b"moved";
+    let mut stale: &[u8] = b"stale";
+    source_col.write(&mut tx, "a", &mut moved).await.unwrap();
+    shuttle_col.write(&mut tx, "b", &mut stale).await.unwrap();
+    tx.commit().await.unwrap();
+
+    // The shuttle is a copy destination and is dropped again by the same transaction.
+    let mut tx = storage.begin_transaction().unwrap();
+    storage
+        .copy_collection(&mut tx, &source, &shuttle)
+        .await
+        .unwrap();
+    storage.delete_collection(&mut tx, &shuttle).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let result = storage.get_collection(&shuttle).await;
+    assert!(matches!(result, Err(StorageError::CollectionNotFound(_))));
+
+    // The source is untouched by the shuttle's removal.
+    let source_col = storage.get_collection(&source).await.unwrap();
+    let handle = source_col.read("a").await.unwrap();
+    let mut buf = vec![0u8; 5];
+    handle.read_at(0, &mut buf).unwrap();
+    assert_eq!(&buf, b"moved");
+}

@@ -295,7 +295,6 @@ async fn handle_mode_get<
 
 pub(crate) mod commctrl {
     use aide::UseApi;
-    use axum::extract::State;
     use cda_interfaces::service_ids;
     use cda_plugin_security::Secured;
     use sovd_interfaces::{
@@ -312,13 +311,13 @@ pub(crate) mod commctrl {
     };
     use crate::{
         openapi,
-        sovd::{error::VendorErrorCode, functions::functional_groups::WebserverFgState},
+        sovd::{error::VendorErrorCode, functions::functional_groups::FgContext},
     };
 
     pub(crate) async fn get<T: UdsEcu + Clone>(
         UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(state): State<WebserverFgState<T>>,
+        FgContext(state): FgContext<T>,
     ) -> Response {
         handle_mode_get(
             &state,
@@ -353,7 +352,7 @@ pub(crate) mod commctrl {
     pub(crate) async fn put<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(state): State<WebserverFgState<T>>,
+        FgContext(state): FgContext<T>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::commctrl::put::Request>,
             ApiError,
@@ -394,7 +393,6 @@ pub(crate) mod commctrl {
 
 pub(crate) mod dtcsetting {
     use aide::UseApi;
-    use axum::extract::State;
     use cda_interfaces::service_ids;
     use cda_plugin_security::Secured;
     use sovd_interfaces::{
@@ -411,13 +409,13 @@ pub(crate) mod dtcsetting {
     };
     use crate::{
         openapi,
-        sovd::{error::VendorErrorCode, functions::functional_groups::WebserverFgState},
+        sovd::{error::VendorErrorCode, functions::functional_groups::FgContext},
     };
 
     pub(crate) async fn get<T: UdsEcu + Clone>(
         UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(state): State<WebserverFgState<T>>,
+        FgContext(state): FgContext<T>,
     ) -> Response {
         handle_mode_get(
             &state,
@@ -446,7 +444,7 @@ pub(crate) mod dtcsetting {
     pub(crate) async fn put<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(state): State<WebserverFgState<T>>,
+        FgContext(state): FgContext<T>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::dtcsetting::put::Request>,
             ApiError,
@@ -489,7 +487,6 @@ pub(crate) mod session {
     use std::time::Duration;
 
     use aide::UseApi;
-    use axum::extract::State;
     use cda_interfaces::service_ids;
     use cda_plugin_security::Secured;
     use sovd_interfaces::functions::functional_groups::{self, modes as sovd_modes};
@@ -500,13 +497,13 @@ pub(crate) mod session {
     };
     use crate::{
         openapi,
-        sovd::{error::VendorErrorCode, functions::functional_groups::WebserverFgState},
+        sovd::{error::VendorErrorCode, functions::functional_groups::FgContext},
     };
 
     pub(crate) async fn get<T: UdsEcu + Clone>(
         UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(state): State<WebserverFgState<T>>,
+        FgContext(state): FgContext<T>,
     ) -> Response {
         handle_mode_get(
             &state,
@@ -533,7 +530,7 @@ pub(crate) mod session {
     pub(crate) async fn put<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(state): State<WebserverFgState<T>>,
+        FgContext(state): FgContext<T>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::session::put::Request>,
             ApiError,

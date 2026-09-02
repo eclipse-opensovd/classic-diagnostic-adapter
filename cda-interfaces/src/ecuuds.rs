@@ -645,7 +645,7 @@ impl<T> UdsEcuDb for T where
               controlled"
 )]
 pub mod mock {
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     use async_trait::async_trait;
 
@@ -714,6 +714,11 @@ pub mod mock {
                 payload: Vec<u8>,
                 timeout: Option<Duration>,
             ) -> Result<Vec<u8>, DiagServiceError>;
+        }
+
+        #[async_trait]
+        impl crate::Shutdown for UdsEcu {
+            async fn shutdown(&self);
         }
 
         #[async_trait]
@@ -836,7 +841,7 @@ pub mod mock {
         impl UdsQuery for UdsEcu {
             async fn get_ecus(&self) -> Vec<String>;
             async fn get_physical_ecus(&self) -> Vec<String>;
-            async fn get_ecus_with_sds(
+                    async fn get_ecus_with_sds(
                 &self,
                 physical_only: bool,
                 sd: &SdBoolMappings) -> Vec<String>;
@@ -1015,6 +1020,38 @@ pub mod mock {
         ) -> impl std::future::Future<Output = Result<SchemaDescription, DiagServiceError>> + Send
         {
             std::future::ready(Err(DiagServiceError::NotFound(String::new())))
+        }
+    }
+
+    use crate::mdd_chunks::{ChunkMetaData, EmbeddedFiles, EmbeddedFilesProvider, MddError};
+
+    /// The store of an ECU that carries no embedded files, which is every
+    /// mocked one: no test serves MDD blobs.
+    pub struct NoEmbeddedFiles;
+
+    impl EmbeddedFiles for NoEmbeddedFiles {
+        fn list(&self) -> impl Future<Output = HashMap<String, ChunkMetaData>> + Send {
+            std::future::ready(HashMap::default())
+        }
+
+        fn get(
+            &self,
+            id: &str,
+        ) -> impl Future<Output = Result<(ChunkMetaData, bytes::Bytes), MddError>> + Send {
+            std::future::ready(Err(MddError::InvalidParameter(format!(
+                "No file with name {id} found"
+            ))))
+        }
+    }
+
+    impl EmbeddedFilesProvider for MockUdsEcu {
+        type Files = NoEmbeddedFiles;
+
+        fn embedded_files(
+            &self,
+            _ecu_name: &str,
+        ) -> impl Future<Output = Result<Arc<Self::Files>, DiagServiceError>> + Send {
+            std::future::ready(Ok(Arc::new(NoEmbeddedFiles)))
         }
     }
 }

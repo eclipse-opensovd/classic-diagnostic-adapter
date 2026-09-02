@@ -50,6 +50,9 @@ pub enum CommunicationState {
     Disabling,
     /// Transport is physically disabled and exclusively owned by a `DisableLease`.
     DisabledExclusive,
+    /// Reconfiguration compensation is incomplete. Transport remains disabled
+    /// and activation is blocked until an exclusive recovery lease succeeds.
+    RecoveryRequired(CommunicationOperationFailure),
     /// The latest lifecycle operation failed.
     Error(CommunicationOperationFailure),
 }
@@ -79,8 +82,8 @@ pub enum CommunicationError {
     Failed(CommunicationOperationFailure),
 }
 
-/// Opaque RAII guard marking communication as in use, so it cannot be
-/// disabled (e.g. by a runtime update) while diagnostic activity is ongoing.
+/// Opaque RAII guard marking communication as in use, so exclusive disable
+/// cannot begin while diagnostic activity is ongoing.
 ///
 /// The implementation is owned by whichever [`CommunicationAccess`] minted it
 /// via [`CommunicationGuard::new`]. This type only stores it type-erased and

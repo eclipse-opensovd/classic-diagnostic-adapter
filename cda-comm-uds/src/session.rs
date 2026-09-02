@@ -16,11 +16,12 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, UdsSecurity, UdsSession,
+    communication_control::CommunicationGuard,
     diagservices::{DiagServiceResponse, DiagServiceResponseType},
     dlt_ctx,
 };
 
-use crate::{UdsManager, types::ResetType};
+use crate::{UdsManager, VariantReadyEcu, types::ResetType};
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     /// Spawn a background task that resets the ECU session or security access
@@ -94,6 +95,21 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
 
         reset_task.write().await.insert(ecu_name, task);
     }
+
+    async fn set_ecu_session_resolved(
+        &self,
+        // Not used here beyond forwarding: holding the borrow for the whole
+        // call keeps the caller's `CommunicationGuard` alive, so communication
+        // cannot be disabled mid-request.
+        communication: &CommunicationGuard,
+        ecu: &VariantReadyEcu<'_, T>,
+        session: &str,
+        security_plugin: &DynamicPlugin,
+    ) -> Result<<T as cda_interfaces::PayloadDecoder>::Response, DiagServiceError> {
+        let dc = ecu.read().await.lookup_session_change(session).await?;
+        self.send_service(communication, ecu, dc, security_plugin, None, true)
+            .await
+    }
 }
 
 #[async_trait]
@@ -109,14 +125,13 @@ impl<S: EcuGateway, T: EcuManager> UdsSession for UdsManager<S, T> {
         expiration: Option<Duration>,
     ) -> Result<Self::Response, DiagServiceError> {
         tracing::info!(ecu_name = %ecu_name, session = %session, "Setting session");
-        let ecu_diag_service = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
-        let dc = ecu_diag_service
-            .read()
-            .await
-            .lookup_session_change(session)
+        let communication_guard = self.acquire_communication_guard()?;
+        let data = self.ecu_data.read().await;
+        let ecu = self
+            .uds_ecu_variant_detection_concluded(&data, ecu_name)
             .await?;
         let result = self
-            .send_with_optional_timeout(ecu_name, dc, security_plugin, None, true, None)
+            .set_ecu_session_resolved(&communication_guard, &ecu, session, security_plugin)
             .await?;
         match result.response_type() {
             DiagServiceResponseType::Positive => {
@@ -139,9 +154,18 @@ impl<S: EcuGateway, T: EcuManager> UdsSession for UdsManager<S, T> {
             old_task.abort();
         }
 
-        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
-        let default_session = ecu_diag_service.read().await.default_session()?;
-        let current_session = ecu_diag_service.read().await.session().await?;
+        // Communication admission prevents an update writer from being queued while
+        // this operation uses one resolved vehicle-data snapshot.
+        let communication_guard = self.acquire_communication_guard()?;
+        let data = self.ecu_data.read().await;
+        let ecu = self
+            .uds_ecu_variant_detection_concluded(&data, ecu_name)
+            .await?;
+        let ecu_read = ecu.read().await;
+        let default_session = ecu_read.default_session()?;
+        let current_session = ecu_read.session().await?;
+        // The send below re-locks this ECU; a queued writer would deadlock it.
+        drop(ecu_read);
 
         if current_session == default_session {
             tracing::info!("Already in default session, nothing to do");
@@ -149,7 +173,12 @@ impl<S: EcuGateway, T: EcuManager> UdsSession for UdsManager<S, T> {
         }
 
         let response = self
-            .set_ecu_session(ecu_name, &default_session, security_plugin, None)
+            .set_ecu_session_resolved(
+                &communication_guard,
+                &ecu,
+                &default_session,
+                security_plugin,
+            )
             .await?;
 
         match response.response_type() {

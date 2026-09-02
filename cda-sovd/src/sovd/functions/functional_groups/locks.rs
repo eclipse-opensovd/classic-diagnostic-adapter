@@ -11,14 +11,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::sync::Arc;
+
 use aide::{UseApi, transform::TransformOperation};
 use cda_interfaces::UdsEcu;
 use cda_plugin_security::Secured;
 
-use super::{
-    ApiError, ErrorWrapper, IntoResponse, Json, Path, Response, State, WebserverFgState,
-    WithRejection,
-};
+use super::{ApiError, ErrorWrapper, FgContext, IntoResponse, Json, Path, Response, WithRejection};
 use crate::{
     openapi,
     sovd::locks::{
@@ -31,13 +30,13 @@ pub(crate) mod lock {
     use cda_interfaces::UdsEcu;
 
     use super::{
-        ApiError, Json, LockPathParam, Path, Response, Secured, State, TransformOperation, UseApi,
-        WebserverFgState, WithRejection, delete_handler, get_id_handler, openapi, put_handler,
+        ApiError, FgContext, Json, LockPathParam, Path, Response, Secured, TransformOperation,
+        UseApi, WithRejection, delete_handler, get_id_handler, openapi, put_handler,
     };
 
     pub(crate) async fn delete<T: UdsEcu + Clone>(
         Path(LockPathParam { lock }): Path<LockPathParam>,
-        State(state): State<WebserverFgState<T>>,
+        FgContext(state): FgContext<T>,
         UseApi(sec_plugin, _): UseApi<Secured, ()>,
     ) -> Response {
         let claims = sec_plugin.as_auth_plugin().claims();
@@ -60,7 +59,7 @@ pub(crate) mod lock {
 
     pub(crate) async fn put<T: UdsEcu + Clone>(
         Path(LockPathParam { lock }): Path<LockPathParam>,
-        State(state): State<WebserverFgState<T>>,
+        FgContext(state): FgContext<T>,
         UseApi(sec_plugin, _): UseApi<Secured, ()>,
         WithRejection(Json(body), _): WithRejection<
             Json<sovd_interfaces::locking::Request>,
@@ -89,7 +88,7 @@ pub(crate) mod lock {
     pub(crate) async fn get<T: UdsEcu + Clone>(
         Path(LockPathParam { lock }): Path<LockPathParam>,
         UseApi(_sec_plugin, _): UseApi<Secured, ()>,
-        State(state): State<WebserverFgState<T>>,
+        FgContext(state): FgContext<T>,
     ) -> Response {
         get_id_handler(
             &state.locks.functional_group,
@@ -116,11 +115,11 @@ pub(crate) mod lock {
 
 pub(crate) async fn post<T: UdsEcu + Clone>(
     UseApi(Secured(sec_plugin), _): UseApi<Secured, ()>,
-    State(state): State<WebserverFgState<T>>,
+    FgContext(state): FgContext<T>,
     WithRejection(Json(body), _): WithRejection<Json<sovd_interfaces::locking::Request>, ApiError>,
 ) -> Response {
     let claims = sec_plugin.as_ref().as_auth_plugin().claims();
-    let vehicle_ro_lock = vehicle_read_lock(&state.locks, &claims).await;
+    let vehicle_ro_lock = vehicle_read_lock(state.locks.vehicle(), &claims).await;
     if let Err(e) = vehicle_ro_lock {
         return ErrorWrapper {
             error: e,
@@ -148,7 +147,10 @@ pub(crate) async fn post<T: UdsEcu + Clone>(
                         .into_response();
                     }
                 };
-                if !ecu_functional_groups.contains(&state.functional_group_name) {
+                if !ecu_functional_groups
+                    .iter()
+                    .any(|group| group.eq_ignore_ascii_case(&state.functional_group_name))
+                {
                     continue;
                 }
                 if let Some(lock_info) = lock_info {
@@ -182,7 +184,7 @@ pub(crate) async fn post<T: UdsEcu + Clone>(
         &state.uds,
         LockContext {
             lock: &state.locks.functional_group,
-            all_locks: &state.locks,
+            lock_provider: Arc::clone(&state.lock_provider),
             rw_lock: None,
         },
         Some(&state.functional_group_name),
@@ -207,7 +209,7 @@ pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
 
 pub(crate) async fn get<T: UdsEcu + Clone>(
     UseApi(sec_plugin, _): UseApi<Secured, ()>,
-    State(state): State<WebserverFgState<T>>,
+    FgContext(state): FgContext<T>,
 ) -> Response {
     let claims = sec_plugin.as_auth_plugin().claims();
     get_handler(

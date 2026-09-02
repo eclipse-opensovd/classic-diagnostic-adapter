@@ -18,8 +18,8 @@ pub(crate) mod proto;
 
 use cda_interfaces::datatypes::DatabaseNamingConvention;
 pub use mdd_data::{
-    ProtoLoadConfig, files::FileManager, load_chunk, load_ecudata, load_proto_data,
-    mmap_and_decode_mdd, update_mdd_uncompressed,
+    ProtoLoadConfig, files::EmbeddedFileStore, load_ecudata, load_proto_data, mmap_and_decode_mdd,
+    update_mdd_uncompressed,
 };
 use serde::{Deserialize, Serialize};
 

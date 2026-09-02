@@ -121,15 +121,7 @@ pub(crate) async fn list_collection_files(
         }
 
         if query.include_revision {
-            let path = collection.file_path(key)?;
-            let path_str = path.to_str().ok_or_else(|| {
-                RuntimeUpdateError::StorageError(StorageError::Other(format!(
-                    "file path for key '{key}' is not valid UTF-8"
-                )))
-            })?;
-            item.revision = cda_database::mmap_and_decode_mdd(path_str)
-                .ok()
-                .and_then(|mdd| mdd.revision);
+            item.revision = crate::mdd::revision(&collection.file_path(key)?);
         }
 
         items.push(item);
@@ -253,25 +245,40 @@ pub(crate) async fn delete_all_nextupdate(
     Ok(deleted_ids)
 }
 
-/// Returns `true` if the MDD backup collection is empty or does not exist.
+/// Returns whether an authoritative backup snapshot exists.
 ///
 /// Used as a pre-condition check before starting a Rollback execution.
-pub(crate) async fn is_backup_empty(storage: &impl Storage) -> Result<bool, RuntimeUpdateError> {
-    let mdd_backup = storage
-        .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
-        .await?;
-    Ok(mdd_backup.is_empty().await?)
+pub(crate) async fn backup_snapshot_exists(
+    storage: &impl Storage,
+) -> Result<bool, RuntimeUpdateError> {
+    match storage
+        .get_collection(&CollectionName::DiagnosticDatabaseBackup)
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(StorageError::CollectionNotFound(_)) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) async fn delete_all_backup(
     storage: &impl Storage,
 ) -> Result<Vec<String>, RuntimeUpdateError> {
-    let mdd_backup = storage
-        .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
-        .await?;
+    let deleted_ids = match storage
+        .get_collection(&CollectionName::DiagnosticDatabaseBackup)
+        .await
+    {
+        Ok(backup) => backup.list().await?,
+        Err(StorageError::CollectionNotFound(_)) => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
     let mut tx = storage.begin_transaction()?;
-    let deleted_ids = mdd_backup.list().await?;
-    mdd_backup.delete_all(&mut tx).await?;
+    crate::operations::delete_collection_ignore_missing(
+        storage,
+        &mut tx,
+        &CollectionName::DiagnosticDatabaseBackup,
+    )
+    .await?;
     tx.commit().await?;
     Ok(deleted_ids)
 }
@@ -348,6 +355,9 @@ pub(crate) async fn upload_files<
     files: Vec<UploadFile>,
 ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
     let mut result = BulkDataCreatedList::default();
+    if files.is_empty() {
+        return Ok(result);
+    }
 
     if let Some(file) = files.iter().find(|file| {
         std::path::Path::new(&file.filename)
@@ -534,7 +544,7 @@ mod tests {
     > cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
         for RejectingSecurityHandler
     {
-        async fn check_apply_allowed(
+        async fn check_execution_allowed(
             &self,
             _lock_state_provider: &L,
             _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
@@ -586,7 +596,7 @@ mod tests {
     > cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
         for RejectingByNameSecurityHandler
     {
-        async fn check_apply_allowed(
+        async fn check_execution_allowed(
             &self,
             _lock_state_provider: &L,
             _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
@@ -1207,6 +1217,27 @@ mod tests {
             result,
             Err(RuntimeUpdateError::InvalidFileType(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn empty_upload_does_not_create_nextupdate_collection() {
+        let (storage, _dir) = make_storage();
+        let current = storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
+            .await
+            .unwrap();
+        write_test_file_by_name(&storage, &*current, "existing.mdd", b"current_data").await;
+
+        let result = upload(&storage, Vec::new()).await.unwrap();
+
+        assert!(result.items.is_empty());
+        assert!(matches!(
+            storage
+                .get_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
+                .await,
+            Err(StorageError::CollectionNotFound(_))
+        ));
+        assert_eq!(current.list().await.unwrap(), vec!["existing.mdd"]);
     }
 
     #[tokio::test]
