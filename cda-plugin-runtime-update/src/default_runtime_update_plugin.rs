@@ -293,7 +293,7 @@ mod tests {
         DefaultRuntimeUpdatePlugin,
         test_utils::{
             MockLockProvider, MockSecurityHandler, NoopReloadHandler, StubTransport, make_storage,
-            make_upload_files, make_valid_config, write_test_file,
+            make_upload_files, make_valid_config, readable_mdd_bytes, write_test_file,
         },
     };
 
@@ -607,7 +607,7 @@ mod tests {
             &storage,
             &CollectionName::DiagnosticDatabaseNextUpdate,
             "ecu.mdd",
-            b"mdd_data",
+            &readable_mdd_bytes("TestEcu"),
         )
         .await;
 
@@ -629,7 +629,7 @@ mod tests {
             &storage,
             &CollectionName::DiagnosticDatabaseNextUpdate,
             "ecu.mdd",
-            b"mdd_data",
+            &readable_mdd_bytes("TestEcu"),
         )
         .await;
 
@@ -720,7 +720,7 @@ mod tests {
             &storage,
             &CollectionName::DiagnosticDatabaseNextUpdate,
             "ecu.mdd",
-            b"mdd_data",
+            &readable_mdd_bytes("TestEcu"),
         )
         .await;
         let (reloader, mut reload) = GatedReloadHandler::new();
