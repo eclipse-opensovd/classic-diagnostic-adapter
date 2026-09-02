@@ -38,6 +38,7 @@ use cda_plugin_security::{
     DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,
 };
 use cda_sovd::Locks;
+use cda_storage::LocalStorage;
 use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
 use cda_transport_router::DiagnosticTransportRouter;
 use clap::{Parser, Subcommand};
@@ -327,8 +328,16 @@ where
 
     tracing::debug!("Webserver is running. Loading sovd routes...");
 
+    let storage = Arc::new(
+        LocalStorage::new(&config.runtime_update_config.storage_dir).map_err(|source| {
+            AppError::InitializationFailed(format!("Failed to initialize storage. Error: {source}"))
+        })?,
+    );
+
     let vehicle_data =
-        match load_vehicle_data::<SP>(&config, webserver_state.health_state.as_ref()).await {
+        match load_vehicle_data::<SP>(&config, webserver_state.health_state.as_ref(), &storage)
+            .await
+        {
             Ok(data) => data,
             Err(AppError::ShutdownRequested) => {
                 tracing::info!("Shutdown requested during database load, exiting cleanly");
@@ -351,6 +360,7 @@ where
         &webserver_state,
         setup.build_update_plugin,
         setup.build_communication_plugin,
+        storage,
     )
     .await?;
 
@@ -550,10 +560,10 @@ async fn register_version_endpoints(dynamic_router: &cda_sovd::dynamic_router::D
 pub async fn load_vehicle_data<S: SecurityPlugin>(
     config: &Configuration,
     health: Option<&cda_health::HealthState>,
+    storage: &LocalStorage,
 ) -> Result<VehicleData<S>, AppError> {
     let mdd_paths: Vec<PathBuf> = {
-        let storage_dir = &config.runtime_update_config.storage_dir;
-        let paths = resolve_mdd_paths(storage_dir, &config.database.seed_dir).await;
+        let paths = resolve_mdd_paths(storage, &config.database.seed_dir).await;
         if paths.is_empty() && config.database.exit_no_database_loaded {
             return Err(AppError::InitializationFailed(
                 "No MDD files found".to_string(),

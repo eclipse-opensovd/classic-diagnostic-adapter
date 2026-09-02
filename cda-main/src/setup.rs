@@ -50,6 +50,7 @@ use cda_plugin_communication_management::{
     },
 };
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
+use cda_storage::LocalStorage;
 use cda_transport_router::DiagnosticTransportRouter;
 use futures::future::BoxFuture;
 use tokio::sync::RwLock;
@@ -89,7 +90,7 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
     pub flash_files_path: String,
     pub components_config: cda_interfaces::datatypes::ComponentsConfig,
     pub health: Option<HashMap<String, Arc<dyn HealthProvider>>>,
-    pub storage_dir: String,
+    pub storage: Arc<LocalStorage>,
     pub mdd_decompress: bool,
     pub shutdown_signal: ShutdownSignal,
     /// Transport behavior to restore after a runtime database update completes.
@@ -431,6 +432,7 @@ pub(crate) async fn setup_runtime_routes<SP, SL, UPB, CPB>(
     ws: &ApplicationState,
     build_update_plugin: Option<UPB>,
     communication_plugin: CPB,
+    storage: Arc<LocalStorage>,
 ) -> Result<CommunicationRuntime, AppError>
 where
     SP: SecurityPlugin,
@@ -516,7 +518,7 @@ where
         uds_manager_replacer: uds_manager.replacer(),
         gateway_replacer: gateway.replacer(),
         health: vehicle_data.health_providers,
-        storage_dir: runtime_update_config.storage_dir.clone(),
+        storage,
         mdd_decompress,
     };
 

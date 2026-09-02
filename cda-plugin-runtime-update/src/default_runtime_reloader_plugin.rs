@@ -70,9 +70,6 @@ where
     /// Health providers for monitoring
     pub health: Option<HashMap<String, Arc<dyn HealthProvider>>>,
 
-    /// Storage directory for runtime update files
-    pub storage_dir: String,
-
     /// Whether to decompress MDD files after apply
     pub mdd_decompress: bool,
 
