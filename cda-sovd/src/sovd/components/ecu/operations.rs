@@ -96,18 +96,18 @@ pub(crate) mod comparams {
         };
         use axum_extra::extract::WithRejection;
         use cda_interfaces::{
-            HashMap, HashMapExtensions, UdsEcu,
-            communication_control::{CommunicationAccess, CommunicationGuard},
+            HashMap, HashMapExtensions, UdsEcu, communication_control::CommunicationAccess,
             file_manager::FileManager,
         };
         use indexmap::IndexMap;
         use opensovd_axum_extra::ExtractHost;
         use sovd_interfaces::components::ecu::operations::comparams as sovd_comparams;
-        use tokio::sync::{Mutex, RwLock};
+        use tokio::sync::RwLock;
         use uuid::Uuid;
 
         use crate::sovd::{
-            IntoSovd, WebserverEcuState, acquire_communication_activity, create_schema,
+            ComparamExecution, IntoSovd, WebserverEcuState, acquire_communication_activity,
+            create_schema,
             error::{ApiError, ErrorWrapper},
         };
 
@@ -151,7 +151,6 @@ pub(crate) mod comparams {
             >,
             State(WebserverEcuState {
                 comparam_executions,
-                communication_activities,
                 communication_access,
                 ..
             }): State<WebserverEcuState<T, U>>,
@@ -167,7 +166,6 @@ pub(crate) mod comparams {
             };
             handler_write(
                 comparam_executions,
-                communication_activities,
                 communication_access,
                 path,
                 body,
@@ -191,7 +189,7 @@ pub(crate) mod comparams {
         }
 
         pub(crate) async fn handler_read(
-            executions: Arc<RwLock<IndexMap<Uuid, sovd_comparams::Execution>>>,
+            executions: Arc<RwLock<IndexMap<Uuid, ComparamExecution>>>,
             include_schema: bool,
         ) -> Response {
             let schema = if include_schema {
@@ -214,8 +212,7 @@ pub(crate) mod comparams {
                 .into_response()
         }
         async fn handler_write(
-            executions: Arc<RwLock<IndexMap<Uuid, sovd_comparams::Execution>>>,
-            communication_activities: Arc<Mutex<HashMap<Uuid, CommunicationGuard>>>,
+            executions: Arc<RwLock<IndexMap<Uuid, ComparamExecution>>>,
             communication_access: Arc<dyn CommunicationAccess>,
             base_path: String,
             request: Option<sovd_comparams::executions::update::Request>,
@@ -260,18 +257,17 @@ pub(crate) mod comparams {
                 schema,
             };
             // Publish the lease before the execution becomes observable to DELETE.
-            communication_activities
-                .lock()
-                .await
-                .insert(id, communication_activity);
             let mut executions = executions.write().await;
             executions.insert(
                 id,
-                sovd_comparams::Execution {
-                    capability: sovd_comparams::executions::Capability::Execute,
-                    status: create_execution_response.status.clone(),
-                    comparam_override,
-                },
+                ComparamExecution::new(
+                    sovd_comparams::Execution {
+                        capability: sovd_comparams::executions::Capability::Execute,
+                        status: create_execution_response.status.clone(),
+                        comparam_override,
+                    },
+                    communication_activity,
+                ),
             );
             (
                 StatusCode::ACCEPTED,
@@ -311,7 +307,7 @@ pub(crate) mod comparams {
                     .ok_or_else(|| {
                         ApiError::NotFound(Some(format!("Execution with id {id} not found")))
                     }) {
-                    Ok((idx, _, v)) => (idx, v.clone()),
+                    Ok((idx, _, exec)) => (idx, exec.snapshot()),
                     Err(e) => {
                         return ErrorWrapper {
                             error: e,
@@ -325,7 +321,7 @@ pub(crate) mod comparams {
 
                 // put in all executions with lower index than this one
                 for (_, v) in &comparam_executions.read().await.as_slice()[..idx] {
-                    executions.push(v.clone());
+                    executions.push(v.snapshot());
                 }
                 executions.push(execution);
 
@@ -384,7 +380,6 @@ pub(crate) mod comparams {
                 Path(id): Path<IdPathParam>,
                 State(WebserverEcuState {
                     comparam_executions,
-                    communication_activities,
                     ..
                 }): State<WebserverEcuState<T, U>>,
             ) -> Response {
@@ -405,7 +400,6 @@ pub(crate) mod comparams {
                     }
                     .into_response();
                 }
-                crate::sovd::release_communication_activity(&communication_activities, &id).await;
                 StatusCode::NO_CONTENT.into_response()
             }
 
@@ -449,7 +443,7 @@ pub(crate) mod comparams {
                 // };
 
                 let mut executions_lock = comparam_executions.write().await;
-                let execution: &mut sovd_comparams::Execution =
+                let execution: &mut ComparamExecution =
                     match executions_lock.get_mut(&id).ok_or_else(|| {
                         ApiError::NotFound(Some(format!("Execution with id {id} not found")))
                     }) {
@@ -766,7 +760,7 @@ pub(crate) mod service {
     }
 
     pub(crate) mod executions {
-        use std::sync::Arc;
+        use std::sync::{Arc, RwLock};
 
         use aide::{UseApi, transform::TransformOperation};
         use axum::{
@@ -779,10 +773,11 @@ pub(crate) mod service {
         use axum_extra::extract::{Host, WithRejection};
         use cda_interfaces::{
             DiagComm, DiagCommType, DynamicPlugin, SchemaProvider, UdsEcu,
-            communication_control::{CommunicationAccess, CommunicationGuard},
+            communication_control::CommunicationAccess,
             diagservices::{DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType},
             file_manager::FileManager,
             subfunction_ids,
+            util::std_ext::{lock_read, lock_write},
         };
         use cda_plugin_security::{Secured, SecurityPlugin};
         use sovd_interfaces::{
@@ -792,18 +787,17 @@ pub(crate) mod service {
                 OperationQuery, service::executions as sovd_executions,
             },
         };
-        use tokio::sync::{Mutex, RwLock};
         use uuid::Uuid;
 
         use crate::{
             openapi,
             sovd::{
-                self, ServiceExecution, WebserverEcuState, acquire_and_reserve_execution,
-                api_error_from_diag_response,
+                self, ExecutionReservation, ServiceExecution, WebserverEcuState,
+                acquire_and_reserve_execution, api_error_from_diag_response,
                 components::get_content_type_and_accept,
                 create_response_schema, create_schema,
                 error::{ApiError, ErrorWrapper, VendorErrorCode},
-                field_parse_errors_to_json, finalize_execution, guard_execution,
+                field_parse_errors_to_json, guard_execution,
                 locks::validate_lock,
             },
         };
@@ -837,9 +831,7 @@ pub(crate) mod service {
             } else {
                 None
             };
-            let ids: Vec<OperationIdItem> = service_executions
-                .read()
-                .await
+            let ids: Vec<OperationIdItem> = lock_read(&service_executions)
                 .get(&service)
                 .map(|op_map| {
                     op_map
@@ -876,7 +868,6 @@ pub(crate) mod service {
                 uds,
                 locks,
                 service_executions,
-                communication_activities,
                 communication_access,
                 ..
             }): State<WebserverEcuState<T, U>>,
@@ -891,11 +882,7 @@ pub(crate) mod service {
             {
                 return response;
             }
-            let ctx = OperationWriteContext::new(
-                service_executions,
-                communication_activities,
-                communication_access,
-            );
+            let ctx = OperationWriteContext::new(service_executions, communication_access);
             ecu_operation_write_handler_with_activity::<T>(
                 WriteHandlerRequest {
                     service,
@@ -978,7 +965,6 @@ pub(crate) mod service {
             service_executions: Arc<
                 RwLock<cda_interfaces::HashMap<String, indexmap::IndexMap<Uuid, ServiceExecution>>>,
             >,
-            communication_activities: Arc<Mutex<cda_interfaces::HashMap<Uuid, CommunicationGuard>>>,
             communication_access: Arc<dyn CommunicationAccess>,
         }
 
@@ -989,14 +975,10 @@ pub(crate) mod service {
                         cda_interfaces::HashMap<String, indexmap::IndexMap<Uuid, ServiceExecution>>,
                     >,
                 >,
-                communication_activities: Arc<
-                    Mutex<cda_interfaces::HashMap<Uuid, CommunicationGuard>>,
-                >,
                 communication_access: Arc<dyn CommunicationAccess>,
             ) -> Self {
                 Self {
                     service_executions,
-                    communication_activities,
                     communication_access,
                 }
             }
@@ -1014,7 +996,6 @@ pub(crate) mod service {
         ) -> Response {
             let OperationWriteContext {
                 service_executions,
-                communication_activities,
                 communication_access,
             } = ctx;
             let WriteHandlerRequest {
@@ -1051,16 +1032,13 @@ pub(crate) mod service {
             // concurrent POST for the same operation sees 409 Conflict.
             // The lease is the active-execution marker for update arbitration. It is
             // published with the reservation and retained until the entry is removed.
-            let (exec_id, guard) = match acquire_and_reserve_execution(
+            let reservation = match acquire_and_reserve_execution(
                 &*communication_access,
                 Arc::clone(&service_executions),
-                Arc::clone(&communication_activities),
                 &service,
                 &service,
                 include_schema,
-            )
-            .await
-            {
+            ) {
                 Ok(v) => v,
                 Err(e) => return e.into_response(),
             };
@@ -1072,7 +1050,6 @@ pub(crate) mod service {
                 match check_if_async(uds, ecu_name, &service, &security_plugin).await {
                     Ok(v) => v,
                     Err(e) => {
-                        guard.cleanup().await;
                         return err_response(e);
                     }
                 }
@@ -1081,7 +1058,6 @@ pub(crate) mod service {
             let (data, map_to_json) = match validate_and_parse_write_request(&headers, &body) {
                 Ok(v) => v,
                 Err(e) => {
-                    guard.cleanup().await;
                     return err_response(e);
                 }
             };
@@ -1108,7 +1084,6 @@ pub(crate) mod service {
                 {
                     Ok(r) => r,
                     Err(e) => {
-                        guard.cleanup().await;
                         return *e;
                     }
                 }
@@ -1119,14 +1094,11 @@ pub(crate) mod service {
                     response,
                     map_to_json,
                     include_schema,
-                    base_path,
-                    service,
-                    service_executions,
-                    exec_id,
+                    &base_path,
+                    reservation,
                 )
-                .await
             } else {
-                guard.cleanup().await;
+                drop(reservation);
                 handle_sync_post::<T>(
                     response,
                     map_to_json,
@@ -1285,18 +1257,12 @@ pub(crate) mod service {
         /// Handles the async (Stop/RequestResults) POST path: finalises the
         /// previously reserved execution with the Start-response parameters,
         /// then returns 202 Accepted with only `id` and `status` per spec Table 184.
-        async fn handle_async_post<T: UdsEcu>(
+        fn handle_async_post<T: UdsEcu>(
             response: Option<T::Response>,
             map_to_json: bool,
             include_schema: bool,
-            base_path: String,
-            service: String,
-            service_executions: std::sync::Arc<
-                tokio::sync::RwLock<
-                    cda_interfaces::HashMap<String, indexmap::IndexMap<Uuid, ServiceExecution>>,
-                >,
-            >,
-            exec_id: Uuid,
+            base_path: &str,
+            reservation: ExecutionReservation<ServiceExecution>,
         ) -> Response {
             let parameters = match response {
                 Some(r) if map_to_json && !r.is_empty() => match r.into_json() {
@@ -1308,10 +1274,9 @@ pub(crate) mod service {
                 },
                 _ => serde_json::Map::new(),
             };
-            finalize_execution(&service_executions, &service, &exec_id, |exec| {
+            let exec_id = reservation.commit_async(|exec| {
                 exec.parameters = parameters;
-            })
-            .await;
+            });
             let schema = if include_schema {
                 Some(create_schema!(AsyncPostResponse))
             } else {
@@ -1604,14 +1569,13 @@ pub(crate) mod service {
 
             /// Process a successful UDS `RequestResults` response: parse it, update stored
             /// execution state, and return the `200 OK` response body.
-            async fn get_operations_response<T: UdsEcu>(
+            fn get_operations_response<T: UdsEcu>(
                 response: T::Response,
                 service: &str,
                 exec_id: Uuid,
-                service_executions: &tokio::sync::RwLock<
+                service_executions: &std::sync::RwLock<
                     cda_interfaces::HashMap<String, indexmap::IndexMap<Uuid, ServiceExecution>>,
                 >,
-                communication_activities: &Mutex<cda_interfaces::HashMap<Uuid, CommunicationGuard>>,
                 include_schema: bool,
             ) -> Response {
                 if let DiagServiceResponseType::Negative = response.response_type() {
@@ -1628,15 +1592,13 @@ pub(crate) mod service {
                     parse_json_response_params::<T::Response>(response, "RequestResults")
                 };
 
-                if let Some(stored_mut) = service_executions
-                    .write()
-                    .await
+                if let Some(stored_mut) = lock_write(service_executions)
                     .get_mut(service)
                     .and_then(|m| m.get_mut(&exec_id))
                 {
                     stored_mut.parameters.clone_from(&parameters);
+                    stored_mut.complete();
                 }
-                sovd::release_communication_activity(communication_activities, &exec_id).await;
 
                 get_by_id_response(
                     ExecutionStatus::Completed,
@@ -1654,7 +1616,6 @@ pub(crate) mod service {
                     ecu_name,
                     uds,
                     service_executions,
-                    communication_activities,
                     ..
                 }): State<WebserverEcuState<T, U>>,
             ) -> Response {
@@ -1670,18 +1631,14 @@ pub(crate) mod service {
                     exec_id,
                     include_schema,
                     &format!("Execution {exec_id} is already in progress"),
-                )
-                .await
-                {
+                ) {
                     Ok(v) => v,
                     Err(e) => return e.into_response(),
                 };
 
                 // suppress_service: skip the UDS send, return stored state directly
                 if query.suppress_service {
-                    if let Some(exec) = service_executions
-                        .write()
-                        .await
+                    if let Some(exec) = lock_write(&service_executions)
                         .get_mut(&service)
                         .and_then(|m| m.get_mut(&exec_id))
                     {
@@ -1712,9 +1669,7 @@ pub(crate) mod service {
                     )
                     .await;
 
-                if let Some(exec) = service_executions
-                    .write()
-                    .await
+                if let Some(exec) = lock_write(&service_executions)
                     .get_mut(&service)
                     .and_then(|m| m.get_mut(&exec_id))
                 {
@@ -1735,17 +1690,13 @@ pub(crate) mod service {
                         }
                         .into_response()
                     }
-                    Ok(response) => {
-                        get_operations_response::<T>(
-                            response,
-                            &service,
-                            exec_id,
-                            &service_executions,
-                            &communication_activities,
-                            include_schema,
-                        )
-                        .await
-                    }
+                    Ok(response) => get_operations_response::<T>(
+                        response,
+                        &service,
+                        exec_id,
+                        &service_executions,
+                        include_schema,
+                    ),
                 }
             }
 
@@ -1773,7 +1724,6 @@ pub(crate) mod service {
                     uds,
                     locks,
                     service_executions,
-                    communication_activities,
                     ..
                 }): State<WebserverEcuState<T, U>>,
             ) -> Response {
@@ -1795,9 +1745,7 @@ pub(crate) mod service {
                     exec_id,
                     include_schema,
                     &format!("Execution {exec_id} is already being stopped"),
-                )
-                .await
-                {
+                ) {
                     return e.into_response();
                 }
 
@@ -1819,14 +1767,9 @@ pub(crate) mod service {
 
                 match uds_result {
                     Ok(r) if matches!(r.response_type(), DiagServiceResponseType::Positive) => {
-                        if let Some(op_map) = service_executions.write().await.get_mut(&service) {
+                        if let Some(op_map) = lock_write(&service_executions).get_mut(&service) {
                             op_map.shift_remove(&exec_id);
                         }
-                        crate::sovd::release_communication_activity(
-                            &communication_activities,
-                            &exec_id,
-                        )
-                        .await;
                         if r.is_empty() {
                             StatusCode::NO_CONTENT.into_response()
                         } else {
@@ -1848,14 +1791,9 @@ pub(crate) mod service {
                             exec_id = %exec_id,
                             "Stop service not found (suppress_service=true), removing execution"
                         );
-                        if let Some(op_map) = service_executions.write().await.get_mut(&service) {
+                        if let Some(op_map) = lock_write(&service_executions).get_mut(&service) {
                             op_map.shift_remove(&exec_id);
                         }
-                        crate::sovd::release_communication_activity(
-                            &communication_activities,
-                            &exec_id,
-                        )
-                        .await;
                         StatusCode::NO_CONTENT.into_response()
                     }
                     result => {
@@ -1874,19 +1812,12 @@ pub(crate) mod service {
                             );
                         }
                         if query.force {
-                            if let Some(op_map) = service_executions.write().await.get_mut(&service)
+                            if let Some(op_map) = lock_write(&service_executions).get_mut(&service)
                             {
                                 op_map.shift_remove(&exec_id);
                             }
-                            crate::sovd::release_communication_activity(
-                                &communication_activities,
-                                &exec_id,
-                            )
-                            .await;
                             return StatusCode::NO_CONTENT.into_response();
-                        } else if let Some(exec) = service_executions
-                            .write()
-                            .await
+                        } else if let Some(exec) = lock_write(&service_executions)
                             .get_mut(&service)
                             .and_then(|m| m.get_mut(&exec_id))
                         {
@@ -2177,6 +2108,7 @@ mod tests {
             },
             file_manager::mock::MockFileManager,
             mock::MockUdsEcu,
+            util::std_ext::{lock_read, lock_write},
         };
         use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
         use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
@@ -2234,7 +2166,7 @@ mod tests {
             ecu_name: &str,
             uds: &T,
             service_executions: Arc<
-                tokio::sync::RwLock<
+                std::sync::RwLock<
                     cda_interfaces::HashMap<
                         String,
                         indexmap::IndexMap<uuid::Uuid, ServiceExecution>,
@@ -2246,7 +2178,6 @@ mod tests {
         ) -> axum::response::Response {
             let ctx = handlers::OperationWriteContext::new(
                 service_executions,
-                Arc::new(tokio::sync::Mutex::new(cda_interfaces::HashMap::default())),
                 enabled_communication_access_for_test(),
             );
             handlers::ecu_operation_write_handler_with_activity::<T>(
@@ -2313,10 +2244,7 @@ mod tests {
 
             // Pre-populate an execution
             let exec_id = uuid::Uuid::new_v4();
-            state
-                .service_executions
-                .write()
-                .await
+            lock_write(&state.service_executions)
                 .entry("CalibrateSensor".to_string())
                 .or_default()
                 .insert(
@@ -2326,6 +2254,7 @@ mod tests {
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
 
@@ -2431,10 +2360,7 @@ mod tests {
             );
 
             let exec_id = uuid::Uuid::new_v4();
-            state
-                .service_executions
-                .write()
-                .await
+            lock_write(&state.service_executions)
                 .entry("CalibrateSensor".to_string())
                 .or_default()
                 .insert(
@@ -2444,6 +2370,7 @@ mod tests {
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
 
@@ -2513,10 +2440,7 @@ mod tests {
                 m.insert("stored".to_string(), serde_json::json!("value"));
                 m
             };
-            state
-                .service_executions
-                .write()
-                .await
+            lock_write(&state.service_executions)
                 .entry("CalibrateSensor".to_string())
                 .or_default()
                 .insert(
@@ -2526,6 +2450,7 @@ mod tests {
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
 
@@ -2590,10 +2515,7 @@ mod tests {
             );
 
             let exec_id = uuid::Uuid::new_v4();
-            state
-                .service_executions
-                .write()
-                .await
+            lock_write(&state.service_executions)
                 .entry("CalibrateSensor".to_string())
                 .or_default()
                 .insert(
@@ -2603,6 +2525,7 @@ mod tests {
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
 
@@ -2698,10 +2621,7 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state
-                .service_executions
-                .write()
-                .await
+            lock_write(&state.service_executions)
                 .entry("CalibrateSensor".to_string())
                 .or_default()
                 .insert(
@@ -2711,6 +2631,7 @@ mod tests {
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
 
@@ -2743,9 +2664,7 @@ mod tests {
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
             // Verify execution was removed
             assert!(
-                service_executions_ref
-                    .read()
-                    .await
+                lock_read(&service_executions_ref)
                     .values()
                     .all(IndexMap::is_empty)
             );
@@ -2781,10 +2700,7 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state
-                .service_executions
-                .write()
-                .await
+            lock_write(&state.service_executions)
                 .entry("CalibrateSensor".to_string())
                 .or_default()
                 .insert(
@@ -2794,6 +2710,7 @@ mod tests {
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
 
@@ -2842,9 +2759,7 @@ mod tests {
             );
             // Execution must be removed regardless
             assert!(
-                service_executions_ref
-                    .read()
-                    .await
+                lock_read(&service_executions_ref)
                     .values()
                     .all(IndexMap::is_empty)
             );
@@ -2876,10 +2791,7 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state
-                .service_executions
-                .write()
-                .await
+            lock_write(&state.service_executions)
                 .entry("CalibrateSensor".to_string())
                 .or_default()
                 .insert(
@@ -2889,6 +2801,7 @@ mod tests {
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
 
@@ -2932,9 +2845,7 @@ mod tests {
                 "parameters should be absent when Stop returns Null"
             );
             assert!(
-                service_executions_ref
-                    .read()
-                    .await
+                lock_read(&service_executions_ref)
                     .values()
                     .all(IndexMap::is_empty)
             );
@@ -2968,10 +2879,7 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state
-                .service_executions
-                .write()
-                .await
+            lock_write(&state.service_executions)
                 .entry("CalibrateSensor".to_string())
                 .or_default()
                 .insert(
@@ -2981,6 +2889,7 @@ mod tests {
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
 
@@ -3022,9 +2931,7 @@ mod tests {
             let errors = result.get("error").expect("missing error field");
             assert!(errors.is_array() && !errors.as_array().unwrap().is_empty());
             assert!(
-                service_executions_ref
-                    .read()
-                    .await
+                lock_read(&service_executions_ref)
                     .values()
                     .all(IndexMap::is_empty)
             );
@@ -3067,10 +2974,7 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state
-                .service_executions
-                .write()
-                .await
+            lock_write(&state.service_executions)
                 .entry("CalibrateSensor".to_string())
                 .or_default()
                 .insert(
@@ -3080,6 +2984,7 @@ mod tests {
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
 
@@ -3120,9 +3025,7 @@ mod tests {
             let errors = result.get("error").expect("missing error field");
             assert!(errors.is_array() && !errors.as_array().unwrap().is_empty());
             assert!(
-                service_executions_ref
-                    .read()
-                    .await
+                lock_read(&service_executions_ref)
                     .values()
                     .all(IndexMap::is_empty)
             );
@@ -3147,10 +3050,7 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state
-                .service_executions
-                .write()
-                .await
+            lock_write(&state.service_executions)
                 .entry("CalibrateSensor".to_string())
                 .or_default()
                 .insert(
@@ -3160,6 +3060,7 @@ mod tests {
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
 
@@ -3192,9 +3093,7 @@ mod tests {
             // force=true -> removes execution even on error
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
             assert!(
-                service_executions_ref
-                    .read()
-                    .await
+                lock_read(&service_executions_ref)
                     .values()
                     .all(IndexMap::is_empty)
             );
@@ -3219,10 +3118,7 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state
-                .service_executions
-                .write()
-                .await
+            lock_write(&state.service_executions)
                 .entry("CalibrateSensor".to_string())
                 .or_default()
                 .insert(
@@ -3232,6 +3128,7 @@ mod tests {
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
 
@@ -3263,9 +3160,7 @@ mod tests {
             // force=true -> removes execution even on negative ECU response
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
             assert!(
-                service_executions_ref
-                    .read()
-                    .await
+                lock_read(&service_executions_ref)
                     .values()
                     .all(IndexMap::is_empty)
             );
@@ -3289,10 +3184,7 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state
-                .service_executions
-                .write()
-                .await
+            lock_write(&state.service_executions)
                 .entry("CalibrateSensor".to_string())
                 .or_default()
                 .insert(
@@ -3302,6 +3194,7 @@ mod tests {
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
 
@@ -3333,7 +3226,7 @@ mod tests {
 
             // force=false -> error should be returned, execution should remain
             assert!(response.status().is_client_error() || response.status().is_server_error());
-            assert_eq!(service_executions_ref.read().await.len(), 1);
+            assert_eq!(lock_read(&service_executions_ref).len(), 1);
         }
 
         #[tokio::test]
@@ -3355,10 +3248,7 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state
-                .service_executions
-                .write()
-                .await
+            lock_write(&state.service_executions)
                 .entry("CalibrateSensor".to_string())
                 .or_default()
                 .insert(
@@ -3368,6 +3258,7 @@ mod tests {
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
 
@@ -3398,7 +3289,7 @@ mod tests {
 
             // Negative ECU response without force -> error returned, in_flight reset
             assert!(response.status().is_client_error() || response.status().is_server_error());
-            let guard = service_executions_ref.read().await;
+            let guard = lock_read(&service_executions_ref);
             let exec = guard
                 .get("CalibrateSensor")
                 .and_then(|m| m.get(&exec_id))
@@ -3426,10 +3317,7 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state
-                .service_executions
-                .write()
-                .await
+            lock_write(&state.service_executions)
                 .entry("CalibrateSensor".to_string())
                 .or_default()
                 .insert(
@@ -3439,6 +3327,7 @@ mod tests {
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
 
@@ -3471,9 +3360,7 @@ mod tests {
             // suppress_service=true on NotFound -> removes execution, returns 204
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
             assert!(
-                service_executions_ref
-                    .read()
-                    .await
+                lock_read(&service_executions_ref)
                     .values()
                     .all(IndexMap::is_empty)
             );
@@ -3491,10 +3378,7 @@ mod tests {
             );
 
             let exec_id = uuid::Uuid::new_v4();
-            state
-                .service_executions
-                .write()
-                .await
+            lock_write(&state.service_executions)
                 .entry("CalibrateSensor".to_string())
                 .or_default()
                 .insert(
@@ -3504,6 +3388,7 @@ mod tests {
                         status: ExecutionStatus::Running,
                         in_flight: true,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
 
@@ -3545,10 +3430,7 @@ mod tests {
             insert_test_ecu_lock(&state.locks, &ecu_name).await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state
-                .service_executions
-                .write()
-                .await
+            lock_write(&state.service_executions)
                 .entry("CalibrateSensor".to_string())
                 .or_default()
                 .insert(
@@ -3558,6 +3440,7 @@ mod tests {
                         status: ExecutionStatus::Running,
                         in_flight: true,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
 
@@ -3613,10 +3496,7 @@ mod tests {
             );
 
             // Pre-populate a running execution for CalibrateSensor
-            state
-                .service_executions
-                .write()
-                .await
+            lock_write(&state.service_executions)
                 .entry("CalibrateSensor".to_string())
                 .or_default()
                 .insert(
@@ -3626,6 +3506,7 @@ mod tests {
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
 
@@ -3678,10 +3559,7 @@ mod tests {
             );
 
             // Pre-populate a running execution for a DIFFERENT service
-            state
-                .service_executions
-                .write()
-                .await
+            lock_write(&state.service_executions)
                 .entry("OtherService".to_string())
                 .or_default()
                 .insert(
@@ -3691,6 +3569,7 @@ mod tests {
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
 
@@ -3853,7 +3732,7 @@ mod tests {
             .await;
 
             assert_eq!(response.status(), StatusCode::ACCEPTED);
-            assert_eq!(service_executions_ref.read().await.len(), 1);
+            assert_eq!(lock_read(&service_executions_ref).len(), 1);
         }
 
         #[tokio::test]
@@ -3894,7 +3773,7 @@ mod tests {
 
             assert_eq!(response.status(), StatusCode::ACCEPTED);
             // execution still tracked even though UDS was not called
-            assert_eq!(service_executions_ref.read().await.len(), 1);
+            assert_eq!(lock_read(&service_executions_ref).len(), 1);
         }
 
         #[tokio::test]
@@ -3955,7 +3834,7 @@ mod tests {
             // Must be 202, not 500 - spec Table 184 body has only id + status
             assert_eq!(response.status(), StatusCode::ACCEPTED);
             // Execution must still be tracked
-            assert_eq!(service_executions_ref.read().await.len(), 1);
+            assert_eq!(lock_read(&service_executions_ref).len(), 1);
             // Body must contain id and status, no errors field
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
@@ -4027,7 +3906,7 @@ mod tests {
 
             // Must be 202, not 500 - spec Table 184 body has only id + status
             assert_eq!(response.status(), StatusCode::ACCEPTED);
-            assert_eq!(service_executions_ref.read().await.len(), 1);
+            assert_eq!(lock_read(&service_executions_ref).len(), 1);
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .unwrap();
@@ -4067,10 +3946,7 @@ mod tests {
             );
 
             let exec_id = uuid::Uuid::new_v4();
-            state
-                .service_executions
-                .write()
-                .await
+            lock_write(&state.service_executions)
                 .entry("CalibrateSensor".to_string())
                 .or_default()
                 .insert(
@@ -4080,6 +3956,7 @@ mod tests {
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
 

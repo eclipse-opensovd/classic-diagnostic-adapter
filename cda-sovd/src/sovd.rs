@@ -11,7 +11,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{Arc, RwLock as StdRwLock},
+    time::Duration,
+};
 
 pub mod request_guard;
 
@@ -40,6 +44,7 @@ use cda_interfaces::{
     diagservices::{FieldParseError, UdsPayloadData},
     file_manager::FileManager,
     runtime_update_api::LockStateProvider,
+    util::std_ext::lock_write,
 };
 use cda_plugin_security::{SecurityPluginLoader, security_plugin_middleware};
 use error::{ApiError, api_error_from_diag_response};
@@ -52,7 +57,7 @@ use sovd_interfaces::{
     components::{ComponentsResponse, ecu as sovd_ecu},
     error::DataError,
 };
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::{
@@ -103,28 +108,22 @@ pub(crate) enum SovdError {
     RouteError(String),
 }
 
+/// Synchronous lock for short execution-map operations so reservation cleanup can run in `Drop`.
+/// Lock guards must never be held across an `.await`.
+pub(crate) type ExecutionLock<E> = StdRwLock<HashMap<String, IndexMap<Uuid, E>>>;
+
 #[derive(Clone)]
 pub(crate) struct WebserverEcuState<T: UdsEcu + Clone, U: FileManager> {
     ecu_name: String,
     uds: T,
     locks: Arc<Locks>,
     // Map of Execution Id -> ComParamMap
-    comparam_executions: Arc<RwLock<IndexMap<Uuid, sovd_ecu::operations::comparams::Execution>>>,
-    // Guards replace sampled execution activity as the source of update exclusion.
-    communication_activities: Arc<Mutex<HashMap<Uuid, CommunicationGuard>>>,
+    comparam_executions: Arc<RwLock<IndexMap<Uuid, ComparamExecution>>>,
     communication_access: Arc<dyn CommunicationAccess>,
     // Map of Service Name -> (Execution Id -> ServiceExecution) for ECU routine operations
-    pub(crate) service_executions: Arc<RwLock<HashMap<String, IndexMap<Uuid, ServiceExecution>>>>,
+    pub(crate) service_executions: Arc<ExecutionLock<ServiceExecution>>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
     mdd_embedded_files: Arc<U>,
-}
-
-async fn release_communication_activity(
-    activities: &Mutex<HashMap<Uuid, CommunicationGuard>>,
-    id: &Uuid,
-) {
-    let activity = activities.lock().await.remove(id);
-    drop(activity);
 }
 
 pub(crate) fn with_retry_after(mut response: Response, retry_after: Option<Duration>) -> Response {
@@ -168,47 +167,134 @@ pub(crate) trait ExecutionStatus {
     fn set_created(&mut self, created: bool);
     /// Creates a placeholder entry used to reserve a slot in the executions map
     /// before the UDS command is sent.
-    fn placeholder() -> Self
+    fn placeholder(communication_guard: CommunicationGuard) -> Self
     where
         Self: Sized;
 }
 
-/// Owns cleanup for a reserved async operation execution and its communication lease.
-pub(crate) struct ExecutionGuard<E> {
-    executions: Arc<RwLock<HashMap<String, IndexMap<Uuid, E>>>>,
-    communication_activities: Arc<Mutex<HashMap<Uuid, CommunicationGuard>>>,
+/// Rolls back a newly inserted execution unless it is committed as asynchronous.
+/// The execution entry owns the communication lease; rollback releases it by removing the entry.
+pub(crate) struct ExecutionReservation<E> {
+    executions: Arc<ExecutionLock<E>>,
     service: String,
     exec_id: Uuid,
+    state: ReservationState,
 }
 
-impl<E: ExecutionStatus> ExecutionGuard<E> {
-    fn new(
-        executions: Arc<RwLock<HashMap<String, IndexMap<Uuid, E>>>>,
-        communication_activities: Arc<Mutex<HashMap<Uuid, CommunicationGuard>>>,
-        service: String,
-        exec_id: Uuid,
-    ) -> Self {
+#[derive(PartialEq)]
+enum ReservationState {
+    Pending,
+    Committed,
+}
+
+impl<E> ExecutionReservation<E> {
+    fn new(executions: Arc<ExecutionLock<E>>, service: String, exec_id: Uuid) -> Self {
         Self {
             executions,
-            communication_activities,
             service,
             exec_id,
+            state: ReservationState::Pending,
         }
     }
 
-    pub(crate) async fn cleanup(&self) {
-        remove_reserved_execution(&self.executions, &self.service, &self.exec_id).await;
-        release_communication_activity(&self.communication_activities, &self.exec_id).await;
+    /// Commits the reserved entry as a persistent asynchronous execution.
+    ///
+    /// The entry already owns the communication lease. While the reservation is pending, its
+    /// `Drop` removes that entry as a rollback. Committing disables only that rollback; the entry
+    /// remains stored and releases its lease automatically when it is completed or removed.
+    pub(crate) fn commit_async(mut self, update_fn: impl FnOnce(&mut E)) -> Uuid
+    where
+        E: ExecutionStatus,
+    {
+        finalize_execution(&self.executions, &self.service, &self.exec_id, update_fn);
+        self.state = ReservationState::Committed;
+        self.exec_id
+    }
+}
+
+impl<E> Drop for ExecutionReservation<E> {
+    fn drop(&mut self) {
+        if self.state == ReservationState::Pending {
+            remove_reserved_execution(&self.executions, &self.service, &self.exec_id);
+        }
+    }
+}
+
+/// Owns a communication-use slot; dropping it releases that slot.
+struct ExecutionLease {
+    _guard: CommunicationGuard,
+}
+
+impl std::fmt::Debug for ExecutionLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ExecutionLease")
+    }
+}
+
+pub(crate) struct ComparamExecution {
+    execution: sovd_ecu::operations::comparams::Execution,
+    _lease: ExecutionLease,
+}
+
+impl ComparamExecution {
+    pub(crate) fn new(
+        execution: sovd_ecu::operations::comparams::Execution,
+        communication_guard: CommunicationGuard,
+    ) -> Self {
+        Self {
+            execution,
+            _lease: ExecutionLease {
+                _guard: communication_guard,
+            },
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> sovd_ecu::operations::comparams::Execution {
+        self.execution.clone()
+    }
+}
+
+impl std::ops::Deref for ComparamExecution {
+    type Target = sovd_ecu::operations::comparams::Execution;
+
+    fn deref(&self) -> &Self::Target {
+        &self.execution
+    }
+}
+
+impl std::ops::DerefMut for ComparamExecution {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.execution
     }
 }
 
 /// Stored state for a single ECU routine execution (async lifecycle).
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct ServiceExecution {
     pub parameters: serde_json::Map<String, serde_json::Value>,
     pub status: sovd_ecu::operations::ExecutionStatus,
     pub in_flight: bool,
     pub is_created: bool,
+    communication_lease: Option<ExecutionLease>,
+}
+
+impl Clone for ServiceExecution {
+    fn clone(&self) -> Self {
+        Self {
+            parameters: self.parameters.clone(),
+            status: self.status.clone(),
+            in_flight: self.in_flight,
+            is_created: self.is_created,
+            communication_lease: None,
+        }
+    }
+}
+
+impl ServiceExecution {
+    pub(crate) fn complete(&mut self) {
+        self.status = sovd_ecu::operations::ExecutionStatus::Completed;
+        self.communication_lease = None;
+    }
 }
 
 impl ExecutionStatus for ServiceExecution {
@@ -227,12 +313,15 @@ impl ExecutionStatus for ServiceExecution {
     fn set_created(&mut self, created: bool) {
         self.is_created = created;
     }
-    fn placeholder() -> Self {
+    fn placeholder(communication_guard: CommunicationGuard) -> Self {
         ServiceExecution {
             parameters: serde_json::Map::new(),
             status: sovd_ecu::operations::ExecutionStatus::Running,
             in_flight: false,
             is_created: false,
+            communication_lease: Some(ExecutionLease {
+                _guard: communication_guard,
+            }),
         }
     }
 }
@@ -240,12 +329,32 @@ impl ExecutionStatus for ServiceExecution {
 /// Stored state for a functional-group routine execution (async lifecycle).
 /// Unlike `ServiceExecution`, parameters are keyed by ECU name so that
 /// per-ECU identity is preserved across the execution lifecycle.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct FgServiceExecution {
     pub parameters: HashMap<String, serde_json::Map<String, serde_json::Value>>,
     pub status: sovd_ecu::operations::ExecutionStatus,
     pub in_flight: bool,
     pub is_created: bool,
+    communication_lease: Option<ExecutionLease>,
+}
+
+impl Clone for FgServiceExecution {
+    fn clone(&self) -> Self {
+        Self {
+            parameters: self.parameters.clone(),
+            status: self.status.clone(),
+            in_flight: self.in_flight,
+            is_created: self.is_created,
+            communication_lease: None,
+        }
+    }
+}
+
+impl FgServiceExecution {
+    pub(crate) fn complete(&mut self) {
+        self.status = sovd_ecu::operations::ExecutionStatus::Completed;
+        self.communication_lease = None;
+    }
 }
 
 impl ExecutionStatus for FgServiceExecution {
@@ -264,12 +373,15 @@ impl ExecutionStatus for FgServiceExecution {
     fn set_created(&mut self, created: bool) {
         self.is_created = created;
     }
-    fn placeholder() -> Self {
+    fn placeholder(communication_guard: CommunicationGuard) -> Self {
         FgServiceExecution {
             parameters: HashMap::new(),
             status: sovd_ecu::operations::ExecutionStatus::Running,
             in_flight: false,
             is_created: false,
+            communication_lease: Some(ExecutionLease {
+                _guard: communication_guard,
+            }),
         }
     }
 }
@@ -329,14 +441,14 @@ impl LockStateProvider for SovdLockStateProvider {
 /// `service` key, marks it `in_flight = true`, and returns a clone of the
 /// execution.  Returns `Err(ErrorWrapper)` (with the lock released) on
 /// not-found or in-flight conflict.
-pub(crate) async fn guard_execution<T: ExecutionStatus + Clone>(
-    executions: &RwLock<HashMap<String, IndexMap<Uuid, T>>>,
+pub(crate) fn guard_execution<T: ExecutionStatus + Clone>(
+    executions: &ExecutionLock<T>,
     service: &str,
     exec_id: Uuid,
     include_schema: bool,
     conflict_msg: &str,
 ) -> Result<T, error::ErrorWrapper> {
-    let mut guard = executions.write().await;
+    let mut guard = lock_write(executions);
     let op_map = guard
         .get_mut(service)
         .and_then(|m| m.get_mut(&exec_id))
@@ -365,20 +477,20 @@ pub(crate) async fn guard_execution<T: ExecutionStatus + Clone>(
 /// operation will see a `409 Conflict`.
 ///
 /// On success the returned [`Uuid`] identifies the reserved execution slot.
-/// The caller **must** later call either [`finalize_execution`] (async
-/// success) or [`remove_reserved_execution`] (sync success / any error).
+/// The inserted placeholder owns the communication guard and releases it when
+/// the execution is completed or removed.
 ///
-/// The caller must already hold a communication guard. Runtime-update admission
-/// is enforced by the request guard and communication access, so this function
-/// only reserves a per-service execution slot.
-pub(crate) async fn reserve_execution<E: ExecutionStatus>(
-    executions: &RwLock<HashMap<String, IndexMap<Uuid, E>>>,
+/// Runtime-update admission is enforced by the request guard and communication
+/// access, so this function only reserves a per-service execution slot.
+pub(crate) fn reserve_execution<E: ExecutionStatus>(
+    executions: &ExecutionLock<E>,
     service: &str,
     display_name: &str,
     include_schema: bool,
     id: Uuid,
+    communication_guard: CommunicationGuard,
 ) -> Result<Uuid, error::ErrorWrapper> {
-    let mut guard = executions.write().await;
+    let mut guard = lock_write(executions);
     let has_running = guard.get(service).is_some_and(|m| {
         m.values()
             .any(|e| *e.execution_status() == sovd_ecu::operations::ExecutionStatus::Running)
@@ -391,7 +503,7 @@ pub(crate) async fn reserve_execution<E: ExecutionStatus>(
             include_schema,
         });
     }
-    let mut entry = E::placeholder();
+    let mut entry = E::placeholder(communication_guard);
     entry.set_in_flight(true);
     guard
         .entry(service.to_owned())
@@ -402,15 +514,14 @@ pub(crate) async fn reserve_execution<E: ExecutionStatus>(
 
 /// Publishes a communication lease before making its execution visible, so every
 /// visible execution has an owner that can release the lease.
-pub(crate) async fn acquire_and_reserve_execution<E: ExecutionStatus>(
+pub(crate) fn acquire_and_reserve_execution<E: ExecutionStatus>(
     communication_access: &dyn CommunicationAccess,
-    executions: Arc<RwLock<HashMap<String, IndexMap<Uuid, E>>>>,
-    communication_activities: Arc<Mutex<HashMap<Uuid, CommunicationGuard>>>,
+    executions: Arc<ExecutionLock<E>>,
     service: &str,
     display_name: &str,
     include_schema: bool,
-) -> Result<(Uuid, ExecutionGuard<E>), error::ErrorWrapper> {
-    let communication_activity =
+) -> Result<ExecutionReservation<E>, error::ErrorWrapper> {
+    let communication_guard =
         acquire_communication_activity(communication_access).map_err(|error| {
             error::ErrorWrapper {
                 error,
@@ -418,35 +529,31 @@ pub(crate) async fn acquire_and_reserve_execution<E: ExecutionStatus>(
             }
         })?;
     let exec_id = Uuid::new_v4();
-    communication_activities
-        .lock()
-        .await
-        .insert(exec_id, communication_activity);
-    if let Err(error) =
-        reserve_execution(&executions, service, display_name, include_schema, exec_id).await
-    {
-        release_communication_activity(&communication_activities, &exec_id).await;
-        return Err(error);
-    }
-    let guard = ExecutionGuard::new(
+    reserve_execution(
+        &executions,
+        service,
+        display_name,
+        include_schema,
+        exec_id,
+        communication_guard,
+    )?;
+    Ok(ExecutionReservation::new(
         executions,
-        communication_activities,
         service.to_owned(),
         exec_id,
-    );
-    Ok((exec_id, guard))
+    ))
 }
 
 /// Updates a previously reserved execution with the received parameters,
 /// sets `is_created(true)`, and clears the `in_flight` flag.
 /// After this step GET/DELETE requests can be called for this execution.
-pub(crate) async fn finalize_execution<E: ExecutionStatus>(
-    executions: &RwLock<HashMap<String, IndexMap<Uuid, E>>>,
+pub(crate) fn finalize_execution<E: ExecutionStatus>(
+    executions: &ExecutionLock<E>,
     service: &str,
     exec_id: &Uuid,
     update_fn: impl FnOnce(&mut E),
 ) {
-    let mut guard = executions.write().await;
+    let mut guard = lock_write(executions);
     if let Some(exec) = guard.get_mut(service).and_then(|m| m.get_mut(exec_id)) {
         update_fn(exec);
         exec.set_created(true);
@@ -454,15 +561,15 @@ pub(crate) async fn finalize_execution<E: ExecutionStatus>(
     }
 }
 
-/// Removes a previously reserved execution slot.  Called on error or after
+/// Removes a previously reserved execution slot. Called on error or after
 /// a synchronous operation completes (sync operations do not persist
 /// execution state).
-pub(crate) async fn remove_reserved_execution<E: ExecutionStatus>(
-    executions: &RwLock<HashMap<String, IndexMap<Uuid, E>>>,
+pub(crate) fn remove_reserved_execution<E>(
+    executions: &ExecutionLock<E>,
     service: &str,
     exec_id: &Uuid,
 ) {
-    let mut guard = executions.write().await;
+    let mut guard = lock_write(executions);
     if let Some(map) = guard.get_mut(service) {
         map.shift_remove(exec_id);
         if map.is_empty() {
@@ -693,9 +800,8 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
         uds: state.uds.clone(),
         locks: Arc::<Locks>::clone(&state.locks),
         comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
-        communication_activities: Arc::new(Mutex::new(HashMap::default())),
         communication_access: Arc::clone(&state.communication_access),
-        service_executions: Arc::new(RwLock::new(HashMap::default())),
+        service_executions: Arc::new(StdRwLock::new(HashMap::default())),
         flash_data: Arc::clone(&state.flash_data),
         mdd_embedded_files: Arc::new(file_manager.remove(&ecu_lower).ok_or_else(|| {
             SovdError::RouteError(format!(
@@ -1226,6 +1332,7 @@ pub(crate) mod tests {
             VariantDetectionMode,
         },
         file_manager::FileManager,
+        util::std_ext::lock_read,
     };
     use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
     use sovd_interfaces::sovd2uds::FileList;
@@ -1235,6 +1342,43 @@ pub(crate) mod tests {
 
     struct DeferredCommunicationAccess {
         activation_requests: AtomicUsize,
+    }
+
+    struct CountingCommunicationAccess {
+        active: Arc<AtomicUsize>,
+    }
+
+    struct CountingGuard(Arc<AtomicUsize>);
+
+    impl Drop for CountingGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl CommunicationAccess for CountingCommunicationAccess {
+        fn state(&self) -> CommunicationState {
+            CommunicationState::Enabled
+        }
+
+        fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+            self.active.fetch_add(1, Ordering::SeqCst);
+            Ok(CommunicationGuard::new(CountingGuard(Arc::clone(
+                &self.active,
+            ))))
+        }
+
+        fn request_activate(&self, _cause: ActivationCause) -> CommunicationState {
+            CommunicationState::Enabled
+        }
+
+        fn retry_after(&self) -> Duration {
+            Duration::ZERO
+        }
+
+        fn variant_detection(&self) -> VariantDetectionMode {
+            VariantDetectionMode::Always
+        }
     }
 
     impl CommunicationAccess for DeferredCommunicationAccess {
@@ -1283,42 +1427,109 @@ pub(crate) mod tests {
         assert_eq!(vendor_code, Some(VendorErrorCode::CommunicationNotReady));
     }
 
-    #[tokio::test]
-    async fn reservation_publishes_lease_with_execution_and_cleans_up_both() {
-        let executions = Arc::new(RwLock::new(HashMap::default()));
-        let activities = Arc::new(Mutex::new(HashMap::default()));
-        let access = enabled_communication_access_for_test();
+    #[test]
+    fn reservation_drop_releases_execution_and_lease() {
+        let executions = Arc::new(StdRwLock::new(HashMap::default()));
+        let active = Arc::new(AtomicUsize::new(0));
+        let access = CountingCommunicationAccess {
+            active: Arc::clone(&active),
+        };
 
-        let result = acquire_and_reserve_execution::<ServiceExecution>(
-            &*access,
+        let Ok(reservation) = acquire_and_reserve_execution::<ServiceExecution>(
+            &access,
             Arc::clone(&executions),
-            Arc::clone(&activities),
             "routine",
             "routine",
             false,
-        )
-        .await;
-        let Ok((id, guard)) = result else {
+        ) else {
             panic!("enabled communication must reserve execution");
         };
+        let id = reservation.exec_id;
 
-        assert!(activities.lock().await.contains_key(&id));
+        assert_eq!(active.load(Ordering::SeqCst), 1);
         assert!(
-            executions
-                .read()
-                .await
+            lock_read(&executions)
                 .get("routine")
                 .is_some_and(|entries| entries.contains_key(&id))
         );
 
-        guard.cleanup().await;
+        drop(reservation);
 
-        assert!(!activities.lock().await.contains_key(&id));
-        assert!(executions.read().await.get("routine").is_none());
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert!(lock_read(&executions).get("routine").is_none());
     }
 
-    #[tokio::test]
-    async fn failed_reservation_releases_published_lease() {
+    #[test]
+    fn comparam_execution_removal_releases_lease() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let access = CountingCommunicationAccess {
+            active: Arc::clone(&active),
+        };
+        let Ok(communication_guard) = access.acquire() else {
+            panic!("enabled communication must provide a guard");
+        };
+        let id = Uuid::new_v4();
+        let mut executions = IndexMap::new();
+        executions.insert(
+            id,
+            ComparamExecution::new(
+                sovd_ecu::operations::comparams::Execution {
+                    capability: sovd_ecu::operations::comparams::executions::Capability::Execute,
+                    status: sovd_ecu::operations::comparams::executions::Status::Running,
+                    comparam_override: HashMap::default(),
+                },
+                communication_guard,
+            ),
+        );
+
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+        executions.shift_remove(&id);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn async_handoff_preserves_execution_and_releases_lease_on_completion() {
+        let executions = Arc::new(StdRwLock::new(HashMap::default()));
+        let active = Arc::new(AtomicUsize::new(0));
+        let access = CountingCommunicationAccess {
+            active: Arc::clone(&active),
+        };
+        let Ok(reservation) = acquire_and_reserve_execution::<ServiceExecution>(
+            &access,
+            Arc::clone(&executions),
+            "routine",
+            "routine",
+            false,
+        ) else {
+            panic!("enabled communication must reserve execution");
+        };
+
+        let id = reservation.commit_async(|execution| {
+            execution
+                .parameters
+                .insert("result".to_owned(), serde_json::json!("ok"));
+        });
+
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+        let mut executions_guard = lock_write(&executions);
+        let execution = executions_guard
+            .get_mut("routine")
+            .and_then(|entries| entries.get_mut(&id))
+            .expect("async execution");
+        assert!(execution.is_created && !execution.in_flight);
+        execution.complete();
+        drop(executions_guard);
+
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert!(
+            lock_read(&executions)
+                .get("routine")
+                .is_some_and(|entries| entries.contains_key(&id))
+        );
+    }
+
+    #[test]
+    fn failed_reservation_releases_acquired_lease() {
         let mut entries = IndexMap::new();
         entries.insert(
             Uuid::new_v4(),
@@ -1327,29 +1538,26 @@ pub(crate) mod tests {
                 status: sovd_ecu::operations::ExecutionStatus::Running,
                 in_flight: false,
                 is_created: true,
+                communication_lease: None,
             },
         );
         let mut execution_map = HashMap::default();
         execution_map.insert("routine".to_owned(), entries);
-        let executions = Arc::new(RwLock::new(execution_map));
-        let activities = Arc::new(Mutex::new(HashMap::default()));
-        let access = enabled_communication_access_for_test();
+        let executions = Arc::new(StdRwLock::new(execution_map));
+        let active = Arc::new(AtomicUsize::new(0));
+        let access = CountingCommunicationAccess {
+            active: Arc::clone(&active),
+        };
 
         let result = acquire_and_reserve_execution::<ServiceExecution>(
-            &*access,
-            executions,
-            Arc::clone(&activities),
-            "routine",
-            "routine",
-            false,
-        )
-        .await;
+            &access, executions, "routine", "routine", false,
+        );
         let Err(error) = result else {
             panic!("second running execution must be rejected");
         };
 
         assert!(matches!(error.error, ApiError::Conflict(_)));
-        assert!(activities.lock().await.is_empty());
+        assert_eq!(active.load(Ordering::SeqCst), 0);
     }
 
     pub fn create_test_webserver_state<T: UdsEcu + Clone, U: FileManager>(
@@ -1370,9 +1578,8 @@ pub(crate) mod tests {
                 ))),
             }),
             comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
-            communication_activities: Arc::new(Mutex::new(HashMap::default())),
             communication_access: enabled_communication_access_for_test(),
-            service_executions: Arc::new(RwLock::new(HashMap::default())),
+            service_executions: Arc::new(StdRwLock::new(HashMap::default())),
             flash_data: Arc::new(RwLock::new(FileList {
                 files: Vec::new(),
                 path: Some(PathBuf::new()),
