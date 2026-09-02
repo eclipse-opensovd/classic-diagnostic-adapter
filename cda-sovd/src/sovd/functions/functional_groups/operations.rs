@@ -198,22 +198,19 @@ pub(crate) mod diag_service {
     use axum_extra::extract::{Host, WithRejection};
     use cda_interfaces::{
         DiagComm, DiagCommType, DynamicPlugin, HashMap, UdsEcu, diagservices::DiagServiceResponse,
-        subfunction_ids,
+        subfunction_ids, util::std_ext::lock_write,
     };
     use cda_plugin_security::Secured;
-    use indexmap::IndexMap;
     use sovd_interfaces::components::ecu::operations::{AsyncPostResponse, ExecutionStatus};
-    use tokio::sync::RwLock;
     use uuid::Uuid;
 
     use super::super::WebserverFgState;
     use crate::{
         create_schema, openapi,
         sovd::{
-            FgServiceExecution, acquire_and_reserve_execution,
+            ExecutionReservation, FgServiceExecution, acquire_and_reserve_execution,
             components::{ecu::DiagServicePathParam, get_content_type_and_accept},
             error::{ApiError, ErrorWrapper, VendorErrorCode},
-            finalize_execution,
             functions::functional_groups::{handle_ecu_response, map_to_json},
             get_payload_data, guard_execution,
             locks::validate_fg_lock,
@@ -261,20 +258,16 @@ pub(crate) mod diag_service {
 
     /// Finalises the previously reserved execution with per-ECU response
     /// parameters and builds the `202 Accepted` response.
-    async fn build_async_response(
-        fg_executions: &RwLock<HashMap<String, IndexMap<Uuid, FgServiceExecution>>>,
-        operation: &str,
+    fn build_async_response(
         response_data: HashMap<String, serde_json::Map<String, serde_json::Value>>,
         host: &str,
         uri: &Uri,
         include_schema: bool,
-        exec_id: Uuid,
+        reservation: ExecutionReservation<FgServiceExecution>,
     ) -> Response {
-        let operation = operation.to_lowercase();
-        finalize_execution(fg_executions, &operation, &exec_id, |exec| {
+        let exec_id = reservation.commit_async(|exec| {
             exec.parameters = response_data;
-        })
-        .await;
+        });
 
         let exec_url = format!("http://{host}{uri}/executions/{exec_id}");
         let schema = if include_schema {
@@ -302,7 +295,7 @@ pub(crate) mod diag_service {
             response::{IntoResponse, Response},
         };
         use axum_extra::extract::WithRejection;
-        use cda_interfaces::UdsEcu;
+        use cda_interfaces::{UdsEcu, util::std_ext::lock_read};
         use cda_plugin_security::Secured;
         use http::StatusCode;
         use sovd_interfaces::common::operations::OperationIdItem;
@@ -325,7 +318,7 @@ pub(crate) mod diag_service {
             } else {
                 None
             };
-            let executions = fg_executions.read().await;
+            let executions = lock_read(&fg_executions);
 
             let ids: Vec<_> = executions
                 .get(&operation)
@@ -373,7 +366,6 @@ pub(crate) mod diag_service {
             locks,
             functional_group_name,
             fg_executions,
-            communication_activities,
             communication_access,
             ..
         }): State<WebserverFgState<T>>,
@@ -406,16 +398,13 @@ pub(crate) mod diag_service {
         // conflict and, if none, inserts a placeholder so that a second
         // concurrent POST for the same operation sees 409 Conflict.
         let operation_lower = operation.to_lowercase();
-        let (exec_id, guard) = match acquire_and_reserve_execution(
+        let reservation = match acquire_and_reserve_execution(
             &*communication_access,
             Arc::clone(&fg_executions),
-            Arc::clone(&communication_activities),
             &operation_lower,
             &operation,
             include_schema,
-        )
-        .await
-        {
+        ) {
             Ok(v) => v,
             Err(e) => return e.into_response(),
         };
@@ -435,7 +424,6 @@ pub(crate) mod diag_service {
             {
                 Ok(is_async) => is_async,
                 Err(e) => {
-                    guard.cleanup().await;
                     return e.into_response();
                 }
             }
@@ -444,7 +432,6 @@ pub(crate) mod diag_service {
         let (content_type, _) = match get_content_type_and_accept(&headers) {
             Ok(v) => v,
             Err(e) => {
-                guard.cleanup().await;
                 return ErrorWrapper {
                     error: e,
                     include_schema,
@@ -463,7 +450,6 @@ pub(crate) mod diag_service {
             {
                 Ok(value) => value,
                 Err(e) => {
-                    guard.cleanup().await;
                     return ErrorWrapper {
                         error: e,
                         include_schema,
@@ -476,7 +462,6 @@ pub(crate) mod diag_service {
         let map_to_json = match map_to_json(include_schema, &accept) {
             Ok(value) => value,
             Err(e) => {
-                guard.cleanup().await;
                 return e.into_response();
             }
         };
@@ -508,18 +493,9 @@ pub(crate) mod diag_service {
         } = handle_ecu_responses(results);
 
         if is_async {
-            build_async_response(
-                &fg_executions,
-                &operation,
-                response_data,
-                &host,
-                &uri,
-                include_schema,
-                exec_id,
-            )
-            .await
+            build_async_response(response_data, &host, &uri, include_schema, reservation)
         } else {
-            guard.cleanup().await;
+            drop(reservation);
             build_operation_response(response_data, errors, include_schema)
         }
     }
@@ -577,7 +553,6 @@ pub(crate) mod diag_service {
             locks,
             functional_group_name,
             fg_executions,
-            communication_activities,
             ..
         }): State<WebserverFgState<T>>,
     ) -> Response {
@@ -608,9 +583,7 @@ pub(crate) mod diag_service {
             exec_id,
             include_schema,
             &format!("Execution {exec_id} is already in flight"),
-        )
-        .await
-        {
+        ) {
             return e.into_response();
         }
 
@@ -621,10 +594,9 @@ pub(crate) mod diag_service {
                 exec_id = %exec_id,
                 "Stop skipped (suppress_service=true), removing execution"
             );
-            if let Some(op_map) = fg_executions.write().await.get_mut(&operation) {
+            if let Some(op_map) = lock_write(&fg_executions).get_mut(&operation) {
                 op_map.shift_remove(&exec_id);
             }
-            crate::sovd::release_communication_activity(&communication_activities, &exec_id).await;
             return StatusCode::NO_CONTENT.into_response();
         }
 
@@ -652,21 +624,19 @@ pub(crate) mod diag_service {
 
         if errors.is_empty() {
             // All ECUs succeeded - remove execution and return 204.
-            if let Some(op_map) = fg_executions.write().await.get_mut(&operation) {
+            if let Some(op_map) = lock_write(&fg_executions).get_mut(&operation) {
                 op_map.shift_remove(&exec_id);
             }
-            crate::sovd::release_communication_activity(&communication_activities, &exec_id).await;
             StatusCode::NO_CONTENT.into_response()
         } else if query.force {
             // force=true - remove execution even though Stop had errors, return 200 with errors.
-            if let Some(op_map) = fg_executions.write().await.get_mut(&operation) {
+            if let Some(op_map) = lock_write(&fg_executions).get_mut(&operation) {
                 op_map.shift_remove(&exec_id);
             }
-            crate::sovd::release_communication_activity(&communication_activities, &exec_id).await;
             build_operation_response(response_data, errors, include_schema)
         } else {
             // force=false and Stop had errors - reset in_flight, keep execution alive for retry.
-            if let Some(op_map) = fg_executions.write().await.get_mut(&operation)
+            if let Some(op_map) = lock_write(&fg_executions).get_mut(&operation)
                 && let Some(exec) = op_map.get_mut(&exec_id)
             {
                 exec.in_flight = false;
@@ -737,6 +707,8 @@ pub(crate) mod diag_service {
     }
 
     pub(crate) mod id {
+        use std::sync::RwLock;
+
         use aide::{UseApi, transform::TransformOperation};
         use axum::{
             Json,
@@ -745,8 +717,8 @@ pub(crate) mod diag_service {
         };
         use axum_extra::extract::WithRejection;
         use cda_interfaces::{
-            DiagComm, DiagCommType, DynamicPlugin, HashMap, UdsEcu,
-            communication_control::CommunicationGuard, subfunction_ids,
+            DiagComm, DiagCommType, DynamicPlugin, HashMap, UdsEcu, subfunction_ids,
+            util::std_ext::lock_write,
         };
         use cda_plugin_security::Secured;
         use http::StatusCode;
@@ -755,7 +727,6 @@ pub(crate) mod diag_service {
             components::ecu::operations::{ExecutionStatus, GetByIdCapability, OperationQuery},
             functions::functional_groups::operations::FgAsyncGetByIdResponse,
         };
-        use tokio::sync::RwLock;
         use uuid::Uuid;
 
         use super::{
@@ -805,7 +776,6 @@ pub(crate) mod diag_service {
                 locks,
                 functional_group_name,
                 fg_executions,
-                communication_activities,
                 ..
             }): State<WebserverFgState<T>>,
         ) -> Response {
@@ -835,7 +805,7 @@ pub(crate) mod diag_service {
 
             // Guard: look up execution and mark in_flight.
             let stored = {
-                let mut guard = fg_executions.write().await;
+                let mut guard = lock_write(&fg_executions);
                 let Some(op_map) = guard.get_mut(&operation) else {
                     return ErrorWrapper {
                         error: ApiError::NotFound(Some(format!(
@@ -873,7 +843,7 @@ pub(crate) mod diag_service {
 
             // suppress_service: skip UDS send, return stored state directly.
             if query.suppress_service {
-                clear_in_flight(&fg_executions, &operation, exec_id).await;
+                clear_in_flight(&fg_executions, &operation, exec_id);
                 return fg_get_by_id_response(
                     stored.status,
                     stored.parameters,
@@ -895,7 +865,7 @@ pub(crate) mod diag_service {
             {
                 Ok(sf) => sf.has_request_results,
                 Err(e) => {
-                    clear_in_flight(&fg_executions, &operation, exec_id).await;
+                    clear_in_flight(&fg_executions, &operation, exec_id);
                     return ErrorWrapper {
                         error: e.into(),
                         include_schema,
@@ -907,7 +877,7 @@ pub(crate) mod diag_service {
             // When there is no RequestResults subfunction, return the stored
             // execution state together with an error entry.
             if !has_request_results {
-                clear_in_flight(&fg_executions, &operation, exec_id).await;
+                clear_in_flight(&fg_executions, &operation, exec_id);
                 return fg_get_by_id_response(
                     stored.status,
                     stored.parameters,
@@ -928,7 +898,7 @@ pub(crate) mod diag_service {
                 );
             }
 
-            let ctx = RequestResultsContext::new(&fg_executions, &communication_activities);
+            let ctx = RequestResultsContext::new(&fg_executions);
             send_request_results(
                 &uds,
                 &security_plugin,
@@ -942,12 +912,12 @@ pub(crate) mod diag_service {
         }
 
         /// Marks the execution as no longer in flight.
-        async fn clear_in_flight(
+        fn clear_in_flight(
             fg_executions: &RwLock<HashMap<String, IndexMap<Uuid, FgServiceExecution>>>,
             operation: &str,
             exec_id: Uuid,
         ) {
-            if let Some(op_map) = fg_executions.write().await.get_mut(operation)
+            if let Some(op_map) = lock_write(fg_executions).get_mut(operation)
                 && let Some(exec) = op_map.get_mut(&exec_id)
             {
                 exec.in_flight = false;
@@ -957,18 +927,13 @@ pub(crate) mod diag_service {
         /// Context for functional group request results, grouping execution-related state.
         struct RequestResultsContext<'a> {
             fg_executions: &'a RwLock<HashMap<String, IndexMap<Uuid, FgServiceExecution>>>,
-            communication_activities: &'a tokio::sync::Mutex<HashMap<Uuid, CommunicationGuard>>,
         }
 
         impl<'a> RequestResultsContext<'a> {
             fn new(
                 fg_executions: &'a RwLock<HashMap<String, IndexMap<Uuid, FgServiceExecution>>>,
-                communication_activities: &'a tokio::sync::Mutex<HashMap<Uuid, CommunicationGuard>>,
             ) -> Self {
-                Self {
-                    fg_executions,
-                    communication_activities,
-                }
+                Self { fg_executions }
             }
         }
 
@@ -984,10 +949,7 @@ pub(crate) mod diag_service {
             ctx: RequestResultsContext<'_>,
             include_schema: bool,
         ) -> Response {
-            let RequestResultsContext {
-                fg_executions,
-                communication_activities,
-            } = ctx;
+            let RequestResultsContext { fg_executions } = ctx;
             let results = uds
                 .send_functional_group(
                     functional_group_name,
@@ -1016,20 +978,17 @@ pub(crate) mod diag_service {
                 ExecutionStatus::Running
             };
             {
-                let mut guard = fg_executions.write().await;
+                let mut guard = lock_write(fg_executions);
                 if let Some(op_map) = guard.get_mut(operation)
                     && let Some(exec) = op_map.get_mut(&exec_id)
                 {
                     exec.parameters.clone_from(&response_data);
-                    exec.status = status.clone();
                     exec.in_flight = false;
+                    if status == ExecutionStatus::Completed {
+                        exec.complete();
+                    }
                 }
             }
-            if status == ExecutionStatus::Completed {
-                crate::sovd::release_communication_activity(communication_activities, &exec_id)
-                    .await;
-            }
-
             fg_get_by_id_response(status, response_data, errors, include_schema)
         }
 
@@ -1078,7 +1037,7 @@ pub(crate) mod diag_service {
 
     #[cfg(test)]
     mod tests {
-        use std::sync::Arc;
+        use std::sync::{Arc, RwLock};
 
         use aide::UseApi;
         use axum::{body::Bytes, extract::State, http::StatusCode};
@@ -1089,12 +1048,12 @@ pub(crate) mod diag_service {
             diagservices::{DiagServiceJsonResponse, mock::MockDiagServiceResponse},
             mock::MockUdsEcu,
             subfunction_ids,
+            util::std_ext::{lock_read, lock_write},
         };
         use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
         use http::HeaderMap;
         use indexmap::IndexMap;
         use sovd_interfaces::components::ecu::operations::ExecutionStatus;
-        use tokio::sync::RwLock;
 
         use super::*;
         use crate::sovd::{
@@ -1269,9 +1228,7 @@ pub(crate) mod diag_service {
             assert!(result.get("id").is_some(), "202 body must have id");
             assert_eq!(result.get("status"), Some(&serde_json::json!("running")));
             assert_eq!(
-                fg_executions_ref
-                    .read()
-                    .await
+                lock_read(&fg_executions_ref)
                     .get("brakeselftest")
                     .map_or(0, IndexMap::len),
                 1
@@ -1321,9 +1278,7 @@ pub(crate) mod diag_service {
 
             assert_eq!(response.status(), StatusCode::ACCEPTED);
             assert_eq!(
-                fg_executions_ref
-                    .read()
-                    .await
+                lock_read(&fg_executions_ref)
                     .get("brakeselftest")
                     .map_or(0, IndexMap::len),
                 1
@@ -1541,16 +1496,16 @@ pub(crate) mod diag_service {
             );
         }
 
-        async fn insert_async_execution(
+        fn insert_async_execution(
             fg_executions: &Arc<
                 RwLock<cda_interfaces::HashMap<String, IndexMap<Uuid, FgServiceExecution>>>,
             >,
             operation: &str,
         ) -> Uuid {
-            insert_async_execution_with_params(fg_executions, operation, HashMap::default()).await
+            insert_async_execution_with_params(fg_executions, operation, HashMap::default())
         }
 
-        async fn insert_async_execution_with_params(
+        fn insert_async_execution_with_params(
             fg_executions: &Arc<
                 RwLock<cda_interfaces::HashMap<String, IndexMap<Uuid, FgServiceExecution>>>,
             >,
@@ -1558,9 +1513,7 @@ pub(crate) mod diag_service {
             parameters: HashMap<String, serde_json::Map<String, serde_json::Value>>,
         ) -> Uuid {
             let id = Uuid::new_v4();
-            fg_executions
-                .write()
-                .await
+            lock_write(fg_executions)
                 .entry(operation.to_owned())
                 .or_default()
                 .insert(
@@ -1570,6 +1523,7 @@ pub(crate) mod diag_service {
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
+                        communication_lease: None,
                     },
                 );
             id
@@ -1580,7 +1534,7 @@ pub(crate) mod diag_service {
             let mock_uds = MockUdsEcu::new();
             // state has no lock set up
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
-            let exec_id = insert_async_execution(&state.fg_executions, "BrakeSelfTest").await;
+            let exec_id = insert_async_execution(&state.fg_executions, "BrakeSelfTest");
 
             let response = delete::<MockUdsEcu>(
                 UseApi(
@@ -1650,7 +1604,7 @@ pub(crate) mod diag_service {
 
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
             insert_test_fg_lock(&state.locks, "AllECUs").await;
-            let exec_id = insert_async_execution(&state.fg_executions, "BrakeSelfTest").await;
+            let exec_id = insert_async_execution(&state.fg_executions, "BrakeSelfTest");
             let fg_executions_ref = Arc::clone(&state.fg_executions);
 
             let response = delete::<MockUdsEcu>(
@@ -1672,9 +1626,7 @@ pub(crate) mod diag_service {
 
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
             assert!(
-                fg_executions_ref
-                    .read()
-                    .await
+                lock_read(&fg_executions_ref)
                     .get("BrakeSelfTest")
                     .is_none_or(IndexMap::is_empty),
                 "execution should be removed"
@@ -1701,7 +1653,7 @@ pub(crate) mod diag_service {
 
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
             insert_test_fg_lock(&state.locks, "AllECUs").await;
-            let exec_id = insert_async_execution(&state.fg_executions, "BrakeSelfTest").await;
+            let exec_id = insert_async_execution(&state.fg_executions, "BrakeSelfTest");
             let fg_executions_ref = Arc::clone(&state.fg_executions);
 
             let response = delete::<MockUdsEcu>(
@@ -1735,9 +1687,7 @@ pub(crate) mod diag_service {
                 "Expected errors in partial failure response"
             );
             assert!(
-                fg_executions_ref
-                    .read()
-                    .await
+                lock_read(&fg_executions_ref)
                     .get("BrakeSelfTest")
                     .is_none_or(IndexMap::is_empty),
                 "execution should be removed"
@@ -1752,7 +1702,7 @@ pub(crate) mod diag_service {
 
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
             insert_test_fg_lock(&state.locks, "AllECUs").await;
-            let exec_id = insert_async_execution(&state.fg_executions, "BrakeSelfTest").await;
+            let exec_id = insert_async_execution(&state.fg_executions, "BrakeSelfTest");
             let fg_executions_ref = Arc::clone(&state.fg_executions);
 
             let response = delete::<MockUdsEcu>(
@@ -1774,9 +1724,7 @@ pub(crate) mod diag_service {
 
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
             assert!(
-                fg_executions_ref
-                    .read()
-                    .await
+                lock_read(&fg_executions_ref)
                     .get("BrakeSelfTest")
                     .is_none_or(IndexMap::is_empty),
                 "execution should be removed"
@@ -1840,9 +1788,7 @@ pub(crate) mod diag_service {
 
             assert_eq!(response.status(), StatusCode::ACCEPTED);
             assert_eq!(
-                fg_executions_ref
-                    .read()
-                    .await
+                lock_read(&fg_executions_ref)
                     .get("somediag")
                     .map_or(0, IndexMap::len),
                 1,
@@ -1859,7 +1805,7 @@ pub(crate) mod diag_service {
             insert_test_fg_lock(&state.locks, "AllECUs").await;
 
             // Pre-populate a running execution for BrakeSelfTest
-            insert_async_execution(&state.fg_executions, "brakeselftest").await;
+            insert_async_execution(&state.fg_executions, "brakeselftest");
 
             let response = post::<MockUdsEcu>(
                 make_post_headers(),
@@ -1929,7 +1875,7 @@ pub(crate) mod diag_service {
             insert_test_fg_lock(&state.locks, "AllECUs").await;
 
             // Pre-populate a running execution for a DIFFERENT operation
-            insert_async_execution(&state.fg_executions, "otherservice").await;
+            insert_async_execution(&state.fg_executions, "otherservice");
 
             let response = post::<MockUdsEcu>(
                 make_post_headers(),
@@ -1993,7 +1939,7 @@ pub(crate) mod diag_service {
 
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
             insert_test_fg_lock(&state.locks, "AllECUs").await;
-            let exec_id = insert_async_execution(&state.fg_executions, "BrakeSelfTest").await;
+            let exec_id = insert_async_execution(&state.fg_executions, "BrakeSelfTest");
             let fg_executions_ref = Arc::clone(&state.fg_executions);
 
             let response = delete::<MockUdsEcu>(
@@ -2026,7 +1972,7 @@ pub(crate) mod diag_service {
                     .is_some_and(|e| !e.is_empty()),
                 "Expected errors in response"
             );
-            let guard = fg_executions_ref.read().await;
+            let guard = lock_read(&fg_executions_ref);
             let op_map = guard
                 .get("BrakeSelfTest")
                 .expect("operation map must exist");
@@ -2061,7 +2007,7 @@ pub(crate) mod diag_service {
 
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
             insert_test_fg_lock(&state.locks, "AllECUs").await;
-            let exec_id = insert_async_execution(&state.fg_executions, "BrakeSelfTest").await;
+            let exec_id = insert_async_execution(&state.fg_executions, "BrakeSelfTest");
             let fg_executions_ref = Arc::clone(&state.fg_executions);
 
             let response = delete::<MockUdsEcu>(
@@ -2095,9 +2041,7 @@ pub(crate) mod diag_service {
                 "Expected errors in response"
             );
             assert!(
-                fg_executions_ref
-                    .read()
-                    .await
+                lock_read(&fg_executions_ref)
                     .get("BrakeSelfTest")
                     .is_none_or(IndexMap::is_empty),
                 "execution must be removed when force=true"
@@ -2156,7 +2100,7 @@ pub(crate) mod diag_service {
 
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
             insert_test_fg_lock(&state.locks, "AllECUs").await;
-            let exec_id = insert_async_execution(&state.fg_executions, "BrakeSelfTest").await;
+            let exec_id = insert_async_execution(&state.fg_executions, "BrakeSelfTest");
             let fg_executions_ref = Arc::clone(&state.fg_executions);
 
             let response = id::get::<MockUdsEcu>(
@@ -2190,7 +2134,7 @@ pub(crate) mod diag_service {
                 Some(&serde_json::json!("pass"))
             );
             // Verify stored execution was updated to Completed
-            let guard = fg_executions_ref.read().await;
+            let guard = lock_read(&fg_executions_ref);
             let exec = guard
                 .get("BrakeSelfTest")
                 .and_then(|m| m.get(&exec_id))
@@ -2224,8 +2168,7 @@ pub(crate) mod diag_service {
             params.insert("ECU2".to_string(), ecu2_params);
 
             let exec_id =
-                insert_async_execution_with_params(&state.fg_executions, "BrakeSelfTest", params)
-                    .await;
+                insert_async_execution_with_params(&state.fg_executions, "BrakeSelfTest", params);
 
             let response = id::get::<MockUdsEcu>(
                 UseApi(
@@ -2329,7 +2272,7 @@ pub(crate) mod diag_service {
 
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
             insert_test_fg_lock(&state.locks, "AllECUs").await;
-            let exec_id = insert_async_execution(&state.fg_executions, "BrakeSelfTest").await;
+            let exec_id = insert_async_execution(&state.fg_executions, "BrakeSelfTest");
             let fg_executions_ref = Arc::clone(&state.fg_executions);
 
             let response = id::get::<MockUdsEcu>(
@@ -2368,7 +2311,7 @@ pub(crate) mod diag_service {
                 "Expected errors for ECU2 failure"
             );
             // Verify stored execution is still Running and in_flight is reset
-            let guard = fg_executions_ref.read().await;
+            let guard = lock_read(&fg_executions_ref);
             let exec = guard
                 .get("BrakeSelfTest")
                 .and_then(|m| m.get(&exec_id))
@@ -2402,7 +2345,7 @@ pub(crate) mod diag_service {
 
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
             insert_test_fg_lock(&state.locks, "AllECUs").await;
-            let exec_id = insert_async_execution(&state.fg_executions, "BrakeSelfTest").await;
+            let exec_id = insert_async_execution(&state.fg_executions, "BrakeSelfTest");
             let fg_executions_ref = Arc::clone(&state.fg_executions);
 
             let response = id::get::<MockUdsEcu>(
@@ -2458,7 +2401,7 @@ pub(crate) mod diag_service {
             );
 
             // Verify in_flight was reset so the execution is still usable
-            let guard = fg_executions_ref.read().await;
+            let guard = lock_read(&fg_executions_ref);
             let exec = guard
                 .get("BrakeSelfTest")
                 .and_then(|m| m.get(&exec_id))
