@@ -31,7 +31,7 @@ use cda_interfaces::{
         ReloadFailure, RuntimeReloaderPlugin, RuntimeUpdateError, RuntimeUpdateSecurityPlugin,
         UpdateCollections, UpdateExecution,
     },
-    storage_api::{CollectionName, Storage},
+    storage_api::{Collection, CollectionName, DirectFileAccess, Storage},
     util::std_ext::lock_mutex,
 };
 use tokio::{sync::RwLock, task::JoinHandle};
@@ -177,6 +177,25 @@ async fn acquire_execution_guards<S, R: ?Sized, T, L>(
     Ok(ExecutionGuards::new(protection, disable_lease))
 }
 
+/// Rejects an execution whose incoming databases cannot be read.
+///
+/// A framework precondition rather than a security-plugin concern: readability
+/// is not policy, and an application that replaces the plugin must not be able
+/// to drop it. Refusing here also keeps the rejection synchronous, before any
+/// collection has moved.
+async fn validate_incoming_databases<C: Collection + DirectFileAccess>(
+    collection: &C,
+) -> Result<(), RuntimeUpdateError> {
+    for key in collection.list().await? {
+        if !key.to_lowercase().ends_with(".mdd") {
+            continue;
+        }
+        crate::mdd::validate(&collection.file_path(&key)?)
+            .map_err(|error| RuntimeUpdateError::ValidationFailed(error.to_string()))?;
+    }
+    Ok(())
+}
+
 async fn load_update_collections<S>(
     storage: &S,
 ) -> Result<UpdateCollections<S::CollectionHandle>, RuntimeUpdateError>
@@ -192,6 +211,11 @@ where
         current_mdd: crate::operations::try_get_collection(
             storage,
             &CollectionName::DiagnosticDatabase,
+        )
+        .await?,
+        backup_mdd: crate::operations::try_get_collection(
+            storage,
+            &CollectionName::DiagnosticDatabaseBackup,
         )
         .await?,
     })
@@ -251,6 +275,18 @@ where
     // inside the spawned task and is too late to affect the HTTP response).
     if mode == ExecutionMode::Apply && collections.pending_mdd.is_none() {
         return Err(reject_execution(RuntimeUpdateError::NoPendingUpdate, guards, mode).await);
+    }
+
+    // The databases this mode is about to make live. `Cleanup` makes none live.
+    let becoming_live = match mode {
+        ExecutionMode::Apply => collections.pending_mdd.as_ref(),
+        ExecutionMode::Rollback => collections.backup_mdd.as_ref(),
+        ExecutionMode::Cleanup => None,
+    };
+    if let Some(collection) = becoming_live
+        && let Err(error) = validate_incoming_databases(&**collection).await
+    {
+        return Err(reject_execution(error, guards, mode).await);
     }
 
     Ok(guards)
@@ -602,7 +638,7 @@ mod tests {
 
     use crate::test_utils::{
         MockLockProvider, MockSecurityHandler, NoopReloadHandler, StubTransport, make_storage,
-        write_test_file,
+        readable_mdd_bytes, write_test_file,
     };
 
     fn make_transport_and_disable() -> (HttpProtectionRegistry, Arc<dyn DisableCommunication>) {
@@ -825,7 +861,7 @@ mod tests {
             &f.storage,
             &CollectionName::DiagnosticDatabaseNextUpdate,
             "ecu.mdd",
-            b"mdd_data",
+            &readable_mdd_bytes("TestEcu"),
         )
         .await;
 
@@ -845,7 +881,7 @@ mod tests {
             &f.storage,
             &CollectionName::DiagnosticDatabaseBackup,
             "ecu.mdd",
-            b"backup_data",
+            &readable_mdd_bytes("TestEcu"),
         )
         .await;
 
@@ -950,7 +986,7 @@ mod tests {
             &f.storage,
             &CollectionName::DiagnosticDatabaseNextUpdate,
             "ecu.mdd",
-            b"mdd_data",
+            &readable_mdd_bytes("TestEcu"),
         )
         .await;
         let execution_id = super::register_execution(&f.executions, ExecutionMode::Apply).await;
@@ -1030,7 +1066,7 @@ mod tests {
             &f.storage,
             &CollectionName::DiagnosticDatabaseNextUpdate,
             "ecu.mdd",
-            b"candidate",
+            &readable_mdd_bytes("TestEcu"),
         )
         .await;
         let execution_id = super::register_execution(&f.executions, ExecutionMode::Apply).await;
@@ -1081,14 +1117,14 @@ mod tests {
             &f.storage,
             &CollectionName::DiagnosticDatabaseBackup,
             "ecu.mdd",
-            b"backup_data",
+            &readable_mdd_bytes("TestEcu"),
         )
         .await;
         write_test_file(
             &f.storage,
             &CollectionName::DiagnosticDatabase,
             "current.mdd",
-            b"current_data",
+            &readable_mdd_bytes("TestEcu"),
         )
         .await;
         let execution_id = super::register_execution(&f.executions, ExecutionMode::Rollback).await;
@@ -1221,7 +1257,7 @@ mod tests {
             &f.storage,
             &CollectionName::DiagnosticDatabaseNextUpdate,
             "ecu.mdd",
-            b"mdd_data",
+            &readable_mdd_bytes("TestEcu"),
         )
         .await;
         let failing_reload_handler = Arc::new(crate::test_utils::FailingReloadHandler);
