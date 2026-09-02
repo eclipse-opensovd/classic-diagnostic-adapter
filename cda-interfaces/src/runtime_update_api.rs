@@ -109,6 +109,8 @@ pub struct UpdateCollections<C: Collection + DirectFileAccess> {
     pub pending_mdd: Option<Arc<C>>,
     /// Currently active MDD collection (`DiagnosticDatabase`), or `None` if not yet initialized.
     pub current_mdd: Option<Arc<C>>,
+    /// Rollback candidate (`DiagnosticDatabaseBackup`), or `None` if nothing has been replaced yet.
+    pub backup_mdd: Option<Arc<C>>,
 }
 
 impl<C: Collection + DirectFileAccess> Default for UpdateCollections<C> {
@@ -116,6 +118,7 @@ impl<C: Collection + DirectFileAccess> Default for UpdateCollections<C> {
         Self {
             pending_mdd: None,
             current_mdd: None,
+            backup_mdd: None,
         }
     }
 }
