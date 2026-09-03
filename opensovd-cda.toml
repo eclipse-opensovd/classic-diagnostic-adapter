@@ -792,7 +792,7 @@
 # Configuration for update plugin, i.e. storage paths
 [runtime_update_config]
 # When `true` and the `DiagnosticDatabase` storage collection is empty,
-# seed it from `database.path` on first startup by copying all `.mdd` files.
+# seed it from `database.seed_dir` on first startup by copying all `.mdd` files.
 # Default: `false`.
 # init_storage_from_database_path = false
 # Value of the Retry-After header (in seconds) sent when the service is
