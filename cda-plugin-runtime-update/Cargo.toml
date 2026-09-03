@@ -16,6 +16,7 @@ edition.workspace = true
 publish = false
 homepage.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [lints]
 workspace = true

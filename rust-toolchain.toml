@@ -9,22 +9,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-[package]
-name = "cda-build"
-version = "0.1.0"
-edition.workspace = true
-publish = false
-description = "Common build utilities for the workspace"
-homepage.workspace = true
-license.workspace = true
-rust-version.workspace = true
+# Documentation: https://rust-lang.github.io/rustup/overrides.html#the-toolchain-file
 
-[lints]
-workspace = true
-
-[lib]
-path = "src/lib.rs"
-doctest = false
-
-[dependencies]
-rustversion = { workspace = true }
+[toolchain]
+channel = "1.96" # Rust version to use during development

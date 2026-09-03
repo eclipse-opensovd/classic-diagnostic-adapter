@@ -17,6 +17,7 @@ publish = false
 description = "Diagnostic Core of CDA"
 homepage.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [lints]
 workspace = true

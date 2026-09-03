@@ -17,6 +17,7 @@ publish = false
 description = "Integration tests for the whole Classic Diagnostic Adapter (CDA) system"
 homepage.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [lints]
 workspace = true

@@ -15,6 +15,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Safe Rust wrapper for mbedtls 4.0.0 with async (Tokio) support"
 license = "Apache-2.0"
+rust-version.workspace = true
 
 [lib]
 path = "src/lib.rs"
