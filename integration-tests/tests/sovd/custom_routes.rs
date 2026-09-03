@@ -196,6 +196,7 @@ async fn test_custom_demo_endpoint() {
     shutdown_and_join(shutdown_tx, webserver_join_handle).await;
 }
 
+/// [[ itest~sovd-api-http-server-unix-socket, End-to-end GET/POST over a Unix domain socket bound webserver, itest ]]
 #[cfg(unix)]
 #[tokio::test]
 async fn test_custom_demo_endpoint_over_unix_socket() {

@@ -24,4 +24,7 @@ HTTP
     :links: dimpl~sovd-api-http-server
     :status: draft
 
-    The SOVD-API is based on HTTP/1.1 as transport protocol, and available through an configurable TCP port.
+    The SOVD-API is based on HTTP/1.1 as transport protocol, and is available through a
+    configurable TCP port, or alternatively through a Unix domain socket path. The two
+    transports are mutually exclusive: when a Unix domain socket path is configured, it
+    takes priority over the TCP host/port.

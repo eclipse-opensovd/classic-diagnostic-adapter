@@ -43,6 +43,24 @@ HTTP(S)
     The HTTP- or HTTPS-Server port must be configurable.
 
 
+.. req:: HTTP-Server Unix Domain Socket
+    :id: req~sovd-api-http-server-unix-socket
+    :links: arch~sovd-api-http-server
+    :status: draft
+
+    The CDA must support binding the HTTP(S) server to a Unix domain socket path as an
+    alternative to a TCP host/port, so that it can be reached only by co-located processes
+    through filesystem permissions instead of network exposure.
+
+    When a Unix domain socket path is configured, it takes priority over the TCP
+    host/port configuration; the two are not combined.
+
+    **Rationale**
+
+    Restricting the server to a Unix domain socket allows the CDA to be exposed only to a
+    co-located process (e.g. a gateway), without needing to allocate or expose a TCP port.
+
+
 .. req:: HTTPS-Server configuration
     :id: req~sovd-api-https-server-configuration
     :status: draft

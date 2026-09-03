@@ -74,7 +74,7 @@ pub struct VehicleResources<T, M> {
     pub communication_access: Arc<dyn CommunicationAccess>,
 }
 
-/// [[ dimpl~sovd-api-http-server, Starts HTTP Server ]]
+/// [[ dimpl~sovd-api-http-server, Starts HTTP Server (TCP or Unix domain socket) ]]
 ///
 /// Launches the http(s) webserver with deferred initialization
 ///
@@ -451,6 +451,7 @@ mod webserver_bind_tests {
             .expect("webserver task panicked");
     }
 
+    /// [[ test~sovd-api-http-server-unix-socket-bind, Binds the server to a unix domain socket and reaches it, test ]]
     #[tokio::test]
     async fn launch_webserver_binds_unix_socket() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
@@ -470,6 +471,7 @@ mod webserver_bind_tests {
         assert_reachable_then_shutdown(&socket_path, shutdown_tx, webserver_task).await;
     }
 
+    /// [[ test~sovd-api-http-server-unix-socket-priority, Unix domain socket takes priority over TCP host/port, test ]]
     #[tokio::test]
     async fn launch_webserver_unix_socket_takes_priority_over_tcp() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
@@ -504,6 +506,7 @@ mod webserver_bind_tests {
         assert_reachable_then_shutdown(&socket_path, shutdown_tx, webserver_task).await;
     }
 
+    /// [[ test~sovd-api-http-server-unix-socket-stale-cleanup, Removes a stale unix socket file left by an unclean shutdown before binding, test ]]
     #[tokio::test]
     async fn launch_webserver_removes_stale_unix_socket_file() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
@@ -526,6 +529,7 @@ mod webserver_bind_tests {
         assert_reachable_then_shutdown(&socket_path, shutdown_tx, webserver_task).await;
     }
 
+    /// [[ test~sovd-api-http-server-unix-socket-stale-cleanup-failure, Fails cleanly when a stale unix socket path can't be removed, test ]]
     #[tokio::test]
     async fn launch_webserver_fails_if_stale_socket_cannot_be_removed() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
