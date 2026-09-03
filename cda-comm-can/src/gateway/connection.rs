@@ -17,6 +17,7 @@ use cda_interfaces::CanId;
 use tokio_socketcan_isotp::{IsoTpBehaviour, IsoTpOptions, IsoTpSocket};
 
 use super::{can_id::CanIdExt, error::CanError};
+use crate::config::CanAddressingMode;
 
 /// Represents a CAN connection to a single ECU using ISO-TP.
 pub struct CanEcuConnection {
@@ -26,6 +27,8 @@ pub struct CanEcuConnection {
     pub request_id: CanId,
     /// Physical response CAN ID
     pub response_id: CanId,
+    /// ISO-TP addressing mode for this connection.
+    addressing_mode: CanAddressingMode,
     /// CAN interface name
     interface: String,
 }
@@ -33,11 +36,18 @@ pub struct CanEcuConnection {
 impl CanEcuConnection {
     /// Creates a new CAN ECU connection configuration.
     #[must_use]
-    pub fn new(ecu_name: String, interface: String, request_id: CanId, response_id: CanId) -> Self {
+    pub fn new(
+        ecu_name: String,
+        interface: String,
+        request_id: CanId,
+        response_id: CanId,
+        addressing_mode: CanAddressingMode,
+    ) -> Self {
         Self {
             ecu_name,
             request_id,
             response_id,
+            addressing_mode,
             interface,
         }
     }
@@ -53,14 +63,16 @@ impl CanEcuConnection {
         let src = self.response_id.to_socket_id()?;
         let dst = self.request_id.to_socket_id()?;
 
-        // Enable TX padding to send 8-byte CAN frames (required by many ECUs)
+        // Enable TX padding to send 8-byte CAN frames (required by many ECUs).
+        let (iso_tp_behaviour, ext_address) = Self::resolve_addressing(self.addressing_mode);
+
         let isotp_opts = IsoTpOptions::new(
-            IsoTpBehaviour::CAN_ISOTP_TX_PADDING,
+            iso_tp_behaviour,
             Duration::ZERO, // frame_txtime
-            0,              // ext_address
-            0x00,           // txpad_content (padding byte value)
-            0x00,           // rxpad_content
-            0,              // rx_ext_address
+            ext_address,
+            0x00, // txpad_content (padding byte value)
+            0x00, // rxpad_content
+            ext_address,
         )
         .ok();
 
@@ -72,6 +84,19 @@ impl CanEcuConnection {
                 ))
             },
         )
+    }
+
+    fn resolve_addressing(addressing_mode: CanAddressingMode) -> (IsoTpBehaviour, u8) {
+        let mut behaviour = IsoTpBehaviour::CAN_ISOTP_TX_PADDING;
+        let ext_address = match addressing_mode {
+            CanAddressingMode::Standard => 0,
+            CanAddressingMode::Extended(byte) => {
+                behaviour |=
+                    IsoTpBehaviour::CAN_ISOTP_EXTEND_ADDR | IsoTpBehaviour::CAN_ISOTP_RX_EXT_ADDR;
+                byte
+            }
+        };
+        (behaviour, ext_address)
     }
 
     /// Verifies that an ISO-TP socket can be opened for this connection.
@@ -200,6 +225,7 @@ impl std::fmt::Debug for CanEcuConnection {
             .field("interface", &self.interface)
             .field("request_id", &self.request_id.to_string())
             .field("response_id", &self.response_id.to_string())
+            .field("addressing_mode", &self.addressing_mode)
             .finish()
     }
 }
@@ -208,6 +234,24 @@ impl std::fmt::Debug for CanEcuConnection {
 mod tests {
     #[cfg(feature = "can-socketcand")]
     use super::*;
+
+    #[test]
+    fn resolve_addressing_standard_has_no_extension() {
+        let (behaviour, ext_address) =
+            CanEcuConnection::resolve_addressing(CanAddressingMode::Standard);
+        assert!(!behaviour.contains(IsoTpBehaviour::CAN_ISOTP_EXTEND_ADDR));
+        assert!(!behaviour.contains(IsoTpBehaviour::CAN_ISOTP_RX_EXT_ADDR));
+        assert_eq!(ext_address, 0);
+    }
+
+    #[test]
+    fn resolve_addressing_extended_sets_flags_and_byte() {
+        let (behaviour, ext_address) =
+            CanEcuConnection::resolve_addressing(CanAddressingMode::Extended(0xF1));
+        assert!(behaviour.contains(IsoTpBehaviour::CAN_ISOTP_EXTEND_ADDR));
+        assert!(behaviour.contains(IsoTpBehaviour::CAN_ISOTP_RX_EXT_ADDR));
+        assert_eq!(ext_address, 0xF1);
+    }
 
     /// End-to-end smoke test: a full request/response round trip using
     /// 29-bit extended IDs (ISO 15765-4 normal fixed addressing) through the
@@ -255,6 +299,7 @@ mod tests {
             IFACE.to_owned(),
             CanId::try_from(REQ_ID).unwrap(),
             CanId::try_from(RESP_ID).unwrap(),
+            CanAddressingMode::Standard,
         );
         let response = conn
             .send_receive(&[0x3E, 0x00], Duration::from_secs(2))

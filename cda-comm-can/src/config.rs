@@ -166,6 +166,25 @@ pub struct CanEcuMapping {
     /// - 11-bit standard CAN IDs (e.g. `0x7E8`)
     /// - 29-bit extended CAN IDs (e.g. `0x18DAF110`)
     pub response_id: u32,
+
+    /// ISO-TP addressing mode. Extended addressing prefixes the given byte to every
+    /// ISO-TP payload; Standard uses only the CAN ID for addressing.
+    #[serde(default)]
+    pub addressing_mode: CanAddressingMode,
+}
+
+#[derive(
+    Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq, Debug, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum CanAddressingMode {
+    /// No address-extension byte; ISO-TP addressing comes entirely from the
+    /// CAN ID.
+    #[default]
+    Standard,
+    /// Mixed/extended addressing: the given address-extension byte is
+    /// prefixed to every ISO-TP payload.
+    Extended(u8),
 }
 
 impl Default for CanConfig {

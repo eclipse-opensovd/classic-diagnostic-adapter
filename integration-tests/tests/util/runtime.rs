@@ -34,8 +34,9 @@ use futures::FutureExt;
 use http::{Method, StatusCode};
 use opensovd_cda_lib::{
     config::configfile::{
-        CanConfig, CanEcuMapping, Configuration, DatabaseConfig, EcuComParams, EcuConfig,
-        RuntimeUpdateConfig, ServerConfig, StrictConfig, TransportOverride, TransportType,
+        CanAddressingMode, CanConfig, CanEcuMapping, Configuration, DatabaseConfig, EcuComParams,
+        EcuConfig, RuntimeUpdateConfig, ServerConfig, StrictConfig, TransportOverride,
+        TransportType,
     },
     update::UpdatePluginBuilder,
 };
@@ -488,6 +489,7 @@ fn can_ecu_mappings() -> Vec<CanEcuMapping> {
             ecu_name: (*name).to_owned(),
             request_id: *req,
             response_id: *resp,
+            addressing_mode: CanAddressingMode::Standard,
         })
         .collect()
 }
