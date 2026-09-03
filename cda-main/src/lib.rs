@@ -120,6 +120,11 @@ pub struct AppArgs {
     #[arg(long)]
     pub listen_port: Option<u16>,
 
+    /// Path to a Unix domain socket to bind the server to. Takes priority over
+    /// `listen_address`/`listen_port` when set.
+    #[arg(long)]
+    pub unix_socket: Option<String>,
+
     #[arg(short, long)]
     pub flash_files_path: Option<String>,
 
@@ -200,6 +205,9 @@ impl AppArgs {
         }
         if let Some(listen_port) = self.listen_port {
             config.server.port = listen_port;
+        }
+        if let Some(unix_socket) = self.unix_socket {
+            config.server.unix_socket = Some(unix_socket);
         }
         if let Some(file_logging) = self.file_logging {
             config.logging.log_file_config.enabled = file_logging;
@@ -449,6 +457,7 @@ async fn init_webserver(
     let webserver_config = cda_sovd::WebServerConfig {
         host: config.server.address.clone(),
         port: config.server.port,
+        unix_socket: config.server.unix_socket.clone(),
     };
 
     let clonable_shutdown_signal = shutdown_signal
@@ -1033,6 +1042,31 @@ pub fn setup_tracing(config: &Configuration) -> Result<TracingGuards, TracingSet
 #[must_use]
 pub fn cda_version() -> &'static str {
     option_env!("CDA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
+#[cfg(test)]
+mod cli_args_tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn unix_socket_flag_updates_server_config() {
+        let args = AppArgs::parse_from(["cda", "--unix-socket", "/run/cda.sock"]);
+        let mut config = crate::config::configfile::Configuration::default();
+        args.update_config(&mut config);
+
+        assert_eq!(config.server.unix_socket, Some("/run/cda.sock".to_owned()));
+    }
+
+    #[test]
+    fn without_unix_socket_flag_server_config_unix_socket_stays_none() {
+        let args = AppArgs::parse_from(["cda"]);
+        let mut config = crate::config::configfile::Configuration::default();
+        args.update_config(&mut config);
+
+        assert_eq!(config.server.unix_socket, None);
+    }
 }
 
 #[cfg(test)]

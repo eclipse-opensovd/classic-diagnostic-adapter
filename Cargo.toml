@@ -149,6 +149,15 @@ axum = { version = "0.8", default-features = false }
 axum-extra = { version = "0.12.2" }
 serde_qs = "1.0.0-rc.3"
 urlencoding = "2.1.3"
+# unix-domain-socket-capable HTTP client, used in tests only. `hyperlocal`
+# uses `tokio::net::UnixStream` unconditionally (no internal `cfg(unix)`
+# guard) and thus doesn't compile on Windows, so consumers must depend on
+# these under `[target.'cfg(unix)'.(dev-)dependencies]` rather than
+# unconditionally.
+hyper = { version = "1.8", default-features = false }
+hyper-util = { version = "0.1", default-features = false }
+hyperlocal = { version = "0.9", default-features = false }
+http-body-util = "0.1"
 
 # ---- utility crates ----
 const_format = "0.2.35" # compile time string formatting
