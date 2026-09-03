@@ -326,6 +326,7 @@ fn base_test_config(
         server: opensovd_cda_lib::config::configfile::ServerConfig {
             address: host.clone(),
             port: cda_port,
+            unix_socket: None,
         },
         doip: opensovd_cda_lib::config::configfile::DoipConfig {
             tester_address: host,

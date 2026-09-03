@@ -811,6 +811,12 @@
 # address = "0.0.0.0"
 # TCP port the server listens on.
 # port = 20002
+# Path to a Unix domain socket to bind the server to, e.g. `/run/cda.sock`.
+#
+# When set, the server binds only to this Unix socket and `address`/`port`
+# are silently ignored - the two transports are mutually exclusive, with
+# the Unix socket taking priority.
+# unix_socket = "/run/cda.sock"
 
 # Strict-mode validation flags.
 [strict]
