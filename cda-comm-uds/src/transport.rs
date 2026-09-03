@@ -916,7 +916,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod send_tests {
+pub(crate) mod send_tests {
     use std::{
         sync::Arc,
         time::{Duration, Instant},
@@ -939,7 +939,9 @@ mod send_tests {
 
     use super::{CommunicationReadiness, RETRY_TEARDOWN_GRACE};
     use crate::{
-        UdsEcuDb, UdsManager, state_coordinator::EcuStateCoordinator, test_helpers::TestEcuDb,
+        UdsEcuDb, UdsManager,
+        state_coordinator::EcuStateCoordinator,
+        test_helpers::{TestEcuDb, TestGateway},
     };
 
     const TEST_COMMUNICATION_RETRY_AFTER: Duration = Duration::from_secs(2);
@@ -948,7 +950,7 @@ mod send_tests {
         /// Test-only constructor that creates a `UdsManager` without spawning
         /// background tasks (variant detection, etc.), so `T` only needs the
         /// narrower trait bounds required by `send_with_raw_payload`.
-        fn new_for_raw_payload_tests(
+        pub(crate) fn new_for_raw_payload_tests(
             gateway: S,
             ecus: Arc<HashMap<String, RwLock<T>>>,
             fault_config: FaultConfig,
@@ -1069,19 +1071,6 @@ mod send_tests {
         }
     }
 
-    /// A test gateway whose `send` behavior is configurable via a closure.
-    #[derive(Clone)]
-    struct TestGateway {
-        send_fn: Arc<TestGatewaySendFn>,
-    }
-
-    type TestGatewaySendFn = dyn Fn(
-            mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
-            bool,
-        ) -> Result<(), DiagServiceError>
-        + Send
-        + Sync;
-
     /// Keeps a `response_sender` alive for the remainder of the test process,
     /// modelling a real gateway task that stays parked (holding its sender)
     /// after sending no usable response - e.g. an offline or answer-suppressing
@@ -1101,47 +1090,6 @@ mod send_tests {
             .lock()
             .unwrap()
             .push(sender);
-    }
-
-    impl PhysicalTransport for TestGateway {
-        fn send(
-            &self,
-            _transmission_params: TransmissionParameters,
-            _message: ServicePayload,
-            response_sender: mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
-            expect_uds_reply: bool,
-        ) -> impl Future<Output = Result<tokio::task::JoinHandle<()>, DiagServiceError>> + Send
-        {
-            // The closure receives `response_sender` by value and fully owns its
-            // lifetime, mirroring how the real gateways manage their per-request
-            // task's sender:
-            //   * to model a gateway that closes the channel after forwarding
-            //     its frame(s) (e.g. the CAN gateway breaking after the first
-            //     SID-matching response), simply let the sender drop when the
-            //     closure returns -> the caller's `recv()` observes `None`.
-            //   * to model a gateway task that stays parked with no (further)
-            //     response until the caller gives up (e.g. an offline/answer-
-            //     suppressing ECU), the closure must keep the sender alive
-            //     itself (store a clone), so the caller's `rx_timeout` fires.
-            let result = (self.send_fn)(response_sender, expect_uds_reply);
-            async move {
-                result?;
-                // This test double's "task" is already fully done by the time
-                // `send` returns (the closure above ran synchronously), so the
-                // returned handle resolves essentially instantly. Tests that
-                // need to exercise the retry-teardown synchronization itself
-                // use `SlowTeardownGateway` instead.
-                Ok(tokio::task::spawn(std::future::ready(())))
-            }
-        }
-
-        fn ecu_online<T: EcuAddresses>(
-            &self,
-            _ecu_name: &str,
-            _ecu_db: &RwLock<T>,
-        ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
-            std::future::ready(Ok(()))
-        }
     }
 
     /// Test gateway dedicated to exercising the retry-teardown synchronization
@@ -1222,38 +1170,6 @@ mod send_tests {
 
     #[async_trait::async_trait]
     impl cda_interfaces::Shutdown for SlowTeardownGateway {
-        async fn shutdown(&self) {}
-    }
-
-    impl FunctionalTransport for TestGateway {
-        fn send_functional(
-            &self,
-            _transmission_params: TransmissionParameters,
-            _message: ServicePayload,
-            _expected_ecu_logical_addrs: HashMap<u16, String>,
-            _timeout: Duration,
-            _expect_positive_response: bool,
-        ) -> impl Future<
-            Output = Result<
-                HashMap<String, Result<ServicePayload, DiagServiceError>>,
-                DiagServiceError,
-            >,
-        > + Send {
-            std::future::ready(Ok(HashMap::new()))
-        }
-    }
-
-    impl NetworkTopology for TestGateway {
-        fn get_gateway_network_address(
-            &self,
-            _logical_address: u16,
-        ) -> impl Future<Output = Option<String>> + Send {
-            std::future::ready(None)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl cda_interfaces::Shutdown for TestGateway {
         async fn shutdown(&self) {}
     }
 
