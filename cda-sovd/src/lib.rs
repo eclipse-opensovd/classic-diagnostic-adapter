@@ -31,6 +31,8 @@ pub use http::Method;
 use opensovd_axum_extra::ExtractHost;
 use sovd::apps::sovd2uds::bulk_data::runtimefiles::RuntimeUpdateRouteState;
 use tokio::net::TcpListener;
+#[cfg(unix)]
+use tokio::net::UnixListener;
 use tower::{Layer, ServiceExt as TowerServiceExt};
 use tower_http::{normalize_path::NormalizePathLayer, trace::TraceLayer};
 
@@ -50,6 +52,10 @@ pub const OPENAPI_JSON_ROUTE: &str = "/openapi.json";
 pub struct WebServerConfig {
     pub host: String,
     pub port: u16,
+    /// When set, the server binds to this Unix domain socket path instead of
+    /// `host`/`port`. Takes priority silently over the TCP settings when
+    /// present - the two are not combined.
+    pub unix_socket: Option<String>,
 }
 
 /// Static configuration for vehicle SOVD routes.
@@ -84,6 +90,7 @@ pub struct VehicleResources<T, M> {
     fields(
         host = %config.host,
         port = %config.port,
+        unix_socket = config.unix_socket.as_deref().unwrap_or(""),
     )
 )]
 pub async fn launch_webserver<F>(
@@ -94,32 +101,73 @@ where
     F: Future<Output = ()> + Clone + Send + 'static,
 {
     let dynamic_router = DynamicRouter::new();
-    let listen_address = format!("{}:{}", config.host, config.port);
-    let listener = TcpListener::bind(&listen_address).await.map_err(|e| {
-        DoipGatewaySetupError::ServerError(format!("Failed to bind to {listen_address}: {e}"))
-    })?;
-
     let dynamic_router_for_service = dynamic_router.clone();
-    let webserver_task = cda_interfaces::spawn_named!("webserver", async move {
-        let service = tower::service_fn(move |request: Request<axum::body::Body>| {
-            let dr = dynamic_router_for_service.clone();
-            async move {
-                let router = dr.get_router().await;
-                TowerServiceExt::oneshot(router, request).await
-            }
-        });
-
-        let middleware = tower::util::MapRequestLayer::new(rewrite_request_uri);
-        let trim_trailing_slash_middleware = NormalizePathLayer::trim_trailing_slash();
-        let service_with_middleware =
-            middleware.layer(trim_trailing_slash_middleware.layer(service));
-
-        let _ = axum::serve(listener, tower::make::Shared::new(service_with_middleware))
-            .with_graceful_shutdown(shutdown_signal)
-            .await;
+    let service = tower::service_fn(move |request: Request<axum::body::Body>| {
+        let dr = dynamic_router_for_service.clone();
+        async move {
+            let router = dr.get_router().await;
+            TowerServiceExt::oneshot(router, request).await
+        }
     });
 
+    let middleware = tower::util::MapRequestLayer::new(rewrite_request_uri);
+    let trim_trailing_slash_middleware = NormalizePathLayer::trim_trailing_slash();
+    let service_with_middleware = middleware.layer(trim_trailing_slash_middleware.layer(service));
+
+    let webserver_task = if let Some(socket_path) = config.unix_socket {
+        #[cfg(unix)]
+        {
+            remove_stale_unix_socket(&socket_path)?;
+            let listener = UnixListener::bind(&socket_path).map_err(|e| {
+                DoipGatewaySetupError::ServerError(format!(
+                    "Failed to bind to unix socket {socket_path}: {e}"
+                ))
+            })?;
+            tracing::info!("SOVD HTTP server listening on unix socket {socket_path}");
+            cda_interfaces::spawn_named!("webserver", async move {
+                let _ = axum::serve(listener, tower::make::Shared::new(service_with_middleware))
+                    .with_graceful_shutdown(shutdown_signal)
+                    .await;
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(DoipGatewaySetupError::ServerError(format!(
+                "Unix domain sockets are not supported on this platform (requested path: \
+                 {socket_path})"
+            )));
+        }
+    } else {
+        let listen_address = format!("{}:{}", config.host, config.port);
+        let listener = TcpListener::bind(&listen_address).await.map_err(|e| {
+            DoipGatewaySetupError::ServerError(format!("Failed to bind to {listen_address}: {e}"))
+        })?;
+        tracing::info!("SOVD HTTP server listening on {listen_address}");
+        cda_interfaces::spawn_named!("webserver", async move {
+            let _ = axum::serve(listener, tower::make::Shared::new(service_with_middleware))
+                .with_graceful_shutdown(shutdown_signal)
+                .await;
+        })
+    };
+
     Ok((dynamic_router, webserver_task))
+}
+
+/// Removes a pre-existing file at `socket_path`, if any, so that binding a
+/// fresh `UnixListener` there doesn't fail with `AddrInUse` because of a
+/// socket file left behind by a previous unclean shutdown.
+#[cfg(unix)]
+fn remove_stale_unix_socket(socket_path: &str) -> Result<(), DoipGatewaySetupError> {
+    match std::fs::remove_file(socket_path) {
+        Ok(()) => {
+            tracing::debug!("Removed stale unix socket file at {socket_path}");
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(DoipGatewaySetupError::ServerError(format!(
+            "Failed to remove stale unix socket file at {socket_path}: {e}"
+        ))),
+    }
 }
 
 /// Add vehicle routes to the dynamic router
@@ -339,5 +387,164 @@ pub(crate) mod test_utils {
             .await
             .unwrap();
         serde_json::from_slice::<T>(body.as_ref())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod webserver_bind_tests {
+    use std::time::Duration;
+
+    use futures::FutureExt;
+    use http_body_util::Empty;
+    use hyper_util::{client::legacy::Client, rt::TokioExecutor};
+    use hyperlocal::UnixConnector;
+
+    use super::*;
+
+    /// Sends a GET request over a Unix domain socket using a real HTTP
+    /// client (`hyperlocal` on top of `hyper-util`) and returns the response
+    /// status code. Used instead of parsing raw bytes off a `UnixStream`, so
+    /// the tests exercise a spec-compliant HTTP client the same way a real
+    /// consumer of the Unix socket transport would.
+    async fn get_over_unix_socket(socket_path: &str, path: &str) -> http::StatusCode {
+        let client: Client<UnixConnector, Empty<bytes::Bytes>> =
+            Client::builder(TokioExecutor::new()).build(UnixConnector);
+        let uri: http::Uri = hyperlocal::Uri::new(socket_path, path).into();
+
+        let response = client
+            .get(uri)
+            .await
+            .expect("failed to send request over unix socket");
+        response.status()
+    }
+
+    fn shutdown_channel() -> (
+        tokio::sync::broadcast::Sender<()>,
+        impl Future<Output = ()> + Clone + Send + 'static,
+    ) {
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<()>(1);
+        let signal = async move {
+            rx.recv().await.ok();
+        }
+        .shared();
+        (tx, signal)
+    }
+
+    /// Asserts that `socket_path` is reachable (a request gets routed through
+    /// the dynamic router, even if it 404s because no routes are registered),
+    /// then signals shutdown and waits for `webserver_task` to finish.
+    async fn assert_reachable_then_shutdown(
+        socket_path: &str,
+        shutdown_tx: tokio::sync::broadcast::Sender<()>,
+        webserver_task: tokio::task::JoinHandle<()>,
+    ) {
+        // No routes are registered, so the dynamic router responds with 404 -
+        // that's fine, we only need to confirm the connection was accepted
+        // and routed.
+        let status = get_over_unix_socket(socket_path, "/").await;
+        assert_eq!(status, http::StatusCode::NOT_FOUND);
+
+        let _ = shutdown_tx.send(());
+        tokio::time::timeout(Duration::from_secs(5), webserver_task)
+            .await
+            .expect("webserver task didn't shut down in time")
+            .expect("webserver task panicked");
+    }
+
+    #[tokio::test]
+    async fn launch_webserver_binds_unix_socket() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let socket_path = dir.path().join("cda.sock").to_string_lossy().to_string();
+
+        let config = WebServerConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            unix_socket: Some(socket_path.clone()),
+        };
+        let (shutdown_tx, shutdown_signal) = shutdown_channel();
+
+        let (_dynamic_router, webserver_task) = launch_webserver(config, shutdown_signal)
+            .await
+            .expect("failed to launch webserver on unix socket");
+
+        assert_reachable_then_shutdown(&socket_path, shutdown_tx, webserver_task).await;
+    }
+
+    #[tokio::test]
+    async fn launch_webserver_unix_socket_takes_priority_over_tcp() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let socket_path = dir.path().join("cda.sock").to_string_lossy().to_string();
+
+        // Deliberately bind the TCP host/port too, to confirm it's ignored.
+        let tcp_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to reserve a tcp port");
+        let tcp_port = tcp_listener.local_addr().unwrap().port();
+        drop(tcp_listener);
+
+        let config = WebServerConfig {
+            host: "127.0.0.1".to_owned(),
+            port: tcp_port,
+            unix_socket: Some(socket_path.clone()),
+        };
+        let (shutdown_tx, shutdown_signal) = shutdown_channel();
+
+        let (_dynamic_router, webserver_task) = launch_webserver(config, shutdown_signal)
+            .await
+            .expect("failed to launch webserver");
+
+        // The TCP port must remain free, proving TCP was never bound (the
+        // unix socket reachability itself is checked below).
+        let retry_listener = TcpListener::bind(("127.0.0.1", tcp_port)).await;
+        assert!(
+            retry_listener.is_ok(),
+            "TCP port should not have been bound when unix_socket is set"
+        );
+
+        assert_reachable_then_shutdown(&socket_path, shutdown_tx, webserver_task).await;
+    }
+
+    #[tokio::test]
+    async fn launch_webserver_removes_stale_unix_socket_file() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let socket_path = dir.path().join("cda.sock").to_string_lossy().to_string();
+
+        // Simulate a leftover socket file from a previous unclean shutdown.
+        std::fs::write(&socket_path, b"stale").expect("failed to create stale socket file");
+
+        let config = WebServerConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            unix_socket: Some(socket_path.clone()),
+        };
+        let (shutdown_tx, shutdown_signal) = shutdown_channel();
+
+        let (_dynamic_router, webserver_task) = launch_webserver(config, shutdown_signal)
+            .await
+            .expect("failed to launch webserver despite stale socket file");
+
+        assert_reachable_then_shutdown(&socket_path, shutdown_tx, webserver_task).await;
+    }
+
+    #[tokio::test]
+    async fn launch_webserver_fails_if_stale_socket_cannot_be_removed() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        // A directory can't be removed with `remove_file`, so binding must fail
+        // with a clear error instead of silently misbehaving.
+        let socket_path = dir.path().join("cda.sock");
+        std::fs::create_dir(&socket_path).expect("failed to create directory");
+
+        let config = WebServerConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            unix_socket: Some(socket_path.to_string_lossy().to_string()),
+        };
+        let (_shutdown_tx, shutdown_signal) = shutdown_channel();
+
+        let result = launch_webserver(config, shutdown_signal).await;
+        assert!(
+            result.is_err(),
+            "expected launch_webserver to fail when the stale socket path is a directory"
+        );
     }
 }

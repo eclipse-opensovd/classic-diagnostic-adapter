@@ -108,3 +108,13 @@ cda-interfaces = { workspace = true, features = ["test-utils"] }
 cda-plugin-communication-management = { workspace = true, features = ["test-utils"] }
 cda-plugin-security = { workspace = true, features = ["test-utils"] }
 mockall = { workspace = true }
+futures = { workspace = true }
+tempfile = { workspace = true }
+
+# unix-domain-socket-capable HTTP client, unix-only - see the root Cargo.toml
+# for why this is scoped to `cfg(unix)`.
+[target.'cfg(unix)'.dev-dependencies]
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
+hyperlocal = { workspace = true, features = ["client"] }
+http-body-util = { workspace = true }
