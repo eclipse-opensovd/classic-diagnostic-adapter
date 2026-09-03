@@ -22,7 +22,8 @@ use reqwest::Method;
 use serde::{Deserialize, Serialize};
 
 use crate::util::{
-    http::response_to_t,
+    TestingError,
+    http::{Response, response_to_t},
     runtime::{find_available_tcp_port, host, wait_for_cda_online},
 };
 
@@ -75,11 +76,55 @@ async fn add_custom_routes(dynamic_router: &DynamicRouter) {
     dynamic_router.add_routes(custom_router).await;
 }
 
+fn shutdown_channel() -> (
+    tokio::sync::broadcast::Sender<()>,
+    impl Future<Output = ()> + Clone + Send + 'static,
+) {
+    let (tx, mut rx) = tokio::sync::broadcast::channel::<()>(1);
+    let signal = async move {
+        rx.recv().await.ok();
+    }
+    .shared();
+    (tx, signal)
+}
+
+async fn shutdown_and_join(
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    webserver_join_handle: tokio::task::JoinHandle<()>,
+) {
+    shutdown_tx.send(()).ok();
+    webserver_join_handle
+        .await
+        .expect("Failed to shutdown webserver");
+}
+
+/// Exercises the `/test` demo endpoint via `get`/`post` (parameterized so
+/// callers can send the requests over TCP or a Unix domain socket) and
+/// asserts on the round-tripped `TestData` payloads.
+async fn assert_demo_endpoint_get_post<GetFut>(
+    get: impl FnOnce() -> GetFut,
+    post: impl FnOnce(String) -> futures::future::BoxFuture<'static, Result<Response, TestingError>>,
+) where
+    GetFut: Future<Output = Result<Response, TestingError>>,
+{
+    let get_response = get().await.expect("GET request failed");
+    let demo_data: TestData = response_to_t(&get_response).expect("Failed to parse GET response");
+    assert_eq!(demo_data.oem_name, "Eclipse Foundation");
+    assert_eq!(demo_data.version, "1.0.0");
+
+    let post_payload = TestData {
+        oem_name: "Custom OEM".to_string(),
+        version: "2.0.0".to_string(),
+    };
+    let post_body = serde_json::to_string(&post_payload).expect("Failed to serialize payload");
+    let post_response = post(post_body).await.expect("POST request failed");
+
+    let response_data: TestData =
+        response_to_t(&post_response).expect("Failed to parse POST response");
+    assert_eq!(response_data, post_payload);
+}
+
 #[tokio::test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "Makes sense to keep the test together"
-)]
 async fn test_custom_demo_endpoint() {
     // Use loopback since we don't need actual ECU connections for this test
     let host = host();
@@ -88,13 +133,10 @@ async fn test_custom_demo_endpoint() {
     let webserver_config = cda_sovd::WebServerConfig {
         host: host.clone(),
         port: test_port,
+        unix_socket: None,
     };
 
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
-    let shutdown_signal = async move {
-        shutdown_rx.recv().await.ok();
-    }
-    .shared();
+    let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
     let (dynamic_router, webserver_join_handle) =
         cda_sovd::launch_webserver(webserver_config, shutdown_signal.clone())
@@ -127,42 +169,87 @@ async fn test_custom_demo_endpoint() {
     wait_for_cda_online(&ServerConfig {
         address: host,
         port: test_port,
+        unix_socket: None,
     })
     .await
     .expect("Webserver did not start in time");
 
-    // Test GET request
-    let get_response =
-        crate::util::http::send_request(StatusCode::OK, Method::GET, None, None, url.clone())
-            .await
-            .expect("GET request failed");
-
-    let demo_data: TestData = response_to_t(&get_response).expect("Failed to parse GET response");
-    assert_eq!(demo_data.oem_name, "Eclipse Foundation");
-    assert_eq!(demo_data.version, "1.0.0");
-
-    // Test POST request
-    let post_payload = TestData {
-        oem_name: "Custom OEM".to_string(),
-        version: "2.0.0".to_string(),
-    };
-    let post_body = serde_json::to_string(&post_payload).expect("Failed to serialize payload");
-    let post_response = crate::util::http::send_request(
-        StatusCode::CREATED,
-        Method::POST,
-        Some(&post_body),
-        None,
-        url,
+    assert_demo_endpoint_get_post(
+        || crate::util::http::send_request(StatusCode::OK, Method::GET, None, None, url.clone()),
+        |body| {
+            let url = url.clone();
+            async move {
+                crate::util::http::send_request(
+                    StatusCode::CREATED,
+                    Method::POST,
+                    Some(&body),
+                    None,
+                    url,
+                )
+                .await
+            }
+            .boxed()
+        },
     )
-    .await
-    .expect("POST request failed");
+    .await;
 
-    let response_data: TestData =
-        response_to_t(&post_response).expect("Failed to parse POST response");
-    assert_eq!(response_data, post_payload);
+    shutdown_and_join(shutdown_tx, webserver_join_handle).await;
+}
 
-    shutdown_tx.send(()).ok();
-    webserver_join_handle
-        .await
-        .expect("Failed to shutdown webserver");
+#[cfg(unix)]
+#[tokio::test]
+async fn test_custom_demo_endpoint_over_unix_socket() {
+    let socket_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let socket_path = socket_dir
+        .path()
+        .join("cda.sock")
+        .to_string_lossy()
+        .to_string();
+
+    let webserver_config = cda_sovd::WebServerConfig {
+        host: host(),
+        port: 0,
+        unix_socket: Some(socket_path.clone()),
+    };
+
+    let (shutdown_tx, shutdown_signal) = shutdown_channel();
+
+    let (dynamic_router, webserver_join_handle) =
+        cda_sovd::launch_webserver(webserver_config, shutdown_signal.clone())
+            .await
+            .expect("Failed to launch webserver");
+
+    // Add custom routes directly. No vehicle routes or health checks are
+    // needed for this test since we talk to the raw socket directly instead
+    // of polling the health endpoint for readiness.
+    add_custom_routes(&dynamic_router).await;
+
+    assert_demo_endpoint_get_post(
+        || {
+            crate::util::http::send_unix_socket_request(
+                &socket_path,
+                "/test",
+                StatusCode::OK,
+                Method::GET,
+                None,
+            )
+        },
+        |body| {
+            let socket_path = socket_path.clone();
+            async move {
+                crate::util::http::send_unix_socket_request(
+                    &socket_path,
+                    "/test",
+                    StatusCode::CREATED,
+                    Method::POST,
+                    Some(&body),
+                )
+                .await
+            }
+            .boxed()
+        },
+    )
+    .await;
+
+    shutdown_and_join(shutdown_tx, webserver_join_handle).await;
 }
