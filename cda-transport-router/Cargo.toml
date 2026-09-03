@@ -17,6 +17,7 @@ publish = false
 description = "Transport routing layer for the Classic Diagnostic Adapter"
 homepage.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [lints]
 workspace = true

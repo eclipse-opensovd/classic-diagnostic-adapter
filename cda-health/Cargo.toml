@@ -17,6 +17,7 @@ publish = false
 description = "Provides a health check interface"
 homepage.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [lints]
 workspace = true

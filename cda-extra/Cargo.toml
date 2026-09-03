@@ -17,6 +17,7 @@ publish = false
 description = "Optional extras for the Eclipse OpenSOVD CDA"
 homepage.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [lints]
 workspace = true

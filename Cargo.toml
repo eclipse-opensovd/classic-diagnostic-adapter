@@ -13,6 +13,7 @@
 edition = "2024"
 license = "Apache-2.0"
 homepage = "https://github.com/eclipse-opensovd/classic-diagnostic-adapter"
+rust-version = "1.88" # Minimum Supported Rust Version (MSRV): https://doc.rust-lang.org/cargo/reference/rust-version.html
 
 [workspace]
 resolver = "3"
