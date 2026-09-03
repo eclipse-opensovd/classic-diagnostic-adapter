@@ -10,13 +10,15 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
-use cda_interfaces::HashMap;
 use http::{HeaderMap, Method, StatusCode};
 use opensovd_cda_lib::config::configfile::Configuration;
 use serde::de::DeserializeOwned;
-use sovd_interfaces::components::ecu::modes::{self, dtcsetting};
+use serde_json::json;
+use sovd_interfaces::components::ecu::modes::{
+    self, dtcsetting, security_and_session::put::RequestSeedResponse,
+};
 
 use crate::{
     sovd::{
@@ -449,6 +451,190 @@ async fn test_ecu_session_switching() {
     assert_eq!(security_result.name, Some("Security access".to_owned()));
 
     // Delete the ECU lock
+    lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+}
+
+/// A `RequestSeed` parameter must be encoded into the UDS request; FSNR2000's
+/// simulator rejects the seed request unless it receives the configured byte.
+#[tokio::test]
+async fn request_seed_forwards_parameters_to_fsnr2000() {
+    if skip_for_can(
+        "request_seed_forwards_parameters_to_fsnr2000",
+        "SecurityAccess sequencing not yet supported over CAN",
+    ) {
+        return;
+    }
+
+    let (runtime, _lock) = setup_integration_test(true)
+        .await
+        .expect("integration test runtime should start");
+    let auth = auth_header(&runtime.config, None)
+        .await
+        .expect("auth header should be obtainable");
+    let ecu_endpoint = sovd::ECU_FSNR2000_ENDPOINT;
+    let lock_endpoint = format!("{ecu_endpoint}/locks");
+
+    let ecu_lock = create_lock(
+        Duration::from_secs(60),
+        &lock_endpoint,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let lock_id = extract_field_from_json::<String>(
+        &response_to_json(&ecu_lock).expect("lock response should be JSON"),
+        "id",
+    )
+    .expect("lock response should contain an id");
+    lock_operation(
+        &lock_endpoint,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::OK,
+        Method::GET,
+    )
+    .await;
+
+    ecusim::switch_variant(&runtime.ecu_sim, "FSNR2000", "BOOT")
+        .await
+        .expect("FSNR2000 should switch to the boot variant");
+    force_variant_detection(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .expect("FSNR2000 boot variant should be detected");
+
+    assert_request_seed_rejected(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        None,
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+
+    assert_request_seed_rejected(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        Some(HashMap::from([(String::from("Invalid"), json!(0x5A))])),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+
+    assert_request_seed_rejected(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        Some(HashMap::from([(
+            String::from("SeedRequestParameter"),
+            json!(0x5B),
+        )])),
+        StatusCode::BAD_GATEWAY,
+    )
+    .await;
+
+    ecusim::start_recording(&runtime.ecu_sim, "fsnr2000")
+        .await
+        .expect("FSNR2000 recording should start");
+
+    let mut parameters = HashMap::new();
+    parameters.insert("SeedRequestParameter".to_owned(), json!(0x5A));
+    let response: Option<RequestSeedResponse> = put_mode(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        "security",
+        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
+            value: "Level_5_RequestSeed".to_owned(),
+            mode_expiration: None,
+            key: None,
+            parameters: Some(parameters),
+        },
+        StatusCode::OK,
+    )
+    .await
+    .expect("RequestSeed with parameters should succeed");
+    assert!(response.is_some(), "RequestSeed should return a seed");
+
+    let frames = ecusim::stop_and_clear_recording(&runtime.ecu_sim, "fsnr2000")
+        .await
+        .expect("FSNR2000 recording should stop");
+    assert!(
+        frames.contains(&"27055A".to_owned()),
+        "expected RequestSeed parameter frame 27055A, got: {frames:?}"
+    );
+}
+
+#[tokio::test]
+async fn send_key_rejects_request_seed_parameters() {
+    if skip_for_can(
+        "send_key_rejects_request_seed_parameters",
+        "SecurityAccess sequencing not yet supported over CAN",
+    ) {
+        return;
+    }
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None)
+        .await
+        .expect("auth header should be obtainable");
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+
+    let ecu_lock = create_lock(
+        Duration::from_secs(60),
+        locks::ECU_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let lock_id = extract_field_from_json::<String>(
+        &response_to_json(&ecu_lock).expect("lock response should be JSON"),
+        "id",
+    )
+    .expect("lock response should contain an id");
+    lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::OK,
+        Method::GET,
+    )
+    .await;
+
+    let mut parameters = HashMap::new();
+    parameters.insert("Foo".to_owned(), json!(90));
+    let response: Option<modes::security_and_session::put::Response<String>> = put_mode(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        "security",
+        modes::security_and_session::put::SecurityRequest {
+            value: "Level_5".to_owned(),
+            mode_expiration: None,
+            key: Some(modes::security_and_session::put::ModeKey {
+                send_key: "0x12 0x34".to_owned(),
+            }),
+            parameters: Some(parameters),
+        },
+        StatusCode::BAD_REQUEST,
+    )
+    .await
+    .expect("SendKey with RequestSeed parameters should be rejected");
+    assert!(
+        response.is_none(),
+        "a rejected SendKey should not return a body"
+    );
+
     lock_operation(
         locks::ECU_ENDPOINT,
         Some(&lock_id),
@@ -943,10 +1129,9 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
         &auth,
         ecu_endpoint,
         "session",
-        modes::security_and_session::put::Request {
+        modes::security_and_session::put::SessionRequest {
             value: "extended".to_owned(),
             mode_expiration: Some(session_expiration),
-            key: None,
         },
         StatusCode::OK,
     )
@@ -1351,10 +1536,9 @@ pub(crate) async fn switch_session(
         headers,
         ecu_endpoint,
         "session",
-        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
+        sovd_interfaces::components::ecu::modes::security_and_session::put::SessionRequest {
             value: name.to_owned(),
             mode_expiration: None,
-            key: None,
         },
         expected_status,
     )
@@ -1379,10 +1563,39 @@ async fn request_seed(
             value: name,
             mode_expiration: None,
             key: None,
+            parameters: None,
         },
         StatusCode::OK,
     )
     .await
+}
+
+async fn assert_request_seed_rejected(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+    parameters: Option<HashMap<String, serde_json::Value>>,
+    expected_status: StatusCode,
+) {
+    let response: Option<RequestSeedResponse> = put_mode(
+        config,
+        headers,
+        ecu_endpoint,
+        "security",
+        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
+            value: "Level_5_RequestSeed".to_owned(),
+            mode_expiration: None,
+            key: None,
+            parameters,
+        },
+        expected_status,
+    )
+    .await
+    .expect("RequestSeed should be rejected");
+    assert!(
+        response.is_none(),
+        "a rejected RequestSeed should not return a body"
+    );
 }
 
 async fn send_key(
@@ -1409,6 +1622,7 @@ async fn send_key(
                     send_key: key,
                 },
             ),
+            parameters: None,
         },
         excepted_status,
     )

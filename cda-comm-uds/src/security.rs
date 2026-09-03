@@ -48,6 +48,7 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
                 ecu_name,
                 &default_security_access,
                 None,
+                None,
                 security_plugin,
                 None,
             )
@@ -73,6 +74,7 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
         ecu_name: &str,
         level: &str,
         authentication_data: Option<UdsPayloadData>,
+        request_seed_data: Option<UdsPayloadData>,
         security_plugin: &DynamicPlugin,
         expiration: Option<Duration>,
     ) -> Result<(SecurityAccess, Self::Response), DiagServiceError> {
@@ -85,8 +87,14 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
         match &security_access {
             SecurityAccess::RequestSeed(dc) => Ok((
                 security_access.clone(),
-                self.send(ecu_name, dc.clone(), security_plugin, None, false)
-                    .await?,
+                self.send(
+                    ecu_name,
+                    dc.clone(),
+                    security_plugin,
+                    request_seed_data,
+                    false,
+                )
+                .await?,
             )),
             SecurityAccess::SendKey(dc) => {
                 let result = self

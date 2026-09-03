@@ -229,7 +229,7 @@ pub(crate) mod session {
             ..
         }): State<WebserverEcuState<T, U>>,
         WithRejection(Json(request_body), _): WithRejection<
-            Json<sovd_modes::security_and_session::put::Request>,
+            Json<sovd_modes::security_and_session::put::SessionRequest>,
             ApiError,
         >,
     ) -> Response {
@@ -292,7 +292,7 @@ pub(crate) mod session {
 
     pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
         op.description("Change the active session.")
-            .input::<Json<sovd_modes::security_and_session::put::Request>>()
+            .input::<Json<sovd_modes::security_and_session::put::SessionRequest>>()
             .response_with::<200, Json<sovd_modes::security_and_session::put::Response<String>>, _>(
                 |res| {
                     res.description("Session updated successfully").example(
@@ -467,8 +467,17 @@ pub(crate) mod security {
             }
             .into_response();
         }
+        if !is_request_seed && request_body.parameters.is_some() {
+            return ErrorWrapper {
+                error: ApiError::BadRequest(
+                    "RequestSeed parameters cannot be used with SendKey.".to_string(),
+                ),
+                include_schema,
+            }
+            .into_response();
+        }
 
-        let payload = if let Some(key) = key {
+        let (seed_payload, key_payload) = if let Some(key) = key {
             let mut data = HashMap::new();
             let Ok(value) = serde_json::to_value(&key) else {
                 return ErrorWrapper {
@@ -490,17 +499,20 @@ pub(crate) mod security {
             };
 
             data.insert(param_name, value);
-            let payload = UdsPayloadData::ParameterMap(data);
-            Some(payload)
+            (None, Some(UdsPayloadData::ParameterMap(data)))
         } else {
-            None
+            let seed_payload = request_body
+                .parameters
+                .map(|p| UdsPayloadData::ParameterMap(p.into_iter().collect()));
+            (seed_payload, None)
         };
 
         match uds
             .set_ecu_security_access(
                 &ecu_name,
                 &level,
-                payload,
+                key_payload,
+                seed_payload,
                 &(security_plugin as DynamicPlugin),
                 request_body.mode_expiration.map(Duration::from_secs),
             )
@@ -565,7 +577,7 @@ pub(crate) mod security {
 
     pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
         op.description("Change the security Level.")
-            .input::<Json<sovd_modes::security_and_session::put::Request>>()
+            .input::<Json<sovd_modes::security_and_session::put::SecurityRequest>>()
             .response_with::<200, Json<sovd_modes::security_and_session::put::Response<String>>, _>(
                 |res| {
                     res.description("Security level updated successfully")
