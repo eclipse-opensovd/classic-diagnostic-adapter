@@ -241,16 +241,16 @@ $env:OPENSSL_INCLUDE_DIR="C:\Program Files\OpenSSL-Win64\include"
 
 ### pre commit
 
-Check staged files:
+Check staged files (skips the all-features build in the `CI` group):
 
 ```shell
 uv run --group tools prek run
 ```
 
-Check all files:
+Check all files, including the all-features build (the same command CI runs):
 
 ```shell
-uv run --group tools prek run --all-files
+uv run --group tools prek run --all-files --group CI --group @ungrouped
 ```
 
 Install this command as documented here: <https://git-scm.com/book/en/v2/Customizing-Git-Git-Hooks>

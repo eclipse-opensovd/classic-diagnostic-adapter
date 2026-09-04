@@ -10,6 +10,10 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+#![allow(
+    clippy::mod_module_files,
+    reason = "Named mod.rs in integration tests are not supported"
+)]
 
 mod sovd;
 mod util;
