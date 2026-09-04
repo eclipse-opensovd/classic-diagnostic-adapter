@@ -534,6 +534,11 @@
 # Semantic ID used to identify the distinguishing parameter of a service.
 # configuration_service_parameter_semantic_id = "ID"
 # Functional class name used to filter varcoding services.
+# NOTE: this is currently the only functional class routed to `/configurations`, and there is no
+# functional-class-to-category mapping for `/data` yet. See `arch~sovd-api-functional-class-mapping`
+# in docs/03_architecture/02_sovd-api/02_sovd-api.rst for the target design (a configurable list of
+# functional classes routed to `/configurations`, plus a functional-class-to-category mapping table
+# with a configurable default/fallback category for `/data`).
 # functional_class_varcoding = "varcoding"
 # Position of affixes in diagnostic service long names.
 # long_name_affix_position = "Suffix"
