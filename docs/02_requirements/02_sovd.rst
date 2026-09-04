@@ -122,7 +122,9 @@ Paths
            | 2E
          - | /data/{data-identifier}
            | /configurations/{data-identifier}
-         - category & classification between paths is handled by the functional class with configuration
+         - | Classification between ``/data`` and ``/configurations`` is handled by mapping the ODX functional
+           | class to a category (for ``/data``) or to the ``/configurations`` path, via configuration.
+           | See :need:`arch~sovd-api-functional-class-mapping`.
        * - 27
          - /modes/security
          -
@@ -155,6 +157,43 @@ Paths
 
     The CDA must support the optional query parameter ``x-sovd2uds-includesdgs`` (alias ``x-include-sdgs``) to be able to
     include a list of SDG/SD properties of the ECU - see :need:`req~sovd-api-component-sdgsd`.
+
+.. req:: Data Categories Endpoint
+    :id: req~sovd-api-data-categories-endpoint
+    :links: arch~sovd-api-data-categories-endpoint
+    :status: draft
+
+    The CDA must provide a ``GET /components/{ecu-name}/data-categories`` endpoint returning the list of data
+    categories supported by that ECU, as specified by ISO 17978-3.
+
+    **Rationale**
+
+    Allows an SOVD client to discover which categories are actually in use for a given ECU without having to
+    enumerate and inspect every entry of ``/data`` first.
+
+.. req:: Data Groups Endpoint
+    :id: req~sovd-api-data-groups-endpoint
+    :links: arch~sovd-api-data-groups-endpoint
+    :status: draft
+
+    The CDA must provide a ``GET /components/{ecu-name}/data-groups`` endpoint returning the list of groups defined
+    for that ECU's data resources, optionally filtered by the ``category`` query parameter, as specified by ISO
+    17978-3.
+
+    **Rationale**
+
+    Allows an SOVD client to discover related data resources (e.g. all values belonging to "engine performance")
+    without relying on category alone, and to filter that discovery by category.
+
+.. req:: Data Query Filtering
+    :id: req~sovd-api-data-query-filtering
+    :links: arch~sovd-api-data-query-filtering
+    :status: draft
+
+    The CDA must support the optional query parameters ``categories`` and ``groups`` on
+    ``GET /components/{ecu-name}/data``, to filter the returned data resources by category or by group
+    respectively, as specified by ISO 17978-3. If both are provided, ``groups`` takes precedence and
+    ``categories`` must be ignored.
 
 .. req:: Component SDG/SDs
     :id: req~sovd-api-component-sdgsd
