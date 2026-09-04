@@ -189,7 +189,60 @@ pub mod data {
 
     pub mod get {
         use super::ComponentData;
+
         pub type Response = ComponentData;
+
+        /// Query parameters for `GET /data`.
+        #[derive(serde::Deserialize, schemars::JsonSchema)]
+        pub struct Query {
+            #[serde(rename = "include-schema", default)]
+            pub include_schema: bool,
+            /// Optional comma-separated list of categories. When present, only data resources
+            /// whose `category` is one of the given values are returned.
+            ///
+            /// Matching is case-insensitive: incoming request URIs (including the query
+            /// string) are lowercased by CDA's request normalization middleware before
+            /// reaching this handler, so category names must be compared case-insensitively
+            /// against the (potentially mixed-case) `category` values produced by
+            /// `category_mapping`/`default_category`.
+            #[serde(default)]
+            pub categories: Option<String>,
+        }
+
+        impl Query {
+            /// Returns the parsed, trimmed list of requested categories, or `None` if the
+            /// `categories` query parameter was not provided.
+            ///
+            /// Comparisons against a `category` value must be done case-insensitively;
+            /// see the field documentation on [`Query::categories`].
+            #[must_use]
+            pub fn categories(&self) -> Option<Vec<&str>> {
+                self.categories
+                    .as_deref()
+                    .map(|c| c.split(',').map(str::trim).collect())
+            }
+        }
+    }
+}
+
+pub mod data_categories {
+    /// A single entry of the `/data-categories` response.
+    /// Spec ISO 17978-3 Section 7.9.2.1 (`DataCategoryInformation`).
+    #[derive(serde::Deserialize, serde::Serialize, Debug, schemars::JsonSchema)]
+    pub struct DataCategoryInformation {
+        /// The category name, e.g. `identData`, `currentData`, `storedData`, `sysInfo`, or a
+        /// custom `x-<ext>-...` category.
+        pub item: String,
+        /// Optional identifier for translating the category name. CDA does not currently
+        /// support translation, so this is always omitted.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub category_translation_id: Option<String>,
+    }
+
+    pub mod get {
+        use super::DataCategoryInformation;
+
+        pub type Response = crate::Items<DataCategoryInformation>;
         pub type Query = crate::IncludeSchemaQuery;
     }
 }

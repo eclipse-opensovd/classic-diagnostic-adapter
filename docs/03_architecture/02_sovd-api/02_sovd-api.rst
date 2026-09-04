@@ -352,15 +352,14 @@ Categories
        The SOVD standard also defines the resources ``GET /{entity-path}/data-categories`` (see
        :need:`arch~sovd-api-data-categories-endpoint`), ``GET /{entity-path}/data-groups`` (see
        :need:`arch~sovd-api-data-groups-endpoint`), and ``categories``/``groups`` query parameters on
-       ``GET /{entity-path}/data`` (see :need:`arch~sovd-api-data-query-filtering`). These are **not yet
-       implemented** by the CDA; the following subsections specify their target design.
+       ``GET /{entity-path}/data`` (see :need:`arch~sovd-api-data-query-filtering`). ``data-categories`` and the
+       ``categories`` query parameter are implemented; ``data-groups`` and the ``groups`` query parameter are
+       **not yet implemented** by the CDA (their configuration mechanism is left open for a future architecture
+       change, see :need:`arch~sovd-api-data-groups-endpoint`).
 
 .. arch:: Data Categories Endpoint
     :id: arch~sovd-api-data-categories-endpoint
     :status: draft
-
-    .. note::
-       Not yet implemented.
 
     ``GET /components/{ecu-name}/data-categories`` returns the categories actually in use by the ECU's ``/data``
     resource collection, i.e. the distinct set of values returned as ``category`` on the ``/data`` items -- not
@@ -459,7 +458,9 @@ Categories
     :status: draft
 
     .. note::
-       Not yet implemented.
+       The ``categories`` query parameter is implemented. The ``groups`` query parameter is **not yet
+       implemented**, since it depends on the group-assignment configuration mechanism described in
+       :need:`arch~sovd-api-data-groups-endpoint`, which is also not yet implemented.
 
     ``GET /components/{ecu-name}/data`` must support the following additional query parameters:
 
@@ -469,15 +470,13 @@ Categories
        * - Parameter Name
          - Description
        * - categories
-         - Optional array. Filters the returned data resources to those whose ``category`` is one of the given
-           values.
+         - Optional. Comma-separated list of categories. Filters the returned data resources to those whose
+           ``category`` is one of the given values.
        * - groups
-         - Optional array. Filters the returned data resources to those belonging to at least one of the given
-           groups. If both ``groups`` and ``categories`` are provided, ``groups`` takes precedence and
-           ``categories`` must be ignored by the CDA, since ``groups`` is the more restrictive filter.
-
-    If the existing ``tags`` query parameter is combined with either ``groups`` or ``categories``, the two filters
-    must be logically AND-combined.
+         - Optional. Comma-separated list of groups. Filters the returned data resources to those belonging to at
+           least one of the given groups. If both ``groups`` and ``categories`` are provided, ``groups`` takes
+           precedence and ``categories`` must be ignored by the CDA, since ``groups`` is the more restrictive
+           filter.
 
 .. arch:: Functional Class to Category and Configuration Mapping
     :id: arch~sovd-api-functional-class-mapping
@@ -508,16 +507,16 @@ Categories
     clearly identifiable to integrators and testers rather than being bucketed into a standard category by
     accident.
 
-    **Configuration shape** (illustrative, see ``[database.naming_convention]`` in the sample configuration file):
+    **Configuration shape** (see ``[database.naming_convention]`` in the sample configuration file):
 
     .. code-block:: toml
 
        [database.naming_convention]
        # Functional classes routed to /configurations instead of /data.
-       functional_classes_configuration = ["varcoding"]
+       configuration_functional_classes = ["varcoding"]
        # Default category for /data services whose functional class (or lack thereof)
        # has no entry in `category_mapping`.
-       default_data_category = "x-sovd2uds-unmapped"
+       default_category = "x-sovd2uds-unmapped"
 
        # Functional class -> category mapping for /data services.
        [[database.naming_convention.category_mapping]]
@@ -542,7 +541,7 @@ Configurations -- SID 22\ :sub:`16` & 2E\ :sub:`16`
     :status: draft
 
     Names for data resources are determined by taking all diag-services defined for 22\ :sub:`16` and 2E\ :sub:`16`, and filtering
-    them for one of the configurable functional class names in ``functional_classes_configuration`` (see
+    them for one of the configurable functional class names in ``configuration_functional_classes`` (see
     :need:`arch~sovd-api-functional-class-mapping`). Their short name is taken as a base and processed by removing
     configurable prefixes/suffixes, to determine the data identifier within the ``/configurations/{data-identifier}`` path.
 
