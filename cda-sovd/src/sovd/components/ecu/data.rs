@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use aide::UseApi;
+use aide::{UseApi, transform::TransformParameter};
 use cda_plugin_security::Secured;
 use sovd_interfaces::error::ApiErrorResponse;
 
@@ -41,6 +41,13 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
         .await
     {
         Ok(mut items) => {
+            if let Some(categories) = query.categories() {
+                items.retain(|item| {
+                    categories
+                        .iter()
+                        .any(|c| c.eq_ignore_ascii_case(&item.category))
+                });
+            }
             let sovd_component_data = sovd_interfaces::components::ecu::data::get::Response {
                 items: items
                     .drain(0..)
@@ -60,6 +67,12 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
 
 pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
     op.description("Get all ECU data.")
+        .parameter("categories", |op: TransformParameter<String>| {
+            op.description(
+                "Optional comma-separated list of categories. When present, only data resources \
+                 whose category is one of the given values are returned.",
+            )
+        })
         .response_with::<200, Json<sovd_interfaces::components::ecu::data::get::Response>, _>(
             |res| {
                 res.description("Response with all data.").example(
@@ -85,6 +98,187 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
                     schema: None,
                 })
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use aide::UseApi;
+    use axum::extract::State;
+    use axum_extra::extract::WithRejection;
+    use cda_interfaces::{
+        datatypes::ComponentDataInfo, file_manager::mock::MockFileManager, mock::MockUdsEcu,
+    };
+    use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
+
+    use super::*;
+    use crate::sovd::tests::create_test_webserver_state;
+
+    fn three_items() -> Vec<ComponentDataInfo> {
+        vec![
+            ComponentDataInfo {
+                category: "identData".to_owned(),
+                id: "Foo".to_owned(),
+                name: "Foo".to_owned(),
+            },
+            ComponentDataInfo {
+                category: "currentData".to_owned(),
+                id: "Bar".to_owned(),
+                name: "Bar".to_owned(),
+            },
+            ComponentDataInfo {
+                category: "identData".to_owned(),
+                id: "Baz".to_owned(),
+                name: "Baz".to_owned(),
+            },
+        ]
+    }
+
+    async fn call_get(
+        mock_uds: MockUdsEcu,
+        query: sovd_interfaces::components::ecu::data::get::Query,
+    ) -> Response {
+        let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
+            "TestECU".to_owned(),
+            mock_uds,
+            MockFileManager::new(),
+        );
+
+        get::<MockUdsEcu, MockFileManager>(
+            UseApi(
+                Secured(Box::new(TestSecurityPlugin)),
+                std::marker::PhantomData,
+            ),
+            WithRejection(Query(query), std::marker::PhantomData),
+            State(state),
+        )
+        .await
+    }
+
+    /// Asserts the response is a `200 OK` and returns its parsed `items` array.
+    async fn ok_items(response: Response) -> Vec<serde_json::Value> {
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        doc.get("items").unwrap().as_array().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn returns_all_items_when_no_categories_filter() {
+        let mut mock_uds = MockUdsEcu::new();
+        mock_uds
+            .expect_get_components_data_info()
+            .returning(|_, _| Ok(three_items()));
+
+        let items = ok_items(
+            call_get(
+                mock_uds,
+                sovd_interfaces::components::ecu::data::get::Query {
+                    include_schema: false,
+                    categories: None,
+                },
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(items.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn filters_items_by_single_category() {
+        let mut mock_uds = MockUdsEcu::new();
+        mock_uds
+            .expect_get_components_data_info()
+            .returning(|_, _| Ok(three_items()));
+
+        let items = ok_items(
+            call_get(
+                mock_uds,
+                sovd_interfaces::components::ecu::data::get::Query {
+                    include_schema: false,
+                    categories: Some("identData".to_owned()),
+                },
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|i| i["category"] == "identData"));
+    }
+
+    #[tokio::test]
+    async fn filters_items_by_multiple_comma_separated_categories() {
+        let mut mock_uds = MockUdsEcu::new();
+        mock_uds
+            .expect_get_components_data_info()
+            .returning(|_, _| Ok(three_items()));
+
+        let items = ok_items(
+            call_get(
+                mock_uds,
+                sovd_interfaces::components::ecu::data::get::Query {
+                    include_schema: false,
+                    categories: Some("identData, currentData".to_owned()),
+                },
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(items.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn returns_empty_when_category_does_not_match() {
+        let mut mock_uds = MockUdsEcu::new();
+        mock_uds
+            .expect_get_components_data_info()
+            .returning(|_, _| Ok(three_items()));
+
+        let items = ok_items(
+            call_get(
+                mock_uds,
+                sovd_interfaces::components::ecu::data::get::Query {
+                    include_schema: false,
+                    categories: Some("storedData".to_owned()),
+                },
+            )
+            .await,
+        )
+        .await;
+
+        assert!(items.is_empty());
+    }
+
+    /// Request URIs (including their query string) are lowercased by CDA's request
+    /// normalization middleware (`rewrite_request_uri` in `cda-sovd::lib`) before reaching
+    /// this handler, so a category name requested as e.g. `identdata` must still match an
+    /// item whose `category` is the mixed-case `identData`.
+    #[tokio::test]
+    async fn filters_items_by_category_case_insensitively() {
+        let mut mock_uds = MockUdsEcu::new();
+        mock_uds
+            .expect_get_components_data_info()
+            .returning(|_, _| Ok(three_items()));
+
+        let items = ok_items(
+            call_get(
+                mock_uds,
+                sovd_interfaces::components::ecu::data::get::Query {
+                    include_schema: false,
+                    categories: Some("identdata".to_owned()),
+                },
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|i| i["category"] == "identData"));
+    }
 }
 
 pub(crate) mod diag_service {

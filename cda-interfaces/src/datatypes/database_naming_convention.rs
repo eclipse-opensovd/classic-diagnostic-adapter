@@ -26,7 +26,13 @@ use crate::{
 /// - `long_name_affix_position`: Position of affixes in long names (prefix or suffix).
 /// - `configuration_service_parameter_semantic_id`: Parameter semantic used to distinguish
 ///   between different services in configurations
-/// - `functional_class_varcoding`: Functional class name for filtering varcoding services.
+/// - `configuration_functional_classes`: Functional class names for filtering services that
+///   are routed to `/configurations` instead of `/data`.
+/// - `category_mapping`: Maps a functional class name to a `/data` category for 0x22/0x2E
+///   services that are *not* routed to `/configurations`. A functional class must not appear
+///   both here and in `configuration_functional_classes`.
+/// - `default_category`: Fallback category used for 0x22/0x2E services whose functional class
+///   is not present in `category_mapping` (and not in `configuration_functional_classes`).
 /// - `short_name_affixes`: List of lowercase affixes for short names.
 ///   **Each affix must match the specified `short_name_affix_position`
 ///   (i.e., be a prefix if `Prefix`, or a suffix if `Suffix`).**
@@ -55,8 +61,17 @@ pub struct DatabaseNamingConvention {
     pub long_name_affix_position: DiagnosticServiceAffixPosition,
     /// Semantic ID used to identify the distinguishing parameter of a service.
     pub configuration_service_parameter_semantic_id: String,
-    /// Functional class name used to filter varcoding services.
-    pub functional_class_varcoding: String,
+    /// Functional class names used to route 0x22/0x2E services to `/configurations`.
+    pub configuration_functional_classes: Vec<String>,
+    /// Maps a functional class name to a `/data` category for 0x22/0x2E services that are not
+    /// routed to `/configurations`. A functional class must not appear both here and in
+    /// `configuration_functional_classes`.
+    #[serde(default)]
+    pub category_mapping: Vec<FunctionalClassCategoryMapping>,
+    /// Fallback category for 0x22/0x2E services whose functional class has no entry in
+    /// `category_mapping`.
+    #[serde(default = "default_category")]
+    pub default_category: String,
     /// Ordered list of lowercase affixes to strip from short names during service lookup.
     ///
     /// Compound affixes (e.g. `_read_dump`) must come before general ones (e.g. `_dump`).
@@ -94,6 +109,19 @@ pub struct DatabaseNamingConvention {
     pub action_affixes: DiagCommActionAffixes,
     /// Database semantics to identify the type of service
     pub semantics: Semantics,
+}
+
+/// Maps a single ODX functional class name to a `/data` category.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct FunctionalClassCategoryMapping {
+    /// The ODX functional class short name (case-insensitive match).
+    pub functional_class: String,
+    /// The category to assign to 0x22/0x2E services belonging to this functional class.
+    pub category: String,
+}
+
+fn default_category() -> String {
+    "x-sovd2uds-unmapped".to_owned()
 }
 
 /// Defines the name for the database semantics. Although they should follow the labels
@@ -174,11 +202,56 @@ impl ConfigSanity for DatabaseNamingConvention {
             }
         }
 
+        // A functional class must not be routed to /configurations and also have a category
+        // mapping to /data at the same time.
+        for mapping in &self.category_mapping {
+            if self
+                .configuration_functional_classes
+                .iter()
+                .any(|fc| fc.eq_ignore_ascii_case(&mapping.functional_class))
+            {
+                return Err(ConfigSanityError::InvalidValue {
+                    field: "database_naming_convention.category_mapping".to_owned(),
+                    reason: format!(
+                        "functional class '{}' is present in both \
+                         'configuration_functional_classes' and 'category_mapping'",
+                        mapping.functional_class
+                    ),
+                });
+            }
+        }
+
         Ok(())
     }
 }
 
 impl DatabaseNamingConvention {
+    /// Returns `true` if the given functional class name is configured to route 0x22/0x2E
+    /// services to `/configurations` instead of `/data`.
+    #[must_use]
+    pub fn is_configuration_functional_class(&self, functional_class_name: &str) -> bool {
+        self.configuration_functional_classes
+            .iter()
+            .any(|fc| fc.eq_ignore_ascii_case(functional_class_name))
+    }
+
+    /// Resolves the `/data` category for a 0x22/0x2E service belonging to the given functional
+    /// class, using the configured `category_mapping`, falling back to `default_category` if no
+    /// entry matches.
+    #[must_use]
+    pub fn category_for_functional_class(&self, functional_class_name: &str) -> &str {
+        self.category_mapping
+            .iter()
+            .find(|mapping| {
+                mapping
+                    .functional_class
+                    .eq_ignore_ascii_case(functional_class_name)
+            })
+            .map_or(self.default_category.as_str(), |mapping| {
+                mapping.category.as_str()
+            })
+    }
+
     /// Trims a diagnostic service long name using the configured affixes and naming position.
     /// The first matching affix is removed and the result is returned.
     /// Affixes must be lowercase for correct matching.
@@ -304,7 +377,9 @@ impl Default for DatabaseNamingConvention {
             short_name_affix_position: DiagnosticServiceAffixPosition::Suffix,
             long_name_affix_position: DiagnosticServiceAffixPosition::Suffix,
             configuration_service_parameter_semantic_id: "ID".to_owned(),
-            functional_class_varcoding: "varcoding".to_owned(),
+            configuration_functional_classes: vec!["varcoding".to_owned()],
+            category_mapping: Vec::new(),
+            default_category: default_category(),
             short_name_affixes: vec![
                 "_read".to_owned(),
                 "_write".to_owned(),
@@ -444,7 +519,9 @@ mod tests {
                 DiagnosticServiceAffixPosition::Suffix
             },
             configuration_service_parameter_semantic_id: "ID".to_owned(),
-            functional_class_varcoding: "varcoding".to_owned(),
+            configuration_functional_classes: vec!["varcoding".to_owned()],
+            category_mapping: Vec::new(),
+            default_category: default_category(),
             short_name_affixes: if prefix {
                 vec!["pre_".to_owned(), "s_".to_owned()]
             } else {
@@ -548,7 +625,9 @@ mod tests {
             short_name_affixes: vec!["pre_".to_owned()],
             long_name_affixes: vec![" post".to_owned()],
             configuration_service_parameter_semantic_id: "ID".to_owned(),
-            functional_class_varcoding: "varcoding".to_owned(),
+            configuration_functional_classes: vec!["varcoding".to_owned()],
+            category_mapping: Vec::new(),
+            default_category: default_category(),
             service_affixes: HashMap::default(),
             action_affixes: DiagCommActionAffixes::default(),
             semantics: Semantics::default(),
@@ -603,7 +682,7 @@ mod tests {
             "short_name_affix_position": "Suffix",
             "long_name_affix_position": "Suffix",
             "configuration_service_parameter_semantic_id": "ID",
-            "functional_class_varcoding": "varcoding",
+            "configuration_functional_classes": ["varcoding"],
             "short_name_affixes": [],
             "long_name_affixes": [],
             "service_affixes": {
@@ -708,6 +787,98 @@ mod tests {
         assert_eq!(
             conv.apply_action_affix("Data", &DiagCommAction::Read),
             "Data"
+        );
+    }
+
+    #[test]
+    fn test_is_configuration_functional_class_case_insensitive() {
+        let conv = DatabaseNamingConvention {
+            configuration_functional_classes: vec![
+                "VarCoding".to_owned(),
+                "calibration".to_owned(),
+            ],
+            ..make_convention(false)
+        };
+        assert!(conv.is_configuration_functional_class("varcoding"));
+        assert!(conv.is_configuration_functional_class("CALIBRATION"));
+        assert!(!conv.is_configuration_functional_class("sensors"));
+    }
+
+    #[test]
+    fn test_category_for_functional_class_uses_mapping() {
+        let conv = DatabaseNamingConvention {
+            category_mapping: vec![
+                FunctionalClassCategoryMapping {
+                    functional_class: "Sensors".to_owned(),
+                    category: "identData".to_owned(),
+                },
+                FunctionalClassCategoryMapping {
+                    functional_class: "measurements".to_owned(),
+                    category: "currentData".to_owned(),
+                },
+            ],
+            default_category: "x-sovd2uds-unmapped".to_owned(),
+            ..make_convention(false)
+        };
+        assert_eq!(conv.category_for_functional_class("sensors"), "identData");
+        assert_eq!(
+            conv.category_for_functional_class("MEASUREMENTS"),
+            "currentData"
+        );
+    }
+
+    #[test]
+    fn test_category_for_functional_class_falls_back_to_default() {
+        let conv = DatabaseNamingConvention {
+            category_mapping: vec![FunctionalClassCategoryMapping {
+                functional_class: "sensors".to_owned(),
+                category: "identData".to_owned(),
+            }],
+            default_category: "x-sovd2uds-unmapped".to_owned(),
+            ..make_convention(false)
+        };
+        assert_eq!(
+            conv.category_for_functional_class("unknown_class"),
+            "x-sovd2uds-unmapped"
+        );
+    }
+
+    #[test]
+    fn test_validate_sanity_rejects_functional_class_in_both_lists() {
+        let conv = DatabaseNamingConvention {
+            configuration_functional_classes: vec!["varcoding".to_owned()],
+            category_mapping: vec![FunctionalClassCategoryMapping {
+                functional_class: "VarCoding".to_owned(),
+                category: "identData".to_owned(),
+            }],
+            ..make_convention(false)
+        };
+        let result = conv.validate_sanity();
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(ConfigSanityError::InvalidValue { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_sanity_accepts_disjoint_lists() {
+        let conv = DatabaseNamingConvention {
+            configuration_functional_classes: vec!["varcoding".to_owned()],
+            category_mapping: vec![FunctionalClassCategoryMapping {
+                functional_class: "sensors".to_owned(),
+                category: "identData".to_owned(),
+            }],
+            ..make_convention(false)
+        };
+        assert!(conv.validate_sanity().is_ok());
+    }
+
+    #[test]
+    fn test_default_category_is_unmapped_marker() {
+        assert_eq!(
+            DatabaseNamingConvention::default().default_category,
+            "x-sovd2uds-unmapped"
         );
     }
 }
