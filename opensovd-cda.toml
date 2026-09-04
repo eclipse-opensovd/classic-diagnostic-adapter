@@ -797,7 +797,6 @@
 # init_storage_from_database_path = false
 # Value of the Retry-After header (in seconds) sent when the service is
 # temporarily unavailable due to a busy transaction.
-# Default: 1 second.
 # retry_after_seconds = 1
 # Directory where the updatable database is stored.
 # storage_dir = "."
