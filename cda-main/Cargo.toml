@@ -47,6 +47,7 @@ cda-plugin-runtime-update = { workspace = true }
 cda-storage = { workspace = true }
 # args
 clap = { workspace = true, features = ["derive", "env"] }
+backon = { workspace = true }
 # config
 figment = { workspace = true, features = ["env", "toml"] }
 toml = { workspace = true }

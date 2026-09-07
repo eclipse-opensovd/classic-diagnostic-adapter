@@ -800,6 +800,12 @@
 # retry_after_seconds = 1
 # Directory where the updatable database is stored.
 # storage_dir = "."
+# How many times to try loading the storage directory,
+# if it is unavailable.
+# storage_dir_load_retry_attempts = 100
+# How long to wait between trying to load the storage directory,
+# if it is unavailable, in milliseconds.
+# storage_dir_load_retry_delay_ms = 3000
 # Maximum upload body size in bytes for multipart file uploads.
 # Default: 50MB. Axum's built-in limit is 2MB which is too low for MDD files.
 # upload_body_limit_bytes = 52428800

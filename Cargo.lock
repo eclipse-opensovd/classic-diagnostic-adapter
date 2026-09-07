@@ -229,6 +229,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backon"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffb0e931875b666fc4fcb20fee52e9bbd1ef836fd9e9e04ec21555f9f85f7ef"
+dependencies = [
+ "fastrand",
+ "tokio",
+]
+
+[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2474,6 +2484,7 @@ name = "opensovd-cda"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "backon",
  "cda-comm-can",
  "cda-comm-doip",
  "cda-comm-uds",
