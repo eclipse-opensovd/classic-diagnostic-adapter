@@ -15,6 +15,20 @@ default_install_hook_types:
   - commit-msg
 
 repos:
+  - repo: local
+    hooks:
+      - id: make-lint
+        name: make lint
+        entry: make lint
+        language: system
+        pass_filenames: false
+      - id: make-lint-all-features
+        name: make lint with --all-features
+        stages: [manual]
+        groups: [CI]
+        entry: make lint-all-features
+        language: system
+        pass_filenames: false
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
@@ -64,6 +78,7 @@ repos:
         exclude: ^comm-mbedtls/
       - id: validate-cargo-lints
       - id: cargo-fmt
+      # TODO can't remove, because check-hooks hook requires it
       - id: clippy
         name: Clippy
         entry: shared-config/cargo-clippy.sh
