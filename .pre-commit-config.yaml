@@ -53,11 +53,6 @@ repos:
     hooks:
       - id: conventional-pre-commit
         stages: [commit-msg]
-  - repo: https://github.com/compilerla/conventional-pre-commit
-    rev: v4.4.0
-    hooks:
-      - id: conventional-pre-commit
-        stages: [commit-msg]
   - repo: https://github.com/eclipse-opensovd/cicd-workflows
     rev: 07140bdd84f20b66fd4aff58a83c5148deec388c
     hooks:
