@@ -118,6 +118,7 @@ rkyv = { version = "0.8.16", default-features = false, features = [
   "std",
   "bytecheck",
 ] }
+backon = { version = "1.6.0", default-features = false, features = ["tokio-sleep"] }
 
 # ---- tracing & logging crates ----
 tracing = "0.1.41"

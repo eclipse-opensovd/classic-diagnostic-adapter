@@ -22,6 +22,7 @@ use std::{
     time::Duration,
 };
 
+use backon::Retryable;
 use cda_comm_can::{CanDiagGateway, config::CanConfig};
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::{UdsManager, state_coordinator::EcuStateCoordinator};
@@ -32,6 +33,7 @@ use cda_interfaces::{
     HashMapExtensions, TransportType, VariantDetectionReceiver, VariantDetectionSender,
     communication_control::CommunicationAccess, component_slot::ComponentSlot,
     config::ConfigSanity, datatypes::FaultConfig, dlt_ctx, health::HealthProvider,
+    storage_api::StorageError,
 };
 use cda_plugin_communication_management::plugin::CommunicationPluginBuilder;
 use cda_plugin_security::{
@@ -318,6 +320,8 @@ where
     UPB: UpdatePluginBuilder<SP>,
     CPB: CommunicationPluginBuilder,
 {
+    let storage = initialize_storage_with_retries(&config).await?; //done as first step, since the application will not function without storage
+
     let webserver_state = init_webserver(
         &config,
         setup.pre_load,
@@ -327,12 +331,6 @@ where
     .await?;
 
     tracing::debug!("Webserver is running. Loading sovd routes...");
-
-    let storage = Arc::new(
-        LocalStorage::new(&config.runtime_update_config.storage_dir).map_err(|source| {
-            AppError::InitializationFailed(format!("Failed to initialize storage. Error: {source}"))
-        })?,
-    );
 
     let vehicle_data =
         match load_vehicle_data::<SP>(&config, webserver_state.health_state.as_ref(), &storage)
@@ -1035,6 +1033,55 @@ pub fn setup_tracing(config: &Configuration) -> Result<TracingGuards, TracingSet
         _file: file_guard,
         _otel: otel_guard,
     })
+}
+
+/// Retry initializing the Storage, as for example the partition
+/// may not yet be available on which we want to store the files.
+async fn initialize_storage_with_retries(
+    config: &Configuration,
+) -> Result<Arc<LocalStorage>, AppError> {
+    let retry_delay =
+        Duration::from_millis(config.runtime_update_config.storage_dir_load_retry_delay_ms);
+    let attempts = config.runtime_update_config.storage_dir_load_retry_attempts;
+
+    let storage = (async || {
+        LocalStorage::new(&config.runtime_update_config.storage_dir)
+    })
+    .retry(
+        backon::ConstantBuilder::new()
+            .with_delay(retry_delay)
+            .with_max_times(attempts),
+    )
+    .when(|error| match error {
+        StorageError::Io(_)
+        | StorageError::Other(_)
+        | StorageError::TransactionBusy
+        | StorageError::TransactionConflict(_)
+        // following errors don't make much sense here, but retry just in case
+        | StorageError::CollectionNotFound(_)
+        | StorageError::KeyNotFound(_)
+        => true,
+
+        | StorageError::Corruption(_)
+        | StorageError::NoSpaceLeft(_)
+        | StorageError::PermissionDenied(_) => {
+            tracing::debug!("Encountered irrecoverable error while initializing storage. Not retrying.");
+            false
+        }
+    })
+    .notify(|error, delay: Duration| {
+        tracing::warn!(
+            "Failed to initialize storage. Retrying in {delay:?}. Error was: {error}"
+        );
+    })
+    .await
+    .map_err(|source| {
+        AppError::InitializationFailed(format!(
+            "Failed to initialize storage. Not retrying. Error was: {source}"
+        ))
+    })?;
+
+    Ok(Arc::new(storage))
 }
 
 /// Returns the CDA version string, which is either
