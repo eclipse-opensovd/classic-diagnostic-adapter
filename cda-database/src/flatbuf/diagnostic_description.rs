@@ -15627,6 +15627,7 @@ impl<'a> Variant<'a> {
   pub const VT_IS_BASE_VARIANT: flatbuffers::VOffsetT = 6;
   pub const VT_VARIANT_PATTERN: flatbuffers::VOffsetT = 8;
   pub const VT_PARENT_REFS: flatbuffers::VOffsetT = 10;
+  pub const VT_REVISION: flatbuffers::VOffsetT = 12;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -15638,6 +15639,7 @@ impl<'a> Variant<'a> {
     args: &'args VariantArgs<'args>
   ) -> flatbuffers::WIPOffset<Variant<'bldr>> {
     let mut builder = VariantBuilder::new(_fbb);
+    if let Some(x) = args.revision { builder.add_revision(x); }
     if let Some(x) = args.parent_refs { builder.add_parent_refs(x); }
     if let Some(x) = args.variant_pattern { builder.add_variant_pattern(x); }
     if let Some(x) = args.diag_layer { builder.add_diag_layer(x); }
@@ -15674,6 +15676,13 @@ impl<'a> Variant<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<ParentRef>>>>(Variant::VT_PARENT_REFS, None)}
   }
+  #[inline]
+  pub fn revision(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(Variant::VT_REVISION, None)}
+  }
 }
 
 impl flatbuffers::Verifiable for Variant<'_> {
@@ -15687,6 +15696,7 @@ impl flatbuffers::Verifiable for Variant<'_> {
      .visit_field::<bool>("is_base_variant", Self::VT_IS_BASE_VARIANT, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<VariantPattern>>>>("variant_pattern", Self::VT_VARIANT_PATTERN, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<ParentRef>>>>("parent_refs", Self::VT_PARENT_REFS, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<&str>>("revision", Self::VT_REVISION, false)?
      .finish();
     Ok(())
   }
@@ -15696,6 +15706,7 @@ pub struct VariantArgs<'a> {
     pub is_base_variant: bool,
     pub variant_pattern: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<VariantPattern<'a>>>>>,
     pub parent_refs: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<ParentRef<'a>>>>>,
+    pub revision: Option<flatbuffers::WIPOffset<&'a str>>,
 }
 impl<'a> Default for VariantArgs<'a> {
   #[inline]
@@ -15705,6 +15716,7 @@ impl<'a> Default for VariantArgs<'a> {
       is_base_variant: false,
       variant_pattern: None,
       parent_refs: None,
+      revision: None,
     }
   }
 }
@@ -15731,6 +15743,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> VariantBuilder<'a, 'b, A> {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Variant::VT_PARENT_REFS, parent_refs);
   }
   #[inline]
+  pub fn add_revision(&mut self, revision: flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Variant::VT_REVISION, revision);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> VariantBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     VariantBuilder {
@@ -15752,6 +15768,7 @@ impl core::fmt::Debug for Variant<'_> {
       ds.field("is_base_variant", &self.is_base_variant());
       ds.field("variant_pattern", &self.variant_pattern());
       ds.field("parent_refs", &self.parent_refs());
+      ds.field("revision", &self.revision());
       ds.finish()
   }
 }
@@ -17954,14 +17971,10 @@ impl<'a> flatbuffers::Follow<'a> for EcuData<'a> {
 }
 
 impl<'a> EcuData<'a> {
-  pub const VT_VERSION: flatbuffers::VOffsetT = 4;
-  pub const VT_ECU_NAME: flatbuffers::VOffsetT = 6;
-  pub const VT_REVISION: flatbuffers::VOffsetT = 8;
-  pub const VT_METADATA: flatbuffers::VOffsetT = 10;
-  pub const VT_FEATURE_FLAGS: flatbuffers::VOffsetT = 12;
-  pub const VT_VARIANTS: flatbuffers::VOffsetT = 14;
-  pub const VT_FUNCTIONAL_GROUPS: flatbuffers::VOffsetT = 16;
-  pub const VT_DTCS: flatbuffers::VOffsetT = 18;
+  pub const VT_ECU_NAME: flatbuffers::VOffsetT = 4;
+  pub const VT_REVISION: flatbuffers::VOffsetT = 6;
+  pub const VT_VARIANTS: flatbuffers::VOffsetT = 8;
+  pub const VT_DTCS: flatbuffers::VOffsetT = 10;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -17974,24 +17987,13 @@ impl<'a> EcuData<'a> {
   ) -> flatbuffers::WIPOffset<EcuData<'bldr>> {
     let mut builder = EcuDataBuilder::new(_fbb);
     if let Some(x) = args.dtcs { builder.add_dtcs(x); }
-    if let Some(x) = args.functional_groups { builder.add_functional_groups(x); }
     if let Some(x) = args.variants { builder.add_variants(x); }
-    if let Some(x) = args.feature_flags { builder.add_feature_flags(x); }
-    if let Some(x) = args.metadata { builder.add_metadata(x); }
     if let Some(x) = args.revision { builder.add_revision(x); }
     if let Some(x) = args.ecu_name { builder.add_ecu_name(x); }
-    if let Some(x) = args.version { builder.add_version(x); }
     builder.finish()
   }
 
 
-  #[inline]
-  pub fn version(&self) -> Option<&'a str> {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(EcuData::VT_VERSION, None)}
-  }
   #[inline]
   pub fn ecu_name(&self) -> Option<&'a str> {
     // Safety:
@@ -18007,32 +18009,11 @@ impl<'a> EcuData<'a> {
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(EcuData::VT_REVISION, None)}
   }
   #[inline]
-  pub fn metadata(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<KeyValue<'a>>>> {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<KeyValue>>>>(EcuData::VT_METADATA, None)}
-  }
-  #[inline]
-  pub fn feature_flags(&self) -> Option<flatbuffers::Vector<'a, FeatureFlag>> {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, FeatureFlag>>>(EcuData::VT_FEATURE_FLAGS, None)}
-  }
-  #[inline]
   pub fn variants(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Variant<'a>>>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Variant>>>>(EcuData::VT_VARIANTS, None)}
-  }
-  #[inline]
-  pub fn functional_groups(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<FunctionalGroup<'a>>>> {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<FunctionalGroup>>>>(EcuData::VT_FUNCTIONAL_GROUPS, None)}
   }
   #[inline]
   pub fn dtcs(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<DTC<'a>>>> {
@@ -18050,39 +18031,27 @@ impl flatbuffers::Verifiable for EcuData<'_> {
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
-     .visit_field::<flatbuffers::ForwardsUOffset<&str>>("version", Self::VT_VERSION, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<&str>>("ecu_name", Self::VT_ECU_NAME, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<&str>>("revision", Self::VT_REVISION, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<KeyValue>>>>("metadata", Self::VT_METADATA, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, FeatureFlag>>>("feature_flags", Self::VT_FEATURE_FLAGS, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Variant>>>>("variants", Self::VT_VARIANTS, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<FunctionalGroup>>>>("functional_groups", Self::VT_FUNCTIONAL_GROUPS, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<DTC>>>>("dtcs", Self::VT_DTCS, false)?
      .finish();
     Ok(())
   }
 }
 pub struct EcuDataArgs<'a> {
-    pub version: Option<flatbuffers::WIPOffset<&'a str>>,
     pub ecu_name: Option<flatbuffers::WIPOffset<&'a str>>,
     pub revision: Option<flatbuffers::WIPOffset<&'a str>>,
-    pub metadata: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<KeyValue<'a>>>>>,
-    pub feature_flags: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, FeatureFlag>>>,
     pub variants: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Variant<'a>>>>>,
-    pub functional_groups: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<FunctionalGroup<'a>>>>>,
     pub dtcs: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<DTC<'a>>>>>,
 }
 impl<'a> Default for EcuDataArgs<'a> {
   #[inline]
   fn default() -> Self {
     EcuDataArgs {
-      version: None,
       ecu_name: None,
       revision: None,
-      metadata: None,
-      feature_flags: None,
       variants: None,
-      functional_groups: None,
       dtcs: None,
     }
   }
@@ -18094,10 +18063,6 @@ pub struct EcuDataBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
 }
 impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> EcuDataBuilder<'a, 'b, A> {
   #[inline]
-  pub fn add_version(&mut self, version: flatbuffers::WIPOffset<&'b  str>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(EcuData::VT_VERSION, version);
-  }
-  #[inline]
   pub fn add_ecu_name(&mut self, ecu_name: flatbuffers::WIPOffset<&'b  str>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(EcuData::VT_ECU_NAME, ecu_name);
   }
@@ -18106,20 +18071,8 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> EcuDataBuilder<'a, 'b, A> {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(EcuData::VT_REVISION, revision);
   }
   #[inline]
-  pub fn add_metadata(&mut self, metadata: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<KeyValue<'b >>>>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(EcuData::VT_METADATA, metadata);
-  }
-  #[inline]
-  pub fn add_feature_flags(&mut self, feature_flags: flatbuffers::WIPOffset<flatbuffers::Vector<'b , FeatureFlag>>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(EcuData::VT_FEATURE_FLAGS, feature_flags);
-  }
-  #[inline]
   pub fn add_variants(&mut self, variants: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Variant<'b >>>>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(EcuData::VT_VARIANTS, variants);
-  }
-  #[inline]
-  pub fn add_functional_groups(&mut self, functional_groups: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<FunctionalGroup<'b >>>>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(EcuData::VT_FUNCTIONAL_GROUPS, functional_groups);
   }
   #[inline]
   pub fn add_dtcs(&mut self, dtcs: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<DTC<'b >>>>) {
@@ -18143,13 +18096,9 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> EcuDataBuilder<'a, 'b, A> {
 impl core::fmt::Debug for EcuData<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     let mut ds = f.debug_struct("EcuData");
-      ds.field("version", &self.version());
       ds.field("ecu_name", &self.ecu_name());
       ds.field("revision", &self.revision());
-      ds.field("metadata", &self.metadata());
-      ds.field("feature_flags", &self.feature_flags());
       ds.field("variants", &self.variants());
-      ds.field("functional_groups", &self.functional_groups());
       ds.field("dtcs", &self.dtcs());
       ds.finish()
   }
@@ -18268,75 +18217,371 @@ impl core::fmt::Debug for KeyValue<'_> {
       ds.finish()
   }
 }
+pub enum SharedDataOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct SharedData<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for SharedData<'a> {
+  type Inner = SharedData<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> SharedData<'a> {
+  pub const VT_FUNCTIONAL_GROUPS: flatbuffers::VOffsetT = 4;
+  pub const VT_ECU_SHARED_DATA: flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+    SharedData { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args SharedDataArgs<'args>
+  ) -> flatbuffers::WIPOffset<SharedData<'bldr>> {
+    let mut builder = SharedDataBuilder::new(_fbb);
+    if let Some(x) = args.ecu_shared_data { builder.add_ecu_shared_data(x); }
+    if let Some(x) = args.functional_groups { builder.add_functional_groups(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn functional_groups(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<FunctionalGroup<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<FunctionalGroup>>>>(SharedData::VT_FUNCTIONAL_GROUPS, None)}
+  }
+  #[inline]
+  pub fn ecu_shared_data(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<EcuSharedData<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<EcuSharedData>>>>(SharedData::VT_ECU_SHARED_DATA, None)}
+  }
+}
+
+impl flatbuffers::Verifiable for SharedData<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    v.visit_table(pos)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<FunctionalGroup>>>>("functional_groups", Self::VT_FUNCTIONAL_GROUPS, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<EcuSharedData>>>>("ecu_shared_data", Self::VT_ECU_SHARED_DATA, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct SharedDataArgs<'a> {
+    pub functional_groups: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<FunctionalGroup<'a>>>>>,
+    pub ecu_shared_data: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<EcuSharedData<'a>>>>>,
+}
+impl<'a> Default for SharedDataArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    SharedDataArgs {
+      functional_groups: None,
+      ecu_shared_data: None,
+    }
+  }
+}
+
+pub struct SharedDataBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SharedDataBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_functional_groups(&mut self, functional_groups: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<FunctionalGroup<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(SharedData::VT_FUNCTIONAL_GROUPS, functional_groups);
+  }
+  #[inline]
+  pub fn add_ecu_shared_data(&mut self, ecu_shared_data: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<EcuSharedData<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(SharedData::VT_ECU_SHARED_DATA, ecu_shared_data);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> SharedDataBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    SharedDataBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<SharedData<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl core::fmt::Debug for SharedData<'_> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut ds = f.debug_struct("SharedData");
+      ds.field("functional_groups", &self.functional_groups());
+      ds.field("ecu_shared_data", &self.ecu_shared_data());
+      ds.finish()
+  }
+}
+pub enum OdxDataOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct OdxData<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for OdxData<'a> {
+  type Inner = OdxData<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> OdxData<'a> {
+  pub const VT_VERSION: flatbuffers::VOffsetT = 4;
+  pub const VT_ECU_NAMES: flatbuffers::VOffsetT = 6;
+  pub const VT_METADATA: flatbuffers::VOffsetT = 8;
+  pub const VT_FEATURE_FLAGS: flatbuffers::VOffsetT = 10;
+  pub const VT_ECUS: flatbuffers::VOffsetT = 12;
+  pub const VT_SHARED: flatbuffers::VOffsetT = 14;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+    OdxData { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args OdxDataArgs<'args>
+  ) -> flatbuffers::WIPOffset<OdxData<'bldr>> {
+    let mut builder = OdxDataBuilder::new(_fbb);
+    if let Some(x) = args.shared { builder.add_shared(x); }
+    if let Some(x) = args.ecus { builder.add_ecus(x); }
+    if let Some(x) = args.feature_flags { builder.add_feature_flags(x); }
+    if let Some(x) = args.metadata { builder.add_metadata(x); }
+    if let Some(x) = args.ecu_names { builder.add_ecu_names(x); }
+    if let Some(x) = args.version { builder.add_version(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn version(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(OdxData::VT_VERSION, None)}
+  }
+  #[inline]
+  pub fn ecu_names(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<&'a str>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<&'a str>>>>(OdxData::VT_ECU_NAMES, None)}
+  }
+  #[inline]
+  pub fn metadata(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<KeyValue<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<KeyValue>>>>(OdxData::VT_METADATA, None)}
+  }
+  #[inline]
+  pub fn feature_flags(&self) -> Option<flatbuffers::Vector<'a, FeatureFlag>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, FeatureFlag>>>(OdxData::VT_FEATURE_FLAGS, None)}
+  }
+  #[inline]
+  pub fn ecus(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<EcuData<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<EcuData>>>>(OdxData::VT_ECUS, None)}
+  }
+  #[inline]
+  pub fn shared(&self) -> Option<SharedData<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<SharedData>>(OdxData::VT_SHARED, None)}
+  }
+}
+
+impl flatbuffers::Verifiable for OdxData<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    v.visit_table(pos)?
+     .visit_field::<flatbuffers::ForwardsUOffset<&str>>("version", Self::VT_VERSION, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<&'_ str>>>>("ecu_names", Self::VT_ECU_NAMES, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<KeyValue>>>>("metadata", Self::VT_METADATA, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, FeatureFlag>>>("feature_flags", Self::VT_FEATURE_FLAGS, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<EcuData>>>>("ecus", Self::VT_ECUS, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<SharedData>>("shared", Self::VT_SHARED, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct OdxDataArgs<'a> {
+    pub version: Option<flatbuffers::WIPOffset<&'a str>>,
+    pub ecu_names: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<&'a str>>>>,
+    pub metadata: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<KeyValue<'a>>>>>,
+    pub feature_flags: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, FeatureFlag>>>,
+    pub ecus: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<EcuData<'a>>>>>,
+    pub shared: Option<flatbuffers::WIPOffset<SharedData<'a>>>,
+}
+impl<'a> Default for OdxDataArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    OdxDataArgs {
+      version: None,
+      ecu_names: None,
+      metadata: None,
+      feature_flags: None,
+      ecus: None,
+      shared: None,
+    }
+  }
+}
+
+pub struct OdxDataBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> OdxDataBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_version(&mut self, version: flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(OdxData::VT_VERSION, version);
+  }
+  #[inline]
+  pub fn add_ecu_names(&mut self, ecu_names: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<&'b  str>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(OdxData::VT_ECU_NAMES, ecu_names);
+  }
+  #[inline]
+  pub fn add_metadata(&mut self, metadata: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<KeyValue<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(OdxData::VT_METADATA, metadata);
+  }
+  #[inline]
+  pub fn add_feature_flags(&mut self, feature_flags: flatbuffers::WIPOffset<flatbuffers::Vector<'b , FeatureFlag>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(OdxData::VT_FEATURE_FLAGS, feature_flags);
+  }
+  #[inline]
+  pub fn add_ecus(&mut self, ecus: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<EcuData<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(OdxData::VT_ECUS, ecus);
+  }
+  #[inline]
+  pub fn add_shared(&mut self, shared: flatbuffers::WIPOffset<SharedData<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<SharedData>>(OdxData::VT_SHARED, shared);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> OdxDataBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    OdxDataBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<OdxData<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl core::fmt::Debug for OdxData<'_> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut ds = f.debug_struct("OdxData");
+      ds.field("version", &self.version());
+      ds.field("ecu_names", &self.ecu_names());
+      ds.field("metadata", &self.metadata());
+      ds.field("feature_flags", &self.feature_flags());
+      ds.field("ecus", &self.ecus());
+      ds.field("shared", &self.shared());
+      ds.finish()
+  }
+}
 #[inline]
-/// Verifies that a buffer of bytes contains a `EcuData`
+/// Verifies that a buffer of bytes contains a `OdxData`
 /// and returns it.
 /// Note that verification is still experimental and may not
 /// catch every error, or be maximally performant. For the
 /// previous, unchecked, behavior use
-/// `root_as_ecu_data_unchecked`.
-pub fn root_as_ecu_data(buf: &[u8]) -> Result<EcuData<'_>, flatbuffers::InvalidFlatbuffer> {
-  flatbuffers::root::<EcuData>(buf)
+/// `root_as_odx_data_unchecked`.
+pub fn root_as_odx_data(buf: &[u8]) -> Result<OdxData<'_>, flatbuffers::InvalidFlatbuffer> {
+  flatbuffers::root::<OdxData>(buf)
 }
 #[inline]
 /// Verifies that a buffer of bytes contains a size prefixed
-/// `EcuData` and returns it.
+/// `OdxData` and returns it.
 /// Note that verification is still experimental and may not
 /// catch every error, or be maximally performant. For the
 /// previous, unchecked, behavior use
-/// `size_prefixed_root_as_ecu_data_unchecked`.
-pub fn size_prefixed_root_as_ecu_data(buf: &[u8]) -> Result<EcuData<'_>, flatbuffers::InvalidFlatbuffer> {
-  flatbuffers::size_prefixed_root::<EcuData>(buf)
+/// `size_prefixed_root_as_odx_data_unchecked`.
+pub fn size_prefixed_root_as_odx_data(buf: &[u8]) -> Result<OdxData<'_>, flatbuffers::InvalidFlatbuffer> {
+  flatbuffers::size_prefixed_root::<OdxData>(buf)
 }
 #[inline]
 /// Verifies, with the given options, that a buffer of bytes
-/// contains a `EcuData` and returns it.
+/// contains a `OdxData` and returns it.
 /// Note that verification is still experimental and may not
 /// catch every error, or be maximally performant. For the
 /// previous, unchecked, behavior use
-/// `root_as_ecu_data_unchecked`.
-pub fn root_as_ecu_data_with_opts<'b, 'o>(
+/// `root_as_odx_data_unchecked`.
+pub fn root_as_odx_data_with_opts<'b, 'o>(
   opts: &'o flatbuffers::VerifierOptions,
   buf: &'b [u8],
-) -> Result<EcuData<'b>, flatbuffers::InvalidFlatbuffer> {
-  flatbuffers::root_with_opts::<EcuData<'b>>(opts, buf)
+) -> Result<OdxData<'b>, flatbuffers::InvalidFlatbuffer> {
+  flatbuffers::root_with_opts::<OdxData<'b>>(opts, buf)
 }
 #[inline]
 /// Verifies, with the given verifier options, that a buffer of
-/// bytes contains a size prefixed `EcuData` and returns
+/// bytes contains a size prefixed `OdxData` and returns
 /// it. Note that verification is still experimental and may not
 /// catch every error, or be maximally performant. For the
 /// previous, unchecked, behavior use
-/// `root_as_ecu_data_unchecked`.
-pub fn size_prefixed_root_as_ecu_data_with_opts<'b, 'o>(
+/// `root_as_odx_data_unchecked`.
+pub fn size_prefixed_root_as_odx_data_with_opts<'b, 'o>(
   opts: &'o flatbuffers::VerifierOptions,
   buf: &'b [u8],
-) -> Result<EcuData<'b>, flatbuffers::InvalidFlatbuffer> {
-  flatbuffers::size_prefixed_root_with_opts::<EcuData<'b>>(opts, buf)
+) -> Result<OdxData<'b>, flatbuffers::InvalidFlatbuffer> {
+  flatbuffers::size_prefixed_root_with_opts::<OdxData<'b>>(opts, buf)
 }
 #[inline]
-/// Assumes, without verification, that a buffer of bytes contains a EcuData and returns it.
+/// Assumes, without verification, that a buffer of bytes contains a OdxData and returns it.
 /// # Safety
-/// Callers must trust the given bytes do indeed contain a valid `EcuData`.
-pub unsafe fn root_as_ecu_data_unchecked(buf: &[u8]) -> EcuData<'_> {
-  unsafe { flatbuffers::root_unchecked::<EcuData>(buf) }
+/// Callers must trust the given bytes do indeed contain a valid `OdxData`.
+pub unsafe fn root_as_odx_data_unchecked(buf: &[u8]) -> OdxData<'_> {
+  unsafe { flatbuffers::root_unchecked::<OdxData>(buf) }
 }
 #[inline]
-/// Assumes, without verification, that a buffer of bytes contains a size prefixed EcuData and returns it.
+/// Assumes, without verification, that a buffer of bytes contains a size prefixed OdxData and returns it.
 /// # Safety
-/// Callers must trust the given bytes do indeed contain a valid size prefixed `EcuData`.
-pub unsafe fn size_prefixed_root_as_ecu_data_unchecked(buf: &[u8]) -> EcuData<'_> {
-  unsafe { flatbuffers::size_prefixed_root_unchecked::<EcuData>(buf) }
+/// Callers must trust the given bytes do indeed contain a valid size prefixed `OdxData`.
+pub unsafe fn size_prefixed_root_as_odx_data_unchecked(buf: &[u8]) -> OdxData<'_> {
+  unsafe { flatbuffers::size_prefixed_root_unchecked::<OdxData>(buf) }
 }
 #[inline]
-pub fn finish_ecu_data_buffer<'a, 'b, A: flatbuffers::Allocator + 'a>(
+pub fn finish_odx_data_buffer<'a, 'b, A: flatbuffers::Allocator + 'a>(
     fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
-    root: flatbuffers::WIPOffset<EcuData<'a>>) {
+    root: flatbuffers::WIPOffset<OdxData<'a>>) {
   fbb.finish(root, None);
 }
 
 #[inline]
-pub fn finish_size_prefixed_ecu_data_buffer<'a, 'b, A: flatbuffers::Allocator + 'a>(fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>, root: flatbuffers::WIPOffset<EcuData<'a>>) {
+pub fn finish_size_prefixed_odx_data_buffer<'a, 'b, A: flatbuffers::Allocator + 'a>(fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>, root: flatbuffers::WIPOffset<OdxData<'a>>) {
   fbb.finish_size_prefixed(root, None);
 }
 }  // pub mod dataformat

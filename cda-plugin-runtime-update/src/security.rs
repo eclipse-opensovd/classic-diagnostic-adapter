@@ -112,12 +112,13 @@ async fn mdd_ecu_names<C: Collection + DirectFileAccess>(
                 ))
             })?;
             mmap_and_decode_mdd(path_str)
-                .map(|mdd| mdd.ecu_name)
+                .map(|mdd| mdd.ecu_infos.into_iter().map(|e| e.ecu_name))
                 .map_err(|e| {
                     RuntimeUpdateError::ValidationFailed(format!("Failed to read MDD: {e}"))
                 })
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()
+        .map(|names| names.into_iter().flatten().collect())
 }
 
 #[cfg(test)]
@@ -175,14 +176,21 @@ mod tests {
 
     fn make_mdd_bytes(ecu_name: &str) -> Vec<u8> {
         let magic: &[u8] = &[
-            0x4D, 0x44, 0x44, 0x20, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x20, 0x30, 0x20,
+            0x4D, 0x44, 0x44, 0x20, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x20, 0x31, 0x20,
             0x20, 0x20, 0x20, 0x20, 0x20, 0x00,
         ];
         let name_bytes = ecu_name.as_bytes();
+        // ECUInfo { ecu_name: string = 1 }
+        let mut ecu_info = Vec::new();
+        ecu_info.push(0x0A); // field 1, wiretype 2 (length-delimited)
+        ecu_info.push(u8::try_from(name_bytes.len()).unwrap());
+        ecu_info.extend_from_slice(name_bytes);
+
+        // MDDFile { ecu_infos: repeated ECUInfo = 3 }
         let mut bytes = magic.to_vec();
-        bytes.push(0x1A);
-        bytes.push(u8::try_from(name_bytes.len()).unwrap());
-        bytes.extend_from_slice(name_bytes);
+        bytes.push(0x1A); // field 3, wiretype 2 (length-delimited)
+        bytes.push(u8::try_from(ecu_info.len()).unwrap());
+        bytes.extend_from_slice(&ecu_info);
         bytes
     }
 

@@ -139,21 +139,39 @@ pub(crate) mod test_utils {
 
     pub fn make_valid_mdd(ecu_name: &str) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(b"MDD version 0      \0");
+        buf.extend_from_slice(b"MDD version 1      \0");
         buf.extend_from_slice(&[0x0A, 0x01, 0x31]);
+
+        // MDDFile.ecu_infos (field 3) contains a single ECUInfo { ecu_name: field 1 }.
+        let mut ecu_info = Vec::new();
+        ecu_info.push(0x0A);
+        ecu_info.push(u8::try_from(ecu_name.len()).expect("ecu_name must be <= 255 bytes"));
+        ecu_info.extend_from_slice(ecu_name.as_bytes());
+
         buf.push(0x1A);
-        buf.push(u8::try_from(ecu_name.len()).expect("ecu_name must be <= 255 bytes"));
-        buf.extend_from_slice(ecu_name.as_bytes());
+        buf.push(u8::try_from(ecu_info.len()).expect("ecu_info must be <= 255 bytes"));
+        buf.extend_from_slice(&ecu_info);
         buf
     }
 
-    /// Like `make_valid_mdd` but also encodes a `revision` field (proto tag 4).
+    /// Like `make_valid_mdd` but also encodes a `revision` field on the `ECUInfo` (proto tag 2).
     pub fn make_valid_mdd_with_revision(ecu_name: &str, revision: &str) -> Vec<u8> {
-        let mut buf = make_valid_mdd(ecu_name);
-        // Proto field 4, wire type 2 (length-delimited) -> tag byte 0x22
-        buf.push(0x22);
-        buf.push(u8::try_from(revision.len()).expect("revision must be <= 255 bytes"));
-        buf.extend_from_slice(revision.as_bytes());
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"MDD version 1      \0");
+        buf.extend_from_slice(&[0x0A, 0x01, 0x31]);
+
+        // MDDFile.ecu_infos (field 3) contains a single ECUInfo { ecu_name: field 1, revision: field 2 }.
+        let mut ecu_info = Vec::new();
+        ecu_info.push(0x0A);
+        ecu_info.push(u8::try_from(ecu_name.len()).expect("ecu_name must be <= 255 bytes"));
+        ecu_info.extend_from_slice(ecu_name.as_bytes());
+        ecu_info.push(0x12);
+        ecu_info.push(u8::try_from(revision.len()).expect("revision must be <= 255 bytes"));
+        ecu_info.extend_from_slice(revision.as_bytes());
+
+        buf.push(0x1A);
+        buf.push(u8::try_from(ecu_info.len()).expect("ecu_info must be <= 255 bytes"));
+        buf.extend_from_slice(&ecu_info);
         buf
     }
 

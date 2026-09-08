@@ -90,12 +90,6 @@ struct EcuLoadContext<'a> {
     strict_parameter_validation: bool,
 }
 
-/// Result of building an ECU manager and associated metadata.
-struct EcuLoadResult<S: SecurityPlugin> {
-    manager: EcuManager<S>,
-    files: Vec<Chunk>,
-}
-
 pub(crate) type LoadedEcuMap<S> = HashMap<String, (EcuManager<S>, EcuMetadata)>;
 
 fn get_mdd_files_and_size(files: ReadDir) -> Vec<(PathBuf, u64)> {
@@ -147,32 +141,33 @@ pub async fn load_databases<S: SecurityPlugin>(
     let mut file_managers_map: HashMap<String, FileManager> = HashMap::new();
 
     for path in mdd_paths {
-        let (ecu_name, ecu_manager, file_manager) =
-            match load_single_mdd::<S>(path, config, &ecu_config_map, &protocol) {
-                Ok(result) => result,
-                Err(e) if config.database.ignore_invalid_mdd => {
-                    tracing::warn!(path = %path.display(), error = %e, "Skipping invalid MDD file");
-                    continue;
+        let ecu_results = match load_single_mdd::<S>(path, config, &ecu_config_map, &protocol) {
+            Ok(result) => result,
+            Err(e) if config.database.ignore_invalid_mdd => {
+                tracing::warn!(path = %path.display(), error = %e, "Skipping invalid MDD file");
+                continue;
+            }
+            Err(e) => {
+                if let Some(provider) = db_health_provider {
+                    provider.set_status(cda_health::Status::Failed).await;
                 }
-                Err(e) => {
-                    if let Some(provider) = db_health_provider {
-                        provider.set_status(cda_health::Status::Failed).await;
-                    }
-                    return Err(AppError::DataError(e.to_string()));
-                }
-            };
+                return Err(AppError::DataError(e.to_string()));
+            }
+        };
 
         let mdd_path = path.to_str().unwrap_or_default().to_owned();
-        insert_or_update_ecu(
-            &mut loaded_ecus,
-            &ecu_name,
-            ecu_manager,
-            EcuMetadata {
-                mdd_path,
-                valid: true,
-            },
-        );
-        file_managers_map.insert(ecu_name, file_manager);
+        for (ecu_name, ecu_manager, file_manager) in ecu_results {
+            insert_or_update_ecu(
+                &mut loaded_ecus,
+                &ecu_name,
+                ecu_manager,
+                EcuMetadata {
+                    mdd_path: mdd_path.clone(),
+                    valid: true,
+                },
+            );
+            file_managers_map.insert(ecu_name, file_manager);
+        }
     }
 
     let databases: DatabaseMap<S> = loaded_ecus
@@ -441,25 +436,12 @@ async fn mark_duplicate_ecus_by_address<S: SecurityPlugin>(
     }
 }
 
-/// Extract and build the diagnostic database from proto data.
+/// Extract and build the diagnostic database from the (shared) diagnostic
+/// description payload for the given ECU.
 fn build_diagnostic_database(
-    proto_data: &mut HashMap<ChunkType, Vec<Chunk>>,
+    payload: bytes::Bytes,
     ctx: &EcuLoadContext<'_>,
 ) -> Option<cda_database::datatypes::DiagnosticDatabase> {
-    let database_payload = proto_data
-        .remove(&ChunkType::DiagnosticDescription)
-        .and_then(|mut chunks| chunks.pop())
-        .and_then(|c| c.payload);
-
-    let payload = database_payload.or_else(|| {
-        tracing::error!(
-            mdd_file = %ctx.mddfile.display(),
-            ecu_name = %ctx.ecu_name,
-            "No payload found in diagnostic description for ECU"
-        );
-        None
-    })?;
-
     let mut cfg = ctx.database_config.clone();
     if let Some(override_value) = ctx
         .ecu_config_map
@@ -471,6 +453,7 @@ fn build_diagnostic_database(
 
     cda_database::datatypes::DiagnosticDatabase::new_from_bytes(
         ctx.mdd_path.clone(),
+        ctx.ecu_name.clone(),
         payload,
         ctx.flat_buf_settings.clone(),
         cfg,
@@ -534,14 +517,15 @@ fn extract_file_chunks(mut proto_data: HashMap<ChunkType, Vec<Chunk>>) -> Vec<Ch
         .collect()
 }
 
-/// Load and process a single ECU from MDD file.
+/// Load and process a single ECU (identified by `ctx.ecu_name`) sharing the
+/// given diagnostic-description `payload` with any other ECUs from the same
+/// MDD file.
 fn load_ecu_from_file<S: SecurityPlugin>(
-    proto_data: HashMap<ChunkType, Vec<Chunk>>,
+    payload: bytes::Bytes,
     ctx: &EcuLoadContext<'_>,
     per_ecu_cfg: Option<&EcuConfig>,
-) -> Option<EcuLoadResult<S>> {
-    let mut proto_data = proto_data;
-    let diag_database = build_diagnostic_database(&mut proto_data, ctx)?;
+) -> Option<EcuManager<S>> {
+    let diag_database = build_diagnostic_database(payload, ctx)?;
     let effective_com_params = crate::config::com_params::resolve_com_params(
         &ctx.ecu_name,
         ctx.com_params,
@@ -556,19 +540,19 @@ fn load_ecu_from_file<S: SecurityPlugin>(
     } else {
         EcuManagerType::Ecu
     };
-    let manager = create_ecu_manager(
+    create_ecu_manager(
         diag_database,
         protocol,
         ecu_type,
         &effective_com_params,
         ctx,
-    )?;
-    let files = extract_file_chunks(proto_data);
-
-    Some(EcuLoadResult { manager, files })
+    )
 }
 
-/// Loads a single MDD file and returns the ECU name, manager, and file manager.
+/// Loads a single MDD file, which may contain data for one or more ECUs
+/// sharing a single diagnostic-description flatbuffer chunk. Returns one
+/// entry per ECU: its name, manager, and a (cloned, cheap) file manager for
+/// the code/job/embedded files shared by the whole MDD file.
 ///
 /// # Errors
 ///
@@ -578,7 +562,7 @@ fn load_single_mdd<S: SecurityPlugin>(
     config: &Configuration,
     ecu_config_map: &HashMap<String, EcuConfig>,
     protocol: &Protocol,
-) -> Result<(String, EcuManager<S>, FileManager), MddLoadingError> {
+) -> Result<Vec<(String, EcuManager<S>, FileManager)>, MddLoadingError> {
     let mdd_path =
         path.to_str()
             .map(ToOwned::to_owned)
@@ -598,41 +582,58 @@ fn load_single_mdd<S: SecurityPlugin>(
         });
     }
 
-    let (ecu_name, proto_data) = cda_database::load_proto_data(&mdd_path, PROTO_LOAD_CONFIG)
+    let (ecu_infos, mut proto_data) = cda_database::load_proto_data(&mdd_path, PROTO_LOAD_CONFIG)
         .map_err(|e| MddLoadingError::LoadFailed {
+        path: mdd_path.clone(),
+        reason: e.to_string(),
+    })?;
+
+    let payload = proto_data
+        .remove(&ChunkType::DiagnosticDescription)
+        .and_then(|mut chunks| chunks.pop())
+        .and_then(|c| c.payload)
+        .ok_or_else(|| MddLoadingError::LoadFailed {
             path: mdd_path.clone(),
-            reason: e.to_string(),
+            reason: "No diagnostic description payload found in MDD file".to_owned(),
         })?;
+
+    let files = extract_file_chunks(proto_data);
+    let file_manager = FileManager::new(mdd_path.clone(), files);
 
     let mddfile = PathBuf::from(path);
     let com_params = Arc::new(config.com_params.clone());
     let ecu_config_map = Arc::new(ecu_config_map.clone());
 
-    let ctx = EcuLoadContext {
-        mdd_path: mdd_path.clone(),
-        mddfile: &mddfile,
-        ecu_name: ecu_name.clone(),
-        flat_buf_settings: &config.flat_buf,
-        database_config: &config.database,
-        ecu_config_map: &ecu_config_map,
-        database_naming_convention: config.database.naming_convention.clone(),
-        func_description_cfg: &config.functional_description,
-        protocol,
-        com_params: &com_params,
-        fallback_to_base_variant: config.database.fallback_to_base_variant,
-        strict_parameter_validation: config.strict.parameter_validation(),
-    };
+    let mut results = Vec::with_capacity(ecu_infos.len());
+    for ecu_info in ecu_infos {
+        let ecu_name = ecu_info.ecu_name;
+        let ctx = EcuLoadContext {
+            mdd_path: mdd_path.clone(),
+            mddfile: &mddfile,
+            ecu_name: ecu_name.clone(),
+            flat_buf_settings: &config.flat_buf,
+            database_config: &config.database,
+            ecu_config_map: &ecu_config_map,
+            database_naming_convention: config.database.naming_convention.clone(),
+            func_description_cfg: &config.functional_description,
+            protocol,
+            com_params: &com_params,
+            fallback_to_base_variant: config.database.fallback_to_base_variant,
+            strict_parameter_validation: config.strict.parameter_validation(),
+        };
 
-    let per_ecu_cfg = ecu_config_map.get(&ecu_name.to_lowercase());
-    let result = load_ecu_from_file(proto_data, &ctx, per_ecu_cfg).ok_or_else(|| {
-        MddLoadingError::LoadFailed {
-            path: mdd_path.clone(),
-            reason: format!("Failed to load ECU {ecu_name} from MDD"),
-        }
-    })?;
+        let per_ecu_cfg = ecu_config_map.get(&ecu_name.to_lowercase());
+        let manager = load_ecu_from_file(payload.clone(), &ctx, per_ecu_cfg).ok_or_else(|| {
+            MddLoadingError::LoadFailed {
+                path: mdd_path.clone(),
+                reason: format!("Failed to load ECU {ecu_name} from MDD"),
+            }
+        })?;
 
-    let file_manager = FileManager::new(mdd_path, result.files);
-    Ok((ecu_name, result.manager, file_manager))
+        results.push((ecu_name, manager, file_manager.clone()));
+    }
+
+    Ok(results)
 }
 
 /// Inserts or updates an ECU entry in the loaded map, handling duplicate names
