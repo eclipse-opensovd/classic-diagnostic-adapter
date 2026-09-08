@@ -16,8 +16,11 @@ pub use security::DefaultUpdateSecurityHandler;
 
 pub mod config;
 pub mod default_runtime_reloader_plugin;
-pub use default_runtime_reloader_plugin::{DefaultReloadContext, RuntimeReloaderConfig};
+pub use default_runtime_reloader_plugin::{
+    DefaultReloadContext, DefaultRuntimeReloaderPlugin, RuntimeReloaderConfig,
+};
 pub mod default_runtime_update_plugin;
+pub(crate) mod mdd;
 pub mod operations;
 pub mod security;
 pub mod storage;
@@ -25,18 +28,15 @@ pub mod storage;
 /// Shared test utilities for the runtime update plugin tests.
 #[cfg(test)]
 pub(crate) mod test_utils {
-    use std::{
-        path::PathBuf,
-        sync::{Arc, Mutex},
-    };
+    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use bytes::Bytes;
     use cda_interfaces::{
         communication_control::{TransportControl, TransportState, error::CommControlError},
         runtime_update_api::{
-            LockStateProvider, ReloadError, RuntimeReloaderPlugin, RuntimeUpdateError, UploadFile,
-            VerificationError,
+            LockStateProvider, RecoveryError, RejectedSetDisposition, ReloadError, ReloadFailure,
+            RuntimeReloaderPlugin, RuntimeUpdateError, UploadFile, VerificationError,
         },
         storage_api::{
             Collection, CollectionName, DirectFileAccess, ReadableStream, Storage, Transaction,
@@ -93,11 +93,11 @@ pub(crate) mod test_utils {
 
     #[async_trait]
     impl LockStateProvider for MockLockProvider {
-        async fn vehicle_lock_owner_sub(&self) -> Option<String> {
+        async fn vehicle_lock_owner_id(&self) -> Option<String> {
             self.owner.clone()
         }
 
-        async fn has_non_vehicle_locks(&self) -> bool {
+        async fn has_locks(&self) -> bool {
             self.has_conflicts
         }
     }
@@ -115,12 +115,12 @@ pub(crate) mod test_utils {
         cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
         for MockSecurityHandler
     {
-        async fn check_apply_allowed(
+        async fn check_execution_allowed(
             &self,
             lock_state_provider: &L,
             _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
         ) -> Result<(), RuntimeUpdateError> {
-            let owner = lock_state_provider.vehicle_lock_owner_sub().await;
+            let owner = lock_state_provider.vehicle_lock_owner_id().await;
             match owner {
                 None => Err(RuntimeUpdateError::NoLock(
                     "No vehicle lock held".to_string(),
@@ -159,6 +159,24 @@ pub(crate) mod test_utils {
 
     pub fn make_valid_config() -> Vec<u8> {
         b"[server]\nport = 8080\n".to_vec()
+    }
+
+    /// Smallest byte sequence `mmap_and_decode_mdd` accepts, naming `ecu_name`.
+    ///
+    /// Anything written under a `.mdd` key has to be readable: an execution
+    /// refuses databases it cannot parse before it moves any state.
+    #[must_use]
+    pub fn readable_mdd_bytes(ecu_name: &str) -> Vec<u8> {
+        let magic: &[u8] = &[
+            0x4D, 0x44, 0x44, 0x20, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x20, 0x30, 0x20,
+            0x20, 0x20, 0x20, 0x20, 0x20, 0x00,
+        ];
+        let name_bytes = ecu_name.as_bytes();
+        let mut bytes = magic.to_vec();
+        bytes.push(0x1A);
+        bytes.push(u8::try_from(name_bytes.len()).expect("test ECU name fits in a byte"));
+        bytes.extend_from_slice(name_bytes);
+        bytes
     }
 
     pub async fn write_test_file(
@@ -211,7 +229,7 @@ pub(crate) mod test_utils {
     }
 
     pub struct RecordingReloadHandler {
-        pub reload_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
+        pub reload_calls: Arc<Mutex<Vec<()>>>,
     }
 
     impl RecordingReloadHandler {
@@ -224,8 +242,11 @@ pub(crate) mod test_utils {
 
     #[async_trait]
     impl RuntimeReloaderPlugin for RecordingReloadHandler {
-        async fn reload_databases(&self, paths: Vec<PathBuf>) -> Result<(), ReloadError> {
-            self.reload_calls.lock().unwrap().push(paths);
+        async fn reload_databases(
+            &self,
+            _on_reject: RejectedSetDisposition,
+        ) -> Result<(), ReloadFailure> {
+            self.reload_calls.lock().unwrap().push(());
             Ok(())
         }
     }
@@ -235,7 +256,10 @@ pub(crate) mod test_utils {
 
     #[async_trait]
     impl RuntimeReloaderPlugin for NoopReloadHandler {
-        async fn reload_databases(&self, _mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
+        async fn reload_databases(
+            &self,
+            _on_reject: RejectedSetDisposition,
+        ) -> Result<(), ReloadFailure> {
             Ok(())
         }
     }
@@ -243,24 +267,24 @@ pub(crate) mod test_utils {
     /// A [`RuntimeReloaderPlugin`] whose database reload always fails, useful for
     /// exercising the async-failure path of an execution that has otherwise been
     /// accepted (i.e. that got past all synchronous pre-checks in `start_execution`).
+    ///
+    /// It reports the unrecoverable shape: the candidate was rejected and the
+    /// restored state could not be prepared either, which is what the real
+    /// reloader emits when its second preparation fails.
     pub struct FailingReloadHandler;
 
     #[async_trait]
     impl RuntimeReloaderPlugin for FailingReloadHandler {
-        async fn reload_databases(&self, _mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
-            Err(ReloadError::General("Simulated reload failure".to_string()))
-        }
-    }
-
-    /// A [`RuntimeReloaderPlugin`] whose database reload panics, to exercise the
-    /// supervisor path for an execution task that ends without writing a
-    /// terminal status.
-    pub struct PanickingReloadHandler;
-
-    #[async_trait]
-    impl RuntimeReloaderPlugin for PanickingReloadHandler {
-        async fn reload_databases(&self, _mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
-            panic!("Simulated reload panic");
+        async fn reload_databases(
+            &self,
+            _on_reject: RejectedSetDisposition,
+        ) -> Result<(), ReloadFailure> {
+            Err(ReloadFailure::RecoveryFailed {
+                original: ReloadError::General("Simulated reload failure".to_string()),
+                recovery: RecoveryError::RestoredPreparation(ReloadError::General(
+                    "simulated restored-state rejection".to_owned(),
+                )),
+            })
         }
     }
 }
@@ -275,8 +299,8 @@ mod tests {
     use async_trait::async_trait;
     use cda_interfaces::runtime_update_api::{
         BulkDataCreatedList, BulkDataList, ExclusiveRuntimePlugin, ExecutionMode,
-        RuntimeFilesQuery, RuntimeFilesUpdatePlugin, RuntimeUpdateError, UpdateExecution,
-        UploadFile,
+        RuntimeFileCatalog, RuntimeFileStore, RuntimeFilesQuery, RuntimeFilesUpdatePlugin,
+        RuntimeUpdateError, RuntimeUpdateExecutor, UpdateExecution, UploadFile,
     };
     use tokio::sync::{Barrier, Notify};
 
@@ -294,7 +318,7 @@ mod tests {
     type Notifier = Arc<Notify>;
 
     #[async_trait]
-    impl RuntimeFilesUpdatePlugin for DelayPlugin {
+    impl RuntimeFileCatalog for DelayPlugin {
         async fn list_current(
             &self,
             _query: &RuntimeFilesQuery,
@@ -328,7 +352,10 @@ mod tests {
                 schema: None,
             })
         }
+    }
 
+    #[async_trait]
+    impl RuntimeFileStore for DelayPlugin {
         async fn upload(
             &self,
             _files: Vec<UploadFile>,
@@ -355,7 +382,10 @@ mod tests {
         async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
             Ok(vec![])
         }
+    }
 
+    #[async_trait]
+    impl RuntimeUpdateExecutor for DelayPlugin {
         async fn start_execution(
             &self,
             _mode: ExecutionMode,
@@ -363,12 +393,12 @@ mod tests {
             Ok("exec-1".to_owned())
         }
 
-        async fn get_execution_status(&self, _execution_id: &str) -> Option<UpdateExecution> {
-            None
-        }
-
         async fn list_executions(&self) -> Vec<UpdateExecution> {
             vec![]
+        }
+
+        async fn get_execution_status(&self, _execution_id: &str) -> Option<UpdateExecution> {
+            None
         }
     }
 
@@ -509,5 +539,17 @@ mod tests {
         // Release the read (list_current waits on read_notify)
         read_notify.notify_waiters();
         t2.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn exclusive_wrapper_forwards_exact_execution_context() {
+        let (plugin, _, _, _, _) = make_plugin(1, 1);
+        assert_eq!(
+            plugin
+                .start_execution(ExecutionMode::Cleanup)
+                .await
+                .unwrap(),
+            "exec-1"
+        );
     }
 }

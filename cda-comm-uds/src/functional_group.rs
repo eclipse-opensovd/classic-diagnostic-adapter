@@ -16,7 +16,7 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, HashMapExtensions,
-    PayloadDecoder, ServicePayload, TransmissionParameters, UdsFunctionalGroup, UdsTransport,
+    PayloadDecoder, ServicePayload, TransmissionParameters, UdsFunctionalGroup,
     datatypes::{ComponentDataInfo, ComponentOperationsInfo, RoutineSubfunctions},
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     dlt_ctx,
@@ -44,6 +44,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         map_to_json: bool,
         timeout: Duration,
         functional_group_name: &str,
+        functional_description: &tokio::sync::RwLock<T>,
     ) -> HashMap<String, Result<<T as PayloadDecoder>::Response, DiagServiceError>> {
         // Inspect the subfunction byte for `suppressPosRspMsgIndicationBit` (bit 7).
         // When set, ECUs are not expected to send a positive response.
@@ -51,7 +52,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
 
         // Send functional request via gateway
         match self
-            .gateway
+            .gateway()
             .send_functional(
                 transmission_params,
                 payload,
@@ -64,18 +65,11 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             Ok(uds_responses) => {
                 let mut result_map = HashMap::new();
 
-                let Some(fgl_ecu) = self.ecus.get(&self.functional_description_database) else {
-                    tracing::error!(
-                        "Functional description database ECU not found: {}",
-                        self.functional_description_database
-                    );
-                    return HashMap::new();
-                };
                 for (ecu_name, uds_result) in uds_responses {
                     match uds_result {
                         Ok(msg) => {
                             // Process the response using the ECU's convert_from_uds
-                            let ecu_read = fgl_ecu.read().await;
+                            let ecu_read = functional_description.read().await;
                             let response = ecu_read
                                 .convert_from_uds(
                                     &service,
@@ -113,7 +107,8 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         functional_group_name: &str,
     ) -> Result<Vec<ComponentDataInfo>, DiagServiceError> {
-        self.uds_ecu_db(&self.functional_description_database)?
+        let data = self.ecu_data.read().await;
+        Self::functional_db_lookup(&data)?
             .read()
             .await
             .get_functional_group_data_info(security_plugin, functional_group_name)
@@ -124,7 +119,8 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         functional_group_name: &str,
     ) -> Result<Vec<ComponentOperationsInfo>, DiagServiceError> {
-        self.uds_ecu_db(&self.functional_description_database)?
+        let data = self.ecu_data.read().await;
+        Self::functional_db_lookup(&data)?
             .read()
             .await
             .get_functional_group_operations_info(security_plugin, functional_group_name)
@@ -136,7 +132,8 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
         functional_group_name: &str,
         service_name: &str,
     ) -> Result<RoutineSubfunctions, DiagServiceError> {
-        self.uds_ecu_db(&self.functional_description_database)?
+        let data = self.ecu_data.read().await;
+        Self::functional_db_lookup(&data)?
             .read()
             .await
             .get_functional_group_routine_subfunctions(
@@ -147,7 +144,11 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
     }
 
     async fn ecu_functional_groups(&self, ecu_name: &str) -> Result<Vec<String>, DiagServiceError> {
-        let groups = self.uds_ecu_db(ecu_name)?.read().await.functional_groups();
+        let data = self.ecu_data.read().await;
+        let groups = Self::db_lookup(&data, ecu_name)?
+            .read()
+            .await
+            .functional_groups();
         Ok(groups)
     }
 
@@ -156,24 +157,11 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
         functional_group: &str,
         gateway_only: bool,
     ) -> Vec<String> {
-        let mut ecu_names = Vec::new();
-        for (name, ecu) in self.ecus.iter() {
-            let ecu_guard = ecu.read().await;
-            if gateway_only && ecu_guard.logical_address() != ecu_guard.logical_gateway_address() {
-                continue; // skip non gateway ECUs
-            }
-            if !ecu_guard.is_physical_ecu() {
-                continue; // skip functional description database
-            }
-            if !ecu_guard
-                .functional_groups()
-                .contains(&functional_group.to_owned())
-            {
-                continue; // skip ECUs not in the functional group
-            }
-            ecu_names.push(name.clone());
-        }
-        ecu_names
+        self.ecu_data
+            .read()
+            .await
+            .ecus_for_functional_group(functional_group, gateway_only)
+            .await
     }
 
     #[tracing::instrument(skip(self, security_plugin, payload),
@@ -187,7 +175,22 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
         payload: Option<UdsPayloadData>,
         map_to_json: bool,
     ) -> HashMap<String, Result<Self::Response, DiagServiceError>> {
-        let ecu_list = self
+        let _communication_guard = match self.acquire_communication_guard() {
+            Ok(guard) => guard,
+            Err(error) => {
+                let mut result_map = HashMap::new();
+                for ecu_name in self
+                    .ecus_for_functional_group(functional_group, false)
+                    .await
+                {
+                    result_map.insert(ecu_name, Err(error.clone()));
+                }
+                return result_map;
+            }
+        };
+
+        let data = self.ecu_data.read().await;
+        let ecu_list = data
             .ecus_for_functional_group(functional_group, false)
             .await;
 
@@ -199,21 +202,10 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
             return HashMap::new();
         }
 
-        let _guard = match self.require_communication_ready() {
-            Ok(guard) => guard,
-            Err(error) => {
-                let mut result_map = HashMap::new();
-                for ecu_name in ecu_list {
-                    result_map.insert(ecu_name, Err(error.clone()));
-                }
-                return result_map;
-            }
-        };
-
-        let Some(globals_ecu) = self.ecus.get(&self.functional_description_database) else {
+        let Some(globals_ecu) = data.ecus().get(data.functional_description_database()) else {
             tracing::warn!(
                 functional_group = %functional_group,
-                description_database = %self.functional_description_database,
+                description_database = %data.functional_description_database(),
                 "Functional description database not found for functional group request"
             );
             return HashMap::new();
@@ -247,7 +239,7 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
         let mut ecu_infos_by_gateway = HashMap::<u16, HashMap<u16, String>>::new();
 
         for ecu_name in &ecu_list {
-            if let Some(ecu) = self.ecus.get(ecu_name) {
+            if let Some(ecu) = data.ecus().get(ecu_name) {
                 let ecu_lock = ecu.read().await;
                 if !ecu_lock.is_physical_ecu() {
                     continue;
@@ -267,6 +259,7 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
                 let gateway_addr = ecu_lock.logical_gateway_address();
                 let logical_addr = ecu_lock.logical_address();
                 let func_addr = ecu_lock.logical_functional_address();
+                // `ecu_send_params` re-locks this ECU; a queued writer would deadlock it.
                 drop(ecu_lock);
                 if gateway_addr == logical_addr {
                     let (uds_params, transmission_params) = Self::ecu_send_params(ecu).await;
@@ -330,8 +323,9 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
             service_payload.source_address = gw_infos.source_address;
             service_payload.target_address = gw_infos.functional_address;
             let result_map = Arc::clone(&result_map);
-            let manager = self.clone();
+            let manager = self;
             let fg_name = functional_group.to_owned();
+            let functional_description = globals_ecu;
             let fut = async move {
                 let gateway_results = manager
                     .send_functional_to_gateway(
@@ -342,6 +336,7 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
                         map_to_json,
                         gw_infos.uds_params.timeout_default,
                         &fg_name,
+                        functional_description,
                     )
                     .await;
 
@@ -367,15 +362,20 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
         params: Option<HashMap<String, serde_json::Value>>,
         map_to_json: bool,
     ) -> Result<Self::Response, DiagServiceError> {
-        let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
+        let communication_guard = self.acquire_communication_guard()?;
+        let data = self.ecu_data.read().await;
+        let ecu = self
+            .uds_ecu_variant_detection_concluded(&data, ecu_name)
+            .await?;
         let service = ecu
             .read()
             .await
             .lookup_service_by_sid_and_name(sid, service_name, None)?;
 
         let response = self
-            .send(
-                ecu_name,
+            .send_service(
+                &communication_guard,
+                &ecu,
                 service.clone(),
                 security_plugin,
                 params.map(UdsPayloadData::ParameterMap),
@@ -405,12 +405,13 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
         mode_expiration: Option<Duration>,
         map_to_json: bool,
     ) -> Result<HashMap<String, Result<Self::Response, DiagServiceError>>, DiagServiceError> {
-        let func_group = self.uds_ecu_db(&self.functional_description_database)?;
-        let service = func_group.read().await.lookup_service_by_sid_and_name(
-            sid,
-            service_name,
-            Some(group_name),
-        )?;
+        let service = {
+            let data = self.ecu_data.read().await;
+            Self::functional_db_lookup(&data)?
+                .read()
+                .await
+                .lookup_service_by_sid_and_name(sid, service_name, Some(group_name))?
+        };
 
         let response = self
             .send_functional_group(
@@ -425,13 +426,18 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
         for (ecu, response) in &response {
             if let Ok(response) = response
                 && response.response_type() == DiagServiceResponseType::Positive
-                && let Some(ecu_manager) = self.ecus.get(ecu)
             {
-                ecu_manager
-                    .write()
-                    .await
-                    .set_service_state(sid, service_name.to_owned())
-                    .await;
+                {
+                    let data = self.ecu_data.read().await;
+                    let Ok(ecu_manager) = Self::db_lookup(&data, ecu) else {
+                        continue;
+                    };
+                    ecu_manager
+                        .write()
+                        .await
+                        .set_service_state(sid, service_name.to_owned())
+                        .await;
+                }
                 if let Some(ref expiration) = mode_expiration {
                     self.start_reset_task(ecu, Some(*expiration), ResetType::Session)
                         .await;

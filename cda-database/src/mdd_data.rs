@@ -18,7 +18,7 @@ use cda_interfaces::{
     HashMap,
     datatypes::FlatbBufConfig,
     dlt_ctx,
-    file_manager::{Chunk, ChunkMetaData, ChunkType, MddError},
+    mdd_chunks::{Chunk, ChunkMetaData, ChunkType, MddError},
 };
 use flatbuffers::VerifierOptions;
 use prost::Message;
@@ -159,26 +159,83 @@ impl From<&ChunkType> for ChunkDataType {
 /// Read the chunk data from the MDD file if it has not been loaded yet.
 /// # Errors
 /// Returns an error if the chunk data cannot be loaded, such as if the MDD file is not found,
-/// also returns the error from `load_chunk_data` if the chunk data cannot be read
+/// also returns the error from `load_chunk_payload_at` if the chunk data cannot be read
 /// or parsed correctly.
-#[tracing::instrument(
-    skip(chunk),
-    fields(
-        mdd_file,
-        chunk_name = %chunk.meta_data.name,
-        dlt_context = dlt_ctx!("DB"),
-    )
-)]
 pub fn load_chunk<'a>(chunk: &'a mut Chunk, mdd_file: &str) -> Result<&'a Bytes, MddError> {
     if chunk.payload.is_none() {
-        tracing::debug!("Loading data from file");
-        let chunk_data = load_chunk_data(mdd_file, chunk)?;
+        let chunk_data = load_chunk_payload_at(mdd_file, chunk.index, &chunk.meta_data)?;
         chunk.payload = Some(chunk_data);
     }
     chunk
         .payload
         .as_ref()
         .ok_or_else(|| MddError::Io("Failed to load chunk data".to_owned()))
+}
+
+/// Load one chunk's payload out of an MDD file, by its position in the chunk
+/// list.
+///
+/// Resolving by position rather than by name is what makes a chunk
+/// addressable: an MDD may carry several chunks sharing a type and a name
+/// (unnamed chunks all share the empty name), and a name lookup would serve the
+/// first of them for every one of their ids.
+///
+/// `meta_data` is the metadata recorded for that position when the MDD was
+/// loaded, and the chunk found there is checked against it so that a shifted
+/// layout yields an error rather than an unrelated file. The check is on type
+/// and name only: a same-named chunk at the same position is served, whatever
+/// its content, which is what a client asking for that name wants.
+///
+/// # Errors
+/// Returns an error if the MDD file cannot be read or parsed, if `index` holds
+/// no chunk or a chunk other than the one described by `meta_data`, or if
+/// decompression fails.
+#[tracing::instrument(
+    skip(meta_data),
+    fields(
+        mdd_file,
+        chunk_index = index,
+        chunk_name = %meta_data.name,
+        dlt_context = dlt_ctx!("DB"),
+    )
+)]
+fn load_chunk_payload_at(
+    mdd_file: &str,
+    index: usize,
+    meta_data: &ChunkMetaData,
+) -> Result<Bytes, MddError> {
+    tracing::debug!("Loading chunk data from file");
+    let mdd = mmap_and_decode_mdd(mdd_file)?;
+    let wanted_type: ChunkDataType = (&meta_data.type_).into();
+
+    let chunk = mdd.chunks.get(index).ok_or_else(|| {
+        MddError::MissingData(format!(
+            "Chunk {index} ('{}') is past the end of MDD file: {mdd_file}",
+            meta_data.name
+        ))
+    })?;
+
+    if ChunkDataType::try_from(chunk.r#type) != Ok(wanted_type)
+        || chunk.name.as_deref().unwrap_or_default() != meta_data.name
+    {
+        return Err(MddError::MissingData(format!(
+            "Chunk {index} of MDD file {mdd_file} is no longer '{}'",
+            meta_data.name
+        )));
+    }
+
+    let data = chunk.data.clone().ok_or_else(|| {
+        MddError::MissingData(format!(
+            "Chunk '{}' in MDD file {mdd_file} carries no data",
+            meta_data.name
+        ))
+    })?;
+
+    decompress_chunk_data(
+        data,
+        chunk.compression_algorithm.as_deref(),
+        &meta_data.name,
+    )
 }
 
 /// Load the ECU data from the given MDD file.
@@ -213,31 +270,6 @@ pub fn load_ecudata(mdd_file: &str) -> Result<(String, Bytes), MddError> {
     })
 }
 
-/// Load the data for a chunk from the mdd file.
-/// # Errors
-/// See `load_proto_data` for details on possible errors.
-fn load_chunk_data(mdd_file: &str, chunk: &Chunk) -> Result<Bytes, MddError> {
-    load_proto_data(
-        mdd_file,
-        &[ProtoLoadConfig {
-            load_data: true,
-            type_: chunk.meta_data.type_.clone(),
-            name: Some(chunk.meta_data.name.clone()),
-        }],
-    )
-    .and_then(|(_, mut data)| {
-        data.remove(&chunk.meta_data.type_)
-            .and_then(|d| d.into_iter().next())
-            .and_then(|p| p.payload)
-            .ok_or_else(|| {
-                MddError::MissingData(format!(
-                    "Chunk data with name {} found in MDD file",
-                    chunk.meta_data.name
-                ))
-            })
-    })
-}
-
 /// Load proto buf data from a given mdd file, while filtering by the specified `data_type`.
 /// # Errors
 /// Will return an error if:
@@ -265,14 +297,15 @@ pub fn load_proto_data(
             let chunks: Vec<Chunk> = mdd_file
                 .chunks
                 .iter()
-                .filter(|proto_chunk| {
+                .enumerate()
+                .filter(|(_, proto_chunk)| {
                     ChunkDataType::try_from(proto_chunk.r#type) == Ok((&chunk_info.type_).into())
                         && chunk_info
                             .name
                             .as_ref()
                             .is_none_or(|name| Some(name) == proto_chunk.name.as_ref())
                 })
-                .map(|proto_chunk| {
+                .map(|(index, proto_chunk)| {
                     let data = if chunk_info.load_data {
                         let Some(proto_chunk_data) = &proto_chunk.data else {
                             return Ok(None);
@@ -289,6 +322,7 @@ pub fn load_proto_data(
 
                     Ok(Some(Chunk {
                         payload: data,
+                        index,
                         meta_data: ChunkMetaData {
                             type_: chunk_info.type_.clone(),
                             name: proto_chunk

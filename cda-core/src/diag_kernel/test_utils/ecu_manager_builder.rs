@@ -13,6 +13,8 @@
 
 //! Factory helpers for constructing [`EcuManager`] instances in tests.
 
+use std::sync::Arc;
+
 use cda_interfaces::{
     Connectivity, EcuManagerType, Protocol, VariantState,
     datatypes::{ComParams, DatabaseNamingConvention},
@@ -48,6 +50,10 @@ pub(crate) fn new_ecu_manager(
             enabled_functional_groups: None,
             protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
         },
+        Arc::new(cda_database::EmbeddedFileStore::new(
+            String::new(),
+            Vec::new(),
+        )),
     )
     .expect("Failed to create EcuManager");
 
@@ -86,6 +92,10 @@ pub(crate) fn new_ecu_manager_no_base_fallback(
             enabled_functional_groups: None,
             protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
         },
+        Arc::new(cda_database::EmbeddedFileStore::new(
+            String::new(),
+            Vec::new(),
+        )),
     )
     .unwrap()
 }

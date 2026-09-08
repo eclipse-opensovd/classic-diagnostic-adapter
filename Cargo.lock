@@ -422,6 +422,7 @@ name = "cda-comm-uds"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "cda-build",
  "cda-interfaces",
  "cda-plugin-communication-management",
@@ -439,6 +440,7 @@ name = "cda-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "cda-build",
  "cda-database",
  "cda-interfaces",
@@ -447,7 +449,6 @@ dependencies = [
  "linkme",
  "num-traits",
  "override-macros",
- "parking_lot",
  "schemars",
  "serde",
  "serde_json",
@@ -555,8 +556,6 @@ dependencies = [
  "cda-database",
  "cda-interfaces",
  "cda-plugin-communication-management",
- "cda-plugin-security",
- "cda-sovd",
  "cda-storage",
  "schemars",
  "serde",

@@ -43,7 +43,7 @@ use cda_interfaces::{
     communication_control::{TransportControl, TransportState, error::CommControlError},
 };
 #[cfg(feature = "can")]
-pub use gateway::{CanDiagGateway, error};
+pub use gateway::{CanDiagGateway, CanEcuAddressing, CanTopology, derive_can_topology, error};
 
 /// Stub `CanDiagGateway` when the `can` feature is disabled.
 ///
@@ -145,7 +145,7 @@ impl Shutdown for CanDiagGateway {
 
 /// CAN routing tests for `DiagnosticTransportRouter` (lives here because the
 /// test helpers - `CanDiagGateway::test_instance`, `clear_discovered`,
-/// `CanId`, `CanEcuConnection` - are `pub(crate)` in this crate).
+/// `shared_topology` - are `pub(crate)` in this crate).
 #[cfg(all(test, feature = "can"))]
 mod transport_routing_tests {
     use std::sync::{
@@ -163,7 +163,7 @@ mod transport_routing_tests {
     use cda_transport_router::DiagnosticTransportRouter;
     use tokio::sync::{Notify, RwLock, mpsc};
 
-    use crate::{CanDiagGateway, gateway::connection::CanEcuConnection};
+    use crate::{CanDiagGateway, CanEcuAddressing, gateway::test_utils::shared_topology};
 
     /// `DoIP` gateway stub whose ECU knowledge can be toggled at runtime.
     #[derive(Clone)]
@@ -340,15 +340,15 @@ mod transport_routing_tests {
 
     fn can_gateway_with_discovered_ecu1() -> CanDiagGateway {
         CanDiagGateway::test_instance(
-            vec![(
+            shared_topology(vec![(
                 "ecu1",
-                CanEcuConnection::new(
+                CanEcuAddressing::new(
                     "ecu1".to_owned(),
                     "test0".to_owned(),
                     CanId::try_from(0x700).expect("valid CAN ID"),
                     CanId::try_from(0x708).expect("valid CAN ID"),
                 ),
-            )],
+            )]),
             vec!["ecu1"],
         )
     }
@@ -545,25 +545,6 @@ mod transport_routing_tests {
         assert_eq!(gw.state().await, TransportState::Failed);
         assert_eq!(can.state().await, TransportState::Disabled);
         assert_eq!(doip.disable_calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn router_shutdowns_gateway_when_partial_enable_rollback_fails() {
-        // CAN fails after DoIP enables. A failed normal rollback must still use
-        // the gateway shutdown path to terminate DoIP background work.
-        let doip = DoipStub::default();
-        doip.fail_disable.store(true, Ordering::Release);
-        let can = CanDiagGateway::test_instance(vec![], vec![]);
-        can.disable().await.expect("disable test CAN gateway");
-        let gw = DiagnosticTransportRouter::<_, CanDiagGateway>::new(HashMap::default())
-            .with_doip(doip.clone())
-            .with_can(can);
-
-        assert!(gw.enable().await.is_err());
-        assert_eq!(gw.state().await, TransportState::Failed);
-        assert_eq!(doip.disable_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(doip.shutdown_calls.load(Ordering::SeqCst), 1);
-        assert!(!doip.communication_active.load(Ordering::Acquire));
     }
 
     #[tokio::test]

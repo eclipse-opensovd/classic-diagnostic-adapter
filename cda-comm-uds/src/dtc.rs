@@ -14,7 +14,7 @@
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, HashMapExtensions, HashSet,
-    PayloadDecoder, SchemaDescription, SchemaProvider, ServicePayload, UdsDtc, UdsTransport,
+    PayloadDecoder, SchemaDescription, ServicePayload, UdsDtc,
     datatypes::{
         self, DTC_CODE_BIT_LEN, DtcCode, DtcExtendedInfo, DtcMask, DtcReadInformationFunction,
         DtcRecordAndStatus, DtcSnapshot, ExtendedDataRecords, ExtendedSnapshots,
@@ -24,7 +24,7 @@ use cda_interfaces::{
 };
 use strum::IntoEnumIterator;
 
-use crate::{UdsManager, transport::CommunicationReadiness};
+use crate::UdsManager;
 
 /// Record number requesting all records/all memory (ISO 14229-1).
 const DTC_RECORD_NUMBER_ALL: u8 = 0xFF;
@@ -216,7 +216,11 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         ),
         DiagServiceError,
     > {
-        let ecu = self.uds_ecu_db(ecu_name)?;
+        let communication_guard = self.acquire_communication_guard()?;
+        let data = self.ecu_data.read().await;
+        let ecu = self
+            .uds_ecu_variant_detection_concluded(&data, ecu_name)
+            .await?;
         let (read_func, extended_data_lookup) = ecu
             .read()
             .await
@@ -239,7 +243,9 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
 
         let schema = if include_schema {
             Some(
-                self.schema_for_responses(ecu_name, &extended_data_lookup.service)
+                ecu.read()
+                    .await
+                    .schema_for_responses(&extended_data_lookup.service)
                     .await?,
             )
         } else {
@@ -247,8 +253,9 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         };
 
         let response = self
-            .send(
-                ecu_name,
+            .send_service(
+                &communication_guard,
+                &ecu,
                 extended_data_lookup.service,
                 security_plugin,
                 Some(uds_payload),
@@ -450,6 +457,63 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             schema,
         ))
     }
+    /// Clears fault memory on one ECU against vehicle data the caller already
+    /// holds, so the lookups and the send all run against a single load.
+    async fn delete_dtcs_with_data(
+        &self,
+        data: &crate::VehicleEcuData<T>,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+        fault_code: Option<String>,
+    ) -> Result<<T as PayloadDecoder>::Response, DiagServiceError> {
+        let ecu = self
+            .uds_ecu_variant_detection_concluded(data, ecu_name)
+            .await?;
+
+        let delete_dtc_service = ecu.read().await.lookup_service_through_func_class(
+            "faultmem",
+            service_ids::CLEAR_DIAGNOSTIC_INFORMATION,
+        )?;
+        ecu.read()
+            .await
+            .is_service_allowed(&delete_dtc_service, security_plugin)
+            .await?;
+
+        // For now only all or single DTC clear is supported.
+        // This means we can simply build the payload according to ISO spec here.
+        // Once we support clear by group we will need to lookup things from the db.
+        let mut payload = vec![service_ids::CLEAR_DIAGNOSTIC_INFORMATION];
+        match fault_code {
+            Some(ref dtc_code) => {
+                let dtc = decode_dtc_from_str(dtc_code)?;
+                payload.extend(dtc.to_be_bytes()[1..].to_vec());
+            }
+            None => {
+                payload.extend(DTC_GROUP_ALL);
+            }
+        }
+        let (source_address, target_address) = {
+            let read_lock = ecu.read().await;
+            (read_lock.tester_address(), read_lock.logical_address())
+        };
+        let service_payload = ServicePayload {
+            data: payload,
+            source_address,
+            target_address,
+            new_security: None,
+            new_session: None,
+        };
+
+        match self
+            .send_with_raw_payload(&ecu, service_payload, None)
+            .await?
+        {
+            None => Err(DiagServiceError::NoResponse(
+                "ECU did not respond to DTC clear".to_owned(),
+            )),
+            Some(resp) => T::convert_service_14_response(delete_dtc_service, resp),
+        }
+    }
 }
 
 #[async_trait]
@@ -463,7 +527,11 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         scope: Option<String>,
         memory_selection: Option<u8>,
     ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError> {
-        let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
+        let communication_guard = self.acquire_communication_guard()?;
+        let data = self.ecu_data.read().await;
+        let ecu = self
+            .uds_ecu_variant_detection_concluded(&data, ecu_name)
+            .await?;
         let mut all_dtcs = HashMap::new();
         let scoped_services: Vec<_> = ecu
             .read()
@@ -515,8 +583,9 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
             }
             let payload = UdsPayloadData::Raw(payload);
             let response = self
-                .send(
-                    ecu_name,
+                .send_service(
+                    &communication_guard,
+                    &ecu,
                     lookup.service,
                     security_plugin,
                     Some(payload),
@@ -644,57 +713,10 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         fault_code: Option<String>,
     ) -> Result<Self::Response, DiagServiceError> {
-        let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
-
-        let delete_dtc_service = ecu.read().await.lookup_service_through_func_class(
-            "faultmem",
-            service_ids::CLEAR_DIAGNOSTIC_INFORMATION,
-        )?;
-        ecu.read()
+        let _communication_guard = self.acquire_communication_guard()?;
+        let data = self.ecu_data.read().await;
+        self.delete_dtcs_with_data(&data, ecu_name, security_plugin, fault_code)
             .await
-            .is_service_allowed(&delete_dtc_service, security_plugin)
-            .await?;
-
-        // For now only all or single DTC clear is supported.
-        // This means we can simply build the payload according to ISO spec here.
-        // Once we support clear by group we will need to lookup things from the db.
-        let mut payload = vec![service_ids::CLEAR_DIAGNOSTIC_INFORMATION];
-        match fault_code {
-            Some(ref dtc_code) => {
-                let dtc = decode_dtc_from_str(dtc_code)?;
-                payload.extend(dtc.to_be_bytes()[1..].to_vec());
-            }
-            None => {
-                payload.extend(DTC_GROUP_ALL);
-            }
-        }
-        let (source_address, target_address) = {
-            let read_lock = ecu.read().await;
-            (read_lock.tester_address(), read_lock.logical_address())
-        };
-        let service_payload = ServicePayload {
-            data: payload,
-            source_address,
-            target_address,
-            new_security: None,
-            new_session: None,
-        };
-
-        match self
-            .send_with_raw_payload(
-                ecu_name,
-                service_payload,
-                None,
-                true,
-                CommunicationReadiness::Enforce,
-            )
-            .await?
-        {
-            None => Err(DiagServiceError::NoResponse(
-                "ECU did not respond to DTC clear".to_owned(),
-            )),
-            Some(resp) => T::convert_service_14_response(delete_dtc_service, resp),
-        }
     }
 
     async fn delete_dtcs_scoped(
@@ -703,36 +725,44 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         scope: &str,
     ) -> Result<Self::Response, DiagServiceError> {
-        let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
+        let communication_guard = self.acquire_communication_guard()?;
+        // One borrow for the whole clear: the scope configuration, the ECU and
+        // the service definition all come from the same load.
+        let data = self.ecu_data.read().await;
+        let fault_config = data.fault_config();
+        let ecu = self
+            .uds_ecu_variant_detection_concluded(&data, ecu_name)
+            .await?;
 
         // If the requested scope is the default scope, delegate to the standard delete_dtcs path.
-        if scope.eq_ignore_ascii_case(&self.fault_config.default_scope) {
-            return self.delete_dtcs(ecu_name, security_plugin, None).await;
+        if scope.eq_ignore_ascii_case(&fault_config.default_scope) {
+            return self
+                .delete_dtcs_with_data(&data, ecu_name, security_plugin, None)
+                .await;
         }
 
         // When a user-defined scope is provided, use the configured custom
-        // clear service (e.g. RoutineControl 31 01 42 00) via `self.send`
-        // which does not require any additional parameters, per definition.
-        if !scope.eq_ignore_ascii_case(&self.fault_config.user_memory_scope) {
+        // clear service (e.g. RoutineControl 31 01 42 00), which does not
+        // require any additional parameters, per definition.
+        if !scope.eq_ignore_ascii_case(&fault_config.user_memory_scope) {
             return Err(DiagServiceError::InvalidParameter {
                 possible_values: HashSet::from_iter([
-                    self.fault_config.default_scope.clone(),
-                    self.fault_config.user_memory_scope.clone(),
+                    fault_config.default_scope.clone(),
+                    fault_config.user_memory_scope.clone(),
                 ]),
             });
         }
 
-        let user_defined_dtc_clear_service = self
-            .fault_config
+        let user_defined_dtc_clear_service = fault_config
             .user_defined_dtc_clear_service
             .as_ref()
             .ok_or_else(|| {
-                DiagServiceError::InvalidConfiguration(
-                    "User defined DTC scope name is not set in the configuration, but custom \
-                     scope clear is requested"
-                        .to_owned(),
-                )
-            })?;
+            DiagServiceError::InvalidConfiguration(
+                "User defined DTC scope name is not set in the configuration, but custom scope \
+                 clear is requested"
+                    .to_owned(),
+            )
+        })?;
 
         let delete_dtc_service = ecu
             .read()
@@ -753,8 +783,15 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
             .is_service_allowed(&delete_dtc_service, security_plugin)
             .await?;
 
-        self.send(ecu_name, delete_dtc_service, security_plugin, None, false)
-            .await
+        self.send_service(
+            &communication_guard,
+            &ecu,
+            delete_dtc_service,
+            security_plugin,
+            None,
+            false,
+        )
+        .await
     }
 }
 

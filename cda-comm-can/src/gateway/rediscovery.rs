@@ -28,7 +28,7 @@
 
 use std::time::Duration;
 
-use cda_interfaces::{TransportProbe, VariantDetectionRequest, VariantDetectionSender};
+use cda_interfaces::{VariantDetectionRequest, VariantDetectionSender};
 use tokio_util::sync::CancellationToken;
 
 use super::{CanDiagGateway, background::BackgroundTask};
@@ -59,10 +59,11 @@ impl CanDiagGateway {
                     () = cda_interfaces::util::tokio_ext::sleep_for(REDISCOVERY_INTERVAL) => {}
                 }
 
+                let topology = gateway.topology.read().await;
                 let undiscovered: Vec<String> = {
                     let discovered = gateway.discovered_ecus.read().await;
-                    gateway
-                        .connections
+                    topology
+                        .connections()
                         .keys()
                         .filter(|name| !discovered.contains(*name))
                         .cloned()
@@ -77,7 +78,7 @@ impl CanDiagGateway {
                     if task_cancel.is_cancelled() {
                         return;
                     }
-                    if gateway.probe_ecu(&ecu_name).await {
+                    if gateway.probe_ecu_with_topology(&topology, &ecu_name).await {
                         recovered.push(ecu_name);
                     }
                 }
