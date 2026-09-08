@@ -18,14 +18,14 @@ use std::{
 };
 
 use cda_core::{EcuManager, EcuManagerConfig};
-use cda_database::{EmbeddedFileStore, ProtoLoadConfig, update_mdd_uncompressed};
+use cda_database::{EmbeddedFileStore, ProtoLoadConfig};
 use cda_interfaces::{
     EcuAddresses, EcuManager as EcuManagerTrait, EcuManagerType, FunctionalDescriptionConfig,
     HashMap, HashMapEntry, HashMapExtensions, HashSet, Protocol,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     health::HealthProvider,
     mdd_chunks::{Chunk, ChunkType},
-    runtime_update_api::ReloadError,
+    runtime_update_api::{DatabaseValidator, ReloadError},
     storage_api::{Collection, CollectionName, DirectFileAccess, Storage},
 };
 use cda_plugin_security::SecurityPlugin;
@@ -156,13 +156,14 @@ fn get_mdd_files_and_size(files: ReadDir) -> Vec<(PathBuf, u64)> {
 /// # Errors
 /// Returns [`DatabaseLoadError`] if any database file fails to parse or initialize.
 #[tracing::instrument(
-    skip(config, mdd_paths, db_health_provider),
+    skip(config, mdd_paths, db_health_provider, database_validator),
     fields(database_count = mdd_paths.len())
 )]
 pub async fn load_databases<S: SecurityPlugin>(
     config: &Configuration,
     mdd_paths: &[PathBuf],
     db_health_provider: Option<&Arc<dyn HealthProvider>>,
+    database_validator: &dyn DatabaseValidator,
 ) -> Result<DatabaseMap<S>, DatabaseLoadError> {
     if let Some(provider) = db_health_provider {
         provider.set_status(cda_health::Status::Starting).await;
@@ -180,20 +181,25 @@ pub async fn load_databases<S: SecurityPlugin>(
     let mut loaded_ecus: LoadedEcuMap<S> = HashMap::new();
 
     for path in mdd_paths {
-        let (ecu_name, ecu_manager) =
-            match load_single_mdd::<S>(path, config, &ecu_config_map, &protocol) {
-                Ok(result) => result,
-                Err(e) if config.database.ignore_invalid_mdd => {
-                    tracing::warn!(path = %path.display(), error = %e, "Skipping invalid MDD file");
-                    continue;
+        let (ecu_name, ecu_manager) = match load_single_mdd::<S>(
+            path,
+            config,
+            &ecu_config_map,
+            &protocol,
+            database_validator,
+        ) {
+            Ok(result) => result,
+            Err(e) if config.database.ignore_invalid_mdd => {
+                tracing::warn!(path = %path.display(), error = %e, "Skipping invalid MDD file");
+                continue;
+            }
+            Err(e) => {
+                if let Some(provider) = db_health_provider {
+                    provider.set_status(cda_health::Status::Failed).await;
                 }
-                Err(e) => {
-                    if let Some(provider) = db_health_provider {
-                        provider.set_status(cda_health::Status::Failed).await;
-                    }
-                    return Err(DatabaseLoadError::Data(e.to_string()));
-                }
-            };
+                return Err(DatabaseLoadError::Data(e.to_string()));
+            }
+        };
 
         let mdd_path = path.to_str().unwrap_or_default().to_owned();
         insert_or_update_ecu(
@@ -609,6 +615,7 @@ fn load_single_mdd<S: SecurityPlugin>(
     config: &Configuration,
     ecu_config_map: &HashMap<String, EcuConfig>,
     protocol: &Protocol,
+    database_validator: &dyn DatabaseValidator,
 ) -> Result<(String, EcuManager<S>), MddLoadingError> {
     let mdd_path =
         path.to_str()
@@ -618,10 +625,17 @@ fn load_single_mdd<S: SecurityPlugin>(
                 reason: "Failed to convert path to string".to_string(),
             })?;
 
+    database_validator
+        .check_integrity(path)
+        .map_err(|error| MddLoadingError::LoadFailed {
+            path: mdd_path.clone(),
+            reason: error.to_string(),
+        })?;
+
     // Ensure the MDD file contains uncompressed data (rewrite on first
     // use), so that subsequent loads skip LZMA decompression.
     if config.flat_buf.mdd_decompress
-        && let Err(e) = update_mdd_uncompressed(&mdd_path)
+        && let Err(e) = cda_database::update_mdd_uncompressed(&mdd_path)
     {
         return Err(MddLoadingError::DecompressFailed {
             path: mdd_path,

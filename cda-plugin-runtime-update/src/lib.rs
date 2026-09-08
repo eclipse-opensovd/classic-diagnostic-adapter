@@ -12,7 +12,7 @@
  */
 
 pub use default_runtime_update_plugin::DefaultRuntimeUpdatePlugin;
-pub use security::DefaultUpdateSecurityHandler;
+pub use security::DefaultUpdatePolicy;
 
 pub mod config;
 pub mod default_runtime_reloader_plugin;
@@ -20,7 +20,6 @@ pub use default_runtime_reloader_plugin::{
     DefaultReloadContext, DefaultRuntimeReloaderPlugin, RuntimeReloaderConfig,
 };
 pub mod default_runtime_update_plugin;
-pub(crate) mod mdd;
 pub mod operations;
 pub mod security;
 pub mod storage;

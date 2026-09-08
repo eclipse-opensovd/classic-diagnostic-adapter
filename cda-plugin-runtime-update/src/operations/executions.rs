@@ -27,9 +27,9 @@ use cda_interfaces::{
         HttpStatusCode, OwnedHttpProtection,
     },
     runtime_update_api::{
-        ExecutionFailure, ExecutionFailureClass, ExecutionMode, ExecutionStatus, LockStateProvider,
-        ReloadFailure, RuntimeReloaderPlugin, RuntimeUpdateError, RuntimeUpdateSecurityPlugin,
-        UpdateCollections, UpdateExecution,
+        DatabaseValidator, ExecutionFailure, ExecutionFailureClass, ExecutionMode, ExecutionStatus,
+        LockStateProvider, ReloadFailure, RuntimeReloaderPlugin, RuntimeUpdateError,
+        RuntimeUpdatePolicy, UpdateCollections, UpdateExecution,
     },
     storage_api::{Collection, CollectionName, DirectFileAccess, Storage},
     util::std_ext::lock_mutex,
@@ -41,10 +41,10 @@ use tokio::{sync::RwLock, task::JoinHandle};
 pub(crate) struct ExecutionParams<'a, S, R: ?Sized, T, L> {
     /// Persistent storage; every database mutation goes through it.
     pub(crate) storage: &'a Arc<S>,
-    /// Authorization and content policy, asked twice: once before anything is
+    /// Vehicle and lock state policy, asked twice: once before anything is
     /// disturbed, then again under the guards to close the window between the
     /// two answers.
-    pub(crate) security_handler: &'a Arc<T>,
+    pub(crate) policy: &'a Arc<T>,
     /// Loads the databases that are on disk after a successful apply or
     /// rollback.
     pub(crate) reload_handler: &'a Arc<R>,
@@ -66,9 +66,11 @@ pub(crate) struct ExecutionParams<'a, S, R: ?Sized, T, L> {
     /// for an explicit activation; decides `release` versus `finish` on the
     /// lease in [`finish_execution`].
     pub(crate) post_update_mode: PostUpdateCommunicationMode,
-    /// Consulted by the security checks, and directly for the held-lock
+    /// Consulted by the policy, and directly for the held-lock
     /// precondition that a topology replacement cannot discard live locks.
     pub(crate) lock_state_provider: &'a L,
+    /// Integrator-provided MDD integrity validation.
+    pub(crate) database_validator: &'a Arc<dyn DatabaseValidator>,
     /// Takes ownership of the supervisor task this call spawns.
     ///
     /// Nothing awaits it yet - see the caveat on the plugin's `Shutdown` impl,
@@ -92,13 +94,13 @@ fn http_protection_config_for_update(
 /// Admits one execution and spawns it, returning the id clients poll for its
 /// status.
 ///
-/// Authorization runs twice, and deliberately: once before anything is
-/// disturbed, because acquiring the guards disables communication and refuses
-/// other clients, which an unauthorized caller must not be able to provoke;
+/// The policy runs twice, and deliberately: once before anything is disturbed,
+/// because acquiring the guards disables communication and refuses other
+/// clients, which a caller the policy will refuse must not be able to provoke;
 /// then again under those guards, closing the window between the two answers.
 ///
 /// # Errors
-/// Returns the security handler's own error if the caller is not authorized,
+/// Returns the policy's own error if it refuses the execution,
 /// [`RuntimeUpdateError::ExecutionConflict`] if another execution holds the
 /// disable lease, and the mode's precondition failure - `NoBackup` for a
 /// rollback without one, `NoPendingUpdate` for an apply with nothing staged -
@@ -112,7 +114,7 @@ pub(crate) async fn start_execution<S, R, T, L>(
 where
     S: Storage + Send + Sync + 'static,
     R: RuntimeReloaderPlugin + ?Sized,
-    T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
+    T: RuntimeUpdatePolicy<L, S::CollectionHandle>,
     L: LockStateProvider,
 {
     let collections = load_update_collections(&**params.storage).await?;
@@ -120,7 +122,7 @@ where
     // The cheap half of the two-phase check documented above; the second half
     // runs inside `validate_execution_preconditions`.
     params
-        .security_handler
+        .policy
         .check_execution_allowed(params.lock_state_provider, &collections)
         .await?;
 
@@ -185,12 +187,14 @@ async fn acquire_execution_guards<S, R: ?Sized, T, L>(
 /// collection has moved.
 async fn validate_incoming_databases<C: Collection + DirectFileAccess>(
     collection: &C,
+    database_validator: &dyn DatabaseValidator,
 ) -> Result<(), RuntimeUpdateError> {
     for key in collection.list().await? {
         if !key.to_lowercase().ends_with(".mdd") {
             continue;
         }
-        crate::mdd::validate(&collection.file_path(&key)?)
+        database_validator
+            .check_integrity(&collection.file_path(&key)?)
             .map_err(|error| RuntimeUpdateError::ValidationFailed(error.to_string()))?;
     }
     Ok(())
@@ -230,11 +234,11 @@ async fn validate_execution_preconditions<S, R, T, L>(
 where
     S: Storage + Send + Sync + 'static,
     R: RuntimeReloaderPlugin + ?Sized,
-    T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
+    T: RuntimeUpdatePolicy<L, S::CollectionHandle>,
     L: LockStateProvider,
 {
     if let Err(error) = params
-        .security_handler
+        .policy
         .check_execution_allowed(params.lock_state_provider, collections)
         .await
     {
@@ -243,7 +247,7 @@ where
 
     // Framework-owned, not plugin policy: replacing the lock topology discards every held
     // ECU and functional-group lock, so this is a coherence precondition for the reload and
-    // must not be removable by an OEM security plugin. It runs after authorization so a
+    // must not be removable by an OEM policy. It runs after the policy so a
     // caller without the vehicle lock still gets `NoLock` rather than `LockConflict`.
     if params.lock_state_provider.has_locks().await {
         return Err(reject_execution(
@@ -284,7 +288,8 @@ where
         ExecutionMode::Cleanup => None,
     };
     if let Some(collection) = becoming_live
-        && let Err(error) = validate_incoming_databases(&**collection).await
+        && let Err(error) =
+            validate_incoming_databases(&**collection, &**params.database_validator).await
     {
         return Err(reject_execution(error, guards, mode).await);
     }
@@ -637,7 +642,7 @@ mod tests {
     use tokio::sync::RwLock;
 
     use crate::test_utils::{
-        MockLockProvider, MockSecurityHandler, NoopReloadHandler, StubTransport, make_storage,
+        MockLockProvider, MockUpdatePolicy, NoopReloadHandler, StubTransport, make_storage,
         readable_mdd_bytes, write_test_file,
     };
 
@@ -778,9 +783,10 @@ mod tests {
 
     struct TestFixture {
         storage: Arc<LocalStorage>,
-        security_handler: Arc<MockSecurityHandler>,
+        policy: Arc<MockUpdatePolicy>,
         reload_handler: Arc<NoopReloadHandler>,
         lock_provider: MockLockProvider,
+        database_validator: Arc<dyn cda_interfaces::runtime_update_api::DatabaseValidator>,
         executions: Arc<RwLock<HashMap<String, UpdateExecution>>>,
         communication_disable: Arc<dyn DisableCommunication>,
         http_restriction_manager: HttpProtectionRegistry,
@@ -795,12 +801,12 @@ mod tests {
             '_,
             LocalStorage,
             NoopReloadHandler,
-            MockSecurityHandler,
+            MockUpdatePolicy,
             MockLockProvider,
         > {
             super::ExecutionParams {
                 storage: &self.storage,
-                security_handler: &self.security_handler,
+                policy: &self.policy,
                 reload_handler: &self.reload_handler,
                 executions: &self.executions,
                 communication_disable: &self.communication_disable,
@@ -809,6 +815,7 @@ mod tests {
                 update_retry_after: Duration::from_secs(1),
                 post_update_mode: PostUpdateCommunicationMode::Enabled,
                 lock_state_provider: &self.lock_provider,
+                database_validator: &self.database_validator,
                 execution_supervisor: &self.execution_supervisor,
             }
         }
@@ -819,12 +826,13 @@ mod tests {
         let (mgr, communication_disable) = make_transport_and_disable();
         TestFixture {
             storage: Arc::new(storage),
-            security_handler: Arc::new(MockSecurityHandler::new()),
+            policy: Arc::new(MockUpdatePolicy::new()),
             reload_handler: Arc::new(NoopReloadHandler),
             lock_provider: MockLockProvider {
                 owner: Some("test-user".to_owned()),
                 has_conflicts: false,
             },
+            database_validator: crate::test_utils::test_database_validator(),
             executions: Arc::new(RwLock::new(HashMap::default())),
             communication_disable,
             http_restriction_manager: mgr,
@@ -1263,7 +1271,7 @@ mod tests {
         let failing_reload_handler = Arc::new(crate::test_utils::FailingReloadHandler);
         let params = super::ExecutionParams {
             storage: &f.storage,
-            security_handler: &f.security_handler,
+            policy: &f.policy,
             reload_handler: &failing_reload_handler,
             executions: &f.executions,
             communication_disable: &f.communication_disable,
@@ -1272,6 +1280,7 @@ mod tests {
             update_retry_after: Duration::from_secs(1),
             post_update_mode: PostUpdateCommunicationMode::Enabled,
             lock_state_provider: &f.lock_provider,
+            database_validator: &f.database_validator,
             execution_supervisor: &f.execution_supervisor,
         };
 
@@ -1287,6 +1296,142 @@ mod tests {
                     if failure.class() == ExecutionFailureClass::Fatal
             ),
             "an unrecoverable reload must report a fatal failure, got {status:?}"
+        );
+    }
+
+    /// Transport that counts transitions, so a test can prove a refused
+    /// execution never touched the vehicle at all.
+    struct CountingTransport {
+        disables: std::sync::atomic::AtomicUsize,
+        state: tokio::sync::Mutex<TransportState>,
+    }
+
+    impl CountingTransport {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                disables: std::sync::atomic::AtomicUsize::new(0),
+                state: tokio::sync::Mutex::new(TransportState::Enabled),
+            })
+        }
+
+        fn disable_count(&self) -> usize {
+            self.disables.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TransportControl for CountingTransport {
+        async fn enable(&self) -> Result<(), CommControlError> {
+            *self.state.lock().await = TransportState::Enabled;
+            Ok(())
+        }
+
+        async fn disable(&self) -> Result<(), CommControlError> {
+            self.disables
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            *self.state.lock().await = TransportState::Disabled;
+            Ok(())
+        }
+
+        async fn state(&self) -> TransportState {
+            *self.state.lock().await
+        }
+    }
+
+    /// Policy that refuses every execution and counts how often it was asked,
+    /// so a test can tell the pre-guard question from the under-guard one.
+    struct RefusingPolicy {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl RefusingPolicy {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl<L, C> cda_interfaces::runtime_update_api::RuntimeUpdatePolicy<L, C> for RefusingPolicy
+    where
+        L: cda_interfaces::runtime_update_api::LockStateProvider,
+        C: cda_interfaces::storage_api::Collection
+            + cda_interfaces::storage_api::DirectFileAccess
+            + Send
+            + Sync
+            + 'static,
+    {
+        async fn check_execution_allowed(
+            &self,
+            _lock_state_provider: &L,
+            _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
+        ) -> Result<(), RuntimeUpdateError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(RuntimeUpdateError::NoLock(
+                "vehicle is not parked".to_owned(),
+            ))
+        }
+    }
+
+    /// An execution the policy refuses must be refused before anything
+    /// observable happens.
+    ///
+    /// The guards an execution takes are not bookkeeping: disabling the transport
+    /// drops vehicle communication, and the HTTP protection returns 409 on every
+    /// non-exempt route. Acquiring them before asking the policy would let any
+    /// caller the policy is going to refuse force a real disable/enable cycle
+    /// plus a burst of 409s, purely by being refused a moment later. This pins
+    /// the ordering, so moving guard acquisition ahead of the policy fails here.
+    #[tokio::test]
+    async fn a_refused_execution_never_disables_the_transport() {
+        let f = make_fixture();
+        let transport = CountingTransport::new();
+        let communication_disable =
+            communication_disable_for_test(Arc::<CountingTransport>::clone(&transport), true);
+        let refusing = Arc::new(RefusingPolicy::new());
+        let params = super::ExecutionParams {
+            storage: &f.storage,
+            policy: &refusing,
+            reload_handler: &f.reload_handler,
+            executions: &f.executions,
+            communication_disable: &communication_disable,
+            http_protections: &f.http_restriction_manager,
+            update_exempt_routes: &[],
+            update_retry_after: Duration::from_secs(1),
+            post_update_mode: PostUpdateCommunicationMode::Enabled,
+            lock_state_provider: &f.lock_provider,
+            database_validator: &f.database_validator,
+            execution_supervisor: &f.execution_supervisor,
+        };
+
+        let result = super::start_execution(&params, ExecutionMode::Apply).await;
+
+        assert!(
+            matches!(result, Err(RuntimeUpdateError::NoLock(_))),
+            "a refused execution must surface the policy's own error, got: {result:?}"
+        );
+        assert_eq!(
+            refusing.call_count(),
+            1,
+            "the under-guard check must not be reached once the pre-guard one refused"
+        );
+        assert_eq!(
+            transport.disable_count(),
+            0,
+            "a refused execution must not take the vehicle transport offline"
+        );
+        assert!(
+            !f.http_restriction_manager.is_active(),
+            "a refused execution must not install the process-wide HTTP restriction"
+        );
+        assert!(
+            f.executions.read().await.is_empty(),
+            "a refused execution must not be registered"
         );
     }
 }

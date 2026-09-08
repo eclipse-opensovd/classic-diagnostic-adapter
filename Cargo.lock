@@ -552,7 +552,6 @@ name = "cda-plugin-runtime-update"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "bytes",
  "cda-database",
  "cda-interfaces",
  "cda-plugin-communication-management",

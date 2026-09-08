@@ -16,9 +16,9 @@
 //! [`Setup`] is the public entry-point for applications that need to customize how the CDA
 //! boots. The default startup path uses [`Setup::new`] with the standard update plugin; a
 //! custom path calls [`Setup::with_update_plugin`] to inject any [`RuntimeFilesUpdatePlugin`]
-//! implementation, and [`Setup::with_communication_plugin`] to replace the default
-//! communication plugin factory, before handing the `Setup` to one of the
-//! `run_*` functions.
+//! implementation, [`Setup::with_communication_plugin`] to replace the default
+//! communication plugin factory, and [`Setup::with_database_validator`] to replace the
+//! MDD integrity policy, before handing the `Setup` to one of the `run_*` functions.
 //!
 //! [`RuntimeFilesUpdatePlugin`]: cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin
 
@@ -33,6 +33,7 @@ use cda_interfaces::{
     },
     health::HealthProvider,
     http_protection::registry::HttpProtectionRegistry,
+    runtime_update_api::DatabaseValidator,
 };
 use cda_plugin_communication_management::{
     lifecycle::{
@@ -76,6 +77,9 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
     pub config: Arc<RwLock<Configuration>>,
     /// Runtime-only preparation and typed reload capability.
     pub update_preparation: Arc<DatabaseReloadPreparation<SP>>,
+    /// The injected MDD integrity validator. The single instance supplied by an
+    /// integrator is never bypassed.
+    pub database_validator: Arc<dyn DatabaseValidator>,
     pub dynamic_router: cda_sovd::dynamic_router::DynamicRouter,
     /// Read-only lock topology view; update plugins receive no publication authority.
     pub lock_provider: Arc<cda_sovd::SovdLockStateView>,
@@ -146,6 +150,8 @@ pub struct Setup<
     /// routes are not registered.
     pub(crate) build_update_plugin: Option<UPB>,
     pub(crate) build_communication_plugin: CPB,
+    /// The one construction site of the application's default MDD integrity validator.
+    pub(crate) database_validator: Arc<dyn DatabaseValidator>,
     pub(crate) initialize_tracing: bool,
     pub(crate) shutdown_signal: Option<ShutdownSignal>,
 }
@@ -165,6 +171,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Setup<SP, SL> {
             pre_load: None,
             build_update_plugin: None,
             build_communication_plugin: DefaultCommunicationPluginBuilder,
+            database_validator: Arc::new(crate::mdd_inspector::MddDatabaseValidator),
             initialize_tracing: true,
             shutdown_signal: None,
         }
@@ -183,6 +190,16 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
     #[must_use]
     pub fn with_shutdown_signal(mut self, shutdown_signal: ShutdownSignal) -> Self {
         self.shutdown_signal = Some(shutdown_signal);
+        self
+    }
+
+    /// Replaces the MDD integrity validator used during startup and runtime updates.
+    #[must_use]
+    pub fn with_database_validator(
+        mut self,
+        database_validator: Arc<dyn DatabaseValidator>,
+    ) -> Self {
+        self.database_validator = database_validator;
         self
     }
 
@@ -235,6 +252,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
             pre_load: self.pre_load,
             build_update_plugin: Some(builder),
             build_communication_plugin: self.build_communication_plugin,
+            database_validator: self.database_validator,
             initialize_tracing: self.initialize_tracing,
             shutdown_signal: self.shutdown_signal,
         }
@@ -252,6 +270,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
             pre_load: self.pre_load,
             build_update_plugin: self.build_update_plugin,
             build_communication_plugin: plugin,
+            database_validator: self.database_validator,
             initialize_tracing: self.initialize_tracing,
             shutdown_signal: self.shutdown_signal,
         }
@@ -384,6 +403,7 @@ pub(crate) async fn setup_runtime_routes<SP, SL, UPB, CPB>(
     ws: &ApplicationState,
     build_update_plugin: Option<UPB>,
     communication_plugin: CPB,
+    database_validator: Arc<dyn DatabaseValidator>,
 ) -> Result<CommunicationRuntime, AppError>
 where
     SP: SecurityPlugin,
@@ -464,6 +484,7 @@ where
     let infra = CdaRuntime {
         config: Arc::new(RwLock::new(config)),
         update_preparation,
+        database_validator,
         dynamic_router: ws.dynamic_router.clone(),
         lock_provider: Arc::clone(&lock_state_view),
         shutdown_signal,

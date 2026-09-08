@@ -14,7 +14,6 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use cda_interfaces::{
     communication_control::{TransportControl, TransportState, error::CommControlError},
     runtime_update_api::{
@@ -69,6 +68,34 @@ pub(crate) async fn write_file(
     Ok(())
 }
 
+/// Test validator backed by the MDD reader for deterministic format-specific file operations.
+pub struct TestMddDatabaseValidator;
+
+impl cda_interfaces::runtime_update_api::DatabaseValidator for TestMddDatabaseValidator {
+    fn check_integrity(&self, path: &std::path::Path) -> Result<(), VerificationError> {
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| VerificationError("non-UTF-8 path".to_owned()))?;
+        cda_database::mmap_and_decode_mdd(path_str)
+            .map_err(|error| VerificationError(format!("{error}")))?;
+        Ok(())
+    }
+}
+
+/// Shared `database_validator` handle for tests.
+pub fn test_database_validator() -> Arc<dyn cda_interfaces::runtime_update_api::DatabaseValidator> {
+    Arc::new(TestMddDatabaseValidator)
+}
+
+/// Validator that accepts everything, for tests about paths other than file content.
+pub struct AcceptingDatabaseValidator;
+
+impl cda_interfaces::runtime_update_api::DatabaseValidator for AcceptingDatabaseValidator {
+    fn check_integrity(&self, _path: &std::path::Path) -> Result<(), VerificationError> {
+        Ok(())
+    }
+}
+
 pub struct MockLockProvider {
     pub owner: Option<String>,
     pub has_conflicts: bool,
@@ -85,9 +112,9 @@ impl LockStateProvider for MockLockProvider {
     }
 }
 
-pub struct MockSecurityHandler;
+pub struct MockUpdatePolicy;
 
-impl MockSecurityHandler {
+impl MockUpdatePolicy {
     pub fn new() -> Self {
         Self
     }
@@ -95,7 +122,7 @@ impl MockSecurityHandler {
 
 #[async_trait]
 impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'static>
-    cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C> for MockSecurityHandler
+    cda_interfaces::runtime_update_api::RuntimeUpdatePolicy<L, C> for MockUpdatePolicy
 {
     async fn check_execution_allowed(
         &self,
@@ -109,10 +136,6 @@ impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'sta
             )),
             Some(_) => Ok(()),
         }
-    }
-
-    async fn check_file_integrity(&self, _path: &std::path::Path) -> Result<(), VerificationError> {
-        Ok(())
     }
 }
 
@@ -180,7 +203,7 @@ pub fn make_upload_files(entries: &[(&str, &[u8])]) -> Vec<UploadFile> {
         .filter(|(name, _)| !name.is_empty())
         .map(|(name, data)| UploadFile {
             filename: (*name).to_string(),
-            data: Bytes::copy_from_slice(data),
+            data: data.to_vec().into(),
         })
         .collect()
 }
