@@ -283,6 +283,7 @@ def add_vin_service(dlr: DiagLayerRaw):
         did=0xF190,
         dop=vin_dop,
         add_write=True,
+        funct_class="varcoding",
         long_name="Vehicle Identification Number",
         semantic="STOREDDATA",
     )
