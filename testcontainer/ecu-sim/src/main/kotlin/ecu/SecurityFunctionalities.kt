@@ -18,6 +18,8 @@ import RequestsData
 import utils.getByteArray
 import utils.messagePayload
 
+private const val FSNR2000_REQUEST_SEED_PARAMETER: Byte = 0x5A
+
 fun RequestsData.addSecurityAccessRequests() {
     request("27 []", name = "RequestSeed_SendKey") {
         val ecuState = ecu.ecuState()
@@ -28,6 +30,12 @@ fun RequestsData.addSecurityAccessRequests() {
             val level = SecurityAccess.parse(subFunction)
             if (level == null) {
                 nrc(NrcError.RequestOutOfRange)
+            } else if (
+                ecu.name == "FSNR2000" &&
+                subFunction == 0x05.toByte() &&
+                (message.size != 3 || message[2] != FSNR2000_REQUEST_SEED_PARAMETER)
+            ) {
+                nrc(NrcError.IncorrectMessageLengthOrInvalidFormat)
             } else {
                 // Create deterministic seed: 0x00, 0x01, 0x02, ..., 0x07
                 val generatedSeed = ByteArray(8) { it.toByte() }

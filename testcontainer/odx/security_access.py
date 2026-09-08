@@ -11,6 +11,7 @@
 
 from helper import (
     derived_id,
+    find_dop_by_shortname,
     find_state_transition,
     functional_class_ref,
     matching_request_parameter_subfunction,
@@ -92,16 +93,19 @@ def add_request_seed_service(
     dlr: DiagLayerRaw,
     level: int,
     end_of_pdu_array_dop: DataObjectProperty,
+    request_parameter: ValueParameter | None = None,
 ):
+    parameters = [
+        sid_parameter_rq(0x27),
+        subfunction_rq(level, short_name="SecurityAccessType"),
+    ]
+    if request_parameter is not None:
+        parameters.append(request_parameter)
+
     request = Request(
         odx_id=derived_id(dlr, f"RQ.RQ_RequestSeed_Level_{level}"),
         short_name=f"RQ_RequestSeed_Level_{level}",
-        parameters=NamedItemList(
-            [
-                sid_parameter_rq(0x27),
-                subfunction_rq(level, short_name="SecurityAccessType"),
-            ]
-        ),
+        parameters=NamedItemList(parameters),
     )
     dlr.requests.append(request)
 
@@ -335,7 +339,20 @@ def add_security_access_services(dlc: DiagLayerContainer, dlr: DiagLayerRaw):
     # 27 04 SendKey_Level_3
     add_send_key_service(dlc, dlr, 3, end_of_pdu_array_dop)
     # 27 05 RequestSeed_Level_5
-    add_request_seed_service(dlc, dlr, 5, end_of_pdu_array_dop)
+    add_request_seed_service(
+        dlc,
+        dlr,
+        5,
+        end_of_pdu_array_dop,
+        ValueParameter(
+            short_name="SeedRequestParameter",
+            semantic="DATA",
+            byte_position=2,
+            dop_ref=ref(find_dop_by_shortname(dlc, "IDENTICAL_UINT_8")),
+        )
+        if dlc.short_name == "FSNR2000"
+        else None,
+    )
     # 27 06 SendKey_Level_5
     add_send_key_service(dlc, dlr, 5, end_of_pdu_array_dop)
     # 27 07 RequestSeed_Level_7
