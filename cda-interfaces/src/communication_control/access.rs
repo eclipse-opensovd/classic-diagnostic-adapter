@@ -13,7 +13,7 @@
 
 //! The narrow, diagnostic-use communication contract.
 //!
-//! [[ dimpl~communication-control-access, Capability-limited diagnostic communication access, dimpl, req~dt-deferred-initialization; arch~dt-deferred-initialization ]]
+//! [[ dimpl~communication-control-access, Capability-limited diagnostic communication access, dimpl ]]
 //!
 //! Defined here rather than in the default communication plugin's crate, so that
 //! transport crates and replacement plugins can depend on the contract without

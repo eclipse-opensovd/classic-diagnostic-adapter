@@ -256,6 +256,21 @@ Communication Initialization Mode
     serve that request when a persisted topology makes this possible.
 
 
+Post-Update Deferred Communication
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. req:: Post-Update Deferred Communication
+    :id: req~dt-post-update-deferred-communication
+    :links: arch~dt-post-update-deferred-communication
+    :status: draft
+
+    The CDA must support a configurable ``[communication] post_update_mode`` value of ``Deferred``.
+    After a successful diagnostic database apply or rollback, this mode must leave diagnostic communication
+    disabled instead of automatically resuming the transport. ECU-related requests must report pending
+    initialization with a retry hint and may trigger communication again according to the configured
+    ``init_mode``.
+
+
 ECU Detection and Variant Detection
 -----------------------------------
 

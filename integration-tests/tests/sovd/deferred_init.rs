@@ -159,6 +159,7 @@ fn base_url(runtime: &crate::util::runtime::TestRuntime) -> String {
 /// On-demand initialization for an authenticated diagnostic request. The gate
 /// returns 503 with `Retry-After` immediately and fires the activation trigger
 /// in the background. The endpoint leaves the 503 state once that completes.
+/// [[ itest~deferred-on-demand-pending, On-demand requests report pending before activation completes, itest ]]
 #[tokio::test]
 async fn on_demand_diagnostic_path_returns_503_then_200() {
     let (runtime, _guard) = setup_integration_test(true)
@@ -174,6 +175,17 @@ async fn on_demand_diagnostic_path_returns_503_then_200() {
             let headers = auth_header(&runtime.config, None)
                 .await
                 .expect("Failed to authenticate");
+
+            let version_response = client
+                .get(format!("{base}/vehicle/v15/apps/sovd2uds/data/version"))
+                .send()
+                .await
+                .expect("Version request failed");
+            assert_eq!(
+                version_response.status(),
+                reqwest::StatusCode::OK,
+                "non-ECU endpoints must remain available while communication is deferred"
+            );
 
             // The request must return 503 immediately rather than block through
             // the full activation sequence.
@@ -201,6 +213,7 @@ async fn on_demand_diagnostic_path_returns_503_then_200() {
             let body: ApiErrorResponse<String> = serde_json::from_str(&body_text)
                 .unwrap_or_else(|e| panic!("failed to parse error body: {e}\nbody: {body_text}"));
             assert_eq!(body.error_code, ErrorCode::VendorSpecific);
+            assert_eq!(body.vendor_code.as_deref(), Some("communication-not-ready"));
 
             // The gate's own request fired the trigger. Poll until it completes.
             let response = wait_until_not_pending(
@@ -220,8 +233,9 @@ async fn on_demand_diagnostic_path_returns_503_then_200() {
     .await;
 }
 
-/// The CDA stays fully quiet on the vehicle network (no `DoIP` traffic at all)
-/// until an authenticated diagnostic request authorizes the first activation.
+/// The CDA sends no diagnostic request to the ECU until an authenticated
+/// diagnostic request authorizes the first activation.
+/// [[ itest~deferred-on-demand-uds-silence, On-demand startup sends no UDS request before an authorized trigger, itest ]]
 #[tokio::test]
 async fn on_demand_trigger_produces_no_doip_traffic_before_authorized_request() {
     if skip_for_can(
@@ -309,6 +323,7 @@ async fn on_demand_trigger_produces_no_doip_traffic_before_authorized_request() 
 ///      then run an `Apply` execution and wait for the reload cycle).
 ///   d. Verify diagnostic endpoints return 503 again after the update.
 ///   e. Trigger initialization again (exits the 503 state again).
+/// [[ itest~deferred-post-update, Deferred post-update mode requires communication reactivation, itest ]]
 #[tokio::test]
 async fn post_update_deferred_mode_returns_503_until_triggered() {
     let (runtime, _guard) = setup_integration_test(true)
@@ -416,8 +431,8 @@ async fn post_update_deferred_mode_returns_503_until_triggered() {
 }
 
 /// In `init_mode = Disabled` an ordinary authenticated diagnostic request
-/// must never trigger activation, and the CDA must stay silent on the vehicle
-/// network throughout.
+/// must never trigger activation or send a diagnostic request to the ECU.
+/// [[ itest~deferred-disabled-uds-silence, Disabled mode rejects request activation and sends no UDS request, itest ]]
 #[tokio::test]
 async fn disabled_mode_never_activates_or_produces_traffic() {
     if skip_for_can(
@@ -574,6 +589,7 @@ async fn trigger_variant_detection(
 /// `init_mode`, but must never settle any ECU's variant via the automatic
 /// whole-vehicle variant detection. A manual per-ECU trigger (see
 /// [`trigger_variant_detection`]) still works, because it bypasses that path.
+/// [[ itest~variant-detection-explicit, Disabled automatic variant detection permits an explicit ECU trigger, itest ]]
 #[tokio::test]
 async fn variant_detection_never_requires_explicit_trigger() {
     let (runtime, _guard) = setup_integration_test(true)

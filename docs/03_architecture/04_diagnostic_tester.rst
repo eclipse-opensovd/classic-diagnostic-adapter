@@ -25,6 +25,7 @@ Startup Sequence
 
 .. arch:: Startup Sequence
     :id: arch~dt-startup-sequence
+    :links: dimpl~deferred-communication-startup, dimpl~deferred-doip-transport, test~deferred-startup-policy, test~deferred-doip-passive-construction, itest~deferred-on-demand-pending, itest~deferred-on-demand-uds-silence, itest~deferred-disabled-uds-silence
     :status: draft
 
     The CDA startup is orchestrated by the main application entry point, which coordinates
@@ -155,15 +156,22 @@ Startup Sequence
             UDS --> Main: UdsManager
             deactivate UDS
         else OnDemand / Disabled communication (postponed until triggered)
+            Main -> HTTP: register SOVD routes
             note over Main,UDS
                 DoIP gateway creation, UDS manager
                 creation, and variant detection are
                 postponed until triggered
                 (see arch~dt-deferred-initialization)
             end note
+            note over HTTP,DoIP
+                HTTP API is operational while
+                communication remains disabled
+            end note
         end
 
-        Main -> HTTP: add_vehicle_routes()
+        opt Immediate communication initialization
+            Main -> HTTP: add_vehicle_routes()
+        end
         Main -> HTTP: add_static_data_endpoint() (version)
         Main -> HTTP: add_openapi_routes()
 
@@ -355,6 +363,7 @@ Communication Initialization Mode
 
 .. arch:: Communication Initialization Mode
     :id: arch~dt-deferred-initialization
+    :links: dimpl~communication-control-contracts, dimpl~communication-control-access, dimpl~communication-control-operations, dimpl~communication-lifecycle-controller, dimpl~default-communication-policy, dimpl~deferred-communication-startup, dimpl~deferred-sovd-admission, dimpl~deferred-doip-transport, test~deferred-communication-config, test~deferred-startup-policy, test~deferred-admitting-modes-activate, test~deferred-disabled-rejects-activation, test~deferred-request-activation-policy, test~deferred-activation-retry, test~deferred-sovd-admission, test~deferred-doip-passive-construction, itest~deferred-on-demand-pending, itest~deferred-on-demand-uds-silence, itest~deferred-disabled-uds-silence
     :status: draft
 
     The CDA supports a configurable ``[communication] init_mode`` to enable scenarios where
@@ -417,6 +426,36 @@ Communication Initialization Mode
     modes exist specifically to minimize vehicle network traffic until explicitly authorized.
 
     .. uml::
+        :caption: Communication Initialization Mode State Flow
+
+        @startuml
+        skinparam backgroundColor #FFFFFF
+        skinparam state {
+            BackgroundColor #F8F8F8
+            BorderColor #333333
+        }
+
+        [*] --> SelectingMode
+
+        state SelectingMode <<choice>>
+        SelectingMode --> Enabling : Always / startup
+        SelectingMode --> Deferred : OnDemand
+        SelectingMode --> Disabled : Disabled
+
+        Deferred --> Enabling : first diagnostic request\nor explicit activation
+        Deferred --> Deferred : request returns 503\nwith Retry-After
+
+        Disabled --> Disabled : diagnostic request\nreturns 503
+        Disabled --> Enabling : explicit detection trigger
+
+        Enabling --> Enabled : transport, lifecycle hooks,\nvariant detection complete
+        Enabling --> Failed : initialization failure
+        Failed --> Enabling : authorized retry
+
+        Enabled --> Enabled : diagnostic requests served
+        @enduml
+
+    .. uml::
         :caption: WhenNotPersisted -- Reconnect to a Persisted Gateway
 
         @startuml
@@ -458,6 +497,60 @@ Communication Initialization Mode
     the affected gateway only). The resulting topology is persisted as described in
     :need:`arch~dt-ecu-list-persistence`, so that subsequent startups can reuse it (unless ``init_mode`` is
     ``Always``).
+
+
+Post-Update Deferred Communication
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. arch:: Post-Update Deferred Communication
+    :id: arch~dt-post-update-deferred-communication
+    :links: dimpl~communication-control-contracts, dimpl~communication-lifecycle-controller, dimpl~post-update-deferred-communication, test~deferred-communication-config, test~deferred-post-update-apply, test~deferred-post-update-rollback, itest~deferred-post-update
+    :status: draft
+
+    Runtime database updates acquire the communication lifecycle controller's exclusive disable lease
+    before replacing vehicle data. When ``post_update_mode`` is ``Deferred``, a successful apply or rollback
+    drops that lease without requesting transport resumption. The communication lifecycle therefore returns
+    to its deferred state while the registered ECU routes remain available.
+
+    ECU-related requests are rejected with ``503 Service Unavailable`` and ``Retry-After`` while
+    communication is disabled. Under ``init_mode = OnDemand``, such a request submits a new activation
+    request to the communication lifecycle controller. Diagnostic requests can proceed after transport
+    activation and variant detection complete.
+
+    .. uml::
+        :caption: Deferred Communication After a Runtime Update
+
+        @startuml
+        skinparam backgroundColor #FFFFFF
+        skinparam sequenceArrowThickness 2
+
+        actor Client
+        participant "Runtime Update" as Update
+        participant "Communication Lifecycle" as Lifecycle
+        participant "Diagnostic Transport" as Transport
+        participant "SOVD API" as API
+
+        Client -> Update: Apply or Rollback
+        Update -> Lifecycle: acquire exclusive disable lease
+        Lifecycle -> Transport: disable
+        Transport --> Lifecycle: disabled
+        Update -> Update: install and reload vehicle data
+
+        alt post_update_mode = Enabled
+            Update -> Lifecycle: release lease
+            Lifecycle -> Transport: resume
+        else post_update_mode = Deferred
+            Update -> Lifecycle: drop lease
+            note over Lifecycle,Transport: Communication remains disabled
+            Client -> API: ECU diagnostic request
+            API --> Client: 503 Service Unavailable\nRetry-After
+            API -> Lifecycle: request activation
+            Lifecycle -> Transport: enable and detect
+            Transport --> Lifecycle: enabled
+            Client -> API: retry ECU request
+            API --> Client: diagnostic response
+        end
+        @enduml
 
 
 Health Monitoring
@@ -613,6 +706,7 @@ Variant Detection
 
 .. arch:: Variant Detection
     :id: arch~dt-variant-detection
+    :links: dimpl~default-communication-policy, itest~variant-detection-explicit
     :status: draft
 
     Variant detection identifies the correct ECU software variant from multiple possible

@@ -139,6 +139,7 @@ pub(crate) fn with_retry_after(mut response: Response, retry_after: Option<Durat
 
 /// Acquires a communication lease or starts authorized on-demand activation before
 /// returning a retryable SOVD error.
+/// [[ dimpl~deferred-sovd-admission, Deferred diagnostic request admission, dimpl ]]
 pub(crate) fn acquire_communication_activity(
     communication_access: &dyn CommunicationAccess,
 ) -> Result<CommunicationGuard, ApiError> {
@@ -1260,6 +1261,7 @@ pub(crate) mod tests {
         }
     }
 
+    /// [[ test~deferred-sovd-admission, Deferred request admission triggers activation and returns a retry hint, test ]]
     #[test]
     fn communication_denial_requests_activation_and_returns_retry_hint() {
         let access = DeferredCommunicationAccess {

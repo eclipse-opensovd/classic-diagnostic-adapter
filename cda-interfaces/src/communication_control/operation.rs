@@ -13,7 +13,7 @@
 
 //! Authoritative communication lifecycle operations and failures.
 //!
-//! [[ dimpl~communication-control-operations, Authoritative communication lifecycle operations, dimpl, req~dt-deferred-initialization; arch~dt-deferred-initialization ]]
+//! [[ dimpl~communication-control-operations, Authoritative communication lifecycle operations, dimpl ]]
 //!
 //! Part of the communication-access contract (with [`super::access`]), defined
 //! here so that transport crates and replacement communication plugins can

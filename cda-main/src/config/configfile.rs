@@ -731,4 +731,44 @@ parameter_validation = true
         assert!(config.strict.parameter_validation());
         assert!(!config.strict.ecu_config());
     }
+
+    /// [[ test~deferred-communication-config, Deferred communication modes are configurable, test ]]
+    #[test]
+    fn communication_modes_are_parsed_from_toml() {
+        let defaults: Configuration = Figment::from(Serialized::defaults(Configuration::default()))
+            .extract()
+            .unwrap();
+        assert_eq!(
+            defaults.communication.init_mode,
+            CommunicationInitMode::Always
+        );
+        assert_eq!(
+            defaults.communication.post_update_mode,
+            PostUpdateCommunicationMode::Enabled
+        );
+
+        for init_mode in ["OnDemand", "Disabled"] {
+            let config_str = format!(
+                "[communication]\ninit_mode = \"{init_mode}\"\npost_update_mode = \
+                 \"Deferred\"\ndeferred_retry_after_seconds = 7\n"
+            );
+            let config: Configuration =
+                Figment::from(Serialized::defaults(Configuration::default()))
+                    .merge(Toml::string(&config_str))
+                    .extract()
+                    .unwrap();
+
+            let expected_init_mode = if init_mode == "OnDemand" {
+                CommunicationInitMode::OnDemand
+            } else {
+                CommunicationInitMode::Disabled
+            };
+            assert_eq!(config.communication.init_mode, expected_init_mode);
+            assert_eq!(
+                config.communication.post_update_mode,
+                PostUpdateCommunicationMode::Deferred
+            );
+            assert_eq!(config.communication.deferred_retry_after_seconds, 7);
+        }
+    }
 }

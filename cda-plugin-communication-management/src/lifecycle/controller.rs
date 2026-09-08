@@ -63,6 +63,7 @@ enum ClaimOutcome {
 /// The capability a [`CommunicationPlugin`] uses to perform lifecycle
 /// operations. Passed to [`CommunicationPluginBuilder::build`]. Plugins
 /// typically retain it and delegate their operations to it.
+/// [[ dimpl~communication-lifecycle-controller, Serialized communication lifecycle controller, dimpl ]]
 #[derive(Clone)]
 pub struct CommunicationHandle {
     state: Arc<CommunicationStateStore>,
@@ -1392,6 +1393,7 @@ mod tests {
 
     /// `request_activate` called while communication is `Error` must claim and
     /// retry rather than return the stale `Error` state.
+    /// [[ test~deferred-activation-retry, Failed deferred activation can be retried, test ]]
     #[tokio::test]
     async fn repeated_failure_returns_to_error_and_is_retried_again() {
         let (handle, control) = handle();
