@@ -11,43 +11,46 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use cda_interfaces::{
     runtime_update_api::{
-        LockStateProvider, RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateCollections,
-        VerificationError,
+        LockStateProvider, RuntimeFileInspector, RuntimeUpdateError, RuntimeUpdatePolicy,
+        UpdateCollections,
     },
     storage_api::{Collection, DirectFileAccess},
 };
 
-/// Default implementation of the runtime update security handler.
+/// Default [`RuntimeUpdatePolicy`]: a vehicle must be claimed before its
+/// databases are swapped.
 ///
-/// Validates vehicle lock ownership and verifies that update files decode as
-/// well-formed MDDs.
-pub struct DefaultUpdateSecurityHandler<L: LockStateProvider>(std::marker::PhantomData<L>);
-
-impl<L: LockStateProvider> DefaultUpdateSecurityHandler<L> {
-    /// Creates a security handler.
-    #[must_use]
-    pub fn new() -> Self {
-        Self(std::marker::PhantomData)
-    }
+/// The injected [`RuntimeFileInspector`] is used to read ECU names out of the
+/// staged and current databases.
+pub struct DefaultUpdatePolicy<L: LockStateProvider> {
+    inspector: Arc<dyn RuntimeFileInspector>,
+    _lock: std::marker::PhantomData<L>,
 }
 
-impl<L: LockStateProvider> Default for DefaultUpdateSecurityHandler<L> {
-    fn default() -> Self {
-        Self::new()
+impl<L: LockStateProvider> DefaultUpdatePolicy<L> {
+    /// Creates a policy.
+    #[must_use]
+    pub fn new(inspector: Arc<dyn RuntimeFileInspector>) -> Self {
+        Self {
+            inspector,
+            _lock: std::marker::PhantomData,
+        }
     }
 }
 
 #[async_trait]
 impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'static>
-    RuntimeUpdateSecurityPlugin<L, C> for DefaultUpdateSecurityHandler<L>
+    RuntimeUpdatePolicy<L, C> for DefaultUpdatePolicy<L>
 {
-    /// Ensures the caller owns the vehicle lock. Rejecting held ECU and
-    /// functional-group locks is framework-owned and happens in
+    /// Default policy: a vehicle must be claimed before its databases are
+    /// swapped, so an unheld vehicle lock refuses the execution. This is not
+    /// ownership enforcement - the caller is not visible here. Rejecting held
+    /// ECU and functional-group locks is framework-owned and happens in
     /// `validate_execution_preconditions`, not here. Conflicting communication
     /// activity is already excluded by the coordinator's runtime-update block.
     async fn check_execution_allowed(
@@ -64,8 +67,8 @@ impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'sta
         // framework, so nothing here gates the execution.
         if let (Some(pending), Some(current)) = (&collections.pending_mdd, &collections.current_mdd)
         {
-            let pending_ecus = mdd_ecu_names(pending.as_ref()).await?;
-            let current_ecus = mdd_ecu_names(current.as_ref()).await?;
+            let pending_ecus = database_ecu_names(pending.as_ref(), &*self.inspector).await?;
+            let current_ecus = database_ecu_names(current.as_ref(), &*self.inspector).await?;
 
             if pending_ecus != current_ecus {
                 tracing::warn!(
@@ -75,14 +78,11 @@ impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'sta
         }
         Ok(())
     }
-
-    async fn check_file_integrity(&self, path: &std::path::Path) -> Result<(), VerificationError> {
-        crate::mdd::validate(path)
-    }
 }
 
-async fn mdd_ecu_names<C: Collection + DirectFileAccess>(
+async fn database_ecu_names<C: Collection + DirectFileAccess>(
     col: &C,
+    inspector: &dyn RuntimeFileInspector,
 ) -> Result<HashSet<String>, RuntimeUpdateError> {
     let files = col
         .list()
@@ -94,18 +94,16 @@ async fn mdd_ecu_names<C: Collection + DirectFileAccess>(
             let path = col
                 .file_path(key)
                 .map_err(|e| RuntimeUpdateError::ValidationFailed(e.to_string()))?;
-            crate::mdd::ecu_name(&path)
+            inspector.ecu_name(&path)
         })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use async_trait::async_trait;
     use cda_interfaces::{
-        runtime_update_api::{RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateCollections},
+        runtime_update_api::{RuntimeUpdateError, RuntimeUpdatePolicy, UpdateCollections},
         storage_api::{CollectionName, Storage as _},
     };
     use cda_storage::{LocalCollection, LocalStorage};
@@ -139,17 +137,6 @@ mod tests {
             has_ecu_conflicts,
             has_fg_conflicts,
         }
-    }
-
-    async fn check_file_integrity(
-        handler: &DefaultUpdateSecurityHandler<MockLockProvider>,
-        path: &std::path::Path,
-    ) -> Result<(), VerificationError> {
-        <DefaultUpdateSecurityHandler<_> as RuntimeUpdateSecurityPlugin<
-            MockLockProvider,
-            LocalCollection,
-        >>::check_file_integrity(handler, path)
-        .await
     }
 
     async fn write_mdd_to_collection(
@@ -187,12 +174,9 @@ mod tests {
         owner: Option<&str>,
         has_ecu_conflicts: bool,
         has_fg_conflicts: bool,
-    ) -> (
-        DefaultUpdateSecurityHandler<MockLockProvider>,
-        MockLockProvider,
-    ) {
+    ) -> (DefaultUpdatePolicy<MockLockProvider>, MockLockProvider) {
         let lock_provider = make_lock_provider(owner, has_ecu_conflicts, has_fg_conflicts);
-        let handler = DefaultUpdateSecurityHandler::new();
+        let handler = DefaultUpdatePolicy::new(crate::test_utils::test_inspector());
         (handler, lock_provider)
     }
 
@@ -221,7 +205,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_execution_allowed_succeeds_when_owner_matches_and_no_conflicts() {
+    async fn check_execution_allowed_succeeds_when_no_ecu_or_functional_group_locks_are_held() {
         let (handler, lock_provider) = make_handler(Some("user-a"), false, false);
         assert!(
             handler
@@ -232,24 +216,6 @@ mod tests {
                 .await
                 .is_ok()
         );
-    }
-
-    #[tokio::test]
-    async fn check_file_integrity_mdd_fails_on_nonexistent_file() {
-        let (handler, _) = make_handler(Some("user-a"), false, false);
-        let path = PathBuf::from("/nonexistent/test.mdd");
-        let result = check_file_integrity(&handler, &path).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn check_file_integrity_mdd_fails_on_invalid_data() {
-        let (handler, _) = make_handler(Some("user-a"), false, false);
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bad.mdd");
-        std::fs::write(&path, b"not a valid mdd file").unwrap();
-        let result = check_file_integrity(&handler, &path).await;
-        assert!(result.is_err());
     }
 
     #[tokio::test]

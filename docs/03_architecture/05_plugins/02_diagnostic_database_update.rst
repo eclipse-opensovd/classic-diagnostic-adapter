@@ -153,7 +153,7 @@ Diagnostic Database Update Plugin
 
     Implementations that only need custom authorization, signature checks, version policy, or
     reload behavior should normally retain ``DefaultRuntimeUpdatePlugin`` and provide custom
-    ``RuntimeUpdateSecurityPlugin`` and/or ``RuntimeReloaderPlugin`` implementations instead.
+    ``RuntimeUpdatePolicy`` and/or ``RuntimeReloaderPlugin`` implementations instead.
 
 
     **Application of the update**

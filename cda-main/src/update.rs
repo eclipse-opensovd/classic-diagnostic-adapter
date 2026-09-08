@@ -14,7 +14,7 @@ use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin;
 use cda_plugin_runtime_update::{
-    DefaultRuntimeUpdatePlugin, DefaultUpdateSecurityHandler,
+    DefaultRuntimeUpdatePlugin, DefaultUpdatePolicy,
     default_runtime_reloader_plugin::{
         DefaultReloadContext as ReloaderContext, DefaultRuntimeReloaderPlugin,
     },
@@ -132,6 +132,9 @@ where
         AppError::InitializationFailed(format!("Failed to init storage, error={e:?}"))
     })?);
 
+    // The application supplies the database format; the plugin stays agnostic.
+    let file_inspector = infra.file_inspector;
+
     let reloader_infra = ReloaderContext {
         config: infra.config,
         storage: Arc::clone(&storage),
@@ -147,8 +150,9 @@ where
     Ok(DefaultRuntimeUpdatePlugin::new(
         storage,
         reloader_plugin,
-        Arc::new(DefaultUpdateSecurityHandler::new()),
+        Arc::new(DefaultUpdatePolicy::new(Arc::clone(&file_inspector))),
         Arc::clone(&infra.lock_provider),
+        file_inspector,
         infra.communication_disable,
         infra.http_protections,
         // The set of routes that stay reachable while an update holds its

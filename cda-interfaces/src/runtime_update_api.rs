@@ -99,7 +99,7 @@ pub struct UploadFile {
     pub data: Bytes,
 }
 
-/// Collections passed to [`RuntimeUpdateSecurityPlugin::check_execution_allowed`].
+/// Collections passed to [`RuntimeUpdatePolicy::check_execution_allowed`].
 ///
 /// Provides direct access to the staged (`*NextUpdate`) and currently active collections
 /// so implementations can inspect file lists, read metadata, or verify file content
@@ -121,6 +121,52 @@ impl<C: Collection + DirectFileAccess> Default for UpdateCollections<C> {
             backup_mdd: None,
         }
     }
+}
+
+/// Format-specific operations used by the runtime-update plugin.
+///
+/// Implementations validate staged and installed files, expose ECU-name and revision metadata,
+/// and optionally decompress applied files. Database construction and signature
+/// policy remain the application's responsibility. Methods are
+/// synchronous because implementations inspect local files directly.
+pub trait RuntimeFileInspector: Send + Sync + 'static {
+    /// Verifies that `path` holds a well-formed runtime database.
+    ///
+    /// Called before promotion and before an installed file is constructed into live state.
+    ///
+    /// # Errors
+    /// Returns [`VerificationError`] when the file is malformed or unreadable.
+    fn validate(&self, path: &std::path::Path) -> Result<(), VerificationError>;
+
+    /// Applies the application's content-trust policy to `path`, for example a
+    /// signature or hash check.
+    ///
+    /// Called on each staged file before it is accepted. The default delegates
+    /// to [`validate`](Self::validate), so an implementor with no signature
+    /// policy still gets well-formedness checking; override it only to add more.
+    ///
+    /// # Errors
+    /// Returns [`VerificationError`] to reject the file.
+    fn check_integrity(&self, path: &std::path::Path) -> Result<(), VerificationError> {
+        self.validate(path)
+    }
+
+    /// Returns the short name of the ECU this file describes.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeUpdateError`] when the file cannot be read or carries no name.
+    fn ecu_name(&self, path: &std::path::Path) -> Result<String, RuntimeUpdateError>;
+
+    /// Returns the file's revision, or `None` when it carries none or cannot be
+    /// read. Surfaced as `x-sovd2uds-revision`, where absent is not an error.
+    fn revision(&self, path: &std::path::Path) -> Option<String>;
+
+    /// Rewrites the file uncompressed in place, trading disk for lower runtime
+    /// memory. Formats without compression should succeed without doing anything.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeUpdateError`] when rewriting fails.
+    fn decompress_in_place(&self, path: &std::path::Path) -> Result<(), RuntimeUpdateError>;
 }
 
 /// Provides read-only access to vehicle lock state for security validation.
@@ -169,26 +215,23 @@ pub trait RuntimeReloaderPlugin: Send + Sync + 'static {
     ) -> Result<(), ReloadFailure>;
 }
 
-/// Security and file integrity handler for the diagnostic database update process.
+/// OEM hook for deciding whether an execution may proceed given vehicle and lock state.
 ///
-/// Implementors define the authorization and verification policies that guard
-/// execution operations (apply, rollback) and file integrity checks. This is the
-/// primary OEM extension point for adding custom lock validation, signature checks,
-/// hash verification, version compatibility rules, or any other security requirements.
-///
-/// Execution ownership is enforced through this trait both before update guards are acquired and
-/// again under those guards. HTTP adapters may perform the same check as defense in depth.
+/// The question it answers is whether swapping the diagnostic databases is safe
+/// right now, for example refusing while the vehicle is not parked. Caller
+/// authorization is not done here and no caller identity reaches it: the adapter
+/// enforces vehicle-lock ownership before an execution is ever started.
 #[async_trait]
-pub trait RuntimeUpdateSecurityPlugin<
+pub trait RuntimeUpdatePolicy<
     L: LockStateProvider,
     C: Collection + DirectFileAccess + Send + Sync + 'static,
 >: Send + Sync + 'static
 {
-    /// Applies authorization and content policy before an execution is registered.
+    /// Decides whether an execution may proceed, from lock state and the
+    /// `collections` it would act on.
     ///
-    /// Implementations verify caller authorization, including whatever lock policy the
-    /// OEM requires, and any content policy over `collections`. `lock_state_provider` is
-    /// passed for exactly that.
+    /// Consulted twice, once before the update guards are acquired and again
+    /// under them, because lock and vehicle state can change in between.
     ///
     /// One lock rule is not delegated: a reload replaces the lock topology, so no ECU or
     /// functional-group lock may be held across it. The framework checks that itself,
@@ -201,19 +244,6 @@ pub trait RuntimeUpdateSecurityPlugin<
         lock_state_provider: &L,
         collections: &UpdateCollections<C>,
     ) -> Result<(), RuntimeUpdateError>;
-
-    /// Checks the integrity of all pending files before they are applied.
-    ///
-    /// Called during the apply operation with all pending MDD files.
-    /// Implementations may perform signature verification, hash checks, version
-    /// compatibility validation, or any other file-level security checks.
-    ///
-    /// # Arguments
-    /// * `path` - Path to the file to validate
-    ///
-    /// # Errors
-    /// Return [`VerificationError`] to abort the apply operation.
-    async fn check_file_integrity(&self, path: &std::path::Path) -> Result<(), VerificationError>;
 }
 
 /// Severity of a runtime update execution failure.
@@ -462,11 +492,13 @@ pub trait RuntimeFileCatalog: Send + Sync + 'static {
     ) -> Result<BulkDataList, RuntimeUpdateError>;
 }
 
-/// Mutating the staging and backup areas. Every method authorizes through
-/// [`RuntimeUpdateSecurityPlugin`] before touching anything.
+/// Mutating the staging and backup areas.
 #[async_trait]
 pub trait RuntimeFileStore: Send + Sync + 'static {
     /// Uploads one or more files to the next-update staging area.
+    ///
+    /// Each file is content-checked through
+    /// [`RuntimeFileInspector::check_integrity`] before it is accepted.
     async fn upload(
         &self,
         files: Vec<UploadFile>,
@@ -503,7 +535,7 @@ pub trait RuntimeUpdateExecutor: Send + Sync + 'static {
 ///
 /// Provides listing, staging mutation, and apply/rollback/cleanup execution.
 /// Security validation for mutating operations is delegated to the associated
-/// [`RuntimeUpdateSecurityPlugin`]. A blanket implementation composes the three
+/// [`RuntimeUpdatePolicy`]. A blanket implementation composes the three
 /// capabilities without granting any one capability additional authority.
 pub trait RuntimeFilesUpdatePlugin:
     RuntimeFileCatalog + RuntimeFileStore + RuntimeUpdateExecutor

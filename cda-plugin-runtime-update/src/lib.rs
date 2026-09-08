@@ -12,7 +12,7 @@
  */
 
 pub use default_runtime_update_plugin::DefaultRuntimeUpdatePlugin;
-pub use security::DefaultUpdateSecurityHandler;
+pub use security::DefaultUpdatePolicy;
 
 pub mod config;
 pub mod default_runtime_reloader_plugin;
@@ -20,7 +20,6 @@ pub use default_runtime_reloader_plugin::{
     DefaultReloadContext, DefaultRuntimeReloaderPlugin, RuntimeReloaderConfig,
 };
 pub mod default_runtime_update_plugin;
-pub(crate) mod mdd;
 pub mod operations;
 pub mod security;
 pub mod storage;
@@ -86,6 +85,72 @@ pub(crate) mod test_utils {
         Ok(())
     }
 
+    /// Test inspector backed by the MDD reader for deterministic
+    /// format-specific file operations.
+    pub struct TestMddInspector;
+
+    impl cda_interfaces::runtime_update_api::RuntimeFileInspector for TestMddInspector {
+        fn validate(&self, path: &std::path::Path) -> Result<(), VerificationError> {
+            let path_str = path
+                .to_str()
+                .ok_or_else(|| VerificationError("non-UTF-8 path".to_owned()))?;
+            cda_database::mmap_and_decode_mdd(path_str)
+                .map_err(|error| VerificationError(format!("{error}")))?;
+            Ok(())
+        }
+
+        fn ecu_name(&self, path: &std::path::Path) -> Result<String, RuntimeUpdateError> {
+            let path_str = path
+                .to_str()
+                .ok_or_else(|| RuntimeUpdateError::ValidationFailed("non-UTF-8 path".to_owned()))?;
+            cda_database::mmap_and_decode_mdd(path_str)
+                .map(|mdd| mdd.ecu_name)
+                .map_err(|error| RuntimeUpdateError::ValidationFailed(format!("{error}")))
+        }
+
+        fn revision(&self, path: &std::path::Path) -> Option<String> {
+            cda_database::mmap_and_decode_mdd(path.to_str()?)
+                .ok()
+                .and_then(|mdd| mdd.revision)
+        }
+
+        fn decompress_in_place(&self, path: &std::path::Path) -> Result<(), RuntimeUpdateError> {
+            let path_str = path
+                .to_str()
+                .ok_or_else(|| RuntimeUpdateError::ValidationFailed("non-UTF-8 path".to_owned()))?;
+            cda_database::update_mdd_uncompressed(path_str)
+                .map(|_| ())
+                .map_err(|error| RuntimeUpdateError::ValidationFailed(format!("{error}")))
+        }
+    }
+
+    /// Shared inspector handle for tests.
+    pub fn test_inspector() -> Arc<dyn cda_interfaces::runtime_update_api::RuntimeFileInspector> {
+        Arc::new(TestMddInspector)
+    }
+
+    /// Inspector that accepts everything, for tests about paths other than
+    /// file content.
+    pub struct AcceptingInspector;
+
+    impl cda_interfaces::runtime_update_api::RuntimeFileInspector for AcceptingInspector {
+        fn validate(&self, _path: &std::path::Path) -> Result<(), VerificationError> {
+            Ok(())
+        }
+
+        fn ecu_name(&self, _path: &std::path::Path) -> Result<String, RuntimeUpdateError> {
+            Ok("TestEcu".to_owned())
+        }
+
+        fn revision(&self, _path: &std::path::Path) -> Option<String> {
+            None
+        }
+
+        fn decompress_in_place(&self, _path: &std::path::Path) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+    }
+
     pub struct MockLockProvider {
         pub owner: Option<String>,
         pub has_conflicts: bool,
@@ -102,9 +167,9 @@ pub(crate) mod test_utils {
         }
     }
 
-    pub struct MockSecurityHandler;
+    pub struct MockUpdatePolicy;
 
-    impl MockSecurityHandler {
+    impl MockUpdatePolicy {
         pub fn new() -> Self {
             Self
         }
@@ -112,8 +177,7 @@ pub(crate) mod test_utils {
 
     #[async_trait]
     impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'static>
-        cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
-        for MockSecurityHandler
+        cda_interfaces::runtime_update_api::RuntimeUpdatePolicy<L, C> for MockUpdatePolicy
     {
         async fn check_execution_allowed(
             &self,
@@ -127,13 +191,6 @@ pub(crate) mod test_utils {
                 )),
                 Some(_) => Ok(()),
             }
-        }
-
-        async fn check_file_integrity(
-            &self,
-            _path: &std::path::Path,
-        ) -> Result<(), VerificationError> {
-            Ok(())
         }
     }
 

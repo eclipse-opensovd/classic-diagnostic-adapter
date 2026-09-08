@@ -18,14 +18,14 @@ use std::{
 };
 
 use cda_core::{EcuManager, EcuManagerConfig};
-use cda_database::{EmbeddedFileStore, ProtoLoadConfig, update_mdd_uncompressed};
+use cda_database::{EmbeddedFileStore, ProtoLoadConfig};
 use cda_interfaces::{
     EcuAddresses, EcuManager as EcuManagerTrait, EcuManagerType, FunctionalDescriptionConfig,
     HashMap, HashMapEntry, HashMapExtensions, HashSet, Protocol,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     health::HealthProvider,
     mdd_chunks::{Chunk, ChunkType},
-    runtime_update_api::ReloadError,
+    runtime_update_api::{ReloadError, RuntimeFileInspector},
     storage_api::{Collection, CollectionName, DirectFileAccess, Storage},
 };
 use cda_plugin_security::SecurityPlugin;
@@ -156,13 +156,14 @@ fn get_mdd_files_and_size(files: ReadDir) -> Vec<(PathBuf, u64)> {
 /// # Errors
 /// Returns [`DatabaseLoadError`] if any database file fails to parse or initialize.
 #[tracing::instrument(
-    skip(config, mdd_paths, db_health_provider),
+    skip(config, mdd_paths, db_health_provider, file_inspector),
     fields(database_count = mdd_paths.len())
 )]
 pub async fn load_databases<S: SecurityPlugin>(
     config: &Configuration,
     mdd_paths: &[PathBuf],
     db_health_provider: Option<&Arc<dyn HealthProvider>>,
+    file_inspector: &dyn RuntimeFileInspector,
 ) -> Result<DatabaseMap<S>, DatabaseLoadError> {
     if let Some(provider) = db_health_provider {
         provider.set_status(cda_health::Status::Starting).await;
@@ -181,7 +182,7 @@ pub async fn load_databases<S: SecurityPlugin>(
 
     for path in mdd_paths {
         let (ecu_name, ecu_manager) =
-            match load_single_mdd::<S>(path, config, &ecu_config_map, &protocol) {
+            match load_single_mdd::<S>(path, config, &ecu_config_map, &protocol, file_inspector) {
                 Ok(result) => result,
                 Err(e) if config.database.ignore_invalid_mdd => {
                     tracing::warn!(path = %path.display(), error = %e, "Skipping invalid MDD file");
@@ -609,6 +610,7 @@ fn load_single_mdd<S: SecurityPlugin>(
     config: &Configuration,
     ecu_config_map: &HashMap<String, EcuConfig>,
     protocol: &Protocol,
+    file_inspector: &dyn RuntimeFileInspector,
 ) -> Result<(String, EcuManager<S>), MddLoadingError> {
     let mdd_path =
         path.to_str()
@@ -619,9 +621,10 @@ fn load_single_mdd<S: SecurityPlugin>(
             })?;
 
     // Ensure the MDD file contains uncompressed data (rewrite on first
-    // use), so that subsequent loads skip LZMA decompression.
+    // use), so that subsequent loads skip LZMA decompression. Startup and
+    // runtime reload use the same injected decompression operation.
     if config.flat_buf.mdd_decompress
-        && let Err(e) = update_mdd_uncompressed(&mdd_path)
+        && let Err(e) = file_inspector.decompress_in_place(path)
     {
         return Err(MddLoadingError::DecompressFailed {
             path: mdd_path,
