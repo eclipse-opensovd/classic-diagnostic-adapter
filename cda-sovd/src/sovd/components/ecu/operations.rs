@@ -19,7 +19,7 @@ use axum::{
     response::{IntoResponse as _, Response},
 };
 use axum_extra::extract::WithRejection;
-use cda_interfaces::{SchemaProvider, UdsEcu, file_manager::FileManager};
+use cda_interfaces::{DynamicPlugin, SchemaProvider, UdsEcu, file_manager::FileManager};
 use cda_plugin_security::Secured;
 use sovd_interfaces::components::ecu::operations::OperationCollectionItem;
 
@@ -34,9 +34,23 @@ pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
         Query<sovd_interfaces::IncludeSchemaQuery>,
         ApiError,
     >,
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+    State(WebserverEcuState {
+        ecu_name,
+        uds,
+        locks,
+        ..
+    }): State<WebserverEcuState<T, U>>,
 ) -> Response {
-    use cda_interfaces::DynamicPlugin;
+    if let Err(response) = crate::sovd::locks::validate_ecu_read(
+        &security_plugin.as_auth_plugin().claims(),
+        &ecu_name,
+        &locks,
+        query.include_schema,
+    )
+    .await
+    {
+        return response.into_response();
+    }
     let security_plugin: DynamicPlugin = security_plugin;
     match uds
         .get_components_operations_info(&ecu_name, &security_plugin)
@@ -99,6 +113,7 @@ pub(crate) mod comparams {
             HashMap, HashMapExtensions, UdsEcu, communication_control::CommunicationAccess,
             file_manager::FileManager,
         };
+        use cda_plugin_security::Secured;
         use indexmap::IndexMap;
         use opensovd_axum_extra::ExtractHost;
         use sovd_interfaces::components::ecu::operations::comparams as sovd_comparams;
@@ -109,6 +124,7 @@ pub(crate) mod comparams {
             ComparamExecution, IntoSovd, WebserverEcuState, acquire_communication_activity,
             create_schema,
             error::{ApiError, ErrorWrapper},
+            locks,
         };
 
         fn parse_exec_uuid(id: &str, include_schema: bool) -> Result<Uuid, ErrorWrapper> {
@@ -119,15 +135,28 @@ pub(crate) mod comparams {
         }
 
         pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+            UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             WithRejection(Query(query), _): WithRejection<
                 Query<sovd_comparams::executions::get::Query>,
                 ApiError,
             >,
             State(WebserverEcuState {
+                ecu_name,
+                locks,
                 comparam_executions,
                 ..
             }): State<WebserverEcuState<T, U>>,
         ) -> Response {
+            if let Err(response) = crate::sovd::locks::validate_ecu_read(
+                &security_plugin.as_auth_plugin().claims(),
+                &ecu_name,
+                &locks,
+                query.include_schema,
+            )
+            .await
+            {
+                return response.into_response();
+            }
             handler_read(comparam_executions, query.include_schema).await
         }
 
@@ -145,11 +174,14 @@ pub(crate) mod comparams {
         }
 
         pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
+            UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             WithRejection(Query(query), _): WithRejection<
                 Query<sovd_comparams::executions::get::Query>,
                 ApiError,
             >,
             State(WebserverEcuState {
+                ecu_name,
+                locks,
                 comparam_executions,
                 communication_access,
                 ..
@@ -158,6 +190,12 @@ pub(crate) mod comparams {
             OriginalUri(uri): OriginalUri,
             request_body: Option<Json<sovd_comparams::executions::update::Request>>,
         ) -> Response {
+            let claims = security_plugin.as_auth_plugin().claims();
+            if let Err(response) =
+                locks::validate_ecu_write(&claims, &ecu_name, &locks, query.include_schema).await
+            {
+                return response.into_response();
+            }
             let path = format!("http://{host}{uri}");
             let body = if let Some(Json(body)) = request_body {
                 Some(body)
@@ -281,6 +319,7 @@ pub(crate) mod comparams {
             use super::*;
             use crate::{openapi, sovd::components::IdPathParam};
             pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+                UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
                 Path(id): Path<IdPathParam>,
                 WithRejection(Query(query), _): WithRejection<
                     Query<sovd_comparams::executions::get::Query>,
@@ -289,11 +328,22 @@ pub(crate) mod comparams {
                 State(WebserverEcuState {
                     ecu_name,
                     uds,
+                    locks,
                     comparam_executions,
                     ..
                 }): State<WebserverEcuState<T, U>>,
             ) -> Response {
                 let include_schema = query.include_schema;
+                if let Err(response) = crate::sovd::locks::validate_ecu_read(
+                    &security_plugin.as_auth_plugin().claims(),
+                    &ecu_name,
+                    &locks,
+                    include_schema,
+                )
+                .await
+                {
+                    return response.into_response();
+                }
                 let id = match parse_exec_uuid(&id, include_schema) {
                     Ok(v) => v,
                     Err(e) => return e.into_response(),
@@ -377,12 +427,21 @@ pub(crate) mod comparams {
             }
 
             pub(crate) async fn delete<T: UdsEcu + Clone, U: FileManager>(
+                UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
                 Path(id): Path<IdPathParam>,
                 State(WebserverEcuState {
+                    ecu_name,
+                    locks,
                     comparam_executions,
                     ..
                 }): State<WebserverEcuState<T, U>>,
             ) -> Response {
+                let claims = security_plugin.as_auth_plugin().claims();
+                if let Err(response) =
+                    locks::validate_ecu_write(&claims, &ecu_name, &locks, false).await
+                {
+                    return response.into_response();
+                }
                 let id = match parse_exec_uuid(&id, false) {
                     Ok(v) => v,
                     Err(e) => return e.into_response(),
@@ -412,12 +471,15 @@ pub(crate) mod comparams {
             }
 
             pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
+                UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
                 Path(id): Path<IdPathParam>,
                 WithRejection(Query(query), _): WithRejection<
                     Query<sovd_comparams::executions::update::Query>,
                     ApiError,
                 >,
                 State(WebserverEcuState {
+                    ecu_name,
+                    locks,
                     comparam_executions,
                     ..
                 }): State<WebserverEcuState<T, U>>,
@@ -429,6 +491,12 @@ pub(crate) mod comparams {
                 >,
             ) -> Response {
                 let include_schema = query.include_schema;
+                let claims = security_plugin.as_auth_plugin().claims();
+                if let Err(response) =
+                    locks::validate_ecu_write(&claims, &ecu_name, &locks, include_schema).await
+                {
+                    return response.into_response();
+                }
                 let id = match parse_exec_uuid(&id, include_schema) {
                     Ok(v) => v,
                     Err(e) => return e.into_response(),
@@ -500,30 +568,47 @@ pub(crate) mod comparams {
 }
 
 pub(crate) mod service {
+    use aide::UseApi;
+    use axum::extract::{Path, Query, State};
+    use axum_extra::extract::WithRejection;
+
     /// `GET /operations/{service}` - get operation details or SDGs
     // [[ dimpl~sovd-api-component-operations-sdgsd, GET /operations/{service} SDG handler ]]
     pub(crate) async fn get<
         T: cda_interfaces::UdsEcu + cda_interfaces::SchemaProvider + Clone,
         U: cda_interfaces::file_manager::FileManager,
     >(
-        aide::UseApi(cda_plugin_security::Secured(security_plugin), _): aide::UseApi<
+        UseApi(cda_plugin_security::Secured(security_plugin), _): UseApi<
             cda_plugin_security::Secured,
             (),
         >,
-        axum::extract::Path(docs_endpoint::OperationNamePathParam { service }): axum::extract::Path<
+        Path(docs_endpoint::OperationNamePathParam { service }): Path<
             docs_endpoint::OperationNamePathParam,
         >,
-        axum_extra::extract::WithRejection(axum::extract::Query(query), _): axum_extra::extract::WithRejection<
-            axum::extract::Query<sovd_interfaces::components::ComponentQuery>,
+        WithRejection(Query(query), _): WithRejection<
+            Query<sovd_interfaces::components::ComponentQuery>,
             crate::sovd::error::ApiError,
         >,
-        axum::extract::State(crate::sovd::WebserverEcuState { ecu_name, uds, .. }): axum::extract::State<
-            crate::sovd::WebserverEcuState<T, U>,
-        >,
+        State(crate::sovd::WebserverEcuState {
+            ecu_name,
+            uds,
+            locks,
+            ..
+        }): State<crate::sovd::WebserverEcuState<T, U>>,
     ) -> axum::response::Response {
         use axum::response::IntoResponse as _;
 
         let include_schema = query.include_schema;
+        if let Err(response) = crate::sovd::locks::validate_ecu_read(
+            &security_plugin.as_auth_plugin().claims(),
+            &ecu_name,
+            &locks,
+            include_schema,
+        )
+        .await
+        {
+            return response.into_response();
+        }
         if query.include_sdgs {
             return get_sdgs_handler::<T>(service, &ecu_name, &uds, include_schema).await;
         }
@@ -692,8 +777,23 @@ pub(crate) mod service {
         pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(OperationNamePathParam { service }): Path<OperationNamePathParam>,
-            State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+            State(WebserverEcuState {
+                ecu_name,
+                uds,
+                locks,
+                ..
+            }): State<WebserverEcuState<T, U>>,
         ) -> Response {
+            if let Err(response) = crate::sovd::locks::validate_ecu_read(
+                &security_plugin.as_auth_plugin().claims(),
+                &ecu_name,
+                &locks,
+                false,
+            )
+            .await
+            {
+                return response.into_response();
+            }
             let security_plugin: DynamicPlugin = security_plugin;
 
             let ops_info = match uds
@@ -798,7 +898,7 @@ pub(crate) mod service {
                 create_response_schema, create_schema,
                 error::{ApiError, ErrorWrapper, VendorErrorCode},
                 field_parse_errors_to_json, guard_execution,
-                locks::validate_lock,
+                locks::{self, validate_ecu_read, validate_ecu_write},
             },
         };
 
@@ -819,13 +919,26 @@ pub(crate) mod service {
         }
 
         pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
-            UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
+            UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(OperationServicePathParam { service }): Path<OperationServicePathParam>,
             WithRejection(Query(query), _): WithRejection<Query<sovd_executions::Query>, ApiError>,
             State(WebserverEcuState {
-                service_executions, ..
+                ecu_name,
+                locks,
+                service_executions,
+                ..
             }): State<WebserverEcuState<T, U>>,
         ) -> Response {
+            if let Err(response) = validate_ecu_read(
+                &security_plugin.as_auth_plugin().claims(),
+                &ecu_name,
+                &locks,
+                query.include_schema,
+            )
+            .await
+            {
+                return response.into_response();
+            }
             let schema = if query.include_schema {
                 Some(create_schema!(sovd_interfaces::Items<OperationIdItem>))
             } else {
@@ -877,10 +990,10 @@ pub(crate) mod service {
             body: Bytes,
         ) -> Response {
             let claims = security_plugin.as_auth_plugin().claims();
-            if let Some(response) =
-                validate_lock(&claims, &ecu_name, &locks, query.include_schema).await
+            if let Err(response) =
+                locks::validate_ecu_write(&claims, &ecu_name, &locks, query.include_schema).await
             {
-                return response;
+                return response.into_response();
             }
             let ctx = OperationWriteContext::new(service_executions, communication_access);
             ecu_operation_write_handler_with_activity::<T>(
@@ -1088,7 +1201,49 @@ pub(crate) mod service {
                     }
                 }
             };
+            finish_write_request(FinishWriteRequestArgs {
+                is_async,
+                response,
+                map_to_json,
+                include_schema,
+                base_path,
+                reservation,
+                ecu_name,
+                uds,
+                diag_service,
+            })
+            .await
+        }
 
+        /// Arguments for [`finish_write_request`].
+        struct FinishWriteRequestArgs<'a, T: UdsEcu + SchemaProvider + Clone> {
+            is_async: bool,
+            response: Option<T::Response>,
+            map_to_json: bool,
+            include_schema: bool,
+            base_path: String,
+            reservation: ExecutionReservation<ServiceExecution>,
+            ecu_name: &'a str,
+            uds: &'a T,
+            diag_service: DiagComm,
+        }
+
+        /// Dispatch the tail of a write request to the async or sync
+        /// post-processing path.
+        async fn finish_write_request<T: UdsEcu + SchemaProvider + Clone>(
+            args: FinishWriteRequestArgs<'_, T>,
+        ) -> Response {
+            let FinishWriteRequestArgs {
+                is_async,
+                response,
+                map_to_json,
+                include_schema,
+                base_path,
+                reservation,
+                ecu_name,
+                uds,
+                diag_service,
+            } = args;
             if is_async {
                 handle_async_post::<T>(
                     response,
@@ -1127,7 +1282,8 @@ pub(crate) mod service {
         }
 
         /// Sends the Start subfunction request and returns the positive response, or
-        /// `Err(Response)` if the UDS call failed or returned a negative response.
+        /// `Err(Response)` if the UDS call failed, returned a negative response, or
+        /// was cancelled because the owning lock is closing.
         async fn send_start_request<T: UdsEcu>(
             uds: &T,
             ecu_name: &str,
@@ -1411,7 +1567,8 @@ pub(crate) mod service {
                 .into_response();
             };
 
-            let allowed_values = match uds.get_ecu_reset_services(ecu_name).await {
+            let allowed_values = uds.get_ecu_reset_services(ecu_name).await;
+            let allowed_values = match allowed_values {
                 Ok(v) => v,
                 Err(e) => {
                     return ErrorWrapper {
@@ -1454,16 +1611,11 @@ pub(crate) mod service {
                 None
             };
 
-            let response = match uds
-                .send(
-                    ecu_name,
-                    diag_service,
-                    &(security_plugin as DynamicPlugin),
-                    None,
-                    true,
-                )
-                .await
-            {
+            let security_plugin: DynamicPlugin = security_plugin;
+            let send_result = uds
+                .send(ecu_name, diag_service, &security_plugin, None, true)
+                .await;
+            let response = match send_result {
                 Ok(v) => v,
                 Err(e) => {
                     return ErrorWrapper {
@@ -1560,6 +1712,7 @@ pub(crate) mod service {
 
         pub(crate) mod id {
             use super::*;
+            use crate::sovd::locks;
 
             #[derive(serde::Deserialize, schemars::JsonSchema)]
             pub(crate) struct ServiceAndIdPathParam {
@@ -1619,11 +1772,18 @@ pub(crate) mod service {
                 State(WebserverEcuState {
                     ecu_name,
                     uds,
+                    locks,
                     service_executions,
                     ..
                 }): State<WebserverEcuState<T, U>>,
             ) -> Response {
                 let include_schema = query.include_schema;
+                let claims = security_plugin.as_auth_plugin().claims();
+                if let Err(response) =
+                    validate_ecu_write(&claims, &ecu_name, &locks, include_schema).await
+                {
+                    return response.into_response();
+                }
                 let exec_id = match parse_exec_uuid(&id, include_schema) {
                     Ok(v) => v,
                     Err(e) => return e.into_response(),
@@ -1636,8 +1796,8 @@ pub(crate) mod service {
                     include_schema,
                     &format!("Execution {exec_id} is already in progress"),
                 ) {
-                    Ok(v) => v,
-                    Err(e) => return e.into_response(),
+                    Ok(guard) => guard,
+                    Err(error) => return error.into_response(),
                 };
 
                 // suppress_service: skip the UDS send, return stored state directly
@@ -1703,6 +1863,12 @@ pub(crate) mod service {
                 .with(openapi::error_bad_gateway)
             }
 
+            #[allow(
+                clippy::too_many_lines,
+                reason = "Keeping validation, execution guarding, UDS Stop, and guard cleanup \
+                          together makes cleanup on every response path visible. Splitting the \
+                          flow would obscure that state invariant"
+            )]
             pub(crate) async fn delete<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
                 UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
                 Path(ServiceAndIdPathParam { service, id }): Path<ServiceAndIdPathParam>,
@@ -1720,10 +1886,10 @@ pub(crate) mod service {
             ) -> Response {
                 let include_schema = query.include_schema;
                 let claims = security_plugin.as_auth_plugin().claims();
-                if let Some(response) =
-                    validate_lock(&claims, &ecu_name, &locks, include_schema).await
+                if let Err(response) =
+                    locks::validate_ecu_write(&claims, &ecu_name, &locks, include_schema).await
                 {
-                    return response;
+                    return response.into_response();
                 }
                 let exec_id = match parse_exec_uuid(&id, include_schema) {
                     Ok(v) => v,
@@ -1940,7 +2106,7 @@ mod tests {
                     std::marker::PhantomData,
                 ),
                 WithRejection(
-                    axum::extract::Query(sovd_interfaces::IncludeSchemaQuery {
+                    Query(sovd_interfaces::IncludeSchemaQuery {
                         include_schema: false,
                     }),
                     std::marker::PhantomData,
@@ -2056,7 +2222,7 @@ mod tests {
                     std::marker::PhantomData,
                 ),
                 WithRejection(
-                    axum::extract::Query(sovd_interfaces::IncludeSchemaQuery {
+                    Query(sovd_interfaces::IncludeSchemaQuery {
                         include_schema: true,
                     }),
                     std::marker::PhantomData,
@@ -2187,6 +2353,7 @@ mod tests {
                 mock_uds,
                 mock_file_manager,
             );
+            insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let response = handlers::get::<MockUdsEcu, MockFileManager>(
                 UseApi(
@@ -2227,6 +2394,7 @@ mod tests {
                 mock_uds,
                 mock_file_manager,
             );
+            insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             // Pre-populate an execution
             let exec_id = uuid::Uuid::new_v4();
@@ -2287,6 +2455,7 @@ mod tests {
                 mock_uds,
                 mock_file_manager,
             );
+            insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let unknown_id = uuid::Uuid::new_v4().to_string();
             let response = id_handlers::get::<MockUdsEcu, MockFileManager>(
@@ -2344,6 +2513,7 @@ mod tests {
                 mock_uds,
                 mock_file_manager,
             );
+            insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
             lock_write(&state.service_executions)
@@ -2419,6 +2589,7 @@ mod tests {
                 mock_uds,
                 mock_file_manager,
             );
+            insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
             let stored_params = {
@@ -2499,6 +2670,7 @@ mod tests {
                 mock_uds,
                 mock_file_manager,
             );
+            insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
             lock_write(&state.service_executions)
@@ -3362,6 +3534,7 @@ mod tests {
                 mock_uds,
                 mock_file_manager,
             );
+            insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
             lock_write(&state.service_executions)
@@ -3930,6 +4103,7 @@ mod tests {
                 mock_uds,
                 mock_file_manager,
             );
+            insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
             lock_write(&state.service_executions)

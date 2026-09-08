@@ -13,7 +13,7 @@
 
 use aide::UseApi;
 use axum::{
-    extract::{OriginalUri, Query},
+    extract::{OriginalUri, Query, State},
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
@@ -22,13 +22,14 @@ use cda_interfaces::{
     diagservices::{
         DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType, UdsPayloadData,
     },
+    file_manager::FileManager,
 };
-use cda_plugin_security::SecurityPlugin;
+use cda_plugin_security::{Secured, SecurityPlugin};
 use opensovd_axum_extra::ExtractHost;
 
 use crate::sovd::{
     error::{ApiError, ErrorWrapper, api_error_from_diag_response},
-    resource_response,
+    locks, resource_response,
 };
 
 const FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS: &str = "flash_download_upload";
@@ -86,7 +87,11 @@ async fn sovd_to_func_class_service_exec<T: UdsEcu + Clone>(
     Ok(mapped_data)
 }
 
-pub(crate) async fn get(
+pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+    UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
+    State(crate::sovd::WebserverEcuState {
+        ecu_name, locks, ..
+    }): State<crate::sovd::WebserverEcuState<T, U>>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::IncludeSchemaQuery>,
         ApiError,
@@ -94,6 +99,16 @@ pub(crate) async fn get(
     UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
     OriginalUri(uri): OriginalUri,
 ) -> Response {
+    if let Err(response) = locks::validate_ecu_write(
+        &security_plugin.as_auth_plugin().claims(),
+        &ecu_name,
+        &locks,
+        query.include_schema,
+    )
+    .await
+    {
+        return response.into_response();
+    }
     resource_response(
         &host,
         &uri,
@@ -123,7 +138,7 @@ pub(crate) mod request_download {
         sovd::{
             WebserverEcuState, create_response_schema,
             error::{ApiError, ErrorWrapper, VendorErrorCode},
-            field_parse_errors_to_json,
+            field_parse_errors_to_json, locks,
             x_sovd2uds_download::{
                 FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS, sovd_to_func_class_service_exec,
             },
@@ -136,10 +151,21 @@ pub(crate) mod request_download {
             Query<sovd_interfaces::IncludeSchemaQuery>,
             ApiError,
         >,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+        State(WebserverEcuState {
+            ecu_name,
+            uds,
+            locks,
+            ..
+        }): State<WebserverEcuState<T, U>>,
         body: Json<sovd2uds::download::request_download::put::Request>,
     ) -> Response {
         let include_schema = query.include_schema;
+        let claims = security_plugin.as_auth_plugin().claims();
+        if let Err(response) =
+            locks::validate_ecu_write(&claims, &ecu_name, &locks, include_schema).await
+        {
+            return response.into_response();
+        }
         let schema = if include_schema {
             'schema: {
                 let Ok(service) = uds
@@ -271,6 +297,7 @@ pub(crate) mod flash_transfer {
         sovd::{
             IntoSovd, WebserverEcuState, create_schema,
             error::{ApiError, ErrorWrapper},
+            locks,
             x_sovd2uds_download::FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS,
         },
     };
@@ -284,12 +311,19 @@ pub(crate) mod flash_transfer {
         State(WebserverEcuState {
             ecu_name,
             uds,
+            locks,
             flash_data,
             ..
         }): State<WebserverEcuState<T, U>>,
         body: Json<sovd2uds::download::flash_transfer::post::Request>,
     ) -> Response {
         let include_schema = query.include_schema;
+        let claims = security_plugin.as_auth_plugin().claims();
+        if let Err(response) =
+            locks::validate_ecu_write(&claims, &ecu_name, &locks, include_schema).await
+        {
+            return response.into_response();
+        }
         match flash_data
             .read()
             .await
@@ -382,13 +416,25 @@ pub(crate) mod flash_transfer {
     }
 
     pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<
             Query<sovd_interfaces::IncludeSchemaQuery>,
             ApiError,
         >,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+        State(WebserverEcuState {
+            ecu_name,
+            uds,
+            locks,
+            ..
+        }): State<WebserverEcuState<T, U>>,
     ) -> Response {
         let include_schema = query.include_schema;
+        let claims = security_plugin.as_auth_plugin().claims();
+        if let Err(response) =
+            locks::validate_ecu_write(&claims, &ecu_name, &locks, include_schema).await
+        {
+            return response.into_response();
+        }
         let schema = if include_schema {
             Some(create_schema!(
                 sovd2uds::download::flash_transfer::get::Response
@@ -441,16 +487,28 @@ pub(crate) mod flash_transfer {
             Response, Secured, State, StatusCode, TransformOperation, UdsEcu, UseApi,
             WebserverEcuState, WithRejection, create_schema, openapi, sovd2uds,
         };
-        use crate::sovd::components::IdPathParam;
+        use crate::sovd::{components::IdPathParam, locks};
         pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+            UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(id): Path<IdPathParam>,
             WithRejection(Query(query), _): WithRejection<
                 Query<sovd_interfaces::IncludeSchemaQuery>,
                 ApiError,
             >,
-            State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+            State(WebserverEcuState {
+                ecu_name,
+                uds,
+                locks,
+                ..
+            }): State<WebserverEcuState<T, U>>,
         ) -> Response {
             let include_schema = query.include_schema;
+            let claims = security_plugin.as_auth_plugin().claims();
+            if let Err(response) =
+                locks::validate_ecu_write(&claims, &ecu_name, &locks, include_schema).await
+            {
+                return response.into_response();
+            }
             match uds.ecu_flash_transfer_status_id(&ecu_name, &id).await {
                 Ok(data) => {
                     let mut data = data.into_sovd();
@@ -491,10 +549,21 @@ pub(crate) mod flash_transfer {
         }
 
         pub(crate) async fn delete<T: UdsEcu + Clone, U: FileManager>(
-            UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
+            UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(id): Path<IdPathParam>,
-            State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+            State(WebserverEcuState {
+                ecu_name,
+                uds,
+                locks,
+                ..
+            }): State<WebserverEcuState<T, U>>,
         ) -> Response {
+            let claims = security_plugin.as_auth_plugin().claims();
+            if let Err(response) =
+                locks::validate_ecu_write(&claims, &ecu_name, &locks, false).await
+            {
+                return response.into_response();
+            }
             match uds.ecu_flash_transfer_exit(&ecu_name, &id).await {
                 Ok(()) => StatusCode::NO_CONTENT.into_response(),
                 Err(e) => ErrorWrapper {
@@ -584,7 +653,7 @@ pub(crate) mod transferexit {
     use crate::{
         openapi,
         sovd::{
-            WebserverEcuState,
+            WebserverEcuState, locks,
             x_sovd2uds_download::{
                 FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS, sovd_to_func_class_service_exec,
             },
@@ -593,8 +662,17 @@ pub(crate) mod transferexit {
 
     pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+        State(WebserverEcuState {
+            ecu_name,
+            uds,
+            locks,
+            ..
+        }): State<WebserverEcuState<T, U>>,
     ) -> Response {
+        let claims = security_plugin.as_auth_plugin().claims();
+        if let Err(response) = locks::validate_ecu_write(&claims, &ecu_name, &locks, false).await {
+            return response.into_response();
+        }
         match sovd_to_func_class_service_exec::<T>(
             &uds,
             FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS,

@@ -28,8 +28,20 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
         QsQuery<sovd_interfaces::components::ecu::data::get::Query>,
         ApiError,
     >,
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+    State(WebserverEcuState {
+        ecu_name,
+        uds,
+        locks,
+        ..
+    }): State<WebserverEcuState<T, U>>,
 ) -> Response {
+    let claims = security_plugin.as_auth_plugin().claims();
+    if let Err(response) =
+        crate::sovd::locks::validate_ecu_read(&claims, &ecu_name, &locks, query.include_schema)
+            .await
+    {
+        return response.into_response();
+    }
     let schema = if query.include_schema {
         Some(create_schema!(
             sovd_interfaces::components::ecu::data::get::Response
@@ -46,7 +58,7 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
                 items.retain(|item| {
                     categories
                         .iter()
-                        .any(|c| c.eq_ignore_ascii_case(&item.category))
+                        .any(|category| category.eq_ignore_ascii_case(&item.category))
                 });
             }
             let sovd_component_data = sovd_interfaces::components::ecu::data::get::Response {
@@ -58,8 +70,8 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
             };
             (StatusCode::OK, Json(sovd_component_data)).into_response()
         }
-        Err(e) => ErrorWrapper {
-            error: e.into(),
+        Err(error) => ErrorWrapper {
+            error: error.into(),
             include_schema: query.include_schema,
         }
         .into_response(),
@@ -386,10 +398,22 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::components::ComponentQuery>,
             ApiError,
         >,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+        State(WebserverEcuState {
+            ecu_name,
+            uds,
+            locks,
+            ..
+        }): State<WebserverEcuState<T, U>>,
     ) -> Response {
         let include_schema = query.include_schema;
         if query.include_sdgs {
+            let claims = security_plugin.as_auth_plugin().claims();
+            if let Err(response) =
+                crate::sovd::locks::validate_ecu_read(&claims, &ecu_name, &locks, include_schema)
+                    .await
+            {
+                return response.into_response();
+            }
             get_sdgs_handler::<T>(diag_service, &ecu_name, &uds, include_schema).await
         } else {
             if diag_service.contains('/') {
@@ -410,7 +434,7 @@ pub(crate) mod diag_service {
                 &uds,
                 headers,
                 None,
-                security_plugin,
+                (security_plugin, &locks, false),
                 include_schema,
             )
             .await
@@ -439,7 +463,12 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::components::ecu::data::service::put::Query>,
             ApiError,
         >,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+        State(WebserverEcuState {
+            ecu_name,
+            uds,
+            locks,
+            ..
+        }): State<WebserverEcuState<T, U>>,
         body: Bytes,
     ) -> Response {
         let include_schema = query.include_schema;
@@ -461,7 +490,7 @@ pub(crate) mod diag_service {
             &uds,
             headers,
             Some(body),
-            security_plugin,
+            (security_plugin, &locks, true),
             include_schema,
         )
         .await
@@ -502,8 +531,23 @@ pub(crate) mod diag_service {
         pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(DataDocsPathParam { service }): Path<DataDocsPathParam>,
-            State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+            State(WebserverEcuState {
+                ecu_name,
+                uds,
+                locks,
+                ..
+            }): State<WebserverEcuState<T, U>>,
         ) -> Response {
+            if let Err(response) = crate::sovd::locks::validate_ecu_read(
+                &security_plugin.as_auth_plugin().claims(),
+                &ecu_name,
+                &locks,
+                false,
+            )
+            .await
+            {
+                return response.into_response();
+            }
             let security_plugin: DynamicPlugin = security_plugin;
 
             // Verify the data service exists

@@ -129,8 +129,15 @@ pub use default_security_plugin::{DefaultSecurityPlugin, DefaultSecurityPluginDa
 /// This trait abstracts the claims contained within authentication tokens,
 /// providing access to essential user information and token validation data.
 pub trait Claims: Send + Sync {
-    /// Returns the subject (user identifier) of the token.
+    /// Returns authoritative subject identity used for lock ownership.
+    ///
+    /// Any `sub` entry returned by [`Self::attributes`] is informational and must match this value.
     fn sub(&self) -> &str;
+
+    /// Returns an owned snapshot of all claims available.
+    fn attributes(&self) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::Map::new()
+    }
 }
 
 /// Provides access to authentication information and user claims.
@@ -205,11 +212,19 @@ impl Claims for Box<dyn Claims> {
     fn sub(&self) -> &str {
         (**self).sub()
     }
+
+    fn attributes(&self) -> serde_json::Map<String, serde_json::Value> {
+        (**self).attributes()
+    }
 }
 
 impl Claims for Box<&dyn Claims> {
     fn sub(&self) -> &str {
         (**self).sub()
+    }
+
+    fn attributes(&self) -> serde_json::Map<String, serde_json::Value> {
+        (**self).attributes()
     }
 }
 
@@ -470,6 +485,7 @@ pub mod mock {
         pub Claims {}
         impl Claims for Claims {
             fn sub(&self) -> &'static str;
+            fn attributes(&self) -> serde_json::Map<String, serde_json::Value>;
         }
     }
 
@@ -530,6 +546,10 @@ pub mod mock {
     impl Claims for TestClaims {
         fn sub(&self) -> &'static str {
             "test_user"
+        }
+
+        fn attributes(&self) -> serde_json::Map<String, serde_json::Value> {
+            serde_json::Map::new()
         }
     }
 

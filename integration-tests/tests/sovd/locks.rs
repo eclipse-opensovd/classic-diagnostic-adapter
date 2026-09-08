@@ -17,12 +17,13 @@ use chrono::{DateTime, Utc};
 use http::{HeaderMap, Method, StatusCode};
 use opensovd_cda_lib::config::configfile::Configuration;
 use serde::{self, Deserialize};
+use serde_json::Value;
 
 use crate::{
     sovd,
     sovd::set_dtc_setting,
     util::{
-        TestingError,
+        TestingError, ecusim,
         http::{
             Response, auth_header, extract_field_from_json, response_to_json,
             response_to_json_to_field, send_cda_json_request, send_cda_request,
@@ -152,7 +153,7 @@ async fn lock_unlock() -> Result<(), TestingError> {
 }
 
 #[tokio::test]
-async fn cannot_lock_ecu_with_existing_functional_log() -> Result<(), TestingError> {
+async fn unrelated_functional_group_and_ecu_locks_can_coexist() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;
     let auth = auth_header(&runtime.config, None).await?;
 
@@ -166,12 +167,23 @@ async fn cannot_lock_ecu_with_existing_functional_log() -> Result<(), TestingErr
     .await;
     let lock_id: String = response_to_json_to_field(&func_lock_response, "id")?;
 
-    create_lock(
+    let ecu_lock_response = create_lock(
         default_timeout(),
         ECU_ENDPOINT,
-        StatusCode::CONFLICT,
+        StatusCode::CREATED,
         &runtime.config,
         &auth,
+    )
+    .await;
+    let ecu_lock_id: String = response_to_json_to_field(&ecu_lock_response, "id")?;
+
+    lock_operation(
+        ECU_ENDPOINT,
+        Some(&ecu_lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
     )
     .await;
 
@@ -319,7 +331,7 @@ async fn test_vehicle_locking_blocked_by_other() -> Result<(), TestingError> {
     create_lock(
         default_timeout(),
         VEHICLE_ENDPOINT,
-        StatusCode::FORBIDDEN,
+        StatusCode::LOCKED,
         &runtime.config,
         &auth_user2,
     )
@@ -538,7 +550,7 @@ async fn test_component_ownership_protection_with_vehicle_lock_only() -> Result<
         &runtime.config,
         &auth_non_owner,
         sovd::ECU_FLXC1000_ENDPOINT,
-        StatusCode::FORBIDDEN,
+        StatusCode::LOCKED,
     )
     .await?;
 
@@ -548,6 +560,95 @@ async fn test_component_ownership_protection_with_vehicle_lock_only() -> Result<
         Some(&lock_id),
         &runtime.config,
         &auth_owner,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn vehicle_lock_exclusivity_controls_foreign_communication() -> Result<(), TestingError> {
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let owner = auth_header(&runtime.config, None).await?;
+    let other = bearer_token_header(NON_OWNER_BEARER_TOKEN);
+    let data_endpoint = format!("{}/data/vindataidentifier", sovd::ECU_FLXC1000_ENDPOINT);
+
+    let non_exclusive_id: String = response_to_json_to_field(
+        &create_lock_with_payload(
+            VEHICLE_ENDPOINT,
+            StatusCode::CREATED,
+            &runtime.config,
+            &owner,
+            &serde_json::json!({
+                "lock_expiration": default_timeout().as_secs(),
+                "x_sovd2uds_isexclusive": false,
+            }),
+        )
+        .await,
+        "id",
+    )?;
+    send_cda_request(
+        &runtime.config,
+        &data_endpoint,
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(&other),
+        None,
+    )
+    .await?;
+    set_dtc_setting(
+        "On",
+        &runtime.config,
+        &other,
+        sovd::ECU_FLXC1000_ENDPOINT,
+        StatusCode::LOCKED,
+    )
+    .await?;
+    lock_operation(
+        VEHICLE_ENDPOINT,
+        Some(&non_exclusive_id),
+        &runtime.config,
+        &owner,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    let exclusive_id: String = response_to_json_to_field(
+        &create_lock_with_payload(
+            VEHICLE_ENDPOINT,
+            StatusCode::CREATED,
+            &runtime.config,
+            &owner,
+            &serde_json::json!({
+                "lock_expiration": default_timeout().as_secs(),
+                "x_sovd2uds_isexclusive": true,
+            }),
+        )
+        .await,
+        "id",
+    )?;
+    ecusim::start_recording(&runtime.ecu_sim, "flxc1000").await?;
+    send_cda_request(
+        &runtime.config,
+        &data_endpoint,
+        StatusCode::LOCKED,
+        Method::GET,
+        None,
+        Some(&other),
+        None,
+    )
+    .await?;
+    let frames = ecusim::stop_and_clear_recording(&runtime.ecu_sim, "flxc1000").await?;
+    assert!(frames.is_empty(), "Rejected read reached ECU: {frames:?}");
+    lock_operation(
+        VEHICLE_ENDPOINT,
+        Some(&exclusive_id),
+        &runtime.config,
+        &owner,
         StatusCode::NO_CONTENT,
         Method::DELETE,
     )
@@ -599,15 +700,24 @@ pub(crate) async fn create_lock(
     auth: &HeaderMap,
 ) -> Response {
     let payload = serde_json::json!({
-        "exclusive": false,
         "lock_expiration": expiration.as_secs(),
     });
+    create_lock_with_payload(endpoint, status, webserver, auth, &payload).await
+}
+
+pub(crate) async fn create_lock_with_payload(
+    endpoint: &str,
+    status: StatusCode,
+    webserver: &Configuration,
+    auth: &HeaderMap,
+    payload: &Value,
+) -> Response {
     send_cda_json_request(
         webserver,
         endpoint,
         status,
         Method::POST,
-        &payload,
+        payload,
         Some(auth),
     )
     .await

@@ -32,19 +32,32 @@ use crate::sovd::{
 
 pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+    State(WebserverEcuState {
+        ecu_name,
+        uds,
+        locks,
+        ..
+    }): State<WebserverEcuState<T, U>>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_configurations::ConfigurationsQuery>,
         ApiError,
     >,
 ) -> Response {
+    let claims = security_plugin.as_auth_plugin().claims();
+    if let Err(response) =
+        crate::sovd::locks::validate_ecu_read(&claims, &ecu_name, &locks, query.include_schema)
+            .await
+    {
+        return response.into_response();
+    }
     let schema = if query.include_schema {
         Some(create_schema!(sovd_configurations::get::Response))
     } else {
         None
     };
+    let security_plugin: DynamicPlugin = security_plugin;
     match uds
-        .get_components_configuration_info(&ecu_name, &(security_plugin as DynamicPlugin))
+        .get_components_configuration_info(&ecu_name, &security_plugin)
         .await
     {
         Ok(mut items) => {
@@ -139,7 +152,12 @@ pub(crate) mod diag_service {
             Query<sovd_configurations::ConfigurationsQuery>,
             ApiError,
         >,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+        State(WebserverEcuState {
+            ecu_name,
+            uds,
+            locks,
+            ..
+        }): State<WebserverEcuState<T, U>>,
         body: Bytes,
     ) -> Response {
         let include_schema = query.include_schema;
@@ -161,7 +179,7 @@ pub(crate) mod diag_service {
             &uds,
             headers,
             Some(body),
-            security_plugin,
+            (security_plugin, &locks, true),
             include_schema,
         )
         .await
@@ -203,8 +221,23 @@ pub(crate) mod diag_service {
         pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(ConfigDocsPathParam { service }): Path<ConfigDocsPathParam>,
-            State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+            State(WebserverEcuState {
+                ecu_name,
+                uds,
+                locks,
+                ..
+            }): State<WebserverEcuState<T, U>>,
         ) -> Response {
+            if let Err(response) = crate::sovd::locks::validate_ecu_read(
+                &security_plugin.as_auth_plugin().claims(),
+                &ecu_name,
+                &locks,
+                false,
+            )
+            .await
+            {
+                return response.into_response();
+            }
             let security_plugin: DynamicPlugin = security_plugin;
 
             // Verify the configuration service exists

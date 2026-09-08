@@ -26,6 +26,7 @@ use super::WebserverFgState;
 use crate::sovd::{
     IntoSovd, create_schema,
     error::{ApiError, ErrorWrapper},
+    locks::validate_fg_read,
 };
 
 pub(crate) async fn get<T: UdsEcu + Clone>(
@@ -36,10 +37,22 @@ pub(crate) async fn get<T: UdsEcu + Clone>(
     >,
     State(WebserverFgState {
         uds,
+        locks,
         functional_group_name,
         ..
     }): State<WebserverFgState<T>>,
 ) -> Response {
+    if let Err(response) = validate_fg_read(
+        &security_plugin.as_auth_plugin().claims(),
+        &functional_group_name,
+        &uds,
+        &locks,
+        query.include_schema,
+    )
+    .await
+    {
+        return response.into_response();
+    }
     let schema = if query.include_schema {
         Some(create_schema!(
             sovd_interfaces::functions::functional_groups::data::get::Response
@@ -47,10 +60,10 @@ pub(crate) async fn get<T: UdsEcu + Clone>(
     } else {
         None
     };
-    match uds
+    let result = uds
         .get_functional_group_data_info(&(security_plugin as DynamicPlugin), &functional_group_name)
-        .await
-    {
+        .await;
+    match result {
         Ok(mut items) => {
             let data = sovd_interfaces::functions::functional_groups::data::get::Response {
                 items: items.drain(0..).map(IntoSovd::into_sovd).collect(),
@@ -106,8 +119,14 @@ pub(crate) mod diag_service {
             error::{ApiError, ErrorWrapper, VendorErrorCode},
             functions::functional_groups::{WebserverFgState, handle_ecu_response, map_to_json},
             get_payload_data,
+            locks::{validate_fg_read, validate_fg_write},
         },
     };
+
+    enum FunctionalDataAccess {
+        Read,
+        Write,
+    }
 
     pub(crate) async fn get<T: UdsEcu + Clone>(
         headers: HeaderMap,
@@ -121,6 +140,7 @@ pub(crate) mod diag_service {
         >,
         State(WebserverFgState {
             uds,
+            locks,
             functional_group_name,
             ..
         }): State<WebserverFgState<T>>,
@@ -145,7 +165,7 @@ pub(crate) mod diag_service {
             &uds,
             headers,
             None,
-            security_plugin,
+            (security_plugin, &locks, FunctionalDataAccess::Read),
             include_schema,
         )
         .await
@@ -192,6 +212,7 @@ pub(crate) mod diag_service {
         >,
         State(WebserverFgState {
             uds,
+            locks,
             functional_group_name,
             ..
         }): State<WebserverFgState<T>>,
@@ -217,7 +238,7 @@ pub(crate) mod diag_service {
             &uds,
             headers,
             Some(body),
-            security_plugin,
+            (security_plugin, &locks, FunctionalDataAccess::Write),
             include_schema,
         )
         .await
@@ -246,9 +267,41 @@ pub(crate) mod diag_service {
         gateway: &T,
         headers: HeaderMap,
         body: Option<Bytes>,
-        security_plugin: Box<dyn cda_plugin_security::SecurityPlugin>,
+        authorization: (
+            Box<dyn cda_plugin_security::SecurityPlugin>,
+            &crate::sovd::locks::Locks,
+            FunctionalDataAccess,
+        ),
         include_schema: bool,
     ) -> Response {
+        let (security_plugin, locks, access) = authorization;
+        let claims = security_plugin.as_auth_plugin().claims();
+        let validation = match access {
+            FunctionalDataAccess::Read => {
+                validate_fg_read(
+                    &claims,
+                    functional_group_name,
+                    gateway,
+                    locks,
+                    include_schema,
+                )
+                .await
+            }
+            FunctionalDataAccess::Write => {
+                validate_fg_write(
+                    &claims,
+                    functional_group_name,
+                    gateway,
+                    locks,
+                    include_schema,
+                )
+                .await
+            }
+        };
+        if let Err(response) = validation {
+            return response.into_response();
+        }
+
         let (content_type, accept) = match get_content_type_and_accept(&headers) {
             Ok(v) => v,
             Err(e) => {

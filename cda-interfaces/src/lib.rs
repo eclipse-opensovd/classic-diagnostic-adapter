@@ -39,6 +39,8 @@ pub use ecuuds::*;
 pub mod file_manager;
 pub mod health;
 pub mod http_protection;
+pub mod lock_config;
+pub mod lock_priority_api;
 mod schema;
 pub use schema::*;
 pub mod communication_control;
@@ -250,7 +252,7 @@ pub enum TesterPresentMode {
     Stop,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum TesterPresentType {
     Functional(String),
     Ecu(String),

@@ -28,6 +28,11 @@ use crate::{
     types::{PerGatewayInfo, ResetType},
 };
 
+struct PendingEcuInfo {
+    ecu_name: String,
+    request_lock_key: String,
+}
+
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     /// Send a functional request to a single gateway and collect responses from all expected ECUs
     #[allow(
@@ -44,10 +49,22 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         map_to_json: bool,
         timeout: Duration,
         functional_group_name: &str,
+        request_lock_keys: Vec<String>,
     ) -> HashMap<String, Result<<T as PayloadDecoder>::Response, DiagServiceError>> {
         // Inspect the subfunction byte for `suppressPosRspMsgIndicationBit` (bit 7).
         // When set, ECUs are not expected to send a positive response.
         let expect_positive_response = !payload.is_suppress_positive_response();
+
+        let _ecu_permits = match self.request_ecu_permits(request_lock_keys).await {
+            Ok(permits) => permits,
+            Err(error) => {
+                tracing::error!(%error, "Failed waiting for functional ECU permits");
+                return expected_ecus
+                    .into_values()
+                    .map(|ecu_name| (ecu_name, Err(error.clone())))
+                    .collect();
+            }
+        };
 
         // Send functional request via gateway
         match self
@@ -244,7 +261,7 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
 
         // Group ECUs by their gateway address
         let mut ecus_by_gateway: HashMap<u16, PerGatewayInfo> = HashMap::new();
-        let mut ecu_infos_by_gateway = HashMap::<u16, HashMap<u16, String>>::new();
+        let mut ecu_infos_by_gateway = HashMap::<u16, HashMap<u16, PendingEcuInfo>>::new();
 
         for ecu_name in &ecu_list {
             if let Some(ecu) = self.ecus.get(ecu_name) {
@@ -267,6 +284,7 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
                 let gateway_addr = ecu_lock.logical_gateway_address();
                 let logical_addr = ecu_lock.logical_address();
                 let func_addr = ecu_lock.logical_functional_address();
+                let request_lock_key = ecu_lock.request_lock_key();
                 drop(ecu_lock);
                 if gateway_addr == logical_addr {
                     let (uds_params, transmission_params) = Self::ecu_send_params(ecu).await;
@@ -278,6 +296,7 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
                             source_address: tester_addr,
                             functional_address: func_addr,
                             ecus: HashMap::from_iter([(logical_addr, ecu_name.clone())]),
+                            request_lock_keys: vec![request_lock_key],
                         },
                     ) {
                         tracing::error!(
@@ -299,14 +318,25 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
                     ecu_infos_by_gateway
                         .entry(gateway_addr)
                         .or_default()
-                        .insert(logical_addr, ecu_name.clone());
+                        .insert(
+                            logical_addr,
+                            PendingEcuInfo {
+                                ecu_name: ecu_name.clone(),
+                                request_lock_key,
+                            },
+                        );
                 }
             }
         }
 
         for (gateway_addr, ecu_info_list) in ecu_infos_by_gateway {
             if let Some(gateway_info) = ecus_by_gateway.get_mut(&gateway_addr) {
-                gateway_info.ecus.extend(ecu_info_list);
+                for (logical_addr, ecu_info) in ecu_info_list {
+                    gateway_info.ecus.insert(logical_addr, ecu_info.ecu_name);
+                    gateway_info
+                        .request_lock_keys
+                        .push(ecu_info.request_lock_key);
+                }
             } else {
                 tracing::warn!(
                     functional_group = %functional_group,
@@ -342,6 +372,7 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
                         map_to_json,
                         gw_infos.uds_params.timeout_default,
                         &fg_name,
+                        gw_infos.request_lock_keys,
                     )
                     .await;
 
