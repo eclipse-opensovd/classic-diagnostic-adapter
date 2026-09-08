@@ -20,9 +20,8 @@ use std::{
 use cda_database::storage::{DatabaseLocation, current_database_location, database_name};
 use cda_interfaces::{
     runtime_update_api::{
-        BulkDataCreated, BulkDataCreatedList, BulkDataDescriptor, BulkDataList, HashAlgorithm,
-        LockStateProvider, RuntimeFilesQuery, RuntimeUpdateError, RuntimeUpdateSecurityPlugin,
-        UploadFile,
+        BulkDataCreated, BulkDataCreatedList, BulkDataDescriptor, BulkDataList, DatabaseValidator,
+        HashAlgorithm, RuntimeFilesQuery, RuntimeUpdateError, UploadFile,
     },
     storage_api::{
         Collection, CollectionName, DirectFileAccess, RandomAccessData, Storage, StorageError,
@@ -426,15 +425,11 @@ pub async fn compute_nextupdate_state(
 /// configuration files, are rejected.
 ///
 /// Each file is written and committed individually. Immediately after each commit, the file's
-/// integrity is verified via `security_handler`. If verification fails, the failing file is
+/// integrity is verified via `database_validator`. If verification fails, the failing file is
 /// deleted (best-effort) and the error is returned; previously accepted files are kept.
-pub(crate) async fn upload_files<
-    S: Storage + 'static,
-    T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
-    L: LockStateProvider,
->(
+pub(crate) async fn upload_files<S: Storage + 'static>(
     storage: &S,
-    security_handler: &T,
+    database_validator: &dyn DatabaseValidator,
     database_dir: &Path,
     files: Vec<UploadFile>,
 ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
@@ -491,9 +486,9 @@ pub(crate) async fn upload_files<
                 mdd_collection.write(&mut tx, &key, &mut stream).await?;
                 tx.commit().await?;
 
-                check_file_integrity_and_roll_back_on_error(
+                check_integrity_and_roll_back_on_error(
                     storage,
-                    security_handler,
+                    database_validator,
                     &mdd_collection,
                     &key,
                 )
@@ -508,19 +503,13 @@ pub(crate) async fn upload_files<
     Ok(result)
 }
 
-async fn check_file_integrity_and_roll_back_on_error<
-    S: Storage + 'static,
-    T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
-    L: LockStateProvider,
->(
+async fn check_integrity_and_roll_back_on_error<S: Storage + 'static>(
     storage: &S,
-    security_handler: &T,
+    database_validator: &dyn DatabaseValidator,
     collection: &Arc<impl Collection + DirectFileAccess>,
     key: &String,
 ) -> Result<(), RuntimeUpdateError> {
-    if let Err(verification_error) = security_handler
-        .check_file_integrity(&collection.file_path(key)?)
-        .await
+    if let Err(verification_error) = database_validator.check_integrity(&collection.file_path(key)?)
     {
         tracing::warn!(
             key = %key,
@@ -597,7 +586,7 @@ mod tests {
 
     use super::{compute_nextupdate_state, compute_sha256, list_collection_files, upload_files};
     use crate::test_utils::{
-        MockLockProvider, MockSecurityHandler, empty_database_dir, make_storage, make_upload_files,
+        AcceptingDatabaseValidator, empty_database_dir, make_storage, make_upload_files,
         make_valid_mdd, make_valid_mdd_with_revision, write_file,
     };
 
@@ -605,9 +594,9 @@ mod tests {
         storage: &S,
         files: Vec<UploadFile>,
     ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
-        upload_files::<S, MockSecurityHandler, MockLockProvider>(
+        upload_files(
             storage,
-            &MockSecurityHandler::new(),
+            &AcceptingDatabaseValidator,
             empty_database_dir(),
             files,
         )
@@ -618,30 +607,13 @@ mod tests {
         Mdd,
     }
 
-    struct RejectingSecurityHandler {
+    /// Validator whose integrity policy refuses every MDD.
+    struct RejectingDatabaseValidator {
         reject_type: RejectKind,
     }
 
-    #[async_trait::async_trait]
-    impl<
-        L: cda_interfaces::runtime_update_api::LockStateProvider,
-        C: cda_interfaces::storage_api::Collection
-            + cda_interfaces::storage_api::DirectFileAccess
-            + Send
-            + Sync
-            + 'static,
-    > cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
-        for RejectingSecurityHandler
-    {
-        async fn check_execution_allowed(
-            &self,
-            _lock_state_provider: &L,
-            _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
-        ) -> Result<(), cda_interfaces::runtime_update_api::RuntimeUpdateError> {
-            Ok(())
-        }
-
-        async fn check_file_integrity(
+    impl cda_interfaces::runtime_update_api::DatabaseValidator for RejectingDatabaseValidator {
+        fn check_integrity(
             &self,
             _path: &std::path::Path,
         ) -> Result<(), cda_interfaces::runtime_update_api::VerificationError> {
@@ -660,9 +632,9 @@ mod tests {
         files: Vec<cda_interfaces::runtime_update_api::UploadFile>,
         reject_kind: RejectKind,
     ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
-        upload_files::<S, RejectingSecurityHandler, MockLockProvider>(
+        upload_files(
             storage,
-            &RejectingSecurityHandler {
+            &RejectingDatabaseValidator {
                 reject_type: reject_kind,
             },
             empty_database_dir(),
@@ -671,30 +643,14 @@ mod tests {
         .await
     }
 
-    struct RejectingByNameSecurityHandler {
+    /// Validator whose integrity policy refuses one named file, so a partial
+    /// upload can be observed.
+    struct RejectingByNameDatabaseValidator {
         reject_filename: &'static str,
     }
 
-    #[async_trait::async_trait]
-    impl<
-        L: cda_interfaces::runtime_update_api::LockStateProvider,
-        C: cda_interfaces::storage_api::Collection
-            + cda_interfaces::storage_api::DirectFileAccess
-            + Send
-            + Sync
-            + 'static,
-    > cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
-        for RejectingByNameSecurityHandler
-    {
-        async fn check_execution_allowed(
-            &self,
-            _lock_state_provider: &L,
-            _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
-        ) -> Result<(), cda_interfaces::runtime_update_api::RuntimeUpdateError> {
-            Ok(())
-        }
-
-        async fn check_file_integrity(
+    impl cda_interfaces::runtime_update_api::DatabaseValidator for RejectingByNameDatabaseValidator {
+        fn check_integrity(
             &self,
             path: &std::path::Path,
         ) -> Result<(), cda_interfaces::runtime_update_api::VerificationError> {
@@ -712,9 +668,9 @@ mod tests {
         files: Vec<cda_interfaces::runtime_update_api::UploadFile>,
         reject_filename: &'static str,
     ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
-        upload_files::<S, RejectingByNameSecurityHandler, MockLockProvider>(
+        upload_files(
             storage,
-            &RejectingByNameSecurityHandler { reject_filename },
+            &RejectingByNameDatabaseValidator { reject_filename },
             empty_database_dir(),
             files,
         )
@@ -1673,9 +1629,9 @@ mod tests {
         ]);
 
         let mdd = make_valid_mdd("C");
-        upload_files::<_, MockSecurityHandler, MockLockProvider>(
+        upload_files(
             &storage,
-            &MockSecurityHandler::new(),
+            &AcceptingDatabaseValidator,
             database_dir.path(),
             make_upload_files(&[("ecu_c.mdd", &mdd)]),
         )
@@ -1739,9 +1695,9 @@ mod tests {
             content: b"A",
         }]);
 
-        let result = upload_files::<_, MockSecurityHandler, MockLockProvider>(
+        let result = upload_files(
             &storage,
-            &MockSecurityHandler::new(),
+            &AcceptingDatabaseValidator,
             database_dir.path(),
             make_upload_files(&[("bad.txt", b"not an mdd")]),
         )
@@ -1834,9 +1790,9 @@ mod tests {
         let missing = std::path::Path::new("/nonexistent/cda-database-dir");
         let mdd = make_valid_mdd("A");
 
-        let result = upload_files::<_, MockSecurityHandler, MockLockProvider>(
+        let result = upload_files(
             &storage,
-            &MockSecurityHandler::new(),
+            &AcceptingDatabaseValidator,
             missing,
             make_upload_files(&[("ecu_a.mdd", &mdd)]),
         )

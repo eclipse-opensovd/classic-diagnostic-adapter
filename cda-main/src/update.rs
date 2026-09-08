@@ -14,7 +14,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin;
 use cda_plugin_runtime_update::{
-    DefaultRuntimeUpdatePlugin, DefaultUpdateSecurityHandler,
+    DefaultRuntimeUpdatePlugin, DefaultUpdatePolicy,
     default_runtime_reloader_plugin::{
         DefaultReloadContext as ReloaderContext, DefaultRuntimeReloaderPlugin,
     },
@@ -145,8 +145,9 @@ where
         Arc::clone(&infra.storage),
         database_dir,
         reloader_plugin,
-        Arc::new(DefaultUpdateSecurityHandler::new()),
+        Arc::new(DefaultUpdatePolicy::new()),
         Arc::clone(&infra.lock_provider),
+        infra.database_validator,
         infra.communication_disable,
         infra.http_protections,
         // The set of routes that stay reachable while an update holds its

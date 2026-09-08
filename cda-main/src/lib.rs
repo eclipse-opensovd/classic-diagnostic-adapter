@@ -43,6 +43,7 @@ pub mod config;
 pub mod database_reload;
 pub mod error;
 pub mod mdd;
+pub mod mdd_inspector;
 pub mod setup;
 pub mod update;
 pub mod vehicle;
@@ -413,11 +414,13 @@ where
         return Ok(());
     };
 
+    let database_validator = Arc::clone(&setup.database_validator);
     let Some(vehicle_data) = await_startup_stage(
         vehicle::load_vehicle_data::<SP>(
             &config,
             webserver_state.health_state.as_ref(),
             Arc::clone(&storage),
+            Arc::clone(&database_validator),
             setup.lock_priority_policy,
         ),
         webserver_state.shutdown_signal.clone(),
@@ -438,6 +441,7 @@ where
             setup.build_update_plugin,
             setup.build_communication_plugin,
             storage,
+            database_validator,
         ),
         webserver_state.shutdown_signal.clone(),
     )
