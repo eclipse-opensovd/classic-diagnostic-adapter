@@ -34,7 +34,9 @@ use std::path::PathBuf;
 use cda_core::EcuManager;
 use cda_interfaces::DiagServiceError;
 use cda_plugin_security::{DefaultSecurityPluginData, mock::TestSecurityPlugin};
-use opensovd_cda_lib::{config::configfile::Configuration, mdd::load_databases};
+use opensovd_cda_lib::{
+    config::configfile::Configuration, mdd::load_databases, mdd_inspector::MddDatabaseValidator,
+};
 
 /// Vendor override for `cda_core::lookup_request_seed_service`, registered only
 /// for `EcuManager<TestSecurityPlugin>`.
@@ -76,9 +78,10 @@ fn describe_result(result: &Result<cda_interfaces::SecurityAccess, DiagServiceEr
 async fn vendor_override_is_dispatched_for_matching_concrete_type() {
     let config = Configuration::default();
     let mdd_paths = vec![test_mdd_path()];
-    let databases = load_databases::<TestSecurityPlugin>(&config, &mdd_paths, None)
-        .await
-        .expect("failed to load test ECU database");
+    let databases =
+        load_databases::<TestSecurityPlugin>(&config, &mdd_paths, None, &MddDatabaseValidator)
+            .await
+            .expect("failed to load test ECU database");
     let (_, ecu_lock) = databases.iter().next().expect("no ECU was loaded");
     let ecu_manager = ecu_lock.read().await;
 
@@ -95,9 +98,14 @@ async fn vendor_override_is_dispatched_for_matching_concrete_type() {
 async fn dispatcher_falls_back_when_concrete_type_does_not_match() {
     let config = Configuration::default();
     let mdd_paths = vec![test_mdd_path()];
-    let databases = load_databases::<DefaultSecurityPluginData>(&config, &mdd_paths, None)
-        .await
-        .expect("failed to load test ECU database");
+    let databases = load_databases::<DefaultSecurityPluginData>(
+        &config,
+        &mdd_paths,
+        None,
+        &MddDatabaseValidator,
+    )
+    .await
+    .expect("failed to load test ECU database");
     let (_, ecu_lock) = databases.iter().next().expect("no ECU was loaded");
     let ecu_manager = ecu_lock.read().await;
 
