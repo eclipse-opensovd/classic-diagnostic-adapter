@@ -12,7 +12,7 @@
  */
 use std::time::Duration;
 
-use aide::transform::TransformOperation;
+use aide::{UseApi, transform::TransformOperation};
 use axum::{
     Json,
     extract::{Query, State},
@@ -40,13 +40,25 @@ use crate::{
     sovd::{
         WebserverEcuState, create_schema,
         error::{ApiError, ErrorWrapper, api_error_from_diag_response},
-        locks::validate_lock,
+        locks::{validate_ecu_read, validate_ecu_write},
     },
 };
 
-pub(crate) async fn get(
+pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+    UseApi(cda_plugin_security::Secured(security_plugin), _): UseApi<
+        cda_plugin_security::Secured,
+        (),
+    >,
     WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
+    State(WebserverEcuState {
+        ecu_name, locks, ..
+    }): State<WebserverEcuState<T, U>>,
 ) -> Response {
+    let claims = security_plugin.as_auth_plugin().claims();
+    if let Err(response) = validate_ecu_read(&claims, &ecu_name, &locks, query.include_schema).await
+    {
+        return response.into_response();
+    }
     let schema = if query.include_schema {
         Some(create_schema!(sovd_modes::get::Response))
     } else {
@@ -126,8 +138,8 @@ async fn handle_mode_change<T: UdsEcu + Clone>(
     include_schema: bool,
 ) -> Response {
     let claims = security_plugin.as_auth_plugin().claims();
-    if let Some(response) = validate_lock(&claims, ecu_name, locks, include_schema).await {
-        return response;
+    if let Err(response) = validate_ecu_write(&claims, ecu_name, locks, include_schema).await {
+        return response.into_response();
     }
     match uds
         .set_ecu_state(
@@ -173,33 +185,34 @@ async fn handle_mode_get<T: UdsEcu + Clone, R: schemars::JsonSchema + Serialize>
     uds: &T,
     ecu_name: &str,
     service_id: u8,
-    locks: Option<(&Locks, Box<dyn cda_plugin_security::SecurityPlugin>)>,
+    locks: &Locks,
+    security_plugin: Box<dyn cda_plugin_security::SecurityPlugin>,
     include_schema: bool,
     create_response_type_callback: fn(value: String, schema: Option<Schema>) -> R,
 ) -> Response {
-    if let Some((locks, security_plugin)) = locks {
-        let claims = security_plugin.as_auth_plugin().claims();
-        if let Some(value) = validate_lock(&claims, ecu_name, locks, include_schema).await {
-            return value;
-        }
+    let claims = security_plugin.as_auth_plugin().claims();
+    if let Err(response) = validate_ecu_read(&claims, ecu_name, locks, include_schema).await {
+        return response.into_response();
     }
-    let schema = if include_schema {
-        Some(create_schema!(R))
-    } else {
-        None
-    };
+    {
+        let schema = if include_schema {
+            Some(create_schema!(R))
+        } else {
+            None
+        };
 
-    match uds.get_ecu_service_state(ecu_name, service_id).await {
-        Ok(value) => (
-            StatusCode::OK,
-            Json(&create_response_type_callback(value, schema)),
-        )
+        match uds.get_ecu_service_state(ecu_name, service_id).await {
+            Ok(value) => (
+                StatusCode::OK,
+                Json(&create_response_type_callback(value, schema)),
+            )
+                .into_response(),
+            Err(e) => ErrorWrapper {
+                error: ApiError::from(e),
+                include_schema,
+            }
             .into_response(),
-        Err(e) => ErrorWrapper {
-            error: ApiError::from(e),
-            include_schema,
         }
-        .into_response(),
     }
 }
 
@@ -235,8 +248,9 @@ pub(crate) mod session {
     ) -> Response {
         let claims = security_plugin.as_auth_plugin().claims();
         let include_schema = query.include_schema;
-        if let Some(response) = validate_lock(&claims, &ecu_name, &locks, include_schema).await {
-            return response;
+        if let Err(response) = validate_ecu_write(&claims, &ecu_name, &locks, include_schema).await
+        {
+            return response.into_response();
         }
         let schema = if include_schema {
             Some(create_schema!(
@@ -312,15 +326,21 @@ pub(crate) mod session {
     }
 
     pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
-        UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+        State(WebserverEcuState {
+            ecu_name,
+            uds,
+            locks,
+            ..
+        }): State<WebserverEcuState<T, U>>,
     ) -> Response {
         handle_mode_get(
             &uds,
             &ecu_name,
             service_ids::SESSION_CONTROL,
-            None,
+            &locks,
+            security_plugin,
             query.include_schema,
             |value, schema| sovd_modes::security_and_session::get::Response {
                 name: Some(SESSION_NAME.to_owned()),
@@ -376,7 +396,8 @@ pub(crate) mod security {
             &uds,
             &ecu_name,
             service_ids::SECURITY_ACCESS,
-            Some((locks.as_ref(), security_plugin)),
+            &locks,
+            security_plugin,
             query.include_schema,
             |value, schema| sovd_modes::security_and_session::get::Response {
                 name: Some(SECURITY_NAME.to_owned()),
@@ -438,45 +459,39 @@ pub(crate) mod security {
             ApiError,
         >,
     ) -> Response {
-        let claims = security_plugin.as_auth_plugin().claims();
         let include_schema = query.include_schema;
 
-        if let Some(value) = validate_lock(&claims, &ecu_name, &locks, include_schema).await {
-            return value;
+        if let Err(response) = validate_ecu_write(
+            &security_plugin.as_auth_plugin().claims(),
+            &ecu_name,
+            &locks,
+            include_schema,
+        )
+        .await
+        {
+            return response.into_response();
         }
 
-        let is_request_seed = is_request_seed_value(&request_body.value);
         let level = level_from_value(&request_body.value);
         let key = request_body.key.map(|k| k.send_key);
-
-        if is_request_seed && key.is_some() {
+        let is_request_seed = is_request_seed_value(&request_body.value);
+        let invalid_request = match (
+            is_request_seed,
+            key.is_some(),
+            request_body.parameters.is_some(),
+        ) {
+            (true, true, _) => Some("RequestSeed and SendKey cannot be used at the same time."),
+            (false, false, _) => Some("RequestSeed is not set but no key is given."),
+            (false, _, true) => Some("RequestSeed parameters cannot be used with SendKey."),
+            _ => None,
+        };
+        if let Some(message) = invalid_request {
             return ErrorWrapper {
-                error: ApiError::BadRequest(
-                    "RequestSeed and SendKey cannot be used at the same time.".to_string(),
-                ),
+                error: ApiError::BadRequest(message.to_owned()),
                 include_schema,
             }
             .into_response();
         }
-        if !is_request_seed && key.is_none() {
-            return ErrorWrapper {
-                error: ApiError::BadRequest(
-                    "RequestSeed is not set but no key is given.".to_string(),
-                ),
-                include_schema,
-            }
-            .into_response();
-        }
-        if !is_request_seed && request_body.parameters.is_some() {
-            return ErrorWrapper {
-                error: ApiError::BadRequest(
-                    "RequestSeed parameters cannot be used with SendKey.".to_string(),
-                ),
-                include_schema,
-            }
-            .into_response();
-        }
-
         let (seed_payload, key_payload) = if let Some(key) = key {
             let mut data = HashMap::new();
             let Ok(value) = serde_json::to_value(&key) else {
@@ -486,7 +501,6 @@ pub(crate) mod security {
                 }
                 .into_response();
             };
-
             let param_name = match uds.get_send_key_param_name(&ecu_name, &level).await {
                 Ok(n) => n,
                 Err(e) => {
@@ -497,7 +511,6 @@ pub(crate) mod security {
                     .into_response();
                 }
             };
-
             data.insert(param_name, value);
             (None, Some(UdsPayloadData::ParameterMap(data)))
         } else {
@@ -621,15 +634,21 @@ pub(crate) mod commctrl {
     };
 
     pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
-        UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+        State(WebserverEcuState {
+            ecu_name,
+            uds,
+            locks,
+            ..
+        }): State<WebserverEcuState<T, U>>,
     ) -> Response {
         handle_mode_get(
             &uds,
             &ecu_name,
             service_ids::COMMUNICATION_CONTROL,
-            None,
+            &locks,
+            security_plugin,
             query.include_schema,
             |value, schema| sovd_modes::commctrl::get::Response {
                 name: Some(COMM_CONTROL_NAME.to_owned()),
@@ -728,15 +747,21 @@ pub(crate) mod dtcsetting {
     };
 
     pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
-        UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+        State(WebserverEcuState {
+            ecu_name,
+            uds,
+            locks,
+            ..
+        }): State<WebserverEcuState<T, U>>,
     ) -> Response {
         handle_mode_get(
             &uds,
             &ecu_name,
             service_ids::CONTROL_DTC_SETTING,
-            None,
+            &locks,
+            security_plugin,
             query.include_schema,
             |value, schema| sovd_modes::dtcsetting::get::Response {
                 name: Some(DTC_SETTING_NAME.to_owned()),

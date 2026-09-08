@@ -15,7 +15,8 @@
 //!
 //! This module provides the default security plugin implementation that demonstrates
 //! the security plugin architecture and provides a functional JWT-based authentication
-//! system for development and production use.
+//! system for development and testing. It is not production security infrastructure.
+//! Production deployments must provide a security plugin appropriate for their threat model.
 //!
 //! ## JWT-Based Authentication
 //!
@@ -28,7 +29,7 @@
 //!
 //! The default plugin supports conditional compilation features:
 //! - **auth feature disabled**: Bypasses credential validation (development/testing)
-//! - **auth feature enabled**: Enforces proper credential validation (production)
+//! - **auth feature enabled**: Demonstrates credential validation (development/testing)
 //!
 //! ## Authorization Endpoint Example
 //!
@@ -136,6 +137,13 @@ impl ClaimsTrait for Claims {
     fn sub(&self) -> &str {
         &self.sub
     }
+
+    fn attributes(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut attributes = self.additional.clone();
+        attributes.insert("sub".to_string(), self.sub.clone().into());
+        attributes.insert("exp".to_string(), self.exp.into());
+        attributes
+    }
 }
 
 /// Default security plugin data containing validated user claims.
@@ -212,6 +220,7 @@ impl AuthorizationRequestHandler for DefaultSecurityPlugin {
         let claims = Claims {
             sub: payload.client_id,
             exp: 2_000_000_000, // May 2033
+            additional: serde_json::Map::new(),
         };
         // Create the authorization token
         let Ok(token) = encode(&Header::default(), &claims, &KEYS.encoding) else {
@@ -303,13 +312,13 @@ impl Keys {
 /// identification and token validation.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Claims {
-    // dummy implementation for now
-    // must be filled with remaining fields
-    // once we are using a proper auth provider
     /// Subject (user identifier) of the token
     sub: String,
     /// Expiration time as Unix timestamp
     exp: usize,
+    /// Additional verified JWT claims exposed to downstream policy plugins.
+    #[serde(flatten)]
+    additional: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Authorization response body containing access token information.
@@ -346,3 +355,44 @@ static KEYS: LazyLock<Keys> = LazyLock::new(|| {
     // todo, set up proper secret when adding jwt provider in
     Keys::new("secret".as_bytes())
 });
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn decoded_token_preserves_arbitrary_claims() {
+        let encoded = encode(
+            &Header::default(),
+            &json!({
+                "sub": "cda-client",
+                "exp": 2_000_000_000u64,
+                "application": "cda",
+                "roles": ["diagnostics", "priority"],
+                "context": { "use_case": "recovery" }
+            }),
+            &KEYS.encoding,
+        )
+        .expect("test token should encode");
+
+        let decoded = decode_token::<Claims>(&encoded, &KEYS.decoding)
+            .expect("test token should decode")
+            .claims;
+        let attributes = ClaimsTrait::attributes(&decoded);
+
+        assert_eq!(decoded.sub(), "cda-client");
+        assert_eq!(attributes.get("application"), Some(&json!("cda")));
+        assert_eq!(
+            attributes.get("roles"),
+            Some(&json!(["diagnostics", "priority"]))
+        );
+        assert_eq!(
+            attributes.get("context"),
+            Some(&json!({ "use_case": "recovery" }))
+        );
+        assert_eq!(attributes.get("sub"), Some(&json!("cda-client")));
+        assert_eq!(attributes.get("exp"), Some(&json!(2_000_000_000u64)));
+    }
+}

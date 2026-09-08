@@ -13,40 +13,63 @@
 
 use std::time::Duration;
 
-use aide::transform::TransformOperation;
+use aide::{UseApi, transform::TransformOperation};
 use axum::{
     Json,
-    extract::Query,
+    extract::{Query, State},
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{DiagServiceError, HashMap, UdsEcu, diagservices::DiagServiceResponse};
 use http::StatusCode;
 use serde::Serialize;
-use sovd_interfaces::common::modes::{
-    COMM_CONTROL_ID, COMM_CONTROL_NAME, DTC_SETTING_ID, DTC_SETTING_NAME, SESSION_ID, SESSION_NAME,
+use sovd_interfaces::{
+    common::modes::{
+        COMM_CONTROL_ID, COMM_CONTROL_NAME, DTC_SETTING_ID, DTC_SETTING_NAME, SESSION_ID,
+        SESSION_NAME,
+    },
+    functions::functional_groups::modes::get::{Response as ModesResponse, ResponseItem},
 };
 
 use crate::{
     create_schema,
-    sovd::error::{ApiError, VendorErrorCode, nrc_to_api_error_response},
+    sovd::{
+        error::{ApiError, ErrorWrapper, VendorErrorCode, nrc_to_api_error_response},
+        functions::functional_groups::WebserverFgState,
+        locks::{validate_fg_read, validate_fg_write},
+    },
 };
 
-pub(crate) async fn get(
+pub(crate) async fn get<T: UdsEcu + Clone>(
+    UseApi(cda_plugin_security::Secured(security_plugin), _): UseApi<
+        cda_plugin_security::Secured,
+        (),
+    >,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::functions::functional_groups::modes::Query>,
         ApiError,
     >,
+    State(state): State<WebserverFgState<T>>,
 ) -> Response {
-    use sovd_interfaces::functions::functional_groups::modes::get::{Response, ResponseItem};
+    if let Err(response) = validate_fg_read(
+        &security_plugin.as_auth_plugin().claims(),
+        &state.functional_group_name,
+        &state.uds,
+        &state.locks,
+        query.include_schema,
+    )
+    .await
+    {
+        return response.into_response();
+    }
     let schema = if query.include_schema {
-        Some(create_schema!(Response))
+        Some(create_schema!(ModesResponse))
     } else {
         None
     };
     (
         StatusCode::OK,
-        Json(Response {
+        Json(ModesResponse {
             items: vec![
                 ResponseItem {
                     id: COMM_CONTROL_ID.to_owned(),
@@ -101,15 +124,16 @@ async fn handle_mode_change<T: UdsEcu + Clone>(
     include_schema: bool,
 ) -> Response {
     let claims = security_plugin.as_auth_plugin().claims();
-    if let Some(response) = crate::sovd::locks::validate_fg_lock(
+    if let Err(response) = validate_fg_write(
         &claims,
         &state.functional_group_name,
+        &state.uds,
         &state.locks,
         include_schema,
     )
     .await
     {
-        return response;
+        return response.into_response();
     }
 
     let results = match state
@@ -127,7 +151,7 @@ async fn handle_mode_change<T: UdsEcu + Clone>(
     {
         Ok(results) => results,
         Err(e) => {
-            return crate::sovd::error::ErrorWrapper {
+            return ErrorWrapper {
                 error: ApiError::from(e),
                 include_schema,
             }
@@ -233,6 +257,36 @@ async fn handle_mode_get<
     T: UdsEcu + Clone,
     ResponseElementType: schemars::JsonSchema + Serialize,
 >(
+    state: &WebserverFgState<T>,
+    security_plugin: Box<dyn cda_plugin_security::SecurityPlugin>,
+    service_id: u8,
+    include_schema: bool,
+    create_response_element_callback: fn(value: String) -> ResponseElementType,
+) -> Response {
+    if let Err(response) = validate_fg_read(
+        &security_plugin.as_auth_plugin().claims(),
+        &state.functional_group_name,
+        &state.uds,
+        &state.locks,
+        include_schema,
+    )
+    .await
+    {
+        return response.into_response();
+    }
+    handle_mode_get_work(
+        state,
+        service_id,
+        include_schema,
+        create_response_element_callback,
+    )
+    .await
+}
+
+async fn handle_mode_get_work<
+    T: UdsEcu + Clone,
+    ResponseElementType: schemars::JsonSchema + Serialize,
+>(
     state: &crate::sovd::functions::functional_groups::WebserverFgState<T>,
     service_id: u8,
     include_schema: bool,
@@ -316,12 +370,13 @@ pub(crate) mod commctrl {
     };
 
     pub(crate) async fn get<T: UdsEcu + Clone>(
-        UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(state): State<WebserverFgState<T>>,
     ) -> Response {
         handle_mode_get(
             &state,
+            security_plugin,
             service_ids::COMMUNICATION_CONTROL,
             query.include_schema,
             |value| functional_groups::modes::commctrl::get::ResponseElement {
@@ -415,12 +470,13 @@ pub(crate) mod dtcsetting {
     };
 
     pub(crate) async fn get<T: UdsEcu + Clone>(
-        UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(state): State<WebserverFgState<T>>,
     ) -> Response {
         handle_mode_get(
             &state,
+            security_plugin,
             service_ids::CONTROL_DTC_SETTING,
             query.include_schema,
             |value| functional_groups::modes::dtcsetting::get::ResponseElement {
@@ -504,12 +560,13 @@ pub(crate) mod session {
     };
 
     pub(crate) async fn get<T: UdsEcu + Clone>(
-        UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(state): State<WebserverFgState<T>>,
     ) -> Response {
         handle_mode_get(
             &state,
+            security_plugin,
             service_ids::SESSION_CONTROL,
             query.include_schema,
             |value| sovd_modes::session::get::ResponseElement {

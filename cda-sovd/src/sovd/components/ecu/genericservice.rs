@@ -20,15 +20,25 @@ use http::{HeaderMap, header};
 use super::{ApiError, DynamicPlugin, ErrorWrapper, IntoResponse, StatusCode, TransformOperation};
 use crate::{
     openapi,
-    sovd::{WebserverEcuState, get_octet_stream_payload},
+    sovd::{WebserverEcuState, get_octet_stream_payload, locks},
 };
 
 pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
     headers: HeaderMap,
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+    State(WebserverEcuState {
+        ecu_name,
+        uds,
+        locks,
+        ..
+    }): State<WebserverEcuState<T, U>>,
     body: Bytes,
 ) -> Response {
+    let claims = security_plugin.as_auth_plugin().claims();
+    if let Err(response) = locks::validate_ecu_write(&claims, &ecu_name, &locks, false).await {
+        return response.into_response();
+    }
+
     match headers.get(header::ACCEPT) {
         Some(v) if v == mime::APPLICATION_OCTET_STREAM.essence_str() => (Some(v), false),
         _ => {
@@ -82,18 +92,16 @@ pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
             None,
         )
         .await
-        .map_err(Into::into)
     {
         Err(e) => {
             return ErrorWrapper {
-                error: e,
+                error: e.into(),
                 include_schema: false,
             }
             .into_response();
         }
         Ok(v) => v,
     };
-    // Return the raw response
     (StatusCode::OK, Bytes::from_owner(ecu_response)).into_response()
 }
 

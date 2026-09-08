@@ -19,6 +19,7 @@
 //! implementation and [`Setup::with_communication_plugin`] to replace the default
 //! `init_mode`-aware communication plugin, before handing the `Setup` to one of the
 //! `run_*` functions.
+//! Lock-priority policies are selected with [`Setup::with_lock_priority_plugin`].
 //!
 //! [`RuntimeFilesUpdatePlugin`]: cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin
 
@@ -37,6 +38,7 @@ use cda_interfaces::{
     component_slot::{ComponentSlot, ReplaceComponent},
     health::HealthProvider,
     http_protection::registry::HttpProtectionRegistry,
+    lock_priority_api::LockPriorityPolicy,
 };
 use cda_plugin_communication_management::{
     lifecycle::{
@@ -192,6 +194,8 @@ pub struct Setup<
     pub(crate) build_communication_plugin: CPB,
     pub(crate) initialize_tracing: bool,
     pub(crate) shutdown_signal: Option<ShutdownSignal>,
+    /// Lock-priority policy fixed for the lifetime of the lock store.
+    pub(crate) lock_priority_policy: Arc<dyn LockPriorityPolicy>,
 }
 
 impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Default for Setup<SP, SL> {
@@ -201,7 +205,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Default for Setup<SP, SL> {
 }
 
 impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Setup<SP, SL> {
-    /// Creates a new `Setup` with no preload hook and no custom update plugin.
+    /// Creates a new `Setup` with no preload hook or update plugin and no lock preemption.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -211,6 +215,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Setup<SP, SL> {
             build_communication_plugin: DefaultCommunicationPluginBuilder,
             initialize_tracing: true,
             shutdown_signal: None,
+            lock_priority_policy: Arc::new(cda_plugin_lock_priority::NoPreemptionPolicy),
         }
     }
 }
@@ -281,6 +286,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
             build_communication_plugin: self.build_communication_plugin,
             initialize_tracing: self.initialize_tracing,
             shutdown_signal: self.shutdown_signal,
+            lock_priority_policy: self.lock_priority_policy,
         }
     }
 
@@ -298,7 +304,22 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
             build_communication_plugin: plugin,
             initialize_tracing: self.initialize_tracing,
             shutdown_signal: self.shutdown_signal,
+            lock_priority_policy: self.lock_priority_policy,
         }
+    }
+
+    /// Registers a lock-priority policy.
+    ///
+    /// Policy implementations receive revisioned
+    /// [`LockPriorityEvaluation`](cda_interfaces::lock_priority_api::LockPriorityEvaluation)
+    /// snapshots and return a
+    /// [`LockPriorityDecision`](cda_interfaces::lock_priority_api::LockPriorityDecision). Policy
+    /// calls are bounded by configured timeout and stale-state retries; returning `Preempt` also
+    /// requires the request's `break_lock` flag.
+    #[must_use]
+    pub fn with_lock_priority_plugin(mut self, plugin: Arc<dyn LockPriorityPolicy>) -> Self {
+        self.lock_priority_policy = plugin;
+        self
     }
 }
 
@@ -617,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn new_has_no_preload_and_no_plugin() {
+    fn new_has_no_preload_or_update_plugin() {
         let s = TestSetup::new();
         assert!(
             s.pre_load.is_none(),

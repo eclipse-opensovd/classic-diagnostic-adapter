@@ -22,7 +22,7 @@ use cda_interfaces::{
     diagservices::UdsPayloadData,
 };
 use tokio::{
-    sync::{Mutex, RwLock, Semaphore},
+    sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -45,8 +45,42 @@ mod variant;
 mod test_helpers;
 
 pub use state_coordinator::EcuStateCoordinator;
-pub use types::TesterPresentTask;
-use types::{EcuDataTransfer, EcuIdentifier};
+use types::{EcuDataTransfer, EcuIdentifier, TesterPresentTaskId};
+
+const PERMIT_AQUISITION_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn request_permits(
+    registry: &Mutex<HashMap<String, Arc<Semaphore>>>,
+    mut keys: Vec<String>,
+) -> Result<Box<[OwnedSemaphorePermit]>, DiagServiceError> {
+    keys.sort_unstable();
+    keys.dedup();
+
+    tokio::time::timeout(PERMIT_AQUISITION_TIMEOUT, async {
+        let semaphores = {
+            let mut registry = registry.lock().await;
+            keys.into_iter()
+                .map(|key| {
+                    Arc::clone(
+                        registry
+                            .entry(key)
+                            .or_insert_with(|| Arc::new(Semaphore::new(1))),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut permits = Vec::with_capacity(semaphores.len());
+        for semaphore in semaphores {
+            permits.push(semaphore.acquire_owned().await.map_err(|_| {
+                DiagServiceError::ResourceError("Request gate was closed".to_owned())
+            })?);
+        }
+        Ok(permits.into_boxed_slice())
+    })
+    .await
+    .map_err(|_| DiagServiceError::Timeout)?
+}
 
 /// The running variant-detection listener task, with the token that cancels it.
 ///
@@ -68,7 +102,7 @@ pub struct UdsManager<S: EcuGateway, T: UdsEcuDb> {
     gateway: S,
     data_transfers: Arc<Mutex<HashMap<EcuIdentifier, EcuDataTransfer>>>,
     ecu_semaphores: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
-    tester_present_tasks: Arc<RwLock<HashMap<EcuIdentifier, TesterPresentTask>>>,
+    tester_present_tasks: Arc<RwLock<HashMap<TesterPresentTaskId, JoinHandle<()>>>>,
     session_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, JoinHandle<()>>>>,
     security_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, JoinHandle<()>>>>,
     state_coordinator: EcuStateCoordinator,
@@ -89,6 +123,13 @@ pub struct UdsManager<S: EcuGateway, T: UdsEcuDb> {
 }
 
 impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
+    async fn request_ecu_permits(
+        &self,
+        keys: Vec<String>,
+    ) -> Result<Box<[OwnedSemaphorePermit]>, DiagServiceError> {
+        request_permits(&self.ecu_semaphores, keys).await
+    }
+
     fn uds_ecu_db(&self, ecu_name: &str) -> Result<&RwLock<T>, DiagServiceError> {
         self.ecus
             .get(ecu_name)
@@ -348,7 +389,7 @@ impl<S: EcuGateway, T: EcuManager> cda_interfaces::Shutdown for UdsManager<S, T>
         let mut data_transfers = self.data_transfers.lock().await;
         tester_present_tasks
             .drain()
-            .map(|(_, tp)| tp.task)
+            .map(|(_, task)| task)
             .chain(session_reset_tasks.drain().map(|(_, h)| h))
             .chain(security_reset_tasks.drain().map(|(_, h)| h))
             .chain(data_transfers.drain().map(|(_, t)| t.task))
@@ -387,5 +428,142 @@ impl<S: EcuGateway, T: EcuManager> SchemaProvider for UdsManager<S, T> {
             .await
             .schema_for_fg_request(service, functional_group_name)
             .await
+    }
+}
+
+#[cfg(test)]
+mod request_gate_tests {
+    use std::{sync::Arc, time::Duration};
+
+    use cda_interfaces::HashMap;
+    use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
+
+    use super::request_permits;
+
+    fn registry(keys: &[&str]) -> Arc<Mutex<HashMap<String, Arc<Semaphore>>>> {
+        Arc::new(Mutex::new(
+            keys.iter()
+                .map(|key| ((*key).to_owned(), Arc::new(Semaphore::new(1))))
+                .collect(),
+        ))
+    }
+
+    async fn semaphore(
+        registry: &Mutex<HashMap<String, Arc<Semaphore>>>,
+        key: &str,
+    ) -> Arc<Semaphore> {
+        Arc::clone(registry.lock().await.get(key).expect("gate must exist"))
+    }
+
+    #[tokio::test]
+    async fn duplicate_keys_acquire_one_permit() {
+        let registry = registry(&["same"]);
+        let permits = request_permits(&registry, vec!["same".to_owned(), "same".to_owned()])
+            .await
+            .expect("duplicate request keys should acquire successfully");
+
+        assert_eq!(permits.len(), 1);
+        assert_eq!(semaphore(&registry, "same").await.available_permits(), 0);
+        drop(permits);
+        assert_eq!(semaphore(&registry, "same").await.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn reverse_key_order_does_not_deadlock() {
+        let registry = registry(&["a", "b"]);
+        let first = request_permits(&registry, vec!["b".to_owned(), "a".to_owned()])
+            .await
+            .expect("first request should acquire permits");
+        let second_registry = Arc::clone(&registry);
+        let second = tokio::spawn(async move {
+            request_permits(&second_registry, vec!["a".to_owned(), "b".to_owned()]).await
+        });
+
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(1), second)
+            .await
+            .expect("reverse-order request must not deadlock")
+            .expect("request task must complete")
+            .expect("request should acquire permits after release");
+    }
+
+    #[tokio::test]
+    async fn overlapping_key_sets_serialize() {
+        let registry = registry(&["a", "b", "c"]);
+        let first = request_permits(&registry, vec!["a".to_owned(), "b".to_owned()])
+            .await
+            .expect("first request should acquire permits");
+        let second_registry = Arc::clone(&registry);
+        let (acquired_tx, mut acquired_rx) = mpsc::channel(1);
+        let second = tokio::spawn(async move {
+            let permits = request_permits(&second_registry, vec!["b".to_owned(), "c".to_owned()])
+                .await
+                .expect("second request should acquire permits");
+            acquired_tx
+                .send(())
+                .await
+                .expect("receiver must remain open");
+            permits
+        });
+
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            acquired_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        drop(first);
+        acquired_rx
+            .recv()
+            .await
+            .expect("second request must proceed");
+        second.await.expect("request task must complete");
+    }
+
+    #[tokio::test]
+    async fn disjoint_key_sets_run_concurrently() {
+        let registry = registry(&["a", "b"]);
+        let first = request_permits(&registry, vec!["a".to_owned()])
+            .await
+            .expect("first request should acquire its gate");
+
+        let second = request_permits(&registry, vec!["b".to_owned()]);
+        let second = tokio::time::timeout(Duration::from_secs(1), second)
+            .await
+            .expect("disjoint request should not wait")
+            .expect("disjoint request should acquire its gate");
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancellation_releases_partially_acquired_permits() {
+        let registry = registry(&["a", "b"]);
+        let blocked_gate = semaphore(&registry, "b")
+            .await
+            .acquire_owned()
+            .await
+            .expect("gate must be open");
+        let request_registry = Arc::clone(&registry);
+        let (started_tx, started_rx) = oneshot::channel();
+        let request = tokio::spawn(async move {
+            started_tx.send(()).expect("receiver must remain open");
+            request_permits(&request_registry, vec!["b".to_owned(), "a".to_owned()]).await
+        });
+        started_rx.await.expect("request must start");
+
+        let first_gate = semaphore(&registry, "a").await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while first_gate.available_permits() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("request should acquire first sorted gate");
+
+        request.abort();
+        let _ = request.await;
+        assert_eq!(first_gate.available_permits(), 1);
+        drop(blocked_gate);
     }
 }

@@ -13,13 +13,50 @@
 
 use aide::{
     openapi::{Contact, License, MediaType, SchemaObject, Server, Tag},
-    transform::{TransformOpenApi, TransformOperation},
+    transform::{TransformOpenApi, TransformOperation, TransformPathItem},
 };
 use axum::Json;
 use schemars::JsonSchema;
 use sovd_interfaces::error::ApiErrorResponse;
 
 use crate::sovd::{self, error::VendorErrorCode};
+
+pub(crate) fn lock_details_example() -> sovd_interfaces::locking::id::get::Response {
+    sovd_interfaces::locking::id::get::Response {
+        lock_expiration: "2025-01-01T00:00:00Z".to_owned(),
+        x_sovd2uds_broken_by: None,
+        x_sovd2uds_broken_at: None,
+        x_sovd2uds_current_holder: None,
+        schema: None,
+    }
+}
+
+pub(crate) fn lock_created_example() -> sovd_interfaces::locking::post_put::Response {
+    sovd_interfaces::locking::post_put::Response {
+        id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+        lock_expiration: None,
+        owned: Some(true),
+        x_sovd2uds_broken_by: None,
+        x_sovd2uds_broken_at: None,
+        x_sovd2uds_current_holder: None,
+        schema: None,
+    }
+}
+
+pub(crate) fn lock_list_example() -> sovd_interfaces::locking::get::Response {
+    sovd_interfaces::locking::get::Response {
+        items: vec![sovd_interfaces::locking::Lock {
+            id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+            lock_expiration: Some("2025-01-01T00:00:00Z".to_owned()),
+            owned: Some(true),
+            x_sovd2uds_broken_by: None,
+            x_sovd2uds_broken_at: None,
+            x_sovd2uds_current_holder: None,
+            schema: None,
+        }],
+        schema: None,
+    }
+}
 
 pub(crate) mod aide_helper {
     /// Helper macro to generate path params that have an openapi
@@ -256,6 +293,51 @@ pub(crate) fn error_conflict(op: TransformOperation) -> TransformOperation {
     })
 }
 
+/// Documents lock and update-guard failures shared by diagnostic routes.
+pub(crate) fn lock_responses(op: TransformOperation) -> TransformOperation {
+    op.response_with::<409, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
+        res.description(
+            "Conflict: A required lock is missing or broken, or an operation conflicts with the \
+             current state.",
+        )
+    })
+    .response_with::<423, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
+        res.description("Locked: Another client holds an incompatible lock.")
+    })
+    .response_with::<503, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
+        res.description("Service Unavailable: Lock state cannot currently be evaluated.")
+    })
+}
+
+/// Documents defunct-lock rejection on every diagnostic operation.
+pub(crate) fn defunct_lock_path(mut path: TransformPathItem) -> TransformPathItem {
+    {
+        let item = path.inner_mut();
+        for operation in [
+            item.get.as_mut(),
+            item.put.as_mut(),
+            item.post.as_mut(),
+            item.delete.as_mut(),
+            item.options.as_mut(),
+            item.head.as_mut(),
+            item.patch.as_mut(),
+            item.trace.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let _ = TransformOperation::new(operation).response_with::<409, Json<
+                ApiErrorResponse<sovd::error::VendorErrorCode>,
+            >, _>(|response| {
+                response.description(
+                    "Conflict: A lock previously held by this client was broken by preemption.",
+                )
+            });
+        }
+    }
+    path
+}
+
 pub(crate) fn error_bad_request(op: TransformOperation) -> TransformOperation {
     op.response_with::<400, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
         res.description("Bad Request: The request was invalid or cannot be otherwise served.")
@@ -293,4 +375,37 @@ pub(crate) fn comparam_execution_errors(op: TransformOperation) -> TransformOper
                 schema: None,
             })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use aide::{
+        openapi::{Operation, StatusCode},
+        transform::TransformOperation,
+    };
+
+    #[test]
+    fn lock_responses_document_shared_json_error_schema() {
+        let mut operation = Operation::default();
+        let _ = super::lock_responses(TransformOperation::new(&mut operation));
+        let responses = operation.responses.expect("lock responses");
+
+        for status in [409, 423, 503] {
+            let response = responses
+                .responses
+                .get(&StatusCode::Code(status))
+                .and_then(aide::openapi::ReferenceOr::as_item)
+                .expect("documented lock response");
+            let schema = response
+                .content
+                .get("application/json")
+                .and_then(|content| content.schema.as_ref())
+                .expect("JSON error schema");
+            let serialized = serde_json::to_value(schema).expect("serializable schema");
+            assert_eq!(
+                serialized.get("$ref"),
+                Some(&serde_json::json!("#/components/schemas/ApiErrorResponse"))
+            );
+        }
+    }
 }

@@ -51,6 +51,18 @@ pub enum ApiError {
     InternalServerError(Option<String>),
     #[error("Conflict: {0}")]
     Conflict(String),
+    #[error("Locked: {0}")]
+    Locked(String),
+    #[error("Lock priority policy denied acquisition: {message}")]
+    LockPriorityDenied {
+        message: String,
+        parameters: HashMap<String, serde_json::Value>,
+    },
+    #[error("Lock broken: {message}")]
+    LockBroken {
+        message: String,
+        parameters: HashMap<String, serde_json::Value>,
+    },
     #[error("Not Responding: {0}")]
     NotResponding(String),
     #[error("Service Unavailable: {message}")]
@@ -94,6 +106,10 @@ impl ApiError {
                 Some(VendorErrorCode::BadRequest),
             ),
             ApiError::Forbidden(_) => (ErrorCode::InsufficientAccessRights, None),
+            ApiError::LockBroken { .. } => (ErrorCode::LockBroken, None),
+            ApiError::Locked(_) | ApiError::LockPriorityDenied { .. } => {
+                (ErrorCode::PreconditionsNotFulfilled, None)
+            }
             ApiError::InvalidParameter { .. } => (
                 ErrorCode::VendorSpecific,
                 Some(VendorErrorCode::InvalidParameter),
@@ -239,6 +255,8 @@ pub enum VendorErrorCode {
     StorageTransactionBusy,
     /// The provided data was not valid.
     InvalidData,
+    /// A lock acquisition was denied by the configured priority policy.
+    LockPriorityDenied,
     /// A severe error occurred that needs further investigation, safe operation is still possible
     /// but this indicates an issue that should be investigated
     SevereError,
@@ -257,19 +275,7 @@ impl OperationOutput for ErrorWrapper {
 
 impl IntoResponse for ErrorWrapper {
     fn into_response(self) -> Response {
-        let schema = if self.include_schema {
-            let mut schema = crate::sovd::create_schema!(
-                sovd_interfaces::error::ApiErrorResponse<VendorErrorCode>
-            );
-            if let Some(props) = schema.get_mut("properties") {
-                crate::sovd::remove_descriptions_recursive(props);
-            }
-            Some(schema)
-        } else {
-            None
-        };
-        // Every variant but `ServiceUnavailable` differs only in status,
-        // message and codes, so they share the construction below.
+        let schema = error_response_schema(self.include_schema);
         let (status, message, error_code, vendor_code, parameters) = match self.error {
             ApiError::ServiceUnavailable {
                 message,
@@ -312,6 +318,33 @@ impl IntoResponse for ErrorWrapper {
                 ErrorCode::PreconditionsNotFulfilled,
                 None,
                 None,
+            ),
+            ApiError::Locked(message) => (
+                StatusCode::LOCKED,
+                message,
+                ErrorCode::PreconditionsNotFulfilled,
+                None,
+                None,
+            ),
+            ApiError::LockPriorityDenied {
+                message,
+                parameters,
+            } => (
+                StatusCode::LOCKED,
+                message,
+                ErrorCode::PreconditionsNotFulfilled,
+                Some(VendorErrorCode::LockPriorityDenied),
+                Some(parameters),
+            ),
+            ApiError::LockBroken {
+                message,
+                parameters,
+            } => (
+                StatusCode::CONFLICT,
+                message,
+                ErrorCode::LockBroken,
+                None,
+                Some(parameters),
             ),
             ApiError::BadRequest(message) => (
                 StatusCode::BAD_REQUEST,
@@ -365,6 +398,17 @@ impl IntoResponse for ErrorWrapper {
         )
             .into_response()
     }
+}
+
+fn error_response_schema(include_schema: bool) -> Option<schemars::Schema> {
+    include_schema.then(|| {
+        let mut schema =
+            crate::sovd::create_schema!(sovd_interfaces::error::ApiErrorResponse<VendorErrorCode>);
+        if let Some(props) = schema.get_mut("properties") {
+            crate::sovd::remove_descriptions_recursive(props);
+        }
+        schema
+    })
 }
 
 /// Built separately from `ErrorWrapper::into_response`'s common construction,
@@ -504,4 +548,60 @@ pub(crate) async fn sovd_not_found_handler(uri: Uri) -> impl IntoResponse {
             },
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::axum_response_into;
+
+    #[tokio::test]
+    async fn lock_priority_denial_includes_schema_when_requested() {
+        let response = ErrorWrapper {
+            error: ApiError::LockPriorityDenied {
+                message: "Denied by policy".to_owned(),
+                parameters: HashMap::default(),
+            },
+            include_schema: true,
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::LOCKED);
+        let body: sovd_interfaces::error::ApiErrorResponse<VendorErrorCode> =
+            axum_response_into(response).await.expect("Valid body");
+        assert!(body.schema.is_some());
+        assert_eq!(body.vendor_code, Some(VendorErrorCode::LockPriorityDenied));
+    }
+
+    #[tokio::test]
+    async fn lock_priority_denial_omits_schema_when_not_requested() {
+        let response = ErrorWrapper {
+            error: ApiError::LockPriorityDenied {
+                message: "Denied by policy".to_owned(),
+                parameters: HashMap::default(),
+            },
+            include_schema: false,
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::LOCKED);
+        let body: sovd_interfaces::error::ApiErrorResponse<VendorErrorCode> =
+            axum_response_into(response).await.expect("Valid body");
+        assert!(body.schema.is_none());
+        assert_eq!(body.vendor_code, Some(VendorErrorCode::LockPriorityDenied));
+    }
+
+    #[tokio::test]
+    async fn ordinary_lock_conflict_uses_locked_status() {
+        let response = ErrorWrapper {
+            error: ApiError::Locked("Lock is owned by another client".to_owned()),
+            include_schema: false,
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::LOCKED);
+        let body: sovd_interfaces::error::ApiErrorResponse<VendorErrorCode> =
+            axum_response_into(response).await.expect("Valid body");
+        assert_eq!(body.error_code, ErrorCode::PreconditionsNotFulfilled);
+    }
 }

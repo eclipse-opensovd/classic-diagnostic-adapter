@@ -50,7 +50,7 @@ async fn test_dtc_setting() {
         &runtime.config,
         &auth,
         ecu_endpoint,
-        StatusCode::FORBIDDEN,
+        StatusCode::CONFLICT,
     )
     .await
     .unwrap();
@@ -217,7 +217,7 @@ async fn test_dtc_setting() {
         &runtime.config,
         &auth,
         ecu_endpoint,
-        StatusCode::FORBIDDEN,
+        StatusCode::CONFLICT,
     )
     .await
     .unwrap();
@@ -407,7 +407,7 @@ async fn test_dtc_deletion() {
         &auth,
         ecu_endpoint,
         "999999",
-        StatusCode::FORBIDDEN,
+        StatusCode::CONFLICT,
     )
     .await
     .expect("Request should be forbidden");

@@ -230,6 +230,7 @@ fn create_functional_group_route<T: UdsEcu + SchemaProvider + Clone>(
                 .put_with(modes::session::put, modes::session::docs_put),
         )
         .with_state(fg_state)
+        .with_path_items(crate::openapi::defunct_lock_path)
 }
 
 fn create_error_fallback_route(router: Router, reason: String) -> Router {
@@ -488,29 +489,22 @@ fn map_to_json(include_schema: bool, accept: &mime::Mime) -> Result<bool, ErrorW
 pub(crate) mod tests {
     use std::sync::Arc;
 
-    use cda_interfaces::UdsEcu;
+    use cda_interfaces::mock::MockUdsEcu;
     use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
     use tokio::sync::RwLock;
 
     use super::WebserverFgState;
-    use crate::sovd::{
-        HashMap,
-        locks::{LockType, Locks},
-    };
+    use crate::sovd::{HashMap, locks::Locks};
 
-    pub fn create_test_fg_state<T: UdsEcu + Clone>(
-        uds: T,
+    pub fn create_test_fg_state(
+        mut uds: MockUdsEcu,
         functional_group_name: String,
-    ) -> WebserverFgState<T> {
+    ) -> WebserverFgState<MockUdsEcu> {
+        uds.expect_ecus_for_functional_group()
+            .returning(|_, _| vec!["test-ecu".to_owned()]);
         WebserverFgState {
             uds,
-            locks: Arc::new(Locks {
-                vehicle: LockType::Vehicle(Arc::new(RwLock::new(None))),
-                ecu: LockType::Ecu(Arc::new(RwLock::new(HashMap::default()))),
-                functional_group: LockType::FunctionalGroup(Arc::new(RwLock::new(
-                    HashMap::default(),
-                ))),
-            }),
+            locks: Arc::new(Locks::new()),
             functional_group_name,
             fg_executions: Arc::new(RwLock::new(HashMap::default())),
             communication_activities: Arc::new(tokio::sync::Mutex::new(HashMap::default())),

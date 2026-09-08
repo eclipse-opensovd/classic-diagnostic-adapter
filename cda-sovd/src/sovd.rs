@@ -68,6 +68,7 @@ pub(crate) mod components;
 pub(crate) mod docs;
 pub(crate) mod error;
 pub(crate) mod functions;
+mod lock_state;
 pub(crate) mod locks;
 
 trait IntoSovd {
@@ -288,17 +289,17 @@ impl SovdLockStateProvider {
         }
     }
 
-    /// Updates the ECU and functional-group entries in the current locks in-place,
-    /// preserving only the vehicle lock.
+    /// Verifies lock state permits a runtime configuration update.
     ///
     /// # Errors
     /// Returns an error if any ECU or functional-group lock is currently held.
-    pub async fn update_entries(
-        &self,
-        new_ecu_names: Vec<String>,
-    ) -> Result<(), locks::LockUpdateError> {
-        let locks = self.locks.read().await.clone();
-        locks.update_entries(new_ecu_names).await
+    pub async fn prepare_runtime_update(&self) -> Result<(), locks::LockUpdateError> {
+        self.locks
+            .read()
+            .await
+            .as_ref()
+            .prepare_runtime_update()
+            .await
     }
 
     pub async fn current_locks(&self) -> Arc<Locks> {
@@ -310,18 +311,12 @@ impl SovdLockStateProvider {
 impl LockStateProvider for SovdLockStateProvider {
     async fn vehicle_lock_owner_sub(&self) -> Option<String> {
         let locks = self.locks.read().await.clone();
-        let vehicle_lock = locks.vehicle.lock_ro().await;
-        match &vehicle_lock {
-            ReadLock::OptionLock(l) => l.as_ref().map(|l| l.owner().to_owned()),
-            ReadLock::HashMapLock(_) => None,
-        }
+        locks.vehicle_lock_owner_sub().await
     }
 
     async fn has_non_vehicle_locks(&self) -> bool {
         let locks = self.locks.read().await.clone();
-        let ecu_lock = locks.ecu.lock_ro().await;
-        let fg_lock = locks.functional_group.lock_ro().await;
-        ecu_lock.is_any_locked() || fg_lock.is_any_locked()
+        locks.has_non_vehicle_locks().await
     }
 }
 
@@ -926,6 +921,7 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
                 .delete_with(faults::id::delete, faults::id::docs_delete),
         )
         .with_state(ecu_state)
+        .with_path_items(crate::openapi::defunct_lock_path)
         .with_path_items(|op| op.tag(ecu_name));
 
     Ok((ecu_path, router))
@@ -1086,8 +1082,6 @@ macro_rules! create_schema {
 }
 pub use create_schema;
 
-use crate::sovd::locks::ReadLock;
-
 pub(crate) mod static_data {
     use aide::{
         axum::{ApiRouter, routing},
@@ -1231,7 +1225,6 @@ pub(crate) mod tests {
     use sovd_interfaces::sovd2uds::FileList;
 
     use super::*;
-    use crate::sovd::locks::LockType;
 
     struct DeferredCommunicationAccess {
         activation_requests: AtomicUsize,
@@ -1358,17 +1351,9 @@ pub(crate) mod tests {
         file_manager: U,
     ) -> WebserverEcuState<T, U> {
         WebserverEcuState {
-            ecu_name: ecu_name.clone(),
+            ecu_name,
             uds,
-            locks: Arc::new(Locks {
-                vehicle: LockType::Vehicle(Arc::new(RwLock::new(None))),
-                ecu: LockType::Ecu(Arc::new(RwLock::new(
-                    [(ecu_name, None)].into_iter().collect(),
-                ))),
-                functional_group: LockType::FunctionalGroup(Arc::new(RwLock::new(
-                    HashMap::default(),
-                ))),
-            }),
+            locks: Arc::new(Locks::new()),
             comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
             communication_activities: Arc::new(Mutex::new(HashMap::default())),
             communication_access: enabled_communication_access_for_test(),

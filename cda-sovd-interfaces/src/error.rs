@@ -72,6 +72,9 @@ pub enum ErrorCode {
     /// The preconditions to execute the method are not fulfilled.
     PreconditionsNotFulfilled,
 
+    /// A lock previously held by the client was broken by another client.
+    LockBroken,
+
     /// An update is already in progress and not yet done or aborted.
     UpdateProcessInProgress,
 

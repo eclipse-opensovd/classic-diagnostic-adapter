@@ -32,6 +32,7 @@ use cda_interfaces::{
     HashMapExtensions, TransportType, VariantDetectionReceiver, VariantDetectionSender,
     communication_control::CommunicationAccess, component_slot::ComponentSlot,
     config::ConfigSanity, datatypes::FaultConfig, dlt_ctx, health::HealthProvider,
+    lock_priority_api::LockPriorityPolicy,
 };
 use cda_plugin_communication_management::plugin::CommunicationPluginBuilder;
 use cda_plugin_security::{
@@ -334,17 +335,21 @@ where
         })?,
     );
 
-    let vehicle_data =
-        match load_vehicle_data::<SP>(&config, webserver_state.health_state.as_ref(), &storage)
-            .await
-        {
-            Ok(data) => data,
-            Err(AppError::ShutdownRequested) => {
-                tracing::info!("Shutdown requested during database load, exiting cleanly");
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        };
+    let vehicle_data = match load_vehicle_data::<SP>(
+        &config,
+        webserver_state.health_state.as_ref(),
+        &storage,
+        setup.lock_priority_policy,
+    )
+    .await
+    {
+        Ok(data) => data,
+        Err(AppError::ShutdownRequested) => {
+            tracing::info!("Shutdown requested during database load, exiting cleanly");
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
 
     if vehicle_data.databases.is_empty() && config.database.exit_no_database_loaded {
         return Err(AppError::ResourceError(
@@ -380,7 +385,7 @@ where
 
 /// Run the CDA from parsed CLI arguments.
 ///
-/// Uses the default security plugin and the default runtime update plugin.
+/// Uses the default security, lock-priority, and runtime update plugins.
 /// To customize startup behavior, use [`run_with_ext`] instead.
 ///
 /// # Errors
@@ -403,7 +408,7 @@ pub async fn run(args: AppArgs) -> Result<(), AppError> {
 
 /// Start the CDA runtime from a prepared configuration.
 ///
-/// Uses the default security plugin and the default runtime update plugin.
+/// Uses the default security, lock-priority, and runtime update plugins.
 /// To customize startup behavior, use [`run_with_ext_from_config`] instead.
 ///
 /// # Errors
@@ -561,6 +566,7 @@ pub async fn load_vehicle_data<S: SecurityPlugin>(
     config: &Configuration,
     health: Option<&cda_health::HealthState>,
     storage: &LocalStorage,
+    lock_priority_policy: Arc<dyn LockPriorityPolicy>,
 ) -> Result<VehicleData<S>, AppError> {
     let mdd_paths: Vec<PathBuf> = {
         let paths = resolve_mdd_paths(storage, &config.database.seed_dir).await;
@@ -616,7 +622,10 @@ pub async fn load_vehicle_data<S: SecurityPlugin>(
     Ok(VehicleData {
         diagnostic_gateway: gateway,
         file_managers: prepared.file_managers.clone(),
-        locks: Arc::new(Locks::new(Vec::new())),
+        locks: Arc::new(Locks::new_with_config_and_policy(
+            config.locks.clone(),
+            lock_priority_policy,
+        )),
         databases: Arc::clone(&prepared.databases),
         health_providers,
         prepared,

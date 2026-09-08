@@ -29,6 +29,7 @@ use cda_interfaces::{
         ComParams, ComponentsConfig, FaultConfig, FlatbBufConfig, SdBoolMappings,
         SdMappingsTruthyValue,
     },
+    lock_config::LockConfig,
 };
 pub use cda_interfaces::{
     TransportType,
@@ -107,6 +108,8 @@ pub struct Configuration {
     pub runtime_update_config: RuntimeUpdateConfig,
     /// Diagnostic communication initialization and post-update behavior.
     pub communication: CommunicationSettings,
+    /// Lock priority behavior and limits.
+    pub locks: LockConfig,
     /// Strict-mode validation flags.
     pub strict: StrictConfig,
 }
@@ -190,6 +193,7 @@ impl Default for Configuration {
             ecu: HashMap::default(),
             runtime_update_config: RuntimeUpdateConfig::default(),
             communication: CommunicationSettings::default(),
+            locks: LockConfig::default(),
             strict: StrictConfig::default(),
         }
     }
@@ -305,6 +309,24 @@ impl ConfigSanity for Configuration {
         self.validate_can_mappings()?;
         self.validate_transport_overrides()?;
 
+        if self.locks.priority_policy_timeout_ms == 0 {
+            return Err(ConfigSanityError::InvalidValue {
+                field: "locks.priority_policy_timeout_ms".to_owned(),
+                reason: "Value must be greater than zero".to_owned(),
+            });
+        }
+        if self.locks.priority_lifecycle_timeout_ms == 0 {
+            return Err(ConfigSanityError::InvalidValue {
+                field: "locks.priority_lifecycle_timeout_ms".to_owned(),
+                reason: "Value must be greater than zero".to_owned(),
+            });
+        }
+        if self.locks.priority_lifecycle_queue_capacity == 0 {
+            return Err(ConfigSanityError::InvalidValue {
+                field: "locks.priority_lifecycle_queue_capacity".to_owned(),
+                reason: "Value must be greater than zero".to_owned(),
+            });
+        }
         // Add more checks for Configuration fields here if needed
         Ok(())
     }
@@ -312,7 +334,9 @@ impl ConfigSanity for Configuration {
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::datatypes::DiagnosticServiceAffixPosition;
+    use cda_interfaces::{
+        datatypes::DiagnosticServiceAffixPosition, lock_config::LockExclusivityPolicy,
+    };
     use figment::{
         Figment,
         providers::{Format, Serialized, Toml},
@@ -352,6 +376,13 @@ nack_number_of_retries.name = "CP_TEST"
 [functional_description]
 description_database = "teapot"
 
+[locks]
+lock_exclusivity_policy = "NON_EXCLUSIVE_BY_DEFAULT"
+priority_policy_timeout_ms = 750
+priority_policy_stale_retries = 2
+priority_lifecycle_timeout_ms = 500
+priority_lifecycle_queue_capacity = 32
+
 "#;
 
         let figment = Figment::from(Serialized::defaults(Configuration::default()))
@@ -390,6 +421,14 @@ description_database = "teapot"
             config.database.naming_convention.long_name_affix_position,
             DiagnosticServiceAffixPosition::Prefix,
         );
+        assert_eq!(
+            config.locks.lock_exclusivity_policy,
+            LockExclusivityPolicy::NonExclusiveByDefault
+        );
+        assert_eq!(config.locks.priority_policy_timeout_ms, 750);
+        assert_eq!(config.locks.priority_policy_stale_retries, 2);
+        assert_eq!(config.locks.priority_lifecycle_timeout_ms, 500);
+        assert_eq!(config.locks.priority_lifecycle_queue_capacity, 32);
 
         assert_eq!(
             config
