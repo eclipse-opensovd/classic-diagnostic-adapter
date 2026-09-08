@@ -48,6 +48,7 @@ use crate::lifecycle::{
 
 /// Default communication plugin: applies `init_mode` policy on top of the
 /// framework-serialized lifecycle handle.
+/// [[ dimpl~default-communication-policy, Default deferred communication policy, dimpl ]]
 pub struct DefaultCommunicationPlugin {
     handle: CommunicationHandle,
     mode: CommunicationInitMode,
@@ -227,6 +228,7 @@ mod tests {
 
     /// Both admitting modes bring the transport up for the cause they admit.
     /// `Disabled` refuses, covered separately below.
+    /// [[ test~deferred-admitting-modes-activate, Eager and on-demand modes admit communication activation, test ]]
     #[tokio::test]
     async fn admitting_modes_activate_the_transport() {
         for (mode, cause) in [
@@ -245,6 +247,7 @@ mod tests {
 
     /// Ordinary `activate()` in `Disabled` mode is rejected without any network
     /// activity. The transport must never see an `enable()` call.
+    /// [[ test~deferred-disabled-rejects-activation, Disabled mode rejects communication activation, test ]]
     #[tokio::test]
     async fn disabled_mode_activate_rejected_without_network_activity() {
         let (plugin, control, _handle) = plugin_with_mode(CommunicationInitMode::Disabled);
@@ -260,6 +263,38 @@ mod tests {
             "Disabled mode must not touch the transport on an ordinary activate()"
         );
         assert_eq!(plugin.state(), CommunicationState::Disabled);
+    }
+
+    /// [[ test~deferred-request-activation-policy, Nonblocking activation follows the configured initialization mode, test ]]
+    #[tokio::test]
+    async fn request_activate_follows_init_mode() {
+        for mode in [
+            CommunicationInitMode::Always,
+            CommunicationInitMode::OnDemand,
+        ] {
+            let (plugin, control, handle) = plugin_with_mode(mode);
+            assert!(matches!(
+                plugin.request_activate(ActivationCause::DiagnosticRequest),
+                CommunicationState::Enabling(CommunicationOperation::EnableAndDetect)
+                    | CommunicationState::Enabled
+            ));
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while handle.state() != CommunicationState::Enabled {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("activation did not complete");
+            assert_eq!(control.enables.load(Ordering::Relaxed), 1, "{mode:?}");
+        }
+
+        let (plugin, control, _handle) = plugin_with_mode(CommunicationInitMode::Disabled);
+        assert_eq!(
+            plugin.request_activate(ActivationCause::DiagnosticRequest),
+            CommunicationState::Disabled
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(control.enables.load(Ordering::Relaxed), 0);
     }
 
     /// `trigger_detection()` never brings a transport up, so `Disabled` mode is

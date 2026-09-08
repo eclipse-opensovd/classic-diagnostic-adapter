@@ -376,6 +376,7 @@ where
 /// leave it uninitialized, with HTTP/SOVD already served by the routes registered
 /// beforehand. Under `OnDemand` an explicit `activate()` or a qualifying ECU request
 /// initializes it. The default plugin offers no activation path under `Disabled`.
+/// [[ dimpl~deferred-communication-startup, Deferred communication startup wiring, dimpl ]]
 async fn activate_communication_per_init_mode(
     plugin: &Arc<dyn CommunicationPlugin>,
     init_mode: CommunicationInitMode,
@@ -537,9 +538,20 @@ where
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::runtime_update_api::{
-        BulkDataCreatedList, BulkDataList, ExecutionMode, RuntimeFilesQuery,
-        RuntimeFilesUpdatePlugin, RuntimeUpdateError, UpdateExecution,
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use cda_interfaces::{
+        communication_control::{
+            CommControlError, CommunicationState, TransportControl, TransportState,
+        },
+        runtime_update_api::{
+            BulkDataCreatedList, BulkDataList, ExecutionMode, RuntimeFilesQuery,
+            RuntimeFilesUpdatePlugin, RuntimeUpdateError, UpdateExecution,
+        },
+    };
+    use cda_plugin_communication_management::{
+        lifecycle::build_communication_runtime, plugin::default::DefaultCommunicationPluginBuilder,
     };
     use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 
@@ -608,6 +620,54 @@ mod tests {
     }
 
     type TestSetup = Setup<DefaultSecurityPluginData, DefaultSecurityPlugin>;
+
+    struct NoopTransport;
+
+    #[async_trait]
+    impl TransportControl for NoopTransport {
+        async fn enable(&self) -> Result<(), CommControlError> {
+            Ok(())
+        }
+
+        async fn disable(&self) -> Result<(), CommControlError> {
+            Ok(())
+        }
+
+        async fn state(&self) -> TransportState {
+            TransportState::Disabled
+        }
+    }
+
+    /// [[ test~deferred-startup-policy, Startup activates communication only in Always mode, test ]]
+    #[tokio::test]
+    async fn startup_activation_follows_init_mode() {
+        for (mode, expected) in [
+            (CommunicationInitMode::Always, CommunicationState::Enabled),
+            (
+                CommunicationInitMode::OnDemand,
+                CommunicationState::Disabled,
+            ),
+            (
+                CommunicationInitMode::Disabled,
+                CommunicationState::Disabled,
+            ),
+        ] {
+            let runtime = build_communication_runtime(
+                DefaultCommunicationPluginBuilder,
+                Arc::new(NoopTransport),
+                mode,
+                VariantDetectionMode::Always,
+            )
+            .await
+            .unwrap();
+
+            activate_communication_per_init_mode(&runtime.plugin, mode)
+                .await
+                .unwrap();
+            assert_eq!(runtime.plugin.state(), expected, "{mode:?}");
+            runtime.plugin.shutdown().await;
+        }
+    }
 
     #[test]
     fn documented_public_api_type_checks() {
