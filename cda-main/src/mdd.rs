@@ -743,17 +743,7 @@ mod tests {
             ("ecu_b.mdd", b"MDD_CONTENT_B"),
         ]);
 
-        seed_storage_if_nonexistent_from_mdd_files(
-            fixture.storage_dir.path().to_str().unwrap(),
-            &fixture.mdd_files,
-        )
-        .await;
-
-        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
-        let collection = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
+        let collection = fixture.seeded_diagnostic_collection().await;
 
         let mut keys = collection.list().await.unwrap();
         keys.sort();
@@ -779,18 +769,8 @@ mod tests {
         tx.commit().await.unwrap();
         drop(storage);
 
-        seed_storage_if_nonexistent_from_mdd_files(
-            fixture.storage_dir.path().to_str().unwrap(),
-            &fixture.mdd_files,
-        )
-        .await;
-
         // Verify collection was NOT modified.
-        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
-        let collection = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
+        let collection = fixture.diagnostic_collection().await;
         let keys = collection.list().await.unwrap();
         assert_eq!(keys, vec!["existing.mdd"]);
     }
@@ -807,17 +787,7 @@ mod tests {
             .unwrap();
         drop(storage);
 
-        seed_storage_if_nonexistent_from_mdd_files(
-            fixture.storage_dir.path().to_str().unwrap(),
-            &fixture.mdd_files,
-        )
-        .await;
-
-        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
-        let collection = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
+        let collection = fixture.diagnostic_collection().await;
         assert!(collection.is_empty().await.unwrap());
     }
 
@@ -825,17 +795,7 @@ mod tests {
     async fn seed_handles_no_database_files() {
         let fixture = Fixture::new_with_mdd_files(&[]);
 
-        seed_storage_if_nonexistent_from_mdd_files(
-            fixture.storage_dir.path().to_str().unwrap(),
-            &fixture.mdd_files,
-        )
-        .await;
-
-        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
-        let collection = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
+        let collection = fixture.seeded_diagnostic_collection().await;
         assert!(collection.is_empty().await.unwrap());
     }
 
@@ -843,17 +803,7 @@ mod tests {
     async fn seed_lowercases_mdd_filenames_as_keys() {
         let fixture = Fixture::new_with_mdd_files(&[("ECU_UPPER.mdd", b"UPPER_DATA")]);
 
-        seed_storage_if_nonexistent_from_mdd_files(
-            fixture.storage_dir.path().to_str().unwrap(),
-            &fixture.mdd_files,
-        )
-        .await;
-
-        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
-        let collection = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
+        let collection = fixture.seeded_diagnostic_collection().await;
         let keys = collection.list().await.unwrap();
         assert_eq!(keys, vec!["ecu_upper.mdd"]);
     }
@@ -863,17 +813,7 @@ mod tests {
         let original_data = b"MDD_BINARY_PAYLOAD_1234567890";
         let fixture = Fixture::new_with_mdd_files(&[("FLXC1000.mdd", original_data)]);
 
-        seed_storage_if_nonexistent_from_mdd_files(
-            fixture.storage_dir.path().to_str().unwrap(),
-            &fixture.mdd_files,
-        )
-        .await;
-
-        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
-        let collection = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
+        let collection = fixture.seeded_diagnostic_collection().await;
 
         let stored_path = collection.file_path("flxc1000.mdd").unwrap();
         let stored_data = std::fs::read(&stored_path).expect("read stored file");
@@ -911,7 +851,7 @@ mod tests {
         let storage_str = fixture.storage_dir.path().to_str().unwrap();
         let db_str = fixture.db_dir.path().to_str().unwrap();
 
-        seed_storage_if_nonexistent_from_mdd_files(storage_str, &fixture.mdd_files).await;
+        fixture.seeded_diagnostic_collection().await;
         let paths = resolve_mdd_paths(storage_str, db_str).await;
 
         assert_eq!(paths.len(), 2, "Expected 2 MDD paths from storage");
@@ -932,12 +872,7 @@ mod tests {
         let storage_str = fixture.storage_dir.path().to_str().unwrap();
 
         // An existing collection is authoritative, so an emptied one must not be reseeded.
-        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
-        storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
-        drop(storage);
+        fixture.diagnostic_collection().await;
 
         let paths = resolve_mdd_paths(storage_str, fixture.db_dir.path().to_str().unwrap()).await;
         assert!(paths.is_empty(), "Expected no MDD paths, got {paths:?}");
@@ -995,6 +930,23 @@ mod tests {
                 storage_dir,
                 db_dir,
             }
+        }
+
+        async fn diagnostic_collection(&self) -> Arc<cda_storage::LocalCollection> {
+            let storage = LocalStorage::new(self.storage_dir.path()).unwrap();
+            storage
+                .get_or_create_collection(&CollectionName::DiagnosticDatabase)
+                .await
+                .unwrap()
+        }
+
+        async fn seeded_diagnostic_collection(&self) -> Arc<cda_storage::LocalCollection> {
+            seed_storage_if_nonexistent_from_mdd_files(
+                self.storage_dir.path().to_str().unwrap(),
+                &self.mdd_files,
+            )
+            .await;
+            self.diagnostic_collection().await
         }
     }
 }
