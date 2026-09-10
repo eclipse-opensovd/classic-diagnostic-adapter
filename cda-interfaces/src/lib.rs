@@ -40,6 +40,7 @@ mod ecuuds;
 pub use ecuuds::*;
 pub mod health;
 pub mod http_protection;
+pub mod lifecycle;
 pub mod lock_config;
 pub mod lock_priority_api;
 pub mod mdd_chunks;

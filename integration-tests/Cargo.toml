@@ -24,6 +24,8 @@ workspace = true
 [dependencies]
 # internal dependencies
 cda-interfaces = { workspace = true }
+cda-plugin-communication-management = { workspace = true }
+cda-plugin-security = { workspace = true }
 cda-sovd = { workspace = true }
 sovd-interfaces = { workspace = true }
 cda-tracing = { workspace = true }
@@ -31,6 +33,8 @@ cda-health = { workspace = true }
 opensovd_cda_lib = { workspace = true, features = ["integration-tests"] }
 
 # External dependencies
+# async traits
+async-trait = { workspace = true }
 # tokio
 tokio = { workspace = true, features = ["rt", "sync", "io-util", "time", "signal"] }
 # serde

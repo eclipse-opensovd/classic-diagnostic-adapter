@@ -42,9 +42,12 @@ use tower_http::{normalize_path::NormalizePathLayer, trace::TraceLayer};
 
 /// Public API surface re-exported from the crate-internal `sovd` module.
 pub use crate::sovd::{
-    SovdIdentities, SovdLockStateView, SovdRegistry, SovdRegistryView, error::VendorErrorCode,
-    locks::Locks, new_sovd_lock_state, request_guard::install_http_restriction_guard,
-    static_data::add_static_data_endpoint,
+    SovdIdentities, SovdLockStateView, SovdRegistry, SovdRegistrySnapshot, SovdRegistryView,
+    error::VendorErrorCode,
+    locks::Locks,
+    new_sovd_lock_state,
+    request_guard::install_http_restriction_guard,
+    static_data::{StaticData, add_static_data_endpoint},
 };
 pub mod dynamic_router;
 mod openapi;
@@ -87,21 +90,21 @@ pub struct VehicleResources<T> {
 /// Launches the http(s) webserver with deferred initialization
 ///
 /// The server starts immediately with static endpoints. SOVD routes and other functionality
-/// can be added later by calling methods on the returned `DynamicRouter`.
+/// can be added later by calling methods on the supplied `DynamicRouter`.
 ///
 /// # Errors
 /// Will return `Err` in case that the webserver couldn't be launched.
 /// This can be caused due to invalid config, ports or addresses already being in use.
 ///
-#[tracing::instrument(skip(config, shutdown_signal))]
+#[tracing::instrument(skip(dynamic_router, config, shutdown_signal))]
 pub async fn launch_webserver<F>(
+    dynamic_router: DynamicRouter,
     config: WebServerConfig,
     shutdown_signal: F,
-) -> Result<(DynamicRouter, tokio::task::JoinHandle<()>), DoipGatewaySetupError>
+) -> Result<tokio::task::JoinHandle<()>, DoipGatewaySetupError>
 where
     F: Future<Output = ()> + Clone + Send + 'static,
 {
-    let dynamic_router = DynamicRouter::new();
     let dynamic_router_for_service = dynamic_router.clone();
     let service = tower::service_fn(move |request: Request<axum::body::Body>| {
         let dr = dynamic_router_for_service.clone();
@@ -159,7 +162,7 @@ where
 
     let webserver_task = cda_interfaces::spawn_named!("webserver", serve_future);
 
-    Ok((dynamic_router, webserver_task))
+    Ok(webserver_task)
 }
 
 /// Removes a pre-existing file at `socket_path`, if any, so that binding a
@@ -636,7 +639,7 @@ mod webserver_bind_tests {
         let (_dir, socket_path, config) = temp_socket_config();
         let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
-        let (_dynamic_router, webserver_task) = launch_webserver(config, shutdown_signal)
+        let webserver_task = launch_webserver(DynamicRouter::new(), config, shutdown_signal)
             .await
             .expect("failed to launch webserver on unix socket");
 
@@ -658,7 +661,7 @@ mod webserver_bind_tests {
         };
         let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
-        let (_dynamic_router, webserver_task) = launch_webserver(config, shutdown_signal)
+        let webserver_task = launch_webserver(DynamicRouter::new(), config, shutdown_signal)
             .await
             .expect("failed to launch webserver on tcp");
 
@@ -687,7 +690,7 @@ mod webserver_bind_tests {
 
         let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
-        let (_dynamic_router, webserver_task) = launch_webserver(config, shutdown_signal)
+        let webserver_task = launch_webserver(DynamicRouter::new(), config, shutdown_signal)
             .await
             .expect("failed to launch webserver despite stale socket file");
 
@@ -704,7 +707,7 @@ mod webserver_bind_tests {
 
         let (_shutdown_tx, shutdown_signal) = shutdown_channel();
 
-        let result = launch_webserver(config, shutdown_signal).await;
+        let result = launch_webserver(DynamicRouter::new(), config, shutdown_signal).await;
         assert!(
             result.is_err(),
             "expected launch_webserver to fail when the stale socket path is a directory"

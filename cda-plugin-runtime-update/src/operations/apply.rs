@@ -12,7 +12,7 @@
  */
 
 use cda_interfaces::{
-    runtime_update_api::{RejectedSetDisposition, RuntimeReloaderPlugin, RuntimeUpdateError},
+    runtime_update_api::RuntimeUpdateError,
     storage_api::{CollectionName, Storage, Transaction},
 };
 
@@ -36,17 +36,12 @@ async fn swap_collection<S: Storage>(
 /// The 'apply' performs a **snapshot swap**: the entire `NextUpdate` collection replaces the
 /// current collection. Files absent from `NextUpdate` are removed from current.
 ///
-/// # Parameters
-/// - `storage`: The storage backend.
-/// - `reload_handler`: Notified after commit so the runtime can hot-reload databases.
+/// Storage only: the dispatch that drives this loads the applied files into the
+/// running runtime afterwards, and restores them when that load fails.
 ///
 /// # Errors
-/// Returns [`RuntimeUpdateError`] if validation, a storage transaction, or the runtime reload
-/// fails.
-pub async fn execute_apply<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
-    storage: &S,
-    reload_handler: &R,
-) -> Result<(), RuntimeUpdateError> {
+/// Returns [`RuntimeUpdateError`] if validation or the storage transaction fails.
+pub async fn execute_apply<S: Storage>(storage: &S) -> Result<(), RuntimeUpdateError> {
     let mdd_next =
         try_get_collection(storage, &CollectionName::DiagnosticDatabaseNextUpdate).await?;
     if mdd_next.is_none() {
@@ -76,12 +71,6 @@ pub async fn execute_apply<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
     }
 
     tx.commit().await?;
-
-    crate::operations::rollback::reload_after_database_swap(
-        reload_handler,
-        RejectedSetDisposition::Restage,
-    )
-    .await?;
     Ok(())
 }
 
@@ -95,9 +84,7 @@ mod tests {
     };
 
     use super::execute_apply;
-    use crate::test_utils::{
-        NoopReloadHandler, RecordingReloadHandler, init_collection, make_storage,
-    };
+    use crate::test_utils::{init_collection, make_storage};
 
     #[tokio::test]
     async fn apply_updates_current_and_creates_backup() {
@@ -119,7 +106,7 @@ mod tests {
         )
         .await;
 
-        execute_apply(&storage, &NoopReloadHandler).await.unwrap();
+        execute_apply(&storage).await.unwrap();
 
         // Current should have new data
         let db_col = storage
@@ -154,7 +141,7 @@ mod tests {
     async fn apply_empty_nextupdate_returns_no_pending_update() {
         let (storage, _dir) = make_storage();
 
-        let result = execute_apply(&storage, &NoopReloadHandler).await;
+        let result = execute_apply(&storage).await;
 
         assert!(
             matches!(result, Err(RuntimeUpdateError::NoPendingUpdate)),
@@ -184,7 +171,7 @@ mod tests {
         )
         .await;
 
-        execute_apply(&storage, &NoopReloadHandler).await.unwrap();
+        execute_apply(&storage).await.unwrap();
 
         // Current should have all new files
         let db_col = storage
@@ -216,24 +203,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_calls_reload_databases() {
-        let (storage, _dir) = make_storage();
-
-        init_collection(
-            &storage,
-            &CollectionName::DiagnosticDatabaseNextUpdate,
-            &[("ecu1.mdd", b"data")],
-        )
-        .await;
-
-        let handler = RecordingReloadHandler::new();
-        execute_apply(&storage, &handler).await.unwrap();
-
-        let calls = handler.reload_calls.lock().unwrap();
-        assert_eq!(calls.len(), 1, "reload_databases should be called once");
-    }
-
-    #[tokio::test]
     async fn apply_empty_mdd_nextupdate_clears_diagnostic_database() {
         let (storage, _dir) = make_storage();
 
@@ -251,7 +220,7 @@ mod tests {
             .await
             .unwrap();
 
-        execute_apply(&storage, &NoopReloadHandler).await.unwrap();
+        execute_apply(&storage).await.unwrap();
 
         // DiagnosticDatabase should now be empty (snapshot swap from empty NextUpdate)
         let db_col = storage
@@ -297,7 +266,7 @@ mod tests {
         )
         .await;
 
-        execute_apply(&storage, &NoopReloadHandler).await.unwrap();
+        execute_apply(&storage).await.unwrap();
 
         let db_col = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)

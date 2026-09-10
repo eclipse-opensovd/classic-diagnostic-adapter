@@ -1034,8 +1034,19 @@ pub(crate) fn bind_address() -> String {
 
 /// Waits until the CDA reports ready on `/health/ready`.
 pub(crate) async fn wait_for_cda_online(cfg: &ServerTransport) -> Result<(), TestingError> {
+    wait_for_cda_online_within(cfg, Duration::from_secs(10)).await
+}
+
+/// Waits until the CDA reports ready on `/health/ready`, for at most `timeout`.
+///
+/// For a CDA that does not run in a container, e.g. a debug build in the test process, which
+/// reads the databases far slower than the release image.
+pub(crate) async fn wait_for_cda_online_within(
+    cfg: &ServerTransport,
+    timeout: Duration,
+) -> Result<(), TestingError> {
     let url = format!("http://{}:{}/health/ready", cfg.address(), cfg.port());
-    wait_for_http(&url, Some(StatusCode::NO_CONTENT), Duration::from_secs(10)).await
+    wait_for_http(&url, Some(StatusCode::NO_CONTENT), timeout).await
 }
 
 pub(crate) fn find_available_tcp_port(listen_address: &str) -> Result<u16, TestingError> {
