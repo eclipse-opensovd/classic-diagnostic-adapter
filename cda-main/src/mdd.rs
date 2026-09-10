@@ -18,14 +18,14 @@ use std::{
 };
 
 use cda_core::{EcuManager, EcuManagerConfig};
-use cda_database::{EmbeddedFileStore, ProtoLoadConfig, update_mdd_uncompressed};
+use cda_database::{EmbeddedFileStore, ProtoLoadConfig};
 use cda_interfaces::{
     EcuAddresses, EcuManager as EcuManagerTrait, EcuManagerType, FunctionalDescriptionConfig,
     HashMap, HashMapEntry, HashMapExtensions, HashSet, Protocol,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     health::HealthProvider,
     mdd_chunks::{Chunk, ChunkType},
-    runtime_update_api::ReloadError,
+    runtime_update_api::{DatabaseValidator, ReloadError},
     storage_api::{Collection, CollectionName, DirectFileAccess, Storage},
 };
 use cda_plugin_security::SecurityPlugin;
@@ -156,13 +156,14 @@ fn get_mdd_files_and_size(files: ReadDir) -> Vec<(PathBuf, u64)> {
 /// # Errors
 /// Returns [`DatabaseLoadError`] if any database file fails to parse or initialize.
 #[tracing::instrument(
-    skip(config, mdd_paths, db_health_provider),
+    skip(config, mdd_paths, db_health_provider, database_validator),
     fields(database_count = mdd_paths.len())
 )]
 pub async fn load_databases<S: SecurityPlugin>(
     config: &Configuration,
     mdd_paths: &[PathBuf],
     db_health_provider: Option<&Arc<dyn HealthProvider>>,
+    database_validator: &dyn DatabaseValidator,
 ) -> Result<DatabaseMap<S>, DatabaseLoadError> {
     if let Some(provider) = db_health_provider {
         provider.set_status(cda_health::Status::Starting).await;
@@ -180,20 +181,25 @@ pub async fn load_databases<S: SecurityPlugin>(
     let mut loaded_ecus: LoadedEcuMap<S> = HashMap::new();
 
     for path in mdd_paths {
-        let (ecu_name, ecu_manager) =
-            match load_single_mdd::<S>(path, config, &ecu_config_map, &protocol) {
-                Ok(result) => result,
-                Err(e) if config.database.ignore_invalid_mdd => {
-                    tracing::warn!(path = %path.display(), error = %e, "Skipping invalid MDD file");
-                    continue;
+        let (ecu_name, ecu_manager) = match load_single_mdd::<S>(
+            path,
+            config,
+            &ecu_config_map,
+            &protocol,
+            database_validator,
+        ) {
+            Ok(result) => result,
+            Err(e) if config.database.ignore_invalid_mdd => {
+                tracing::warn!(path = %path.display(), error = %e, "Skipping invalid MDD file");
+                continue;
+            }
+            Err(e) => {
+                if let Some(provider) = db_health_provider {
+                    provider.set_status(cda_health::Status::Failed).await;
                 }
-                Err(e) => {
-                    if let Some(provider) = db_health_provider {
-                        provider.set_status(cda_health::Status::Failed).await;
-                    }
-                    return Err(DatabaseLoadError::Data(e.to_string()));
-                }
-            };
+                return Err(DatabaseLoadError::Data(e.to_string()));
+            }
+        };
 
         let mdd_path = path.to_str().unwrap_or_default().to_owned();
         insert_or_update_ecu(
@@ -609,6 +615,7 @@ fn load_single_mdd<S: SecurityPlugin>(
     config: &Configuration,
     ecu_config_map: &HashMap<String, EcuConfig>,
     protocol: &Protocol,
+    database_validator: &dyn DatabaseValidator,
 ) -> Result<(String, EcuManager<S>), MddLoadingError> {
     let mdd_path =
         path.to_str()
@@ -618,10 +625,17 @@ fn load_single_mdd<S: SecurityPlugin>(
                 reason: "Failed to convert path to string".to_string(),
             })?;
 
+    database_validator
+        .check_integrity(path)
+        .map_err(|error| MddLoadingError::LoadFailed {
+            path: mdd_path.clone(),
+            reason: error.to_string(),
+        })?;
+
     // Ensure the MDD file contains uncompressed data (rewrite on first
     // use), so that subsequent loads skip LZMA decompression.
     if config.flat_buf.mdd_decompress
-        && let Err(e) = update_mdd_uncompressed(&mdd_path)
+        && let Err(e) = cda_database::update_mdd_uncompressed(&mdd_path)
     {
         return Err(MddLoadingError::DecompressFailed {
             path: mdd_path,
@@ -729,17 +743,7 @@ mod tests {
             ("ecu_b.mdd", b"MDD_CONTENT_B"),
         ]);
 
-        seed_storage_if_nonexistent_from_mdd_files(
-            fixture.storage_dir.path().to_str().unwrap(),
-            &fixture.mdd_files,
-        )
-        .await;
-
-        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
-        let collection = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
+        let collection = fixture.seeded_diagnostic_collection().await;
 
         let mut keys = collection.list().await.unwrap();
         keys.sort();
@@ -765,18 +769,8 @@ mod tests {
         tx.commit().await.unwrap();
         drop(storage);
 
-        seed_storage_if_nonexistent_from_mdd_files(
-            fixture.storage_dir.path().to_str().unwrap(),
-            &fixture.mdd_files,
-        )
-        .await;
-
         // Verify collection was NOT modified.
-        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
-        let collection = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
+        let collection = fixture.diagnostic_collection().await;
         let keys = collection.list().await.unwrap();
         assert_eq!(keys, vec!["existing.mdd"]);
     }
@@ -793,17 +787,7 @@ mod tests {
             .unwrap();
         drop(storage);
 
-        seed_storage_if_nonexistent_from_mdd_files(
-            fixture.storage_dir.path().to_str().unwrap(),
-            &fixture.mdd_files,
-        )
-        .await;
-
-        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
-        let collection = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
+        let collection = fixture.diagnostic_collection().await;
         assert!(collection.is_empty().await.unwrap());
     }
 
@@ -811,17 +795,7 @@ mod tests {
     async fn seed_handles_no_database_files() {
         let fixture = Fixture::new_with_mdd_files(&[]);
 
-        seed_storage_if_nonexistent_from_mdd_files(
-            fixture.storage_dir.path().to_str().unwrap(),
-            &fixture.mdd_files,
-        )
-        .await;
-
-        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
-        let collection = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
+        let collection = fixture.seeded_diagnostic_collection().await;
         assert!(collection.is_empty().await.unwrap());
     }
 
@@ -829,17 +803,7 @@ mod tests {
     async fn seed_lowercases_mdd_filenames_as_keys() {
         let fixture = Fixture::new_with_mdd_files(&[("ECU_UPPER.mdd", b"UPPER_DATA")]);
 
-        seed_storage_if_nonexistent_from_mdd_files(
-            fixture.storage_dir.path().to_str().unwrap(),
-            &fixture.mdd_files,
-        )
-        .await;
-
-        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
-        let collection = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
+        let collection = fixture.seeded_diagnostic_collection().await;
         let keys = collection.list().await.unwrap();
         assert_eq!(keys, vec!["ecu_upper.mdd"]);
     }
@@ -849,17 +813,7 @@ mod tests {
         let original_data = b"MDD_BINARY_PAYLOAD_1234567890";
         let fixture = Fixture::new_with_mdd_files(&[("FLXC1000.mdd", original_data)]);
 
-        seed_storage_if_nonexistent_from_mdd_files(
-            fixture.storage_dir.path().to_str().unwrap(),
-            &fixture.mdd_files,
-        )
-        .await;
-
-        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
-        let collection = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
+        let collection = fixture.seeded_diagnostic_collection().await;
 
         let stored_path = collection.file_path("flxc1000.mdd").unwrap();
         let stored_data = std::fs::read(&stored_path).expect("read stored file");
@@ -897,7 +851,7 @@ mod tests {
         let storage_str = fixture.storage_dir.path().to_str().unwrap();
         let db_str = fixture.db_dir.path().to_str().unwrap();
 
-        seed_storage_if_nonexistent_from_mdd_files(storage_str, &fixture.mdd_files).await;
+        fixture.seeded_diagnostic_collection().await;
         let paths = resolve_mdd_paths(storage_str, db_str).await;
 
         assert_eq!(paths.len(), 2, "Expected 2 MDD paths from storage");
@@ -918,12 +872,7 @@ mod tests {
         let storage_str = fixture.storage_dir.path().to_str().unwrap();
 
         // An existing collection is authoritative, so an emptied one must not be reseeded.
-        let storage = LocalStorage::new(fixture.storage_dir.path()).unwrap();
-        storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
-        drop(storage);
+        fixture.diagnostic_collection().await;
 
         let paths = resolve_mdd_paths(storage_str, fixture.db_dir.path().to_str().unwrap()).await;
         assert!(paths.is_empty(), "Expected no MDD paths, got {paths:?}");
@@ -981,6 +930,23 @@ mod tests {
                 storage_dir,
                 db_dir,
             }
+        }
+
+        async fn diagnostic_collection(&self) -> Arc<cda_storage::LocalCollection> {
+            let storage = LocalStorage::new(self.storage_dir.path()).unwrap();
+            storage
+                .get_or_create_collection(&CollectionName::DiagnosticDatabase)
+                .await
+                .unwrap()
+        }
+
+        async fn seeded_diagnostic_collection(&self) -> Arc<cda_storage::LocalCollection> {
+            seed_storage_if_nonexistent_from_mdd_files(
+                self.storage_dir.path().to_str().unwrap(),
+                &self.mdd_files,
+            )
+            .await;
+            self.diagnostic_collection().await
         }
     }
 }

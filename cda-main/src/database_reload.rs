@@ -16,7 +16,9 @@ use async_trait::async_trait;
 use cda_interfaces::{
     HashMap, ReloadComponent, VariantDetectionSender,
     health::HealthProvider,
-    runtime_update_api::{ApplicationUpdatePreparation, ReloadError, VehicleDatabaseLockUpdater},
+    runtime_update_api::{
+        ApplicationUpdatePreparation, DatabaseValidator, ReloadError, VehicleDatabaseLockUpdater,
+    },
 };
 use cda_plugin_security::SecurityPlugin;
 
@@ -35,6 +37,7 @@ where
 {
     health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
     variant_detection: VariantDetectionSender,
+    database_validator: Arc<dyn DatabaseValidator>,
     _phantom: std::marker::PhantomData<SP>,
 }
 
@@ -46,10 +49,12 @@ where
     pub fn new(
         health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
         variant_detection: VariantDetectionSender,
+        database_validator: Arc<dyn DatabaseValidator>,
     ) -> Self {
         Self {
             health_providers,
             variant_detection,
+            database_validator,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -62,6 +67,7 @@ where
             config,
             self.health_providers.as_ref(),
             self.variant_detection.clone(),
+            &*self.database_validator,
         )
         .await?)
     }

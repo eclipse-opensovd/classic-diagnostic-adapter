@@ -22,9 +22,10 @@ use cda_interfaces::{
     communication_control::{DisableCommunication, PostUpdateCommunicationMode},
     http_protection::registry::{HttpProtectionRegistry, HttpRouteMatcher},
     runtime_update_api::{
-        BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider, RuntimeFileCatalog,
-        RuntimeFileStore, RuntimeFilesQuery, RuntimeReloaderPlugin, RuntimeUpdateError,
-        RuntimeUpdateExecutor, RuntimeUpdateSecurityPlugin, UpdateExecution, UploadFile,
+        BulkDataCreatedList, BulkDataList, DatabaseValidator, ExecutionMode, LockStateProvider,
+        RuntimeFileCatalog, RuntimeFileStore, RuntimeFilesQuery, RuntimeReloaderPlugin,
+        RuntimeUpdateError, RuntimeUpdateExecutor, RuntimeUpdatePolicy, UpdateExecution,
+        UploadFile,
     },
     storage_api::Storage,
 };
@@ -46,24 +47,24 @@ use tokio::{sync::RwLock, task::JoinHandle};
 const UPDATE_SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
 /// Default implementation of [`RuntimeFileCatalog`], [`RuntimeFileStore`] and
-/// [`RuntimeUpdateExecutor`], with injectable security and storage.
+/// [`RuntimeUpdateExecutor`], with injectable policy and storage.
 pub struct DefaultRuntimeUpdatePlugin<
     Store: Storage,
-    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    UpdatePolicy: RuntimeUpdatePolicy<Lock, Store::CollectionHandle>,
     Lock: LockStateProvider,
 > {
     /// Access to the persistent storage layer (all mutations go through this)
     storage: Arc<Store>,
     /// Hot-reload notification handler
     reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
-    /// Security and file integrity handler
-    security_handler: Arc<UpdateSecurityPlugin>,
-    /// Lock state provider passed to security checks
+    /// Vehicle and lock state policy consulted before an execution proceeds
+    policy: Arc<UpdatePolicy>,
+    /// Lock state provider passed to the policy
     lock_provider: Arc<Lock>,
     /// Tracking map for in-progress executions: `exec_id` -> `DbUpdateExecution`
     executions: Arc<RwLock<HashMap<String, UpdateExecution>>>,
-    /// Format-specific reads (validate, revision, ECU name), so the plugin
-    /// carries no database format of its own.
+    /// Integrator-provided MDD integrity validation.
+    database_validator: Arc<dyn DatabaseValidator>,
     communication_disable: Arc<dyn DisableCommunication>,
     http_protections: HttpProtectionRegistry,
     update_exempt_routes: Vec<HttpRouteMatcher>,
@@ -84,17 +85,18 @@ pub struct DefaultRuntimeUpdatePlugin<
 
 impl<
     Store: Storage,
-    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    UpdatePolicy: RuntimeUpdatePolicy<Lock, Store::CollectionHandle>,
     Lock: LockStateProvider,
-> DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
+> DefaultRuntimeUpdatePlugin<Store, UpdatePolicy, Lock>
 {
     /// Creates a new plugin instance.
     ///
     /// # Arguments
     /// * `storage` - Persistent storage backend for update files
     /// * `reload_handler` - Notified after apply/rollback to hot-reload databases
-    /// * `security_handler` - Validates authorization and file integrity
-    /// * `lock_provider` - Provides lock state for security validation
+    /// * `policy` - Decides whether an execution may proceed given vehicle and lock state
+    /// * `lock_provider` - Provides lock state for the policy
+    /// * `database_validator` - Integrator-provided MDD integrity validation
     /// * `communication_disable` - Used to acquire exclusive transport disable ownership
     /// * `update_retry_after` - Retry-After duration while an update owns protection
     /// * `post_update_mode` - Communication state to restore after an update
@@ -106,8 +108,9 @@ impl<
     pub fn new(
         storage: Arc<Store>,
         reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
-        security_handler: Arc<UpdateSecurityPlugin>,
+        policy: Arc<UpdatePolicy>,
         lock_provider: Arc<Lock>,
+        database_validator: Arc<dyn DatabaseValidator>,
         communication_disable: Arc<dyn DisableCommunication>,
         http_protections: HttpProtectionRegistry,
         update_exempt_routes: Vec<HttpRouteMatcher>,
@@ -117,9 +120,10 @@ impl<
         Self {
             storage,
             reloader_plugin,
-            security_handler,
+            policy,
             lock_provider,
             executions: Arc::new(RwLock::new(HashMap::default())),
+            database_validator,
             communication_disable,
             http_protections,
             update_exempt_routes,
@@ -133,9 +137,9 @@ impl<
 #[async_trait]
 impl<
     Store: Storage + Send + Sync + 'static,
-    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    UpdatePolicy: RuntimeUpdatePolicy<Lock, Store::CollectionHandle>,
     Lock: LockStateProvider,
-> cda_interfaces::Shutdown for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
+> cda_interfaces::Shutdown for DefaultRuntimeUpdatePlugin<Store, UpdatePolicy, Lock>
 {
     /// Awaits an in-flight execution; never aborts one.
     ///
@@ -181,9 +185,9 @@ impl<
 #[async_trait]
 impl<
     Store: Storage + Send + Sync + 'static,
-    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    UpdatePolicy: RuntimeUpdatePolicy<Lock, Store::CollectionHandle>,
     Lock: LockStateProvider,
-> RuntimeFileCatalog for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
+> RuntimeFileCatalog for DefaultRuntimeUpdatePlugin<Store, UpdatePolicy, Lock>
 {
     async fn list_current(
         &self,
@@ -210,15 +214,15 @@ impl<
 #[async_trait]
 impl<
     Store: Storage + Send + Sync + 'static,
-    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    UpdatePolicy: RuntimeUpdatePolicy<Lock, Store::CollectionHandle>,
     Lock: LockStateProvider,
-> RuntimeFileStore for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
+> RuntimeFileStore for DefaultRuntimeUpdatePlugin<Store, UpdatePolicy, Lock>
 {
     async fn upload(
         &self,
         files: Vec<UploadFile>,
     ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
-        crate::storage::upload_files(&*self.storage, &*self.security_handler, files).await
+        crate::storage::upload_files(&*self.storage, &*self.database_validator, files).await
     }
 
     async fn delete_nextupdate(&self) -> Result<Vec<String>, RuntimeUpdateError> {
@@ -237,14 +241,14 @@ impl<
 #[async_trait]
 impl<
     Store: Storage + Send + Sync + 'static,
-    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    UpdatePolicy: RuntimeUpdatePolicy<Lock, Store::CollectionHandle>,
     Lock: LockStateProvider,
-> RuntimeUpdateExecutor for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock>
+> RuntimeUpdateExecutor for DefaultRuntimeUpdatePlugin<Store, UpdatePolicy, Lock>
 {
     async fn start_execution(&self, mode: ExecutionMode) -> Result<String, RuntimeUpdateError> {
         let params = crate::operations::executions::ExecutionParams {
             storage: &self.storage,
-            security_handler: &self.security_handler,
+            policy: &self.policy,
             reload_handler: &self.reloader_plugin,
             executions: &self.executions,
             communication_disable: &self.communication_disable,
@@ -253,6 +257,7 @@ impl<
             update_retry_after: self.update_retry_after,
             post_update_mode: self.post_update_mode.clone(),
             lock_state_provider: &*self.lock_provider,
+            database_validator: &self.database_validator,
             execution_supervisor: &self.execution_supervisor,
         };
         crate::operations::executions::start_execution(&params, mode).await
@@ -292,14 +297,14 @@ mod tests {
     use crate::{
         DefaultRuntimeUpdatePlugin,
         test_utils::{
-            MockLockProvider, MockSecurityHandler, NoopReloadHandler, StubTransport, make_storage,
+            MockLockProvider, MockUpdatePolicy, NoopReloadHandler, StubTransport, make_storage,
             make_upload_files, make_valid_config, readable_mdd_bytes, write_test_file,
         },
     };
 
     fn make_plugin(
         storage: LocalStorage,
-    ) -> DefaultRuntimeUpdatePlugin<LocalStorage, MockSecurityHandler, MockLockProvider> {
+    ) -> DefaultRuntimeUpdatePlugin<LocalStorage, MockUpdatePolicy, MockLockProvider> {
         let (plugin, _disable_comm) = make_state_with_lock(storage, Some("test-user"), false);
         plugin
     }
@@ -309,7 +314,7 @@ mod tests {
         owner: Option<&str>,
         has_conflicts: bool,
     ) -> (
-        DefaultRuntimeUpdatePlugin<LocalStorage, MockSecurityHandler, MockLockProvider>,
+        DefaultRuntimeUpdatePlugin<LocalStorage, MockUpdatePolicy, MockLockProvider>,
         Arc<dyn DisableCommunication>,
     ) {
         make_state_with_reloader(storage, owner, has_conflicts, Arc::new(NoopReloadHandler))
@@ -321,7 +326,7 @@ mod tests {
         has_conflicts: bool,
         reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
     ) -> (
-        DefaultRuntimeUpdatePlugin<LocalStorage, MockSecurityHandler, MockLockProvider>,
+        DefaultRuntimeUpdatePlugin<LocalStorage, MockUpdatePolicy, MockLockProvider>,
         Arc<dyn DisableCommunication>,
     ) {
         let transport = StubTransport::new();
@@ -331,11 +336,12 @@ mod tests {
         let plugin = DefaultRuntimeUpdatePlugin::new(
             Arc::new(storage),
             reloader_plugin,
-            Arc::new(MockSecurityHandler::new()),
+            Arc::new(MockUpdatePolicy::new()),
             Arc::new(MockLockProvider {
                 owner: owner.map(ToOwned::to_owned),
                 has_conflicts,
             }),
+            crate::test_utils::test_database_validator(),
             Arc::clone(&communication_disable),
             http_protections,
             Vec::new(),

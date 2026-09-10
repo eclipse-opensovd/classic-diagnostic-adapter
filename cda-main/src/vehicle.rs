@@ -24,8 +24,12 @@ use cda_comm_uds::{UdsManager, VehicleEcuData, state_coordinator::EcuStateCoordi
 use cda_core::EcuManager;
 use cda_interfaces::{
     EcuRuntimeState, HashMap, HashMapExtensions, HashSet, ReloadComponent, Reloadable,
-    VariantDetectionReceiver, VariantDetectionSender, communication_control::CommunicationAccess,
-    dlt_ctx, ecu_data::EcuData, health::HealthProvider, runtime_update_api::ReloadError,
+    VariantDetectionReceiver, VariantDetectionSender,
+    communication_control::CommunicationAccess,
+    dlt_ctx,
+    ecu_data::EcuData,
+    health::HealthProvider,
+    runtime_update_api::{DatabaseValidator, ReloadError},
 };
 use cda_plugin_security::SecurityPlugin;
 use cda_sovd::SovdIdentities;
@@ -244,6 +248,7 @@ pub fn variant_detection_channel() -> (VariantDetectionSender, VariantDetectionR
 pub async fn load_vehicle_data<S: SecurityPlugin>(
     config: &Configuration,
     health: Option<&cda_health::HealthState>,
+    database_validator: Arc<dyn DatabaseValidator>,
 ) -> Result<VehicleData<S>, AppError> {
     let health_providers = register_health_providers(health).await?;
     let (variant_detection_sender, variant_detection_receiver) = variant_detection_channel();
@@ -251,6 +256,7 @@ pub async fn load_vehicle_data<S: SecurityPlugin>(
     let database_loader = Arc::new(VehicleDatabaseLoader::<S>::new(
         health_providers.clone(),
         variant_detection_sender.clone(),
+        database_validator,
     ));
 
     let reload_data = match database_loader.create_databases(config).await {
@@ -343,6 +349,7 @@ pub(crate) async fn load_vehicle_databases<S: SecurityPlugin>(
     config: &Configuration,
     health_providers: Option<&HashMap<String, Arc<dyn HealthProvider>>>,
     variant_detection: VariantDetectionSender,
+    database_validator: &dyn DatabaseValidator,
 ) -> Result<VehicleDataSource<S>, DatabaseLoadError> {
     let mdd_paths = mdd::resolve_mdd_paths(
         &config.runtime_update_config.storage_dir,
@@ -351,7 +358,8 @@ pub(crate) async fn load_vehicle_databases<S: SecurityPlugin>(
     .await;
     let db_provider: Option<&Arc<dyn HealthProvider>> =
         health_providers.and_then(|h| h.get(mdd::DB_HEALTH_COMPONENT_KEY));
-    let databases = load_databases::<S>(config, &mdd_paths, db_provider).await?;
+    let databases =
+        load_databases::<S>(config, &mdd_paths, db_provider, database_validator).await?;
     if !mdd_paths.is_empty() && databases.is_empty() {
         return Err(DatabaseLoadError::NoDatabasesLoaded {
             provided: mdd_paths.len(),
@@ -620,6 +628,7 @@ mod tests {
     use cda_storage::LocalStorage;
 
     use super::*;
+    use crate::mdd_inspector::MddDatabaseValidator;
 
     fn config_for(database_dir: &std::path::Path, storage_dir: &std::path::Path) -> Configuration {
         let mut config = crate::config::default_config();
@@ -634,7 +643,8 @@ mod tests {
     ) -> Result<VehicleDataSource<TestSecurityPlugin>, DatabaseLoadError> {
         let config = config_for(database_dir, storage_dir);
         let (sender, _receiver) = variant_detection_channel();
-        load_vehicle_databases::<TestSecurityPlugin>(&config, None, sender).await
+        load_vehicle_databases::<TestSecurityPlugin>(&config, None, sender, &MddDatabaseValidator)
+            .await
     }
 
     /// An applied empty database set survives a restart: an existing storage
@@ -705,6 +715,7 @@ mod tests {
                 "/../testcontainer/odx/FLXC1000.mdd"
             ))],
             None,
+            &MddDatabaseValidator,
         )
         .await?;
         let (sender, _receiver) = variant_detection_channel();
@@ -790,7 +801,13 @@ mod tests {
         config.can = Some(CanConfig::default());
         let (sender, _receiver) = variant_detection_channel();
 
-        let Err(error) = load_vehicle_databases::<TestSecurityPlugin>(&config, None, sender).await
+        let Err(error) = load_vehicle_databases::<TestSecurityPlugin>(
+            &config,
+            None,
+            sender,
+            &MddDatabaseValidator,
+        )
+        .await
         else {
             panic!("MDD files were provided but none loaded, this must be an error");
         };
