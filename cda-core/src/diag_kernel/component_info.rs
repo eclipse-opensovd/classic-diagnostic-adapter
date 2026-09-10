@@ -16,7 +16,7 @@ use cda_interfaces::{
     ComponentInfos, DiagServiceError, DynamicPlugin, HashMap, HashSet,
     datatypes::{
         ComponentConfigurationsInfo, ComponentDataInfo, ComponentOperationsInfo,
-        DiagnosticServiceAffixPosition, RoutineSubfunctions,
+        ComponentResourceMappingKey, DiagnosticServiceAffixPosition, RoutineSubfunctions,
     },
     service_ids, subfunction_ids,
 };
@@ -36,7 +36,7 @@ impl<S: SecurityPlugin> ComponentInfos for EcuManager<S> {
         .filter(|service| is_service_visible::<S>(security_plugin, service))
         .filter_map(|service| {
             let diag_comm = service.diag_comm()?;
-            Some(self.diag_comm_to_component_data_info(&(diag_comm.into())))
+            self.diag_comm_to_component_data_info(&(diag_comm.into()))
         })
         .collect()
     }
@@ -56,7 +56,7 @@ impl<S: SecurityPlugin> ComponentInfos for EcuManager<S> {
             .filter(|service| is_service_visible::<S>(security_plugin, service))
             .filter_map(|service| {
                 let diag_comm = service.diag_comm()?;
-                Some(self.diag_comm_to_component_data_info(&(diag_comm.into())))
+                self.diag_comm_to_component_data_info(&(diag_comm.into()))
             })
             .collect())
     }
@@ -117,12 +117,32 @@ impl<S: SecurityPlugin> ComponentInfos for EcuManager<S> {
                     .map(|dc| (service, datatypes::DiagComm(dc)))
             })
             .filter(|(_, dc)| {
-                dc.funct_class().is_some_and(|fc| {
-                    fc.iter().any(|fc| {
-                        fc.short_name()
-                            .is_some_and(|n| n == var_coding_func_class_short_name)
-                    })
-                })
+                let mapping = &self.database_naming_convention.component_resource_mapping;
+
+                if mapping.configurations.is_empty() {
+                    // No configuration mapping -> preserve old behavior
+                    return dc.funct_class().is_some_and(|classes| {
+                        classes.iter().any(|fc| {
+                            fc.short_name()
+                                .is_some_and(|name| name == var_coding_func_class_short_name)
+                        })
+                    });
+                }
+
+                match mapping.key_type {
+                    ComponentResourceMappingKey::Semantic => dc
+                        .semantic()
+                        .is_some_and(|semantic| mapping.is_configuration(semantic)),
+
+                    ComponentResourceMappingKey::FunctionalClass => {
+                        dc.funct_class().is_some_and(|classes| {
+                            classes.iter().any(|fc| {
+                                fc.short_name()
+                                    .is_some_and(|name| mapping.is_configuration(name))
+                            })
+                        })
+                    }
+                }
             })
             .for_each(|(service, diag_comm)| {
                 // trim short names so write and read services are grouped together
@@ -554,9 +574,34 @@ impl<S: SecurityPlugin> EcuManager<S> {
     fn diag_comm_to_component_data_info(
         &self,
         diag_comm: &datatypes::DiagComm<'_>,
-    ) -> ComponentDataInfo {
-        ComponentDataInfo {
-            category: diag_comm.semantic().unwrap_or_default().to_owned(),
+    ) -> Option<ComponentDataInfo> {
+        let mapping = &self.database_naming_convention.component_resource_mapping;
+
+        let category = if mapping.data.is_empty() {
+            // No mapping configured -> preserve old behavior
+            diag_comm.semantic()?.to_owned()
+        } else {
+            match mapping.key_type {
+                ComponentResourceMappingKey::Semantic => {
+                    let semantic = diag_comm.semantic()?;
+                    mapping.data_category(semantic)?.to_owned()
+                }
+
+                ComponentResourceMappingKey::FunctionalClass => {
+                    let classes = diag_comm.funct_class()?;
+
+                    classes
+                        .iter()
+                        .find_map(|fc| {
+                            fc.short_name().and_then(|name| mapping.data_category(name))
+                        })?
+                        .to_owned()
+                }
+            }
+        };
+
+        Some(ComponentDataInfo {
+            category,
             id: diag_comm.short_name().map_or(<_>::default(), |s| {
                 self.database_naming_convention.trim_short_name_affixes(s)
             }),
@@ -566,7 +611,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 .map_or(<_>::default(), |v| {
                     self.database_naming_convention.trim_long_name_affixes(v)
                 }),
-        }
+        })
     }
 
     /// Filter and transform services into `ComponentOperationsInfo`

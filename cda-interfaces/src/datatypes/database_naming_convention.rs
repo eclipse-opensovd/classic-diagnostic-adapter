@@ -19,6 +19,72 @@ use crate::{
     util::serde_ext,
 };
 
+#[derive(Deserialize, Serialize, Default, Clone, Debug, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentResourceMappingKey {
+    #[default]
+    Semantic,
+    FunctionalClass,
+}
+
+/// Maps a database semantic or functional-class name to the SOVD
+/// resource category.
+///
+/// The map key may end with `*` to perform a prefix match.
+#[derive(Deserialize, Serialize, Clone, Debug, Default, schemars::JsonSchema)]
+pub struct ComponentResourceMapping {
+    /// Determines whether mapping keys refer to diagnostic semantics
+    /// or functional-class short names.
+    #[serde(default)]
+    pub key_type: ComponentResourceMappingKey,
+
+    /// Entries that should be exposed through `/data`.
+    /// The map value is the SOVD `/data` category.
+    #[serde(default)]
+    pub data: HashMap<String, String>,
+
+    /// Entries that should be exposed through `/configurations`.
+    /// The map value is the SOVD category associated with the entry.
+    #[serde(default)]
+    pub configurations: HashMap<String, String>,
+}
+
+impl ComponentResourceMapping {
+    /// Returns the configured `/data` category for a mapping key.
+    #[must_use]
+    pub fn data_category(&self, key: &str) -> Option<&str> {
+        Self::lookup(&self.data, key)
+    }
+
+    fn lookup<'a>(mapping: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
+        if let Some((_, value)) = mapping
+            .iter()
+            .find(|(pattern, _)| pattern.eq_ignore_ascii_case(key))
+        {
+            return Some(value.as_str());
+        }
+
+        mapping
+            .iter()
+            .filter_map(|(pattern, value)| {
+                let prefix = pattern.strip_suffix('*')?;
+
+                key.get(..prefix.len())
+                    .filter(|candidate| candidate.eq_ignore_ascii_case(prefix))
+                    .map(|_| (prefix.len(), value.as_str()))
+            })
+            // Longest prefix wins if multiple wildcard entries match.
+            .max_by_key(|(length, _)| *length)
+            .map(|(_, value)| value)
+    }
+
+    /// Returns true if the key is configured for `/configurations`.
+    #[must_use]
+    pub fn is_configuration(&self, key: &str) -> bool {
+        Self::lookup(&self.configurations, key).is_some()
+    }
+}
+
 /// Holds configuration for diagnostic service naming conventions.
 ///
 /// # Fields
@@ -94,6 +160,11 @@ pub struct DatabaseNamingConvention {
     pub action_affixes: DiagCommActionAffixes,
     /// Database semantics to identify the type of service
     pub semantics: Semantics,
+
+    /// Configures how diagnostic services are exposed through SOVD `/data`
+    /// and `/configurations`.
+    #[serde(default)]
+    pub component_resource_mapping: ComponentResourceMapping,
 }
 
 /// Defines the name for the database semantics. Although they should follow the labels
@@ -369,6 +440,7 @@ impl Default for DatabaseNamingConvention {
             can_protocol_markers: ["CAN", "ISO_11898"].map(str::to_owned).to_vec(),
             semantics: Semantics::default(),
             action_affixes: DiagCommActionAffixes::default(),
+            component_resource_mapping: ComponentResourceMapping::default(),
         }
     }
 }
