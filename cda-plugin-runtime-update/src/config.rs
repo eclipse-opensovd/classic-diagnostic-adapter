@@ -20,20 +20,19 @@ pub struct RuntimeUpdateConfig {
     pub upload_body_limit_bytes: usize,
     /// Directory where the updatable database is stored.
     pub storage_dir: String,
+    /// How long to wait between trying to load the storage directory,
+    /// if it is unavailable, in milliseconds.
+    pub storage_dir_load_retry_delay_ms: u64, //FIXME want more granular than seconds
+    /// How many times to try loading the storage directory,
+    /// if it is unavailable.
+    pub storage_dir_load_retry_attempts: usize,
     /// Value of the Retry-After header (in seconds) sent when the service is
     /// temporarily unavailable due to a busy transaction.
-    /// Default: 1 second.
-    #[serde(default = "default_retry_after_seconds")]
     pub retry_after_seconds: u64,
     /// When `true` and the `DiagnosticDatabase` storage collection is empty,
-    /// seed it from `database.path` on first startup by copying all `.mdd` files.
+    /// seed it from `database.seed_dir` on first startup by copying all `.mdd` files.
     /// Default: `false`.
-    #[serde(default)]
     pub init_storage_from_database_path: bool,
-}
-
-fn default_retry_after_seconds() -> u64 {
-    1
 }
 
 impl Default for RuntimeUpdateConfig {
@@ -41,7 +40,9 @@ impl Default for RuntimeUpdateConfig {
         Self {
             upload_body_limit_bytes: 50 * 1024 * 1024, // 50 MB,
             storage_dir: ".".to_owned(),
-            retry_after_seconds: default_retry_after_seconds(),
+            storage_dir_load_retry_delay_ms: 3000,
+            storage_dir_load_retry_attempts: 100,
+            retry_after_seconds: 1,
             init_storage_from_database_path: false,
         }
     }
