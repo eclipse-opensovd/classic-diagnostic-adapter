@@ -39,6 +39,7 @@ mod ecuuds;
 pub use ecuuds::*;
 pub mod health;
 pub mod http_protection;
+pub mod lifecycle;
 pub mod mdd_chunks;
 mod schema;
 pub use schema::*;

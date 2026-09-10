@@ -19,13 +19,11 @@ use std::{
 use async_trait::async_trait;
 use cda_interfaces::{
     HashMap,
-    communication_control::{DisableCommunication, PostUpdateCommunicationMode},
-    http_protection::registry::{HttpProtectionRegistry, HttpRouteMatcher},
     runtime_update_api::{
         BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider, RuntimeFileCatalog,
-        RuntimeFileInspector, RuntimeFileStore, RuntimeFilesQuery, RuntimeReloaderPlugin,
-        RuntimeUpdateError, RuntimeUpdateExecutor, RuntimeUpdatePolicy, UpdateExecution,
-        UploadFile,
+        RuntimeFileInspector, RuntimeFileStore, RuntimeFileTransaction, RuntimeFilesQuery,
+        RuntimeUpdateError, RuntimeUpdateExecutor, RuntimeUpdatePolicy, UpdateDispatcher,
+        UpdateExecution, UploadFile,
     },
     storage_api::Storage,
 };
@@ -46,8 +44,9 @@ use tokio::{sync::RwLock, task::JoinHandle};
 /// in-memory execution record, so no terminal status survives the restart.
 const UPDATE_SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
-/// Default implementation of [`RuntimeFileCatalog`], [`RuntimeFileStore`] and
-/// [`RuntimeUpdateExecutor`], with injectable policy and storage.
+/// Default implementation of [`RuntimeFileCatalog`], [`RuntimeFileStore`],
+/// [`RuntimeFileTransaction`] and [`RuntimeUpdateExecutor`], with injectable
+/// policy and storage.
 pub struct DefaultRuntimeUpdatePlugin<
     Store: Storage,
     UpdatePolicy: RuntimeUpdatePolicy<Lock, Store::CollectionHandle>,
@@ -55,8 +54,10 @@ pub struct DefaultRuntimeUpdatePlugin<
 > {
     /// Access to the persistent storage layer (all mutations go through this)
     storage: Arc<Store>,
-    /// Hot-reload notification handler
-    reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
+    /// Runs the runtime transition an execution asks for. Which stages a mode
+    /// visits and what the transport looks like afterwards belong to the
+    /// application, so the plugin only asks for the transition.
+    dispatcher: Arc<dyn UpdateDispatcher>,
     /// Vehicle and lock state policy consulted before an execution proceeds
     policy: Arc<UpdatePolicy>,
     /// Lock state provider passed to the policy
@@ -66,21 +67,14 @@ pub struct DefaultRuntimeUpdatePlugin<
     /// Format-specific reads (validate, revision, ECU name), so the plugin
     /// carries no database format of its own.
     file_inspector: Arc<dyn RuntimeFileInspector>,
-    communication_disable: Arc<dyn DisableCommunication>,
-    http_protections: HttpProtectionRegistry,
-    update_exempt_routes: Vec<HttpRouteMatcher>,
-    update_retry_after: Duration,
-    post_update_mode: PostUpdateCommunicationMode,
-    /// Supervisor task of the execution that is in flight, so shutdown can
-    /// await it instead of letting it be cut off.
+    /// Reporting task of the execution that is in flight, so shutdown can await
+    /// it instead of letting it be cut off.
     ///
-    /// A single slot is enough because at most one execution is ever live: an
-    /// execution takes the exclusive communication disable lease in
-    /// `start_execution` and holds it until its own finalization, and a second
-    /// `start_execution` inside that window is refused with
-    /// `DisableError::Conflict`, surfaced as
-    /// [`RuntimeUpdateError::ExecutionConflict`]. Storing a new supervisor
-    /// therefore only ever displaces a finished one.
+    /// A single slot is enough because at most one execution is ever live: a
+    /// dispatch holds the exclusive execution guards until it finishes, and a
+    /// second one inside that window is refused with
+    /// [`RuntimeUpdateError::ExecutionConflict`]. Storing a new task therefore
+    /// only ever displaces a finished one.
     execution_supervisor: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -94,42 +88,24 @@ impl<
     ///
     /// # Arguments
     /// * `storage` - Persistent storage backend for update files
-    /// * `reload_handler` - Notified after apply/rollback to hot-reload databases
+    /// * `dispatcher` - Runs the runtime transition an execution asks for
     /// * `policy` - Decides whether an execution may proceed given vehicle and lock state
     /// * `lock_provider` - Provides lock state for the policy
     /// * `file_inspector` - Format-specific validation, metadata and revision reads
-    /// * `communication_disable` - Used to acquire exclusive transport disable ownership
-    /// * `update_retry_after` - Retry-After duration while an update owns protection
-    /// * `post_update_mode` - Communication state to restore after an update
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "Constructor requires many dependencies for plugin initialization, adding a \
-                  struct of this is pointless, as it is only used once."
-    )]
     pub fn new(
         storage: Arc<Store>,
-        reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
+        dispatcher: Arc<dyn UpdateDispatcher>,
         policy: Arc<UpdatePolicy>,
         lock_provider: Arc<Lock>,
         file_inspector: Arc<dyn RuntimeFileInspector>,
-        communication_disable: Arc<dyn DisableCommunication>,
-        http_protections: HttpProtectionRegistry,
-        update_exempt_routes: Vec<HttpRouteMatcher>,
-        update_retry_after: Duration,
-        post_update_mode: PostUpdateCommunicationMode,
     ) -> Self {
         Self {
             storage,
-            reloader_plugin,
+            dispatcher,
             policy,
             lock_provider,
             executions: Arc::new(RwLock::new(HashMap::default())),
             file_inspector,
-            communication_disable,
-            http_protections,
-            update_exempt_routes,
-            update_retry_after,
-            post_update_mode,
             execution_supervisor: Mutex::new(None),
         }
     }
@@ -250,13 +226,8 @@ impl<
         let params = crate::operations::executions::ExecutionParams {
             storage: &self.storage,
             policy: &self.policy,
-            reload_handler: &self.reloader_plugin,
+            dispatcher: &self.dispatcher,
             executions: &self.executions,
-            communication_disable: &self.communication_disable,
-            http_protections: &self.http_protections,
-            update_exempt_routes: &self.update_exempt_routes,
-            update_retry_after: self.update_retry_after,
-            post_update_mode: self.post_update_mode.clone(),
             lock_state_provider: &*self.lock_provider,
             file_inspector: &self.file_inspector,
             execution_supervisor: &self.execution_supervisor,
@@ -273,83 +244,125 @@ impl<
     }
 }
 
+#[async_trait]
+impl<
+    Store: Storage + Send + Sync + 'static,
+    UpdatePolicy: RuntimeUpdatePolicy<Lock, Store::CollectionHandle>,
+    Lock: LockStateProvider,
+> RuntimeFileTransaction for DefaultRuntimeUpdatePlugin<Store, UpdatePolicy, Lock>
+{
+    async fn apply_files(&self) -> Result<(), RuntimeUpdateError> {
+        crate::operations::apply::execute_apply(&*self.storage).await
+    }
+
+    async fn rollback_files(&self) -> Result<(), RuntimeUpdateError> {
+        crate::operations::rollback::restore_backup(&*self.storage).await
+    }
+
+    async fn discard_staged(&self) -> Result<(), RuntimeUpdateError> {
+        crate::operations::rollback::discard_staged(&*self.storage).await
+    }
+
+    async fn cleanup_files(&self) -> Result<(), RuntimeUpdateError> {
+        crate::operations::cleanup::execute_cleanup(&*self.storage).await
+    }
+
+    async fn restore_after_apply(&self) -> Result<(), RuntimeUpdateError> {
+        crate::operations::rollback::restore_backup_and_restage_rejected(&*self.storage).await
+    }
+
+    async fn restore_after_rollback(&self) -> Result<(), RuntimeUpdateError> {
+        crate::operations::rollback::restore_backup(&*self.storage).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        sync::{Arc, Mutex as StdMutex},
+        time::Duration,
+    };
 
     use async_trait::async_trait;
     use cda_interfaces::{
         Shutdown,
-        communication_control::{CommunicationState, PostUpdateCommunicationMode},
-        http_protection::registry::HttpProtectionRegistry,
         runtime_update_api::{
-            ExecutionMode, ExecutionStatus, HashAlgorithm, RejectedSetDisposition, ReloadFailure,
-            RuntimeFileCatalog, RuntimeFileStore, RuntimeFilesQuery, RuntimeReloaderPlugin,
-            RuntimeUpdateError, RuntimeUpdateExecutor,
+            AcceptedUpdate, ExecutionFailure, ExecutionMode, ExecutionStatus, HashAlgorithm,
+            RuntimeFileCatalog, RuntimeFileStore, RuntimeFilesQuery, RuntimeUpdateError,
+            RuntimeUpdateExecutor, UpdateDispatcher,
         },
         storage_api::CollectionName,
     };
-    use cda_plugin_communication_management::lifecycle::{
-        communication_disable_for_test,
-        disable::{DisableCommunication, DisableReason},
-    };
     use cda_storage::LocalStorage;
+    use tokio::sync::oneshot;
 
     use crate::{
         DefaultRuntimeUpdatePlugin,
         test_utils::{
-            MockLockProvider, MockUpdatePolicy, NoopReloadHandler, StubTransport, make_storage,
-            make_upload_files, make_valid_config, readable_mdd_bytes, write_test_file,
+            MockLockProvider, MockUpdatePolicy, make_storage, make_upload_files, make_valid_config,
+            readable_mdd_bytes, write_test_file,
         },
     };
+
+    /// Stands in for the application's lifecycle, holding the dispatch open
+    /// until the test ends it.
+    struct HeldDispatcher {
+        outcome: StdMutex<Option<oneshot::Sender<Result<(), ExecutionFailure>>>>,
+    }
+
+    impl HeldDispatcher {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                outcome: StdMutex::new(None),
+            })
+        }
+
+        /// Ends the dispatch the way the runtime would, once its guards are down.
+        fn finish(&self) {
+            if let Some(sender) = self.outcome.lock().expect("poisoned").take() {
+                sender.send(Ok(())).ok();
+            }
+        }
+    }
+
+    #[async_trait]
+    impl UpdateDispatcher for HeldDispatcher {
+        async fn dispatch(
+            &self,
+            _mode: ExecutionMode,
+        ) -> Result<AcceptedUpdate, RuntimeUpdateError> {
+            let (sender, receiver) = oneshot::channel();
+            *self.outcome.lock().expect("poisoned") = Some(sender);
+            Ok(AcceptedUpdate {
+                completion: Box::pin(async move {
+                    receiver
+                        .await
+                        .unwrap_or(Err(ExecutionFailure::AbnormalTermination))
+                }),
+            })
+        }
+    }
 
     fn make_plugin(
         storage: LocalStorage,
     ) -> DefaultRuntimeUpdatePlugin<LocalStorage, MockUpdatePolicy, MockLockProvider> {
-        let (plugin, _disable_comm) = make_state_with_lock(storage, Some("test-user"), false);
-        plugin
+        make_plugin_with(storage, HeldDispatcher::new() as Arc<dyn UpdateDispatcher>)
     }
 
-    fn make_state_with_lock(
+    fn make_plugin_with(
         storage: LocalStorage,
-        owner: Option<&str>,
-        has_conflicts: bool,
-    ) -> (
-        DefaultRuntimeUpdatePlugin<LocalStorage, MockUpdatePolicy, MockLockProvider>,
-        Arc<dyn DisableCommunication>,
-    ) {
-        make_state_with_reloader(storage, owner, has_conflicts, Arc::new(NoopReloadHandler))
-    }
-
-    fn make_state_with_reloader(
-        storage: LocalStorage,
-        owner: Option<&str>,
-        has_conflicts: bool,
-        reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
-    ) -> (
-        DefaultRuntimeUpdatePlugin<LocalStorage, MockUpdatePolicy, MockLockProvider>,
-        Arc<dyn DisableCommunication>,
-    ) {
-        let transport = StubTransport::new();
-        let http_protections = HttpProtectionRegistry::new();
-        let communication_disable = communication_disable_for_test(transport, false);
-
-        let plugin = DefaultRuntimeUpdatePlugin::new(
+        dispatcher: Arc<dyn UpdateDispatcher>,
+    ) -> DefaultRuntimeUpdatePlugin<LocalStorage, MockUpdatePolicy, MockLockProvider> {
+        DefaultRuntimeUpdatePlugin::new(
             Arc::new(storage),
-            reloader_plugin,
+            dispatcher,
             Arc::new(MockUpdatePolicy::new()),
             Arc::new(MockLockProvider {
-                owner: owner.map(ToOwned::to_owned),
-                has_conflicts,
+                owner: Some("test-user".to_owned()),
+                has_conflicts: false,
             }),
             crate::test_utils::test_inspector(),
-            Arc::clone(&communication_disable),
-            http_protections,
-            Vec::new(),
-            Duration::from_secs(1),
-            PostUpdateCommunicationMode::Enabled,
-        );
-        (plugin, communication_disable)
+        )
     }
 
     #[tokio::test]
@@ -604,122 +617,9 @@ mod tests {
         assert!(matches!(err, RuntimeUpdateError::InvalidFileType(_)));
     }
 
-    /// An update needs no transport, so a deferred runtime must not have to
-    /// bring the whole network up just to become eligible for one.
-    /// The fixture's communication starts `Disabled`.
-    #[tokio::test]
-    async fn start_execution_allowed_while_communication_is_deferred() {
-        let (storage, _dir) = make_storage();
-        write_test_file(
-            &storage,
-            &CollectionName::DiagnosticDatabaseNextUpdate,
-            "ecu.mdd",
-            &readable_mdd_bytes("TestEcu"),
-        )
-        .await;
-
-        let plugin = make_plugin(storage);
-
-        plugin
-            .start_execution(ExecutionMode::Apply)
-            .await
-            .expect("an update must start while communication is deferred");
-        assert_eq!(plugin.list_executions().await.len(), 1);
-    }
-
-    /// The exclusive disable lease serializes updates, so an execution is
-    /// refused while anything else holds it, including an earlier execution.
-    #[tokio::test]
-    async fn start_execution_conflict_while_disable_lease_held() {
-        let (storage, _dir) = make_storage();
-        write_test_file(
-            &storage,
-            &CollectionName::DiagnosticDatabaseNextUpdate,
-            "ecu.mdd",
-            &readable_mdd_bytes("TestEcu"),
-        )
-        .await;
-
-        let (plugin, communication_disable) =
-            make_state_with_lock(storage, Some("test-user"), false);
-        let lease = communication_disable
-            .disable(DisableReason::Custom("test".to_owned()))
-            .await
-            .expect("lease must be granted from a deferred runtime");
-
-        let result = plugin.start_execution(ExecutionMode::Apply).await;
-        assert!(matches!(result, Err(RuntimeUpdateError::ExecutionConflict)));
-        assert!(plugin.list_executions().await.is_empty());
-
-        // Releasing a lease taken from `Disabled` leaves communication
-        // deferred rather than enabling it.
-        assert_eq!(lease.release().await, Ok(CommunicationState::Disabled));
-    }
-
-    /// A reloader that parks inside `reload_databases` until the test lets it
-    /// through, holding an execution in flight long enough to observe what
-    /// shutdown does with it.
-    struct GatedReloadHandler {
-        entered: tokio::sync::mpsc::UnboundedSender<()>,
-        gate: Arc<tokio::sync::Semaphore>,
-    }
-
-    /// Test-side handle to [`GatedReloadHandler`]'s reload.
-    struct ReloadGate {
-        entered: tokio::sync::mpsc::UnboundedReceiver<()>,
-        gate: Arc<tokio::sync::Semaphore>,
-    }
-
-    impl GatedReloadHandler {
-        fn new() -> (Arc<Self>, ReloadGate) {
-            let (entered_tx, entered_rx) = tokio::sync::mpsc::unbounded_channel();
-            let gate = Arc::new(tokio::sync::Semaphore::new(0));
-            let handler = Arc::new(Self {
-                entered: entered_tx,
-                gate: Arc::clone(&gate),
-            });
-            let reload = ReloadGate {
-                entered: entered_rx,
-                gate,
-            };
-            (handler, reload)
-        }
-    }
-
-    impl ReloadGate {
-        /// Resolves once the reload has started and is parked on the gate.
-        async fn entered(&mut self) {
-            self.entered
-                .recv()
-                .await
-                .expect("the reload must be reached");
-        }
-
-        /// Lets the parked reload run to completion.
-        fn release(&self) {
-            self.gate.add_permits(1);
-        }
-    }
-
-    #[async_trait]
-    impl RuntimeReloaderPlugin for GatedReloadHandler {
-        async fn reload_databases(
-            &self,
-            _on_reject: RejectedSetDisposition,
-        ) -> Result<(), ReloadFailure> {
-            let _ = self.entered.send(());
-            let _permit = self
-                .gate
-                .acquire()
-                .await
-                .expect("gate must not be closed while a reload is parked on it");
-            Ok(())
-        }
-    }
-
-    /// An execution mid storage-swap must not be cut off by shutdown: it holds
-    /// the communication disable lease and has already replaced part of the
-    /// live database, so shutdown waits for it to finalize itself.
+    /// An execution mid storage-swap must not be cut off by shutdown: the
+    /// dispatch it started holds the communication disable lease and has already
+    /// replaced part of the live database, so shutdown waits for it to finish.
     #[tokio::test]
     async fn shutdown_waits_for_an_execution_that_is_still_running() {
         let (storage, _dir) = make_storage();
@@ -730,16 +630,16 @@ mod tests {
             &readable_mdd_bytes("TestEcu"),
         )
         .await;
-        let (reloader, mut reload) = GatedReloadHandler::new();
-        let (plugin, _disable_comm) =
-            make_state_with_reloader(storage, Some("test-user"), false, reloader);
-        let plugin = Arc::new(plugin);
+        let dispatcher = HeldDispatcher::new();
+        let plugin = Arc::new(make_plugin_with(
+            storage,
+            Arc::clone(&dispatcher) as Arc<dyn UpdateDispatcher>,
+        ));
 
         plugin
             .start_execution(ExecutionMode::Apply)
             .await
             .expect("the apply must start");
-        reload.entered().await;
 
         let mut shutting_down = tokio::task::spawn({
             let plugin = Arc::clone(&plugin);
@@ -753,7 +653,7 @@ mod tests {
             "shutdown must not return while the execution is still swapping the database"
         );
 
-        reload.release();
+        dispatcher.finish();
         tokio::time::timeout(Duration::from_secs(5), shutting_down)
             .await
             .expect("shutdown must return once the execution has finished")
@@ -773,12 +673,17 @@ mod tests {
     #[tokio::test]
     async fn shutdown_is_idempotent() {
         let (storage, _dir) = make_storage();
-        let plugin = make_plugin(storage);
+        let dispatcher = HeldDispatcher::new();
+        let plugin = make_plugin_with(
+            storage,
+            Arc::clone(&dispatcher) as Arc<dyn UpdateDispatcher>,
+        );
 
         plugin
             .start_execution(ExecutionMode::Cleanup)
             .await
             .expect("the cleanup must start");
+        dispatcher.finish();
 
         for _ in 0..2 {
             tokio::time::timeout(Duration::from_secs(1), plugin.shutdown())

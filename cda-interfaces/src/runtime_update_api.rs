@@ -40,29 +40,7 @@ use crate::{
 };
 
 mod error;
-pub use error::{RecoveryError, ReloadError, ReloadFailure, RuntimeUpdateError, VerificationError};
-
-/// Application capability that prepares one complete runtime update.
-///
-/// The application owns the concrete data types and delivers each value directly
-/// to its typed component owner. Implementations must finish every fallible step,
-/// including dependent-resource preparation, before returning success. The
-/// returned payload is applied directly to its owner once every participant
-/// has succeeded.
-#[async_trait]
-pub trait ApplicationUpdatePreparation<Config>: Send + Sync + 'static
-where
-    Config: Send + Sync + 'static,
-{
-    /// Builds and stages a complete update while communication is disabled.
-    ///
-    /// # Errors
-    /// Returns [`ReloadError`] if any component or dependent resource cannot be prepared.
-    ///
-    /// Staging happens only once every fallible step has succeeded, so a failed
-    /// preparation leaves nothing staged and there is nothing to discard.
-    async fn prepare_update(&self, config: &Config) -> Result<(), ReloadError>;
-}
+pub use error::{RecoveryError, ReloadError, RuntimeUpdateError, VerificationError};
 
 /// An apply whose fallible work is already done and whose exclusion is already
 /// held, so finalizing it cannot fail.
@@ -186,33 +164,86 @@ pub trait LockStateProvider: Send + Sync + 'static {
     async fn has_locks(&self) -> bool;
 }
 
-/// What to do with the set whose preparation was rejected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RejectedSetDisposition {
-    /// The operator staged this set, so return it to staging for correction.
-    Restage,
-    /// Swapping back restores the exact state from before the operation.
-    Swap,
+/// The database-file transaction one execution runs, and the restore that
+/// undoes it.
+///
+/// Storage only: nothing here loads a database into the running runtime. The
+/// staged dispatch that drives this runs the load afterwards, and calls the
+/// matching restore when it fails.
+#[async_trait]
+pub trait RuntimeFileTransaction: Send + Sync + 'static {
+    /// Promotes the staged set to current, keeping the displaced set as backup.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeUpdateError`] when the transaction could not be committed.
+    async fn apply_files(&self) -> Result<(), RuntimeUpdateError>;
+
+    /// Swaps the backup set back into current, preserving the displaced one as
+    /// the new backup. The staged set is left alone, because a rollback is only
+    /// committed once the runtime accepted the restored databases: see
+    /// [`discard_staged`](Self::discard_staged).
+    ///
+    /// # Errors
+    /// Returns [`RuntimeUpdateError::NoBackup`] when there is nothing to restore.
+    async fn rollback_files(&self) -> Result<(), RuntimeUpdateError>;
+
+    /// Discards the staged set, committing a rollback whose restored databases
+    /// are now live.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeUpdateError`] when the transaction could not be committed.
+    async fn discard_staged(&self) -> Result<(), RuntimeUpdateError>;
+
+    /// Deletes the staged and backup sets. The current set is never touched.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeUpdateError`] when the transaction could not be committed.
+    async fn cleanup_files(&self) -> Result<(), RuntimeUpdateError>;
+
+    /// Undoes [`apply_files`](Self::apply_files): the rejected set goes back to
+    /// staging for correction and the backup keeps naming the last known good
+    /// state.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeUpdateError`] when the previous set could not be restored.
+    async fn restore_after_apply(&self) -> Result<(), RuntimeUpdateError>;
+
+    /// Undoes [`rollback_files`](Self::rollback_files). The swap is an
+    /// involution, so running it again is what restores the previous state.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeUpdateError`] when the previous set could not be restored.
+    async fn restore_after_rollback(&self) -> Result<(), RuntimeUpdateError>;
 }
 
-/// Handler for reloading diagnostic runtime data after file operations (apply/rollback).
+/// Resolves once a dispatched transition is over and its guards are back down.
+pub type UpdateCompletion =
+    std::pin::Pin<Box<dyn Future<Output = Result<(), ExecutionFailure>> + Send>>;
+
+/// An admitted update dispatch: the guards are up and the runtime is changing.
+pub struct AcceptedUpdate {
+    /// A client treats a terminal status as permission to resume ordinary
+    /// traffic, so the caller publishes one only after this resolves.
+    pub completion: UpdateCompletion,
+}
+
+/// Runs the runtime transition an execution asks for.
 ///
-/// Implementors bridge the runtime-files plugin to the application's live diagnostic state,
-/// ensuring that newly applied MDD databases are picked up without a restart.
+/// The plugin owns the files and the policy; which stages a mode visits, which
+/// guards it takes and what the transport looks like afterwards belong to the
+/// application's lifecycle, so they are reached through this instead.
 #[async_trait]
-pub trait RuntimeReloaderPlugin: Send + Sync + 'static {
-    /// Loads (or re-loads) the MDD databases currently on disk into the running system.
+pub trait UpdateDispatcher: Send + Sync + 'static {
+    /// Takes the execution guards and starts the transition `mode` asks for.
     ///
-    /// Called after a successful apply or rollback. The implementor resolves paths
-    /// itself on every call, rather than trusting a caller-supplied list that could
-    /// disagree with what was just committed. The caller holds a live disable
-    /// lease, so no reader can have entered after communication went down.
-    /// `on_reject` selects how a rejected set is disposed of while the previous
-    /// databases are restored: only the caller knows whether it was operator-supplied.
-    async fn reload_databases(
-        &self,
-        on_reject: RejectedSetDisposition,
-    ) -> Result<(), ReloadFailure>;
+    /// Returns as soon as the guards are up, so the caller can answer while the
+    /// stages still run.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeUpdateError::ExecutionConflict`] when another dispatch
+    /// already holds the guards, and [`RuntimeUpdateError::UpdateStartError`]
+    /// when the runtime cannot admit one at all.
+    async fn dispatch(&self, mode: ExecutionMode) -> Result<AcceptedUpdate, RuntimeUpdateError>;
 }
 
 /// OEM hook for deciding whether an execution may proceed given vehicle and lock state.
@@ -230,12 +261,13 @@ pub trait RuntimeUpdatePolicy<
     /// Decides whether an execution may proceed, from lock state and the
     /// `collections` it would act on.
     ///
-    /// Consulted twice, once before the update guards are acquired and again
-    /// under them, because lock and vehicle state can change in between.
+    /// Consulted before the update guards are acquired: taking them disables
+    /// communication and refuses other clients, which a caller this refuses
+    /// must not be able to provoke.
     ///
     /// One lock rule is not delegated: a reload replaces the lock topology, so no ECU or
     /// functional-group lock may be held across it. The framework checks that itself,
-    /// under the update guards, and a plugin cannot switch it off.
+    /// and a plugin cannot switch it off.
     ///
     /// # Errors
     /// Returns an appropriate [`RuntimeUpdateError`] variant to deny the execution.
@@ -538,7 +570,7 @@ pub trait RuntimeUpdateExecutor: Send + Sync + 'static {
 /// [`RuntimeUpdatePolicy`]. A blanket implementation composes the three
 /// capabilities without granting any one capability additional authority.
 pub trait RuntimeFilesUpdatePlugin:
-    RuntimeFileCatalog + RuntimeFileStore + RuntimeUpdateExecutor
+    RuntimeFileCatalog + RuntimeFileStore + RuntimeUpdateExecutor + RuntimeFileTransaction
 {
     /// Wraps this plugin in [`ExclusiveRuntimePlugin`], adding read/write mutual exclusion.
     fn with_exclusive_access(self) -> ExclusiveRuntimePlugin<Self>
@@ -550,7 +582,7 @@ pub trait RuntimeFilesUpdatePlugin:
 }
 
 impl<P> RuntimeFilesUpdatePlugin for P where
-    P: RuntimeFileCatalog + RuntimeFileStore + RuntimeUpdateExecutor
+    P: RuntimeFileCatalog + RuntimeFileStore + RuntimeUpdateExecutor + RuntimeFileTransaction
 {
 }
 
@@ -645,5 +677,36 @@ impl<P: RuntimeUpdateExecutor> RuntimeUpdateExecutor for ExclusiveRuntimePlugin<
     async fn list_executions(&self) -> Vec<UpdateExecution> {
         let _guard = self.lock.read().await;
         self.inner.list_executions().await
+    }
+}
+
+/// Forwarded without the wrapper's lock: the transaction runs inside the staged
+/// dispatch that [`RuntimeUpdateExecutor::start_execution`] admitted, and that
+/// dispatch already holds the exclusive guards. Taking the write lock here would
+/// only queue behind the call that started it.
+#[async_trait]
+impl<P: RuntimeFileTransaction> RuntimeFileTransaction for ExclusiveRuntimePlugin<P> {
+    async fn apply_files(&self) -> Result<(), RuntimeUpdateError> {
+        self.inner.apply_files().await
+    }
+
+    async fn rollback_files(&self) -> Result<(), RuntimeUpdateError> {
+        self.inner.rollback_files().await
+    }
+
+    async fn discard_staged(&self) -> Result<(), RuntimeUpdateError> {
+        self.inner.discard_staged().await
+    }
+
+    async fn cleanup_files(&self) -> Result<(), RuntimeUpdateError> {
+        self.inner.cleanup_files().await
+    }
+
+    async fn restore_after_apply(&self) -> Result<(), RuntimeUpdateError> {
+        self.inner.restore_after_apply().await
+    }
+
+    async fn restore_after_rollback(&self) -> Result<(), RuntimeUpdateError> {
+        self.inner.restore_after_rollback().await
     }
 }

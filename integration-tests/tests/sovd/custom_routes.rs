@@ -96,10 +96,14 @@ async fn test_custom_demo_endpoint() {
     }
     .shared();
 
-    let (dynamic_router, webserver_join_handle) =
-        cda_sovd::launch_webserver(webserver_config, shutdown_signal.clone())
-            .await
-            .expect("Failed to launch webserver");
+    let dynamic_router = cda_sovd::dynamic_router::DynamicRouter::new();
+    let webserver_join_handle = cda_sovd::launch_webserver(
+        dynamic_router.clone(),
+        webserver_config,
+        shutdown_signal.clone(),
+    )
+    .await
+    .expect("Failed to launch webserver");
 
     let health = cda_health::add_health_routes(&dynamic_router, cda_version().to_owned()).await;
     let main_health_provider = {

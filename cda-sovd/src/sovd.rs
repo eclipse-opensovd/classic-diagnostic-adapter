@@ -1534,6 +1534,8 @@ pub use create_schema;
 use crate::sovd::locks::ReadLock;
 
 pub(crate) mod static_data {
+    use std::sync::Arc;
+
     use aide::{
         axum::{ApiRouter, routing},
         transform::TransformOperation,
@@ -1543,9 +1545,36 @@ pub(crate) mod static_data {
         extract::{Query, State},
         response::{IntoResponse, Response},
     };
+    use cda_interfaces::util::std_ext;
     use http::StatusCode;
 
     use crate::{dynamic_router::DynamicRouter, sovd::error::ApiError};
+
+    /// The payload a static data endpoint serves, replaceable in place.
+    ///
+    /// The route and its `OpenAPI` entry are mounted once and stay; only what
+    /// they answer with changes, so a reload never rebuilds the route tree.
+    #[derive(Clone, Default)]
+    pub struct StaticData(Arc<std::sync::RwLock<serde_json::Map<String, serde_json::Value>>>);
+
+    impl StaticData {
+        /// Creates a handle serving `data` until it is replaced.
+        #[must_use]
+        pub fn new(data: serde_json::Map<String, serde_json::Value>) -> Self {
+            Self(Arc::new(std::sync::RwLock::new(data)))
+        }
+
+        /// Replaces what the endpoints answer with.
+        pub fn set(&self, data: serde_json::Map<String, serde_json::Value>) {
+            *std_ext::lock_write(&self.0) = data;
+        }
+
+        /// What the endpoints answer with right now.
+        #[must_use]
+        pub fn snapshot(&self) -> serde_json::Map<String, serde_json::Value> {
+            std_ext::lock_read(&self.0).clone()
+        }
+    }
 
     /// Add an endpoint serving static data.
     /// For example it can be used, to serve version information.
@@ -1554,15 +1583,17 @@ pub(crate) mod static_data {
     /// * `/vehicle/v15/data/version`
     /// # Arguments
     /// * `dynamic_router` - The dynamic router to add the endpoint to.
-    /// * `data` - The version data to return.
+    /// * `data` - The version data to return, which the owner may replace later.
     /// * `path` - The path to serve the data from.
     ///   There is no processing of this, it will be returned as is in the response.
     pub async fn add_static_data_endpoint(
         dynamic_router: &DynamicRouter,
-        data: serde_json::Map<String, serde_json::Value>,
+        data: StaticData,
         path: &str,
     ) {
-        let data_docs = data.clone();
+        // The documented example is a snapshot: the specification is generated
+        // once, while the payload keeps changing behind the route.
+        let data_docs = data.snapshot();
         let router = ApiRouter::new()
             .api_route(
                 path,
@@ -1575,10 +1606,10 @@ pub(crate) mod static_data {
     }
 
     pub(crate) async fn get(
-        State(state): State<serde_json::Map<String, serde_json::Value>>,
+        State(state): State<StaticData>,
         Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
     ) -> Response {
-        let mut response_map = state.clone();
+        let mut response_map = state.snapshot();
         if query.include_schema {
             let schema = match serde_json::to_value(
                 create_schema!(serde_json::Map<String, serde_json::Value>),

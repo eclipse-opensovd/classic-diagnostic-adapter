@@ -16,23 +16,17 @@
 // query depth (128) on stable 1.97. Default limit otherwise.
 #![recursion_limit = "256"]
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
 
 use cda_interfaces::{config::ConfigSanity, dlt_ctx};
 use cda_plugin_communication_management::plugin::CommunicationPluginBuilder;
-use cda_plugin_security::{
-    DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,
-};
+use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
 use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::layer::SubscriberExt;
 
 use crate::{
     config::{configfile::Configuration, generate::generate_config_cmd},
-    setup::PreLoadHook,
     update::{UpdatePluginBuilder, create_default_update_plugin, update_plugin_fn},
 };
 
@@ -42,12 +36,18 @@ pub mod error;
 pub mod mdd;
 pub mod mdd_inspector;
 pub mod setup;
+pub mod startup;
 pub mod update;
 pub mod vehicle;
 
+pub use cda_lifecycle::{
+    CdaEvent, CdaStage, Component, Constructed, ConstructedComponent, LifecycleError,
+    StageResources, WeakLifecycleHandle,
+};
+pub use cda_storage::LocalStorage;
 pub use error::AppError;
 pub use setup::Setup;
-pub use vehicle::{TransportConfigs, VehicleData, create_diagnostic_gateway, load_vehicle_data};
+pub use vehicle::{TransportConfigs, create_diagnostic_gateway};
 
 // Valgrind and other profing tools intercept the system allocator, whereas mimalloc
 // manages allocations internally. Keep mimalloc in normal builds but omit it
@@ -57,9 +57,6 @@ pub use vehicle::{TransportConfigs, VehicleData, create_diagnostic_gateway, load
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 const DOIP_HEALTH_COMPONENT_KEY: &str = "doip";
-
-#[cfg(feature = "health")]
-const MAIN_HEALTH_COMPONENT_KEY: &str = "main";
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
@@ -202,7 +199,7 @@ pub async fn run_from_cli() -> Result<(), AppError> {
 ///
 /// This is the primary setup-aware entry point. Pass a [`Setup`] created with
 /// [`Setup::new`] and optionally configured with
-/// [`Setup::with_preload`] / [`Setup::with_update_plugin`].
+/// [`Setup::with_component`] / [`Setup::with_update_plugin`].
 ///
 /// # Errors
 /// Returns [`AppError`] if configuration loading, validation, or startup fails.
@@ -213,8 +210,8 @@ pub async fn run_with_ext<SP, SL, UPB, CPB>(
 where
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
-    UPB: UpdatePluginBuilder<SP>,
-    CPB: CommunicationPluginBuilder,
+    UPB: UpdatePluginBuilder<LocalStorage> + 'static,
+    CPB: CommunicationPluginBuilder + 'static,
 {
     if let Some(Command::GenerateConfig { output }) = args.command.as_ref() {
         // Exiting after generating config is on purpose.
@@ -255,7 +252,7 @@ where
 /// Start the CDA runtime from a prepared configuration with a custom [`Setup`].
 ///
 /// This is the setup-aware version of [`run_with_config`]. Supply a [`Setup`] to
-/// configure a custom update plugin and/or a preload hook:
+/// configure a custom update plugin and/or additional lifecycle components:
 ///
 /// ```rust,ignore
 /// use opensovd_cda_lib::{Setup, run_with_ext_from_config, update::update_plugin_fn};
@@ -264,11 +261,13 @@ where
 /// let config: Configuration = // ... load or construct ...
 /// # todo!();
 ///
-/// run_with_ext_from_config::<MySecurityPlugin, MySecurityLoader, _, _>(
+/// run_with_ext_from_config(
 ///     config,
-///     Setup::new().with_update_plugin(update_plugin_fn(|infra| async move {
-///         Ok(MyPlugin::new(infra))
-///     })),
+///     Setup::new()
+///         .with_security_plugin::<MySecurityPlugin, MySecurityLoader>()
+///         .with_update_plugin(update_plugin_fn(|resources| async move {
+///             Ok(MyPlugin::new(resources))
+///         })),
 /// ).await?;
 /// ```
 ///
@@ -281,59 +280,10 @@ pub async fn run_with_ext_from_config<SP, SL, UPB, CPB>(
 where
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
-    UPB: UpdatePluginBuilder<SP>,
-    CPB: CommunicationPluginBuilder,
+    UPB: UpdatePluginBuilder<LocalStorage> + 'static,
+    CPB: CommunicationPluginBuilder + 'static,
 {
-    let webserver_state = init_webserver(
-        &config,
-        setup.pre_load,
-        setup.initialize_tracing,
-        setup.shutdown_signal,
-    )
-    .await?;
-
-    tracing::debug!("Webserver is running. Loading sovd routes...");
-
-    let file_inspector = Arc::clone(&setup.file_inspector);
-    let vehicle_data = match vehicle::load_vehicle_data::<SP>(
-        &config,
-        webserver_state.health_state.as_ref(),
-        Arc::clone(&file_inspector),
-    )
-    .await
-    {
-        Ok(data) => data,
-        Err(AppError::ShutdownRequested) => {
-            tracing::info!("Shutdown requested during database load, exiting cleanly");
-            return Ok(());
-        }
-        Err(e) => return Err(e),
-    };
-
-    // Retained for the full server lifetime, so its event dispatcher keeps
-    // running until explicit shutdown.
-    let communication_runtime = setup::setup_runtime_routes::<SP, SL, UPB, CPB>(
-        config,
-        vehicle_data,
-        &webserver_state,
-        setup.build_update_plugin,
-        setup.build_communication_plugin,
-        file_inspector,
-    )
-    .await?;
-
-    tracing::info!("CDA fully initialized and ready to serve requests");
-    if let Some(provider) = &webserver_state.main_health_provider {
-        provider.update_status(cda_health::Status::Up).await;
-    }
-
-    // Wait for shutdown signal
-    webserver_state.shutdown_signal.clone().await;
-    tracing::info!("Shutting down...");
-    webserver_state.join().await?;
-    cda_interfaces::Shutdown::shutdown(&*communication_runtime.plugin).await;
-
-    Ok(())
+    startup::run::<SP, SL, UPB, CPB>(config, setup).await
 }
 
 /// Run the CDA from parsed CLI arguments.
@@ -344,15 +294,10 @@ where
 /// # Errors
 /// Returns [`AppError`] if configuration loading, validation, or startup fails.
 pub async fn run(args: AppArgs) -> Result<(), AppError> {
-    Box::pin(run_with_ext::<
-        DefaultSecurityPluginData,
-        DefaultSecurityPlugin,
-        _,
-        _,
-    >(
+    Box::pin(run_with_ext(
         args,
-        Setup::new().with_update_plugin(update_plugin_fn(|infra| async move {
-            create_default_update_plugin::<DefaultSecurityPluginData>(infra).await
+        Setup::new().with_update_plugin(update_plugin_fn(|resources| async move {
+            create_default_update_plugin(resources).await
         })),
     ))
     .await
@@ -366,119 +311,31 @@ pub async fn run(args: AppArgs) -> Result<(), AppError> {
 /// # Errors
 /// Returns [`AppError`] if tracing setup, webserver startup, data loading, or route setup fails.
 pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
-    Box::pin(run_with_ext_from_config::<
-        DefaultSecurityPluginData,
-        DefaultSecurityPlugin,
-        _,
-        _,
-    >(
+    Box::pin(run_with_ext_from_config(
         config,
-        Setup::new().with_update_plugin(update_plugin_fn(
-            |infra: setup::CdaRuntime<DefaultSecurityPluginData>| async move {
-                create_default_update_plugin::<DefaultSecurityPluginData>(infra).await
-            },
-        )),
+        Setup::new().with_update_plugin(update_plugin_fn(|resources| async move {
+            create_default_update_plugin(resources).await
+        })),
     ))
     .await
 }
 
-async fn init_webserver(
-    config: &Configuration,
-    pre_load: Option<PreLoadHook>,
-    initialize_tracing: bool,
-    shutdown_signal: Option<cda_interfaces::ShutdownSignal>,
-) -> Result<ApplicationState, AppError> {
-    let tracing_guards = if initialize_tracing {
-        setup_tracing(config)?
-    } else {
-        TracingGuards {
-            _file: None,
-            _otel: None,
-        }
-    };
-    tracing::info!("Starting CDA - version {}", cda_version());
+/// The version payload, with the revision each loaded database reports.
+///
+/// Rebuilt rather than patched, so what is served is always the whole answer
+/// for one set of databases.
+#[allow(
+    clippy::implicit_hasher,
+    reason = "Type alias doesn't allow specifying hasher"
+)]
+pub(crate) fn version_payload(
+    revisions: &cda_interfaces::HashMap<String, String>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let databases = revisions
+        .iter()
+        .map(|(ecu, revision)| (ecu.clone(), serde_json::Value::String(revision.clone())))
+        .collect::<serde_json::Map<_, _>>();
 
-    // Vendor overrides are registered via `linkme` distributed slices, whose
-    // final contents are only known after linking; this checks that at most
-    // one override is linked in per overridable function before any of them
-    // are used. Every crate that defines vendor-overridable functions must
-    // be listed here.
-    if let Err(errors) = cda_core::validate_vendor_overrides() {
-        return Err(AppError::InitializationFailed(format!(
-            "Vendor override configuration error(s): {}",
-            errors.join("; ")
-        )));
-    }
-
-    let webserver_config = cda_sovd::WebServerConfig {
-        host: config.server.address.clone(),
-        port: config.server.port,
-    };
-
-    let clonable_shutdown_signal = shutdown_signal
-        .unwrap_or_else(|| cda_interfaces::shutdown_signal(crate::shutdown_signal()));
-
-    let (dynamic_router, webserver_task) =
-        cda_sovd::launch_webserver(webserver_config.clone(), clonable_shutdown_signal.clone())
-            .await?;
-
-    let mut webserver_state = ApplicationState {
-        _tracing_guards: tracing_guards,
-        dynamic_router,
-        webserver_task: Some(webserver_task),
-        shutdown_signal: clonable_shutdown_signal,
-        health_state: None,
-        main_health_provider: None,
-    };
-
-    #[cfg(feature = "health")]
-    let (health_state, main_health_provider) = if config.health.enabled {
-        let health_state = cda_health::add_health_routes(
-            &webserver_state.dynamic_router,
-            cda_version().to_owned(),
-        )
-        .await;
-        let main_health_provider = Arc::new(cda_health::StatusHealthProvider::new(
-            cda_health::Status::Starting,
-        ));
-        let registration = health_state
-            .register_provider(
-                MAIN_HEALTH_COMPONENT_KEY,
-                Arc::clone(&main_health_provider) as Arc<dyn cda_health::HealthProvider>,
-            )
-            .await
-            .map_err(|e| AppError::InitializationFailed(e.to_string()));
-        registration?;
-        (Some(health_state), Some(main_health_provider))
-    } else {
-        (None, None)
-    };
-
-    #[cfg(not(feature = "health"))]
-    let (health_state, main_health_provider): (
-        Option<cda_health::HealthState>,
-        Option<Arc<cda_health::StatusHealthProvider>>,
-    ) = (None, None);
-
-    webserver_state.health_state = health_state;
-    webserver_state.main_health_provider = main_health_provider;
-
-    #[cfg(feature = "systemd-notify")]
-    let _sd_notify_task = cda_extra::create_sd_notify_task(
-        webserver_state.health_state.clone(),
-        webserver_state.shutdown_signal.clone(),
-    );
-
-    register_version_endpoints(&webserver_state.dynamic_router).await;
-
-    if let Some(hook) = pre_load {
-        hook(webserver_state.dynamic_router.clone()).await?;
-    }
-
-    Ok(webserver_state)
-}
-
-async fn register_version_endpoints(dynamic_router: &cda_sovd::dynamic_router::DynamicRouter) {
     // [[ dimpl~sovd-api-version-endpoint, Register Version Endpoint ]]
     let serde_json::Value::Object(version_info) = serde_json::json!({
         "id": "version",
@@ -491,55 +348,27 @@ async fn register_version_endpoints(dynamic_router: &cda_sovd::dynamic_router::D
                 "version": cda_version(),
                 "commit": env!("GIT_COMMIT_HASH").to_owned(),
                 "build_date": env!("BUILD_DATE").to_owned(),
-            }
+            },
+            "databases": databases,
         }
     }) else {
         tracing::error!("Failed to build version information");
-        return;
+        return serde_json::Map::new();
     };
+    version_info
+}
+
+pub(crate) async fn register_version_endpoints(
+    dynamic_router: &cda_sovd::dynamic_router::DynamicRouter,
+    version: cda_sovd::StaticData,
+) {
     cda_sovd::add_static_data_endpoint(
         dynamic_router,
-        version_info.clone(),
+        version.clone(),
         "/vehicle/v15/apps/sovd2uds/data/version",
     )
     .await;
-    cda_sovd::add_static_data_endpoint(dynamic_router, version_info, "/vehicle/v15/data/version")
-        .await;
-}
-
-/// Collected webserver state produced by [`init_webserver`].
-///
-/// Passed to [`setup::setup_runtime_routes`] and [`run_with_ext_from_config`] so that
-/// the shutdown signal and health provider are accessible after the webserver is started.
-///
-/// Dropping this value aborts the webserver task, so all error paths are covered
-/// automatically without any explicit cleanup calls.
-pub(crate) struct ApplicationState {
-    _tracing_guards: TracingGuards,
-    pub dynamic_router: cda_sovd::dynamic_router::DynamicRouter,
-    webserver_task: Option<tokio::task::JoinHandle<()>>,
-    pub shutdown_signal: cda_interfaces::ShutdownSignal,
-    health_state: Option<cda_health::HealthState>,
-    main_health_provider: Option<Arc<cda_health::StatusHealthProvider>>,
-}
-
-impl Drop for ApplicationState {
-    fn drop(&mut self) {
-        if let Some(task) = self.webserver_task.take() {
-            task.abort();
-        }
-    }
-}
-
-impl ApplicationState {
-    /// Waits for the normally signaled webserver task to finish.
-    async fn join(mut self) -> Result<(), AppError> {
-        if let Some(task) = self.webserver_task.take() {
-            task.await
-                .map_err(|e| AppError::RuntimeError(format!("Webserver task join error: {e}")))?;
-        }
-        Ok(())
-    }
+    cda_sovd::add_static_data_endpoint(dynamic_router, version, "/vehicle/v15/data/version").await;
 }
 
 /// # Panics
@@ -624,33 +453,4 @@ pub fn setup_tracing(config: &Configuration) -> Result<TracingGuards, TracingSet
 #[must_use]
 pub fn cda_version() -> &'static str {
     option_env!("CDA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
-}
-
-#[cfg(test)]
-mod webserver_lifecycle_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn drop_aborts_webserver_task() {
-        let task = tokio::spawn(std::future::pending::<()>());
-        let abort_handle = task.abort_handle();
-
-        let state = ApplicationState {
-            _tracing_guards: TracingGuards {
-                _file: None,
-                _otel: None,
-            },
-            dynamic_router: cda_sovd::dynamic_router::DynamicRouter::new(),
-            webserver_task: Some(task),
-            shutdown_signal: cda_interfaces::shutdown_signal(std::future::pending()),
-            health_state: None,
-            main_health_provider: None,
-        };
-
-        drop(state);
-
-        // abort() is asynchronous; yield to let the cancellation propagate.
-        tokio::task::yield_now().await;
-        assert!(abort_handle.is_finished());
-    }
 }

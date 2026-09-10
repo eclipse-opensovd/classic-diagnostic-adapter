@@ -12,19 +12,19 @@
  */
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use cda_interfaces::{
-    HashMap, ReloadComponent, VariantDetectionSender,
+    HashMap, VariantDetectionSender,
     health::HealthProvider,
     runtime_update_api::{
-        ApplicationUpdatePreparation, ReloadError, RuntimeFileInspector, VehicleDatabaseLockUpdater,
+        PreparedApply, ReloadError, RuntimeFileInspector, VehicleDatabaseLockUpdater,
     },
 };
 use cda_plugin_security::SecurityPlugin;
 
 use crate::{
     config::configfile::Configuration,
-    vehicle::{CanReloadHandle, VehicleDataSource, load_vehicle_databases},
+    mdd,
+    vehicle::{VehicleDataSource, load_vehicle_databases},
 };
 
 /// Loads the diagnostic databases that are currently on disk.
@@ -35,7 +35,6 @@ pub struct VehicleDatabaseLoader<SP>
 where
     SP: SecurityPlugin,
 {
-    health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
     variant_detection: VariantDetectionSender,
     file_inspector: Arc<dyn RuntimeFileInspector>,
     _phantom: std::marker::PhantomData<SP>,
@@ -47,116 +46,122 @@ where
 {
     #[must_use]
     pub fn new(
-        health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
         variant_detection: VariantDetectionSender,
         file_inspector: Arc<dyn RuntimeFileInspector>,
     ) -> Self {
         Self {
-            health_providers,
             variant_detection,
             file_inspector,
             _phantom: std::marker::PhantomData,
         }
     }
 
+    /// `health_providers` belongs to whoever asked for the load: the caller that
+    /// publishes the database status supplies it, and one that does not passes
+    /// `None`.
+    #[allow(
+        clippy::implicit_hasher,
+        reason = "Type alias doesn't allow specifying hasher"
+    )]
     pub(crate) async fn create_databases(
         &self,
         config: &Configuration,
+        health_providers: Option<&HashMap<String, Arc<dyn HealthProvider>>>,
     ) -> Result<VehicleDataSource<SP>, ReloadError> {
         Ok(load_vehicle_databases::<SP>(
             config,
-            self.health_providers.as_ref(),
+            health_providers,
             self.variant_detection.clone(),
             &*self.file_inspector,
         )
         .await?)
     }
-}
 
-/// The components a database reload replaces.
-///
-/// Held directly rather than behind a registration list: the set is fixed by
-/// what the application is built from, so no target can be missed because a
-/// registration did not run. The order they are applied in belongs to
-/// [`DatabaseReloadPreparation`]'s `prepare_update`, not to this declaration.
-pub struct ReloadTargets<SP: SecurityPlugin> {
-    /// Lock resources, reserved before anything is replaced so a conflicting
-    /// lock aborts the reload while the live data is still intact.
-    pub locks: Arc<dyn VehicleDatabaseLockUpdater>,
-    pub uds: Arc<dyn ReloadComponent<cda_comm_uds::VehicleEcuData<cda_core::EcuManager<SP>>>>,
-    /// `None` when the application is configured without CAN.
-    pub can: CanReloadHandle,
-    pub sovd: Arc<dyn ReloadComponent<cda_sovd::SovdIdentities>>,
-}
+    /// The revision each database file on disk carries, keyed by the ECU it
+    /// describes.
+    ///
+    /// Read through the injected inspector rather than off the loaded
+    /// databases, so an application that supplies its own format reports its
+    /// own revisions. A file that names neither is left out; a revision nobody
+    /// can read is not an error.
+    #[allow(
+        clippy::implicit_hasher,
+        reason = "Type alias doesn't allow specifying hasher"
+    )]
+    pub(crate) async fn revisions(&self, config: &Configuration) -> HashMap<String, String> {
+        let paths = mdd::resolve_mdd_paths(
+            &config.runtime_update_config.storage_dir,
+            &config.database.seed_dir,
+        )
+        .await;
 
-/// Rebuilds runtime state from the databases a runtime update just applied.
-///
-/// The MDD files have already been swapped on disk when this runs; what it
-/// prepares is the in-memory state derived from them.
-pub struct DatabaseReloadPreparation<SP: SecurityPlugin> {
-    database_loader: Arc<VehicleDatabaseLoader<SP>>,
-    targets: ReloadTargets<SP>,
-}
-
-impl<SP: SecurityPlugin> DatabaseReloadPreparation<SP> {
-    #[must_use]
-    pub fn new(
-        database_loader: Arc<VehicleDatabaseLoader<SP>>,
-        targets: ReloadTargets<SP>,
-    ) -> Self {
-        Self {
-            database_loader,
-            targets,
+        let mut revisions = HashMap::default();
+        for path in paths {
+            let (Ok(ecu), Some(revision)) = (
+                self.file_inspector.ecu_name(&path),
+                self.file_inspector.revision(&path),
+            ) else {
+                continue;
+            };
+            revisions.insert(ecu, revision);
         }
+        revisions
     }
 }
 
-#[async_trait]
-impl<SP> ApplicationUpdatePreparation<Configuration> for DatabaseReloadPreparation<SP>
-where
-    SP: SecurityPlugin,
-{
-    async fn prepare_update(&self, config: &Configuration) -> Result<(), ReloadError> {
-        let databases = self.database_loader.create_databases(config).await?;
+/// Vehicle data built from the databases on disk, not yet live.
+///
+/// Every step that can fail happened while this was built, against live data
+/// that was still untouched, so a failure leaves the runtime as it was and
+/// installing what succeeded cannot fail.
+pub(crate) struct PreparedVehicleData<SP: SecurityPlugin> {
+    /// Normalized SOVD ECU and functional-group membership.
+    pub(crate) identities: cda_sovd::SovdIdentities,
+    /// `None` when the application is configured without CAN.
+    pub(crate) can_topology: Option<crate::vehicle::CanTopologyPayload>,
+    /// The UDS view of the vehicle, which owns the loaded databases.
+    pub(crate) ecu_data: cda_comm_uds::VehicleEcuData<cda_core::EcuManager<SP>>,
+    /// Lock admission for the new topology, reserved so a conflicting lock
+    /// aborts the reload while the live data is still intact.
+    pub(crate) lock_reservation: Box<dyn PreparedApply>,
+    /// What the loaded files report, for whoever publishes the live revisions.
+    pub(crate) revisions: HashMap<String, String>,
+}
 
-        // Everything that can fail happens first, against live data that is
-        // still untouched, so a failure here leaves the runtime as it was.
-        // `ecu_data` consumes the source, so every other payload is derived from
-        // it before that.
-        let sovd_registry = databases.sovd_registry(config).await;
-        #[cfg(feature = "can")]
-        let can_topology = match (
-            &self.targets.can,
-            databases
-                .can_topology(config)
-                .await
-                .map_err(|error| ReloadError::ReplacementFailure(error.to_string()))?,
-        ) {
-            (Some(owner), Some(topology)) => Some((owner, topology)),
-            (None, None) => None,
-            _ => {
-                return Err(ReloadError::ReplacementFailure(
-                    "Prepared CAN topology does not match the configured CAN owner".to_owned(),
-                ));
-            }
-        };
+impl<SP: SecurityPlugin> PreparedVehicleData<SP> {
+    /// Builds everything a reload needs from the databases that are on disk.
+    ///
+    /// # Errors
+    /// Returns [`ReloadError`] when the databases cannot be loaded, the
+    /// configured CAN topology cannot be derived from them, or a held lock
+    /// stands in the way of the topology they imply.
+    pub(crate) async fn build(
+        loader: &VehicleDatabaseLoader<SP>,
+        config: &Configuration,
+        locks: &dyn VehicleDatabaseLockUpdater,
+    ) -> Result<Self, ReloadError> {
+        // A reload reports its outcome to the caller that asked for it; the
+        // published database status keeps describing the data that is live.
+        let databases = loader.create_databases(config, None).await?;
+
+        // `ecu_data` consumes the source, so every other payload is derived
+        // from it before that.
+        let identities = databases.sovd_registry(config).await;
+        let can_topology = databases
+            .can_topology(config)
+            .await
+            .map_err(|error| ReloadError::ReplacementFailure(error.to_string()))?;
         let ecu_data = databases.ecu_data(config);
-        let lock_reservation = self
-            .targets
-            .locks
+        let lock_reservation = locks
             .reserve_lock_resources(ecu_data.physical_ecu_names())
             .await?;
 
-        // Nothing below can fail. It runs under the caller's exclusive disable
-        // lease, with the transport down and ordinary HTTP refused, so no
-        // reader observes a half-replaced runtime.
-        lock_reservation.apply();
-        self.targets.uds.apply(ecu_data).await;
-        #[cfg(feature = "can")]
-        if let Some((owner, topology)) = can_topology {
-            owner.apply(topology).await;
-        }
-        self.targets.sovd.apply(sovd_registry).await;
-        Ok(())
+        Ok(Self {
+            identities,
+            can_topology,
+            ecu_data,
+            lock_reservation,
+            revisions: loader.revisions(config).await,
+        })
     }
 }

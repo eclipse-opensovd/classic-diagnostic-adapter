@@ -22,14 +22,12 @@ use cda_comm_can::{CanDiagGateway, config::CanConfig};
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::{UdsManager, VehicleEcuData, state_coordinator::EcuStateCoordinator};
 use cda_core::EcuManager;
+#[cfg(feature = "can")]
+use cda_interfaces::ReloadComponent;
 use cda_interfaces::{
-    EcuRuntimeState, HashMap, HashMapExtensions, HashSet, ReloadComponent, Reloadable,
-    VariantDetectionReceiver, VariantDetectionSender,
-    communication_control::CommunicationAccess,
-    dlt_ctx,
-    ecu_data::EcuData,
-    health::HealthProvider,
-    runtime_update_api::{ReloadError, RuntimeFileInspector},
+    EcuRuntimeState, HashMap, HashMapExtensions, HashSet, Reloadable, VariantDetectionReceiver,
+    VariantDetectionSender, communication_control::CommunicationAccess, dlt_ctx, ecu_data::EcuData,
+    health::HealthProvider, runtime_update_api::RuntimeFileInspector,
 };
 use cda_plugin_security::SecurityPlugin;
 use cda_sovd::SovdIdentities;
@@ -37,9 +35,8 @@ use cda_transport_router::DiagnosticTransportRouter;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::{
-    AppError, DOIP_HEALTH_COMPONENT_KEY,
+    AppError,
     config::configfile::Configuration,
-    database_reload::VehicleDatabaseLoader,
     mdd::{self, DatabaseLoadError, load_databases},
 };
 
@@ -70,21 +67,6 @@ pub type CanReloadHandle = Option<Arc<dyn ReloadComponent<CanTopologyPayload>>>;
 /// support.
 #[cfg(not(feature = "can"))]
 pub type CanReloadHandle = ();
-
-pub struct VehicleData<S: SecurityPlugin> {
-    pub diagnostic_gateway: Arc<VehicleGateway<S>>,
-    pub lock_provider: Arc<cda_sovd::SovdLockStateView>,
-    pub(crate) lock_updater:
-        Arc<dyn cda_interfaces::runtime_update_api::VehicleDatabaseLockUpdater>,
-    pub health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
-    /// The process-wide vehicle-data factory used by startup and reload preparation.
-    pub database_loader: Arc<VehicleDatabaseLoader<S>>,
-    pub(crate) ecu_data: Reloadable<VehicleEcuData<EcuManager<S>>>,
-    pub(crate) uds_reload: Arc<dyn ReloadComponent<VehicleEcuData<EcuManager<S>>>>,
-    pub(crate) initial_identities: SovdIdentities,
-    pub(crate) can_reload: CanReloadHandle,
-    pub(crate) variant_detection_receiver: VariantDetectionReceiver,
-}
 
 /// The database-derived source a reload's participants share.
 ///
@@ -176,54 +158,6 @@ pub struct TransportConfigs<'a> {
     pub can: Option<&'a CanConfig>,
 }
 
-/// Registers the vehicle's health providers and returns handles to them.
-///
-/// Process-lifetime singletons: `HealthState` keeps a registration forever, so
-/// this runs once at startup and every later reload reports on the same
-/// handles.
-///
-/// # Errors
-/// Returns [`AppError`] if a provider cannot be registered.
-pub async fn register_health_providers(
-    health: Option<&cda_health::HealthState>,
-) -> Result<Option<HashMap<String, Arc<dyn HealthProvider>>>, AppError> {
-    let Some(health_state) = health else {
-        return Ok(None);
-    };
-
-    let doip = Arc::new(cda_health::StatusHealthProvider::new(
-        cda_health::Status::Starting,
-    ));
-    let database = Arc::new(cda_health::StatusHealthProvider::new(
-        cda_health::Status::Starting,
-    ));
-    health_state
-        .register_provider(
-            DOIP_HEALTH_COMPONENT_KEY,
-            Arc::clone(&doip) as Arc<dyn cda_health::HealthProvider>,
-        )
-        .await
-        .map_err(|e| AppError::InitializationFailed(e.to_string()))?;
-    health_state
-        .register_provider(
-            mdd::DB_HEALTH_COMPONENT_KEY,
-            Arc::clone(&database) as Arc<dyn cda_health::HealthProvider>,
-        )
-        .await
-        .map_err(|e| AppError::InitializationFailed(e.to_string()))?;
-
-    let mut providers: HashMap<String, Arc<dyn HealthProvider>> = HashMap::default();
-    providers.insert(
-        DOIP_HEALTH_COMPONENT_KEY.to_owned(),
-        doip as Arc<dyn HealthProvider>,
-    );
-    providers.insert(
-        mdd::DB_HEALTH_COMPONENT_KEY.to_owned(),
-        database as Arc<dyn HealthProvider>,
-    );
-    Ok(Some(providers))
-}
-
 /// Creates the process's single variant-detection channel.
 ///
 /// Startup keeps the receiver for the lifetime of the `UdsManager`; every
@@ -236,91 +170,6 @@ pub fn variant_detection_channel() -> (VariantDetectionSender, VariantDetectionR
         VariantDetectionSender::new(tx),
         VariantDetectionReceiver::new(rx),
     )
-}
-
-/// Loads the vehicle at startup: creates the process-lifetime singletons, builds
-/// the first ECU data through the same factory later reloads use,
-/// and builds the one diagnostic gateway over it.
-///
-/// # Errors
-/// Returns [`AppError`] if health registration, database loading, or transport
-/// creation fails.
-pub async fn load_vehicle_data<S: SecurityPlugin>(
-    config: &Configuration,
-    health: Option<&cda_health::HealthState>,
-    file_inspector: Arc<dyn RuntimeFileInspector>,
-) -> Result<VehicleData<S>, AppError> {
-    let health_providers = register_health_providers(health).await?;
-    let (variant_detection_sender, variant_detection_receiver) = variant_detection_channel();
-
-    let database_loader = Arc::new(VehicleDatabaseLoader::<S>::new(
-        health_providers.clone(),
-        variant_detection_sender.clone(),
-        file_inspector,
-    ));
-
-    let reload_data = match database_loader.create_databases(config).await {
-        Ok(data) => data,
-        // Startup has nothing to roll back to, and refusing to boot would also
-        // deny the operator the update endpoint that fixes the broken files.
-        // A reload propagates the same error and rolls back instead.
-        Err(error @ ReloadError::NoDatabasesLoaded(_)) => {
-            tracing::error!(
-                %error,
-                "Every MDD file failed to load; starting with no ECU database. Push working \
-                 files through the runtime-update endpoint to recover."
-            );
-            assemble_vehicle_data_source::<S>(HashMap::default(), variant_detection_sender.clone())
-                .await
-        }
-        Err(error) => return Err(AppError::InitializationFailed(error.to_string())),
-    };
-    let initial_identities = reload_data.sovd_registry(config).await;
-    let can_topology = reload_data.can_topology(config).await?;
-    let ecu_data = reload_data.ecu_data(config);
-    // Startup only: a reload reports an empty result to its caller instead, so
-    // an operator can never lose the running server by pushing an empty set.
-    if ecu_data.ecus().is_empty() && config.database.exit_no_database_loaded {
-        return Err(AppError::ResourceError(
-            "No database loaded, exiting as configured".to_string(),
-        ));
-    }
-    let ecu_names = ecu_data.physical_ecu_names();
-    let (lock_state, lock_updater) = cda_sovd::new_sovd_lock_state(ecu_names);
-    let (ecu_data, uds_reload) = cda_comm_uds::prepare_ecu_data(ecu_data);
-
-    let doip_provider: Option<&Arc<dyn HealthProvider>> = health_providers
-        .as_ref()
-        .and_then(|h| h.get(DOIP_HEALTH_COMPONENT_KEY));
-
-    // Gateway constructors are passive. Each long-lived owner receives only
-    // the reload state it consumes.
-    let (gateway, can_reload) = create_diagnostic_gateway(
-        ecu_data.clone(),
-        can_topology,
-        transport_overrides(config),
-        TransportConfigs {
-            doip: &config.doip,
-            can: config.can.as_ref(),
-        },
-        variant_detection_sender,
-        doip_provider,
-    )
-    .await?;
-
-    Ok(VehicleData {
-        diagnostic_gateway: Arc::new(gateway),
-        // Startup topology A is live before any route is mounted.
-        lock_provider: lock_state,
-        lock_updater,
-        health_providers,
-        database_loader,
-        ecu_data,
-        uds_reload,
-        initial_identities,
-        can_reload,
-        variant_detection_receiver,
-    })
 }
 
 /// Builds installable ECU data from the configured MDD databases
@@ -366,6 +215,13 @@ pub(crate) async fn load_vehicle_databases<S: SecurityPlugin>(
     }
 
     Ok(assemble_vehicle_data_source::<S>(databases, variant_detection).await)
+}
+
+/// The vehicle every reloadable owner starts on, before any database is loaded.
+pub(crate) async fn empty_vehicle_data_source<S: SecurityPlugin>(
+    variant_detection: VariantDetectionSender,
+) -> VehicleDataSource<S> {
+    assemble_vehicle_data_source::<S>(HashMap::default(), variant_detection).await
 }
 
 #[allow(
@@ -426,7 +282,7 @@ async fn build_runtime_states<S: SecurityPlugin>(
     states
 }
 
-// The UDS manager, and the SOVD routes `setup::setup_runtime_routes` builds
+// The UDS manager, and the SOVD routes the `SovdApi` stage builds
 // from it, are constructed eagerly regardless of `init_mode`, pointed at a
 // gateway that stays network-inert until an authorized
 // `activate()`/`trigger_detection()` binds its DoIP socket (see

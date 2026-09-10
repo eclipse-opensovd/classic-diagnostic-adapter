@@ -1687,11 +1687,12 @@ pub(crate) async fn execute_mode(
 /// Waits until `execution_id` has finished **and** the update's HTTP protection
 /// has been lifted.
 ///
-/// Waiting for `completed` alone is not enough. The update task publishes that
-/// status, then re-enables communication, and only then drops the protection.
-/// Until it does, every non-exempt route answers `409 Update in progress`,
-/// including `DELETE /vehicle/v15/locks/{id}`, so a test returning inside that
-/// window cannot release its own vehicle lock.
+/// The dispatch brings the protection down before it reports, and only then is
+/// the terminal status published, so reading `completed` already implies the
+/// protection is gone. The second wait stays as a belt-and-braces check: until
+/// the protection is lifted every non-exempt route answers `409`, including
+/// `DELETE /vehicle/v15/locks/{id}`, so a test returning inside that window
+/// cannot release its own vehicle lock.
 ///
 /// The execution resource stays readable throughout, being on the exempt list.
 async fn wait_for_execution_completion(
@@ -2584,6 +2585,78 @@ async fn runtimefiles_apply_updates_live_ecu_set() -> Result<(), TestingError> {
 
     teardown_lock(&runtime.config, &auth, &lock_id).await;
     Ok(())
+}
+
+/// A reload replaces the live databases, so what `/version` says about them
+/// changes with it. Everything else `/version` and `/health` answer with is
+/// mounted at a stage no reload visits, so it must come back identical.
+#[tokio::test]
+async fn a_reload_republishes_database_revisions_and_leaves_the_static_api_alone()
+-> Result<(), TestingError> {
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth = auth_header(&runtime.config, None).await?;
+    let host = &runtime.config.server.address;
+    let port = runtime.config.server.port;
+    let health_url = format!("http://{host}:{port}/health");
+    let version_url = format!("http://{host}:{port}/vehicle/v15/data/version");
+
+    let health_before = read_json(&health_url).await?;
+    let version_before = read_json(&version_url).await?;
+
+    let lock_id = setup_with_lock(&runtime.config, &auth).await;
+    stage_full_database(&runtime.config, &auth).await?;
+    execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
+    teardown_lock(&runtime.config, &auth, &lock_id).await;
+    wait_for_ecus_online(&runtime.config).await?;
+
+    let version_after = read_json(&version_url).await?;
+    let data_after = extract_field_from_json::<serde_json::Value>(&version_after, "data")?;
+    let databases = extract_field_from_json::<serde_json::Value>(&data_after, "databases")?;
+    assert!(
+        databases
+            .as_object()
+            .is_some_and(|revisions| !revisions.is_empty()),
+        "the version endpoint must report the revisions of the live databases, got {databases}"
+    );
+
+    let data_before = extract_field_from_json::<serde_json::Value>(&version_before, "data")?;
+    for field in ["name", "api", "implementation"] {
+        assert_eq!(
+            data_before.get(field),
+            data_after.get(field),
+            "a reload must leave data.{field} of the version endpoint untouched"
+        );
+    }
+    assert_eq!(
+        health_report(&health_before),
+        health_report(&read_json(&health_url).await?),
+        "a reload must leave the health endpoint untouched"
+    );
+
+    Ok(())
+}
+
+/// Reads an unauthenticated endpoint that is exempt from the update protection.
+async fn read_json(url: &str) -> Result<serde_json::Value, TestingError> {
+    let url =
+        reqwest::Url::parse(url).map_err(|error| TestingError::SetupError(error.to_string()))?;
+    let response = send_request(StatusCode::OK, Method::GET, None, None, url).await?;
+    response_to_json(&response)
+}
+
+/// The overall status plus what each component reports, sorted: the components
+/// come out of a map, so the order they are listed in carries no meaning.
+fn health_report(health: &serde_json::Value) -> Vec<String> {
+    let mut report = vec![format!("status={}", health["status"])];
+    report.extend(
+        health["components"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|component| format!("{}={}", component["name"], component["status"])),
+    );
+    report.sort();
+    report
 }
 
 #[tokio::test]

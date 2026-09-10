@@ -47,6 +47,7 @@ COPY cda-sovd/Cargo.toml ./cda-sovd/Cargo.toml
 COPY cda-tracing/Cargo.toml ./cda-tracing/Cargo.toml
 COPY cda-sovd-interfaces/Cargo.toml ./cda-sovd-interfaces/Cargo.toml
 COPY cda-health/Cargo.toml ./cda-health/Cargo.toml
+COPY cda-lifecycle/Cargo.toml ./cda-lifecycle/Cargo.toml
 COPY cda-extra/Cargo.toml ./cda-extra/Cargo.toml
 COPY cda-storage/Cargo.toml ./cda-storage/Cargo.toml
 COPY integration-tests/Cargo.toml ./integration-tests/Cargo.toml
@@ -113,6 +114,7 @@ COPY cda-sovd ./cda-sovd
 COPY cda-tracing ./cda-tracing
 COPY cda-sovd-interfaces ./cda-sovd-interfaces
 COPY cda-health ./cda-health/
+COPY cda-lifecycle ./cda-lifecycle
 COPY cda-extra ./cda-extra
 COPY cda-storage ./cda-storage
 COPY integration-tests ./integration-tests

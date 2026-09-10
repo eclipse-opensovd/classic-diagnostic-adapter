@@ -15,92 +15,41 @@
 //!
 //! [`Setup`] is the public entry-point for applications that need to customize how the CDA
 //! boots. The default startup path uses [`Setup::new`] with the standard update plugin; a
-//! custom path calls [`Setup::with_update_plugin`] to inject any [`RuntimeFilesUpdatePlugin`]
+//! custom path calls [`Setup::with_security_plugin`] to replace the security plugin and
+//! its loader, [`Setup::with_update_plugin`] to inject any [`RuntimeFilesUpdatePlugin`]
 //! implementation, [`Setup::with_communication_plugin`] to replace the default
 //! communication plugin factory, and [`Setup::with_file_inspector`] to replace the
-//! reader for the application's database format, before handing the `Setup` to one of the
-//! `run_*` functions.
+//! reader for the application's database format, before handing the `Setup` to one of
+//! the `run_*` functions.
 //!
 //! [`RuntimeFilesUpdatePlugin`]: cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin
 
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    HashMap, ShutdownSignal,
+    ShutdownSignal,
     communication_control::{
         ActivationCause, CommunicationAccess, CommunicationInitMode, CommunicationLifecycle,
-        CommunicationVariantDetection, PostUpdateCommunicationMode, TransportControl,
-        VariantDetectionMode,
+        CommunicationVariantDetection, TransportControl, VariantDetectionMode,
     },
-    health::HealthProvider,
     http_protection::registry::HttpProtectionRegistry,
     runtime_update_api::RuntimeFileInspector,
 };
+use cda_lifecycle::{CdaEvent, Component, ErasedComponent, erase};
 use cda_plugin_communication_management::{
     lifecycle::{
-        CommunicationRuntime,
-        access::CommunicationAccessView,
-        build_communication_runtime,
-        disable::{CommunicationDisableView, DisableCommunication},
+        CommunicationRuntime, access::CommunicationAccessView, build_communication_runtime,
     },
     plugin::{
         CommunicationPlugin, CommunicationPluginBuilder, default::DefaultCommunicationPluginBuilder,
     },
 };
-use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
-use futures::future::BoxFuture;
-use tokio::sync::RwLock;
-
-use crate::{
-    ApplicationState,
-    config::configfile::Configuration,
-    database_reload::{DatabaseReloadPreparation, ReloadTargets},
-    error::AppError,
-    update::{UpdatePluginBuilder, add_runtime_update_routes},
-    vehicle::{UdsManagerType, VehicleData},
+use cda_plugin_security::{
+    DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,
 };
+use cda_storage::LocalStorage;
 
-// Type alias
-
-/// Boxed async callback executed after the webserver starts but **before** vehicle data is
-/// loaded. Receives the dynamic router so it can register early routes.
-pub(crate) type PreLoadHook = Box<
-    dyn FnOnce(cda_sovd::dynamic_router::DynamicRouter) -> BoxFuture<'static, Result<(), AppError>>
-        + Send,
->;
-
-/// Runtime context produced during CDA initialization and provided to update-plugin builders.
-///
-/// The runtime update factory returns a consumed preparation whose typed
-/// values are already bound to their actual component owners. No aggregate
-/// writable vehicle-data handle crosses this boundary.
-pub struct CdaRuntime<SP: SecurityPlugin> {
-    pub config: Arc<RwLock<Configuration>>,
-    /// Runtime-only preparation and typed reload capability.
-    pub update_preparation: Arc<DatabaseReloadPreparation<SP>>,
-    /// The injected inspector for the application's database format. The single
-    /// instance: an OEM that supplies its own is never bypassed.
-    pub file_inspector: Arc<dyn RuntimeFileInspector>,
-    pub dynamic_router: cda_sovd::dynamic_router::DynamicRouter,
-    /// Read-only lock topology view; update plugins receive no publication authority.
-    pub lock_provider: Arc<cda_sovd::SovdLockStateView>,
-    pub health: Option<HashMap<String, Arc<dyn HealthProvider>>>,
-    pub storage_dir: String,
-    pub shutdown_signal: ShutdownSignal,
-    /// Transport behavior to restore after a runtime database update completes.
-    pub post_update_mode: PostUpdateCommunicationMode,
-    /// Narrow handle used by update plugins to request activation without
-    /// gaining the full [`CommunicationPlugin`](CommunicationPlugin) lifecycle authority.
-    pub communication_access: Arc<dyn CommunicationAccess>,
-    /// Narrow handle used by update plugins to take exclusive ownership of
-    /// communication for the duration of a runtime file update.
-    pub communication_disable: Arc<dyn DisableCommunication>,
-    /// Shared registry of HTTP request restrictions installed by update plugins.
-    pub http_protections: HttpProtectionRegistry,
-    /// Retry hint surfaced on the HTTP `Retry-After` header while a runtime
-    /// update holds communication exclusively.
-    pub update_retry_after: Duration,
-}
+use crate::{error::AppError, update::UpdatePluginBuilder, vehicle::UdsManagerType};
 
 /// Builder for customizing the CDA startup sequence.
 ///
@@ -113,13 +62,10 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
 ///     update::update_plugin_fn,
 /// };
 ///
-/// let setup = Setup::<MySecurityPlugin, MySecurityLoader>::new()
-///     .with_preload(|router| async move {
-///         // register additional routes before databases load
-///         Ok(())
-///     })
-///     .with_update_plugin(update_plugin_fn(|infra| async move {
-///         Ok(MyCustomUpdatePlugin::new(infra))
+/// let setup = Setup::new()
+///     .with_security_plugin::<MySecurityPlugin, MySecurityLoader>()
+///     .with_update_plugin(update_plugin_fn(|resources| async move {
+///         Ok(MyCustomUpdatePlugin::new(resources))
 ///     }))
 ///     .with_communication_plugin(MyCommunicationPluginBuilder);
 ///
@@ -134,19 +80,20 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
 /// [`UpdatePluginBuilder`]: UpdatePluginBuilder
 ///
 /// Type parameters:
-/// - `SP`: security plugin
-/// - `SL`: security plugin loader
+/// - `SP`: security plugin, defaults to [`DefaultSecurityPluginData`]
+/// - `SL`: security plugin loader, defaults to [`DefaultSecurityPlugin`]
 /// - `UPB`: update plugin builder, defaults to `()`
 /// - `CPB`: communication plugin builder, defaults to [`DefaultCommunicationPluginBuilder`]
 pub struct Setup<
-    SP: SecurityPlugin,
-    SL: SecurityPluginLoader,
+    SP: SecurityPlugin = DefaultSecurityPluginData,
+    SL: SecurityPluginLoader = DefaultSecurityPlugin,
     UPB = (),
     CPB = DefaultCommunicationPluginBuilder,
 > {
     pub(crate) _phantom: std::marker::PhantomData<(SP, SL)>,
-    /// Optional callback run after the webserver starts but before vehicle data is loaded.
-    pub(crate) pre_load: Option<PreLoadHook>,
+    /// Extra components registered alongside the built-in ones. Erased here,
+    /// because a `Setup` collects them before there is a runtime to put them in.
+    pub(crate) components: Vec<Box<dyn ErasedComponent<CdaEvent>>>,
     /// Optional update-plugin builder. When `None` (or `UPB = ()`) the runtime-update
     /// routes are not registered.
     pub(crate) build_update_plugin: Option<UPB>,
@@ -158,19 +105,19 @@ pub struct Setup<
     pub(crate) shutdown_signal: Option<ShutdownSignal>,
 }
 
-impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Default for Setup<SP, SL> {
+impl Default for Setup {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Setup<SP, SL> {
-    /// Creates a new `Setup` with no preload hook and no custom update plugin.
+impl Setup {
+    /// Creates a new `Setup` with no extra components and no custom update plugin.
     #[must_use]
     pub fn new() -> Self {
         Self {
             _phantom: std::marker::PhantomData,
-            pre_load: None,
+            components: Vec::new(),
             build_update_plugin: None,
             build_communication_plugin: DefaultCommunicationPluginBuilder,
             file_inspector: Arc::new(crate::mdd_inspector::MddFileInspector),
@@ -206,31 +153,44 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
         self
     }
 
-    /// Registers a preload hook.
+    /// Registers an additional lifecycle component.
     ///
-    /// The hook is called after the webserver starts, health state and sd-notify are
-    /// configured, but **before** vehicle data (MDD databases) are loaded.  Use it to
-    /// mount additional routes that should be reachable during the (potentially slow)
-    /// database load.
-    ///
-    /// The hook must return `Ok(())` to allow startup to continue; returning `Err` aborts
-    /// the entire startup.
+    /// It is constructed, started and stopped in the order its declared
+    /// [`Requires`](Component::Requires) and [`Provides`](Component::Provides)
+    /// derive, alongside the built-in ones, and is dispatched every event that
+    /// visits the stage it labels itself with. Returning an error from it
+    /// aborts the whole dispatch.
     #[must_use]
-    pub fn with_preload<F, Fut>(mut self, f: F) -> Self
-    where
-        F: FnOnce(cda_sovd::dynamic_router::DynamicRouter) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<(), AppError>> + Send + 'static,
-    {
-        self.pre_load = Some(Box::new(|router| Box::pin(f(router))));
+    pub fn with_component<C: Component<CdaEvent>>(mut self, component: C) -> Self {
+        self.components.push(erase(component));
         self
+    }
+
+    /// Replaces the security plugin and its loader.
+    ///
+    /// Both stay concrete types rather than trait objects: the SOVD routes are
+    /// built with `SP` as the protection middleware's plugin and `SL` as an
+    /// axum handler, neither of which survives erasure.
+    pub fn with_security_plugin<SP2: SecurityPlugin, SL2: SecurityPluginLoader>(
+        self,
+    ) -> Setup<SP2, SL2, UPB, CPB> {
+        Setup {
+            _phantom: std::marker::PhantomData,
+            components: self.components,
+            build_update_plugin: self.build_update_plugin,
+            build_communication_plugin: self.build_communication_plugin,
+            file_inspector: self.file_inspector,
+            initialize_tracing: self.initialize_tracing,
+            shutdown_signal: self.shutdown_signal,
+        }
     }
 
     /// Configures a custom runtime update plugin.
     ///
     /// `builder` is called after vehicle data is loaded and routes are registered.
-    /// It receives the [`CdaRuntime`] capabilities exposed to update plugins,
-    /// including application preparation, storage configuration, lock policy,
-    /// communication lifecycle, and HTTP protection.
+    /// It receives the [`UpdatePluginResources`] the application grants an update
+    /// plugin: its storage, the dispatcher that runs a transition, the database
+    /// format reader and a read-only view of the lock topology.
     ///
     /// The returned plugin is wrapped in [`ExclusiveRuntimePlugin`] (read/write mutual
     /// exclusion) and mounted on the standard runtime-update HTTP endpoints automatically.
@@ -239,20 +199,21 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
     /// manually:
     ///
     /// ```rust,ignore
-    /// setup.with_update_plugin(update_plugin_fn(|infra| async move {
-    ///     Ok(MyPlugin::new(infra))
+    /// setup.with_update_plugin(update_plugin_fn(|resources| async move {
+    ///     Ok(MyPlugin::new(resources))
     /// }))
     /// ```
     ///
     /// [`ExclusiveRuntimePlugin`]: cda_interfaces::runtime_update_api::ExclusiveRuntimePlugin
     /// [`update_plugin_fn`]: crate::update::update_plugin_fn
-    pub fn with_update_plugin<UPB2: UpdatePluginBuilder<SP>>(
-        self,
-        builder: UPB2,
-    ) -> Setup<SP, SL, UPB2, CPB> {
+    /// [`UpdatePluginResources`]: crate::update::UpdatePluginResources
+    pub fn with_update_plugin<UPB2>(self, builder: UPB2) -> Setup<SP, SL, UPB2, CPB>
+    where
+        UPB2: UpdatePluginBuilder<LocalStorage>,
+    {
         Setup {
             _phantom: self._phantom,
-            pre_load: self.pre_load,
+            components: self.components,
             build_update_plugin: Some(builder),
             build_communication_plugin: self.build_communication_plugin,
             file_inspector: self.file_inspector,
@@ -270,7 +231,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
     ) -> Setup<SP, SL, UPB, CPB2> {
         Setup {
             _phantom: self._phantom,
-            pre_load: self.pre_load,
+            components: self.components,
             build_update_plugin: self.build_update_plugin,
             build_communication_plugin: plugin,
             file_inspector: self.file_inspector,
@@ -286,8 +247,8 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
 /// Diagnostic operations request activation directly (see
 /// `CommunicationAccess::request_activate`), so `http_protections` is left to the
 /// runtime-update plugin's own protection.
-async fn build_communication_runtime_and_access<CPB>(
-    ws: &ApplicationState,
+pub(crate) async fn build_communication_runtime_and_access<CPB>(
+    dynamic_router: &cda_sovd::dynamic_router::DynamicRouter,
     transport_control: Arc<dyn TransportControl>,
     communication_plugin: CPB,
     init_mode: CommunicationInitMode,
@@ -298,11 +259,8 @@ async fn build_communication_runtime_and_access<CPB>(
 where
     CPB: CommunicationPluginBuilder,
 {
-    cda_sovd::install_http_restriction_guard(
-        &ws.dynamic_router,
-        Arc::new(http_protections.clone()),
-    )
-    .await;
+    cda_sovd::install_http_restriction_guard(dynamic_router, Arc::new(http_protections.clone()))
+        .await;
 
     let communication_runtime = build_communication_runtime(
         communication_plugin,
@@ -326,7 +284,7 @@ where
 /// They register separately because they run at different times: the lifecycle
 /// hook on every transport enable, and variant detection as the optional last
 /// stage that `trigger_detection()` can run on its own.
-async fn register_communication_hooks<SP>(
+pub(crate) async fn register_communication_hooks<SP>(
     plugin: &Arc<dyn CommunicationPlugin>,
     uds_manager: &UdsManagerType<SP>,
 ) -> Result<(), AppError>
@@ -351,7 +309,7 @@ where
 /// leave it uninitialized, with HTTP/SOVD already served by the routes registered
 /// beforehand. Under `OnDemand` an explicit `activate()` or a qualifying ECU request
 /// initializes it. The default plugin offers no activation path under `Disabled`.
-async fn activate_communication_per_init_mode(
+pub(crate) async fn activate_communication_per_init_mode(
     plugin: &Arc<dyn CommunicationPlugin>,
     init_mode: CommunicationInitMode,
 ) -> Result<(), AppError> {
@@ -365,169 +323,44 @@ async fn activate_communication_per_init_mode(
     }
 }
 
-/// Builds the caller-supplied update plugin, if any, and mounts its HTTP routes.
-async fn setup_update_plugin<SP, SL, UPB>(
-    ws: &ApplicationState,
-    build_update_plugin: Option<UPB>,
-    infra: CdaRuntime<SP>,
-    lock_provider: Arc<cda_sovd::SovdLockStateView>,
-    upload_body_limit_bytes: usize,
-    update_retry_after: Duration,
-) -> Result<(), AppError>
-where
-    SP: SecurityPlugin,
-    SL: SecurityPluginLoader,
-    UPB: UpdatePluginBuilder<SP>,
-{
-    let Some(builder) = build_update_plugin else {
-        return Ok(());
-    };
-
-    let plugin = builder.build(infra).await?;
-    add_runtime_update_routes::<SL, _>(
-        &ws.dynamic_router,
-        plugin,
-        lock_provider,
-        upload_body_limit_bytes,
-        update_retry_after,
-    )
-    .await;
-
-    Ok(())
-}
-
-/// Registers all SOVD routes, the runtime-update plugin, `OpenAPI` routes, and the update guard.
-///
-/// This is called after vehicle data has been loaded. The `build_update_plugin` optional
-/// builder is consumed here; when `None` the runtime-update endpoints are simply not mounted.
-pub(crate) async fn setup_runtime_routes<SP, SL, UPB, CPB>(
-    config: Configuration,
-    vehicle_data: VehicleData<SP>,
-    ws: &ApplicationState,
-    build_update_plugin: Option<UPB>,
-    communication_plugin: CPB,
-    file_inspector: Arc<dyn RuntimeFileInspector>,
-) -> Result<CommunicationRuntime, AppError>
-where
-    SP: SecurityPlugin,
-    SL: SecurityPluginLoader,
-    UPB: UpdatePluginBuilder<SP>,
-    CPB: CommunicationPluginBuilder,
-{
-    let runtime_update_config = config.runtime_update_config.clone();
-    let update_retry_after = Duration::from_secs(runtime_update_config.retry_after_seconds);
-    let communication_retry_after =
-        Duration::from_secs(config.communication.deferred_retry_after_seconds);
-    let post_update_mode = config.communication.post_update_mode.clone();
-
-    let lock_provider = Arc::clone(&vehicle_data.lock_provider);
-    let lock_state_view = Arc::clone(&lock_provider);
-
-    let shutdown_signal = cda_interfaces::shutdown_signal(ws.shutdown_signal.clone());
-    let http_protections = HttpProtectionRegistry::new();
-
-    let transport_control: Arc<dyn TransportControl> =
-        Arc::clone(&vehicle_data.diagnostic_gateway) as Arc<dyn TransportControl>;
-    let (communication_runtime, communication_access) = build_communication_runtime_and_access(
-        ws,
-        transport_control,
-        communication_plugin,
-        config.communication.init_mode,
-        config.communication.variant_detection,
-        communication_retry_after,
-        &http_protections,
-    )
-    .await?;
-    let plugin = Arc::clone(&communication_runtime.plugin);
-
-    let registry = Arc::new(cda_sovd::SovdRegistry::new(vehicle_data.initial_identities));
-    let sovd_registry = registry.view();
-    let sovd_reload =
-        registry as Arc<dyn cda_interfaces::ReloadComponent<cda_sovd::SovdIdentities>>;
-    let update_preparation = Arc::new(DatabaseReloadPreparation::new(
-        Arc::clone(&vehicle_data.database_loader),
-        ReloadTargets {
-            locks: Arc::clone(&vehicle_data.lock_updater),
-            uds: Arc::clone(&vehicle_data.uds_reload),
-            can: vehicle_data.can_reload,
-            sovd: sovd_reload,
-        },
-    ));
-    let uds_manager = crate::vehicle::finish_vehicle_components(
-        Arc::clone(&vehicle_data.diagnostic_gateway),
-        vehicle_data.ecu_data,
-        vehicle_data.variant_detection_receiver,
-        &config,
-        Arc::clone(&communication_access),
-    );
-    register_communication_hooks(&plugin, &uds_manager).await?;
-
-    let communication_disable: Arc<dyn DisableCommunication> =
-        Arc::new(CommunicationDisableView::new(Arc::clone(&plugin)));
-
-    // Routes and OpenAPI share one process-lifetime registry. Reloads update
-    // component-owned data and never rebuild this index or route tree.
-    let _ = cda_sovd::add_vehicle_routes::<_, SL>(
-        &ws.dynamic_router,
-        cda_sovd::VehicleConfig {
-            flash_files_path: config.flash_files_path.clone(),
-            components_config: config.components.clone(),
-        },
-        cda_sovd::VehicleResources {
-            ecu_uds: uds_manager.clone(),
-            lock_provider: Arc::clone(&lock_state_view),
-            registry: sovd_registry.clone(),
-            communication_access: Arc::clone(&communication_access),
-        },
-    )
-    .await?;
-
-    activate_communication_per_init_mode(&plugin, config.communication.init_mode).await?;
-
-    let infra = CdaRuntime {
-        config: Arc::new(RwLock::new(config)),
-        update_preparation,
-        file_inspector,
-        dynamic_router: ws.dynamic_router.clone(),
-        lock_provider: Arc::clone(&lock_state_view),
-        shutdown_signal,
-        post_update_mode,
-        communication_access,
-        communication_disable,
-        http_protections,
-        update_retry_after,
-        health: vehicle_data.health_providers,
-        storage_dir: runtime_update_config.storage_dir.clone(),
-    };
-
-    setup_update_plugin::<SP, SL, _>(
-        ws,
-        build_update_plugin,
-        infra,
-        lock_state_view,
-        runtime_update_config.upload_body_limit_bytes,
-        update_retry_after,
-    )
-    .await?;
-
-    cda_sovd::add_openapi_routes(&ws.dynamic_router, sovd_registry).await;
-
-    Ok(communication_runtime)
-}
-
 #[cfg(test)]
 mod tests {
     use cda_interfaces::runtime_update_api::{
         BulkDataCreatedList, BulkDataList, ExecutionMode, RuntimeFileCatalog, RuntimeFileStore,
         RuntimeFilesQuery, RuntimeUpdateError, RuntimeUpdateExecutor, UpdateExecution,
     };
-    use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 
     use super::*;
-    use crate::update::{UpdatePluginFn, update_plugin_fn};
+    use crate::update::{UpdatePluginFn, UpdatePluginResources, update_plugin_fn};
 
     // Minimal no-op plugin for type-checking.
     struct NoOpPlugin;
+
+    // Minimal component for the registration tests.
+    struct NoOpComponent;
+
+    #[async_trait::async_trait]
+    impl Component<CdaEvent> for NoOpComponent {
+        type Provides = ();
+
+        fn name(&self) -> &'static str {
+            "no-op"
+        }
+
+        fn stage(&self) -> cda_lifecycle::CdaStage {
+            cda_lifecycle::CdaStage::Transports
+        }
+
+        async fn construct(
+            self,
+            _resources: &cda_interfaces::lifecycle::StageResources<'_>,
+        ) -> Result<
+            cda_lifecycle::Constructed<Self::Provides, CdaEvent>,
+            cda_interfaces::lifecycle::LifecycleError,
+        > {
+            Ok(cda_lifecycle::Constructed::new(()))
+        }
+    }
 
     #[async_trait::async_trait]
     impl RuntimeFileCatalog for NoOpPlugin {
@@ -576,6 +409,33 @@ mod tests {
     }
 
     #[async_trait::async_trait]
+    impl cda_interfaces::runtime_update_api::RuntimeFileTransaction for NoOpPlugin {
+        async fn apply_files(&self) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+
+        async fn rollback_files(&self) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+
+        async fn discard_staged(&self) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+
+        async fn cleanup_files(&self) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+
+        async fn restore_after_apply(&self) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+
+        async fn restore_after_rollback(&self) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
     impl RuntimeUpdateExecutor for NoOpPlugin {
         async fn start_execution(
             &self,
@@ -593,19 +453,17 @@ mod tests {
         }
     }
 
-    type TestSetup = Setup<DefaultSecurityPluginData, DefaultSecurityPlugin>;
-
     #[test]
     fn documented_public_api_type_checks() {
-        let _: Option<CdaRuntime<DefaultSecurityPluginData>> = None;
+        let _: Option<UpdatePluginResources<LocalStorage>> = None;
     }
 
     #[test]
-    fn new_has_no_preload_and_no_plugin() {
-        let s = TestSetup::new();
+    fn new_has_no_components_and_no_plugin() {
+        let s = Setup::new();
         assert!(
-            s.pre_load.is_none(),
-            "fresh Setup must have no preload hook"
+            s.components.is_empty(),
+            "fresh Setup must have no extra components"
         );
         assert!(
             s.build_update_plugin.is_none(),
@@ -614,11 +472,12 @@ mod tests {
     }
 
     #[test]
-    fn with_preload_stores_hook() {
-        let s = TestSetup::new().with_preload(|_router| async { Ok(()) });
-        assert!(
-            s.pre_load.is_some(),
-            "with_preload must store the provided hook"
+    fn with_component_stores_component() {
+        let s = Setup::new().with_component(NoOpComponent);
+        assert_eq!(
+            s.components.len(),
+            1,
+            "with_component must store the provided component"
         );
     }
 
@@ -626,12 +485,11 @@ mod tests {
     fn with_update_plugin_stores_builder() {
         // Use `update_plugin_fn` as a convenient closure adapter.
         let builder: UpdatePluginFn<_> =
-            update_plugin_fn(|_infra: CdaRuntime<DefaultSecurityPluginData>| async {
+            update_plugin_fn(|_resources: UpdatePluginResources<LocalStorage>| async {
                 Ok(NoOpPlugin)
             });
 
-        let s: Setup<DefaultSecurityPluginData, DefaultSecurityPlugin, _> =
-            TestSetup::new().with_update_plugin(builder);
+        let s = Setup::new().with_update_plugin(builder);
 
         assert!(
             s.build_update_plugin.is_some(),
@@ -640,17 +498,17 @@ mod tests {
     }
 
     #[test]
-    fn chaining_preload_then_plugin_retains_both() {
+    fn chaining_component_then_plugin_retains_both() {
         let builder: UpdatePluginFn<_> =
-            update_plugin_fn(|_infra: CdaRuntime<DefaultSecurityPluginData>| async {
+            update_plugin_fn(|_resources: UpdatePluginResources<LocalStorage>| async {
                 Ok(NoOpPlugin)
             });
 
-        let s = TestSetup::new()
-            .with_preload(|_| async { Ok(()) })
+        let s = Setup::new()
+            .with_component(NoOpComponent)
             .with_update_plugin(builder);
 
-        assert!(s.pre_load.is_some(), "preload hook must survive chaining");
+        assert_eq!(s.components.len(), 1, "components must survive chaining");
         assert!(
             s.build_update_plugin.is_some(),
             "plugin builder must be stored after chaining"
@@ -658,17 +516,17 @@ mod tests {
     }
 
     #[test]
-    fn chaining_plugin_then_preload_retains_both() {
+    fn chaining_plugin_then_component_retains_both() {
         let builder: UpdatePluginFn<_> =
-            update_plugin_fn(|_infra: CdaRuntime<DefaultSecurityPluginData>| async {
+            update_plugin_fn(|_resources: UpdatePluginResources<LocalStorage>| async {
                 Ok(NoOpPlugin)
             });
 
-        let s = TestSetup::new()
+        let s = Setup::new()
             .with_update_plugin(builder)
-            .with_preload(|_| async { Ok(()) });
+            .with_component(NoOpComponent);
 
-        assert!(s.pre_load.is_some(), "preload hook must survive chaining");
+        assert_eq!(s.components.len(), 1, "components must survive chaining");
         assert!(
             s.build_update_plugin.is_some(),
             "plugin builder must survive chaining"

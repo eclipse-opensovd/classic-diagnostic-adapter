@@ -12,9 +12,7 @@
  */
 
 use cda_interfaces::{
-    runtime_update_api::{
-        RejectedSetDisposition, ReloadFailure, RuntimeReloaderPlugin, RuntimeUpdateError,
-    },
+    runtime_update_api::RuntimeUpdateError,
     storage_api::{CollectionName, Storage, StorageError},
 };
 
@@ -134,25 +132,16 @@ pub async fn restore_backup_and_restage_rejected<S: Storage>(
     Ok(())
 }
 
-pub(crate) async fn reload_after_database_swap<R: RuntimeReloaderPlugin + ?Sized>(
-    reload_handler: &R,
-    on_reject: RejectedSetDisposition,
-) -> Result<(), ReloadFailure> {
-    reload_handler.reload_databases(on_reject).await
-}
-
-/// Roll back the entire update from the backup, then reload from it.
+/// Discards the staged set once a rollback's databases are live.
+///
+/// Separate from [`restore_backup`] on purpose: a rollback is only committed
+/// once the runtime has accepted the restored database, and discarding the
+/// staged update before that would leave a rejected rollback partially applied,
+/// because recovering from one swaps current and backup back.
+///
 /// # Errors
-/// Returns [`RuntimeUpdateError`] if the persistent restore or runtime reload fails.
-pub async fn execute_rollback<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
-    storage: &S,
-    reload_handler: &R,
-) -> Result<(), RuntimeUpdateError> {
-    restore_backup(storage).await?;
-    reload_after_database_swap(reload_handler, RejectedSetDisposition::Swap).await?;
-    // The rollback is only committed once the runtime accepted the restored database.
-    // Discarding the staged update before that would leave a rejected rollback in a
-    // partially applied state, because the reloader swaps current and backup back.
+/// Returns [`RuntimeUpdateError`] if the storage transaction fails.
+pub async fn discard_staged<S: Storage>(storage: &S) -> Result<(), RuntimeUpdateError> {
     let mut tx = storage.begin_transaction()?;
     delete_collection_ignore_missing(
         storage,
@@ -167,17 +156,14 @@ pub async fn execute_rollback<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
 #[cfg(test)]
 mod tests {
     use cda_interfaces::{
-        runtime_update_api::{ReloadFailure, RuntimeUpdateError},
+        runtime_update_api::RuntimeUpdateError,
         storage_api::{
             Collection as _, CollectionName, RandomAccessData as _, Storage as _, StorageError,
         },
     };
 
-    use super::{execute_rollback, restore_backup_and_restage_rejected};
-    use crate::test_utils::{
-        FailingReloadHandler, NoopReloadHandler, RecordingReloadHandler, init_collection,
-        make_storage,
-    };
+    use super::{discard_staged, restore_backup, restore_backup_and_restage_rejected};
+    use crate::test_utils::{init_collection, make_storage};
 
     async fn read_file(
         storage: &cda_storage::LocalStorage,
@@ -210,9 +196,7 @@ mod tests {
         )
         .await;
 
-        execute_rollback(&storage, &NoopReloadHandler)
-            .await
-            .unwrap();
+        restore_backup(&storage).await.unwrap();
 
         let db_col = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
@@ -228,8 +212,10 @@ mod tests {
         assert_eq!(&buf, b"backup_data");
     }
 
+    /// Only a rollback that the runtime accepted clears the staged set, so
+    /// restoring the backup on its own must leave it in place.
     #[tokio::test]
-    async fn rollback_clears_diagnostic_database_next_update() {
+    async fn restoring_the_backup_leaves_the_staged_set_alone() {
         let (storage, _dir) = make_storage();
 
         init_collection(
@@ -246,17 +232,45 @@ mod tests {
         )
         .await;
 
-        execute_rollback(&storage, &NoopReloadHandler)
-            .await
-            .unwrap();
+        restore_backup(&storage).await.unwrap();
+
+        assert_eq!(
+            read_file(
+                &storage,
+                &CollectionName::DiagnosticDatabaseNextUpdate,
+                "ecu1.mdd"
+            )
+            .await,
+            b"pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn discarding_the_staged_set_clears_diagnostic_database_next_update() {
+        let (storage, _dir) = make_storage();
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+            &[("ecu1.mdd", b"pending")],
+        )
+        .await;
+
+        discard_staged(&storage).await.unwrap();
 
         let result = storage
             .get_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
             .await;
         assert!(
             matches!(result, Err(StorageError::CollectionNotFound(_))),
-            "NextUpdate should be gone after rollback"
+            "NextUpdate should be gone once the rollback is committed"
         );
+    }
+
+    #[tokio::test]
+    async fn discarding_an_absent_staged_set_succeeds() {
+        let (storage, _dir) = make_storage();
+
+        discard_staged(&storage).await.unwrap();
     }
 
     #[tokio::test]
@@ -276,9 +290,7 @@ mod tests {
         )
         .await;
 
-        execute_rollback(&storage, &NoopReloadHandler)
-            .await
-            .unwrap();
+        restore_backup(&storage).await.unwrap();
 
         let backup_col = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
@@ -301,9 +313,7 @@ mod tests {
         )
         .await;
 
-        execute_rollback(&storage, &NoopReloadHandler)
-            .await
-            .unwrap();
+        restore_backup(&storage).await.unwrap();
 
         let current = storage
             .get_collection(&CollectionName::DiagnosticDatabase)
@@ -318,28 +328,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rollback_calls_reload_handler() {
-        let (storage, _dir) = make_storage();
-
-        init_collection(
-            &storage,
-            &CollectionName::DiagnosticDatabaseBackup,
-            &[("ecu1.mdd", b"backup")],
-        )
-        .await;
-
-        let handler = RecordingReloadHandler::new();
-        execute_rollback(&storage, &handler).await.unwrap();
-
-        let calls = handler.reload_calls.lock().unwrap();
-        assert_eq!(calls.len(), 1, "reload_databases should be called once");
-    }
-
-    #[tokio::test]
     async fn rollback_no_backup_returns_error() {
         let (storage, _dir) = make_storage();
 
-        let result = execute_rollback(&storage, &NoopReloadHandler).await;
+        let result = restore_backup(&storage).await;
         assert!(
             matches!(result, Err(RuntimeUpdateError::NoBackup)),
             "expected NoBackup when the backup collection is absent, got: {result:?}"
@@ -352,8 +344,11 @@ mod tests {
         ));
     }
 
+    /// The swap is an involution, so running it twice returns to the starting
+    /// state. That is what makes it usable as the undo of a rollback whose load
+    /// was rejected.
     #[tokio::test]
-    async fn failed_rollback_reload_reports_recovery_required_without_an_unproven_restore() {
+    async fn restoring_the_backup_twice_returns_to_the_starting_state() {
         let (storage, _dir) = make_storage();
         init_collection(
             &storage,
@@ -368,24 +363,19 @@ mod tests {
         )
         .await;
 
-        let result = execute_rollback(&storage, &FailingReloadHandler).await;
+        restore_backup(&storage).await.unwrap();
+        restore_backup(&storage).await.unwrap();
 
-        assert!(matches!(
-            result,
-            Err(RuntimeUpdateError::ReloadFailed(
-                ReloadFailure::RecoveryFailed { .. }
-            ))
-        ));
         let current = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
             .await
             .unwrap();
-        assert_eq!(current.list().await.unwrap(), vec!["ecu1.mdd"]);
+        assert_eq!(current.list().await.unwrap(), vec!["current.mdd"]);
         let backup = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
             .await
             .unwrap();
-        assert_eq!(backup.list().await.unwrap(), vec!["current.mdd"]);
+        assert_eq!(backup.list().await.unwrap(), vec!["ecu1.mdd"]);
     }
 
     /// A swap that failed mid-transaction leaves the internal rollback collection behind.
@@ -413,9 +403,7 @@ mod tests {
         )
         .await;
 
-        execute_rollback(&storage, &NoopReloadHandler)
-            .await
-            .unwrap();
+        restore_backup(&storage).await.unwrap();
 
         let current = storage
             .get_collection(&CollectionName::DiagnosticDatabase)

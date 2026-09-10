@@ -506,14 +506,11 @@ pub(crate) fn host() -> String {
 pub(crate) fn start_cda(config: Configuration) {
     start_cda_with_setup(
         config,
-        opensovd_cda_lib::Setup::<DefaultSecurityPluginData, DefaultSecurityPlugin>::new()
+        opensovd_cda_lib::Setup::new()
             .with_existing_tracing()
             .with_update_plugin(opensovd_cda_lib::update::update_plugin_fn(
-                |infra: opensovd_cda_lib::setup::CdaRuntime<DefaultSecurityPluginData>| async {
-                    opensovd_cda_lib::update::create_default_update_plugin::<
-                        DefaultSecurityPluginData,
-                    >(infra)
-                    .await
+                |resources| async {
+                    opensovd_cda_lib::update::create_default_update_plugin(resources).await
                 },
             )),
     );
@@ -523,11 +520,12 @@ pub(crate) fn start_cda(config: Configuration) {
 ///
 /// The shutdown sender is stored in `CDA_SHUTDOWN` so that [`stop_cda`] and
 /// [`restart_cda`] work regardless of which setup was used.
-pub(crate) fn start_cda_with_setup<UPB>(
+pub(crate) fn start_cda_with_setup<UPB, CPB>(
     config: Configuration,
-    setup: opensovd_cda_lib::Setup<DefaultSecurityPluginData, DefaultSecurityPlugin, UPB>,
+    setup: opensovd_cda_lib::Setup<DefaultSecurityPluginData, DefaultSecurityPlugin, UPB, CPB>,
 ) where
-    UPB: UpdatePluginBuilder<DefaultSecurityPluginData> + Send + 'static,
+    UPB: UpdatePluginBuilder<opensovd_cda_lib::LocalStorage> + Send + 'static,
+    CPB: cda_plugin_communication_management::plugin::CommunicationPluginBuilder + 'static,
 {
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
     let setup = setup.with_shutdown_signal(cda_interfaces::shutdown_signal(async move {
@@ -1100,7 +1098,18 @@ async fn mark_cda_stopped() {
     *RUNNING_CDA_COMMUNICATION.lock().await = None;
 }
 
+/// Brings `container` up on the new configuration.
+///
+/// A run whose first test deferred the CDA never created the container, and
+/// `restart` refuses a container that does not exist, which used to fail every
+/// Docker-backed test that followed. So an absent container is created and a
+/// present one restarted, the latter because only a restart makes it re-read
+/// the bind-mounted configuration the caller just wrote.
 fn docker_compose_restart(container: &str) -> Result<(), TestingError> {
+    if !docker_compose_container_exists(container)? {
+        return docker_compose_up(Some(container.to_owned()), true);
+    }
+
     let test_container_dir = test_container_dir()?;
     let mut cmd = std::process::Command::new("docker");
     cmd.arg("compose");
@@ -1117,6 +1126,27 @@ fn docker_compose_restart(container: &str) -> Result<(), TestingError> {
             TestingError::ProcessFailed(format!("Failed to restart docker compose: {e}"))
         })?;
     check_command_success(status, "docker compose restart failed")
+}
+
+/// Whether compose knows a container for `container`, running or stopped.
+fn docker_compose_container_exists(container: &str) -> Result<bool, TestingError> {
+    let test_container_dir = test_container_dir()?;
+    let mut cmd = std::process::Command::new("docker");
+    cmd.arg("compose");
+    if coverage_mode() {
+        append_coverage_compose_files(&mut cmd);
+    }
+    let output = cmd
+        .arg("ps")
+        .arg("--all")
+        .arg("--quiet")
+        .arg(container)
+        .current_dir(&test_container_dir)
+        .output()
+        .map_err(|e| {
+            TestingError::ProcessFailed(format!("Failed to list docker compose containers: {e}"))
+        })?;
+    Ok(!output.stdout.is_empty())
 }
 
 fn docker_compose_stop(container: &str) -> Result<(), TestingError> {
@@ -1235,6 +1265,17 @@ async fn wait_for_ecu_sim_ready(host: &str, sim_control_port: u16) -> Result<(),
 pub(crate) async fn wait_for_cda_online(cfg: &ServerConfig) -> Result<(), TestingError> {
     let url = format!("http://{}:{}/health/ready", cfg.address, cfg.port);
     wait_for_http_ready(url, "CDA", Some(http::StatusCode::NO_CONTENT)).await
+}
+
+/// Waits for an instance the test started in-process rather than for the shared
+/// one, which is a release image: a debug build reads the diagnostic databases
+/// far slower, so it gets a budget the shared instance never needs.
+pub(crate) async fn wait_for_in_process_cda_online(cfg: &ServerConfig) -> Result<(), TestingError> {
+    let url = format!("http://{}:{}/health/ready", cfg.address, cfg.port);
+    // Deliberately not a whole number of minutes, so nightly clippy does not
+    // push `from_mins` on a budget that is not one.
+    let timeout = Duration::from_secs(150);
+    wait_for_http_ready_with_timeout(url, "CDA", Some(http::StatusCode::NO_CONTENT), timeout).await
 }
 
 /// Poll the networkstructure endpoint until every ECU in every gateway reports

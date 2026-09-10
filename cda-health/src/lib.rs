@@ -73,6 +73,21 @@ pub struct HealthState {
 }
 
 impl HealthState {
+    /// Creates a state with no providers registered yet.
+    ///
+    /// # The empty set reads as ready
+    /// [`HealthState::query_all_providers`] over an empty map satisfies
+    /// "everything is up", so `/health/ready` answers 204 and every readiness
+    /// wait returns immediately. Register every provider before the instance
+    /// can be reached, or callers are told it is ready before it is.
+    #[must_use]
+    pub fn new(cda_version: String) -> Self {
+        Self {
+            providers: Arc::new(RwLock::default()),
+            version: cda_version,
+        }
+    }
+
     /// Register a health provider for a component.
     /// The provider will be queried when health status is requested.
     /// # Errors
@@ -110,11 +125,18 @@ impl HealthState {
 /// Adds health check routes to the provided dynamic router,
 /// which makes the health endpoint available
 pub async fn add_health_routes(dynamic_router: &DynamicRouter, cda_version: String) -> HealthState {
-    let state = HealthState {
-        providers: Arc::new(RwLock::default()),
-        version: cda_version,
-    };
+    let state = HealthState::new(cda_version);
+    mount_health_routes(dynamic_router, &state).await;
+    state
+}
 
+/// Mounts the health routes over a state the caller already owns.
+///
+/// Separate from [`add_health_routes`] so registration and mounting can be
+/// ordered independently: a provider registered after the routes are mounted
+/// still appears, and one registered before them is never missed. See
+/// [`HealthState::new`] for why that ordering matters.
+pub async fn mount_health_routes(dynamic_router: &DynamicRouter, state: &HealthState) {
     let router = Router::new()
         .api_route("/health", routing::get_with(routes::get, routes::docs_get))
         .api_route(
@@ -124,7 +146,6 @@ pub async fn add_health_routes(dynamic_router: &DynamicRouter, cda_version: Stri
         .with_state(state.clone());
 
     dynamic_router.add_routes(router).await;
-    state
 }
 
 mod routes {
@@ -388,5 +409,30 @@ mod tests {
         let result = state.register_provider(name.clone(), provider2).await;
         let err = result.unwrap_err();
         assert_eq!(err, HealthError::ProviderAlreadyExists(name));
+    }
+
+    /// Pins the trap [`HealthState::new`] documents: with nothing registered,
+    /// "every provider is up" is vacuously true, so the instance reports itself
+    /// ready. A registered provider that is still starting is what makes it say
+    /// otherwise, which is why registration has to finish before anything can
+    /// ask.
+    #[tokio::test]
+    async fn an_instance_with_no_providers_calls_itself_ready() {
+        let state = HealthState::new("test".to_owned());
+
+        assert_eq!(routes::health_response(&state).await.status, Status::Up);
+
+        state
+            .register_provider(
+                "database".to_owned(),
+                Arc::new(StatusHealthProvider::new(Status::Starting)),
+            )
+            .await
+            .expect("nothing else claimed the name");
+
+        assert_eq!(
+            routes::health_response(&state).await.status,
+            Status::Starting
+        );
     }
 }

@@ -151,9 +151,11 @@ Diagnostic Database Update Plugin
     with read/write mutual exclusion. A replacement plugin therefore implements the complete
     update lifecycle (listing, upload, deletion, apply, rollback, cleanup, and execution status).
 
-    Implementations that only need custom authorization, signature checks, version policy, or
-    reload behavior should normally retain ``DefaultRuntimeUpdatePlugin`` and provide custom
-    ``RuntimeUpdatePolicy`` and/or ``RuntimeReloaderPlugin`` implementations instead.
+    Implementations that only need custom authorization, signature checks or version policy
+    should normally retain ``DefaultRuntimeUpdatePlugin`` and provide a custom
+    ``RuntimeUpdatePolicy`` instead. Loading the applied databases into the running runtime is
+    not the plugin's to replace: it is a staged lifecycle dispatch, which the plugin asks for
+    through ``UpdateDispatcher`` and whose stages the application owns.
 
 
     **Application of the update**

@@ -37,9 +37,12 @@ use tower_http::{normalize_path::NormalizePathLayer, trace::TraceLayer};
 
 /// Public API surface re-exported from the crate-internal `sovd` module.
 pub use crate::sovd::{
-    SovdIdentities, SovdLockStateView, SovdRegistry, SovdRegistryView, error::VendorErrorCode,
-    locks::Locks, new_sovd_lock_state, request_guard::install_http_restriction_guard,
-    static_data::add_static_data_endpoint,
+    SovdIdentities, SovdLockStateView, SovdRegistry, SovdRegistryView,
+    error::VendorErrorCode,
+    locks::Locks,
+    new_sovd_lock_state,
+    request_guard::install_http_restriction_guard,
+    static_data::{StaticData, add_static_data_endpoint},
 };
 pub mod dynamic_router;
 mod openapi;
@@ -75,27 +78,27 @@ pub struct VehicleResources<T> {
 /// Launches the http(s) webserver with deferred initialization
 ///
 /// The server starts immediately with static endpoints. SOVD routes and other functionality
-/// can be added later by calling methods on the returned `DynamicRouter`.
+/// can be added later by calling methods on the supplied `DynamicRouter`.
 ///
 /// # Errors
 /// Will return `Err` in case that the webserver couldn't be launched.
 /// This can be caused due to invalid config, ports or addresses already being in use.
 ///
 #[tracing::instrument(
-    skip(config, shutdown_signal),
+    skip(dynamic_router, config, shutdown_signal),
     fields(
         host = %config.host,
         port = %config.port,
     )
 )]
 pub async fn launch_webserver<F>(
+    dynamic_router: DynamicRouter,
     config: WebServerConfig,
     shutdown_signal: F,
-) -> Result<(DynamicRouter, tokio::task::JoinHandle<()>), DoipGatewaySetupError>
+) -> Result<tokio::task::JoinHandle<()>, DoipGatewaySetupError>
 where
     F: Future<Output = ()> + Clone + Send + 'static,
 {
-    let dynamic_router = DynamicRouter::new();
     let listen_address = format!("{}:{}", config.host, config.port);
     let listener = TcpListener::bind(&listen_address).await.map_err(|e| {
         DoipGatewaySetupError::ServerError(format!("Failed to bind to {listen_address}: {e}"))
@@ -121,7 +124,7 @@ where
             .await;
     });
 
-    Ok((dynamic_router, webserver_task))
+    Ok(webserver_task)
 }
 
 /// Add vehicle routes to the dynamic router

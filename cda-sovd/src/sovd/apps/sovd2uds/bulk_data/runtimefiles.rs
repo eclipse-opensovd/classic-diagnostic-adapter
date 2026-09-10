@@ -114,7 +114,6 @@ impl IntoResponse for DbUpdateErrorResponse {
             ),
             RuntimeUpdateError::StorageError(_)
             | RuntimeUpdateError::UpdateStartError(_)
-            | RuntimeUpdateError::ReloadFailed(_)
             | RuntimeUpdateError::CommunicationFailure(_)
             | RuntimeUpdateError::ReplacementFailure(_) => build_api_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
