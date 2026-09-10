@@ -45,16 +45,23 @@ Startup Sequence
     2. **Tracing Phase**: Initialize logging and tracing subsystems based on configuration
        (terminal output, file logging, OpenTelemetry, DLT).
 
-    3. **HTTP Server Phase**: Launch the web server with a dynamic router that supports
-       deferred route registration.
-
-    4. **Health Registration Phase** *(conditional, see* :need:`arch~dt-health-monitoring` *)*:
+    3. **Health Registration Phase** *(conditional, see* :need:`arch~dt-health-monitoring` *)*:
        Register component-specific health providers
        (main, database, doip) to enable granular health status reporting.
        Health monitoring is an optional build-time feature. When the health feature is
        disabled, the CDA starts without health endpoints and providers, and all
        health-related registration steps are skipped. Health status is only retrievable
        through the health endpoint when this feature is enabled.
+
+       Registration completes before the instance can be reached: ``/health/ready`` answers 204
+       when every registered provider is up, and an empty provider set satisfies that vacuously,
+       so an instance that accepted a connection before its providers were registered would
+       report itself ready while still starting.
+
+    4. **HTTP Server Phase**: Launch the web server with a dynamic router that supports
+       deferred route registration. The health and other static routes are mounted before the
+       port opens; the routes that depend on ECU data are mounted later, while the server
+       already answers.
 
     5. **Vehicle Data Loading Phase**: Load diagnostic databases (MDD files) and, depending on
        the configured ``init_mode``, initialize the communication layer.
@@ -124,18 +131,19 @@ Startup Sequence
         Trace --> Main: TracingGuards
         deactivate Trace
 
-        Main -> HTTP: launch_webserver()
-        activate HTTP
-        HTTP --> Main: (DynamicRouter, ServerTask)
-        note right: Server running, no routes yet
-
         opt Health feature enabled
-            Main -> Health: add_health_routes()
+            Main -> Health: HealthState::new()
             activate Health
             Health -> Health: register main provider (Starting)
             Health --> Main: HealthState
             deactivate Health
         end
+
+        Main -> HTTP: mount health and other static routes
+        activate HTTP
+        Main -> HTTP: launch_webserver()
+        HTTP --> Main: (DynamicRouter, ServerTask)
+        note right: Port opens only once the health\nproviders are registered
 
         Main -> DB: load_databases()
         activate DB
@@ -504,7 +512,7 @@ Post-Update Deferred Communication
 
 .. arch:: Post-Update Deferred Communication
     :id: arch~dt-post-update-deferred-communication
-    :links: dimpl~communication-control-contracts, dimpl~communication-lifecycle-controller, dimpl~post-update-deferred-communication, test~deferred-communication-config, test~deferred-post-update-apply, test~deferred-post-update-rollback, itest~deferred-post-update
+    :links: dimpl~communication-control-contracts, dimpl~communication-lifecycle-controller, dimpl~post-update-deferred-communication, test~deferred-communication-config, test~deferred-post-update-lease, test~deferred-post-update-transport, itest~deferred-post-update
     :status: draft
 
     Runtime database updates acquire the communication lifecycle controller's exclusive disable lease

@@ -195,6 +195,9 @@ pub struct SovdRegistry {
     state: Arc<StdMutex<SovdRegistryState>>,
 }
 
+/// Complete displaced SOVD registry state retained for transactional rollback.
+pub struct SovdRegistrySnapshot(SovdRegistryState);
+
 /// Cloneable read-only view of live SOVD identities and execution state.
 #[derive(Clone)]
 pub struct SovdRegistryView {
@@ -257,6 +260,24 @@ impl SovdRegistry {
             state: Arc::clone(&self.state),
         }
     }
+
+    /// Replaces the live identities and returns the complete displaced state.
+    pub async fn swap_for_update(&self, identities: SovdIdentities) -> SovdRegistrySnapshot {
+        self.report_dropped_communication_leases().await;
+        let previous = std::mem::replace(
+            &mut *std_ext::lock_mutex(&self.state),
+            Self::prepare_update(identities),
+        );
+        SovdRegistrySnapshot(previous)
+    }
+
+    /// Restores a complete displaced state and returns the rejected state.
+    pub async fn restore(&self, snapshot: SovdRegistrySnapshot) -> SovdRegistrySnapshot {
+        self.report_dropped_communication_leases().await;
+        let rejected = std::mem::replace(&mut *std_ext::lock_mutex(&self.state), snapshot.0);
+        SovdRegistrySnapshot(rejected)
+    }
+
     /// Builds the state one commit makes live.
     ///
     /// Execution state never carries over. Every update rebuilds every
@@ -795,13 +816,21 @@ struct PreparedTopologySwap {
 
 impl PreparedApply for PreparedTopologySwap {
     fn apply(self: Box<Self>) {
+        drop(self.apply_reversible());
+    }
+
+    fn apply_reversible(self: Box<Self>) -> Option<Box<dyn PreparedApply>> {
         let Self {
             mut live,
             replacement,
         } = *self;
-        if let Some(replacement) = replacement {
-            *live = replacement;
-        }
+        replacement.map(|replacement| {
+            let previous = std::mem::replace(&mut *live, replacement);
+            Box::new(Self {
+                live,
+                replacement: Some(previous),
+            }) as Box<dyn PreparedApply>
+        })
     }
 }
 
@@ -1686,6 +1715,8 @@ pub use create_schema;
 use crate::sovd::locks::ReadLock;
 
 pub(crate) mod static_data {
+    use std::sync::Arc;
+
     use aide::{
         axum::{ApiRouter, routing},
         transform::TransformOperation,
@@ -1695,9 +1726,36 @@ pub(crate) mod static_data {
         extract::{Query, State},
         response::{IntoResponse, Response},
     };
+    use cda_interfaces::util::std_ext;
     use http::StatusCode;
 
     use crate::{dynamic_router::DynamicRouter, sovd::error::ApiError};
+
+    /// The payload a static data endpoint serves, replaceable in place.
+    ///
+    /// The route and its `OpenAPI` entry are mounted once and stay; only what
+    /// they answer with changes, so a reload never rebuilds the route tree.
+    #[derive(Clone, Default)]
+    pub struct StaticData(Arc<std::sync::RwLock<serde_json::Map<String, serde_json::Value>>>);
+
+    impl StaticData {
+        /// Creates a handle serving `data` until it is replaced.
+        #[must_use]
+        pub fn new(data: serde_json::Map<String, serde_json::Value>) -> Self {
+            Self(Arc::new(std::sync::RwLock::new(data)))
+        }
+
+        /// Replaces what the endpoints answer with.
+        pub fn set(&self, data: serde_json::Map<String, serde_json::Value>) {
+            *std_ext::lock_write(&self.0) = data;
+        }
+
+        /// What the endpoints answer with right now.
+        #[must_use]
+        pub fn snapshot(&self) -> serde_json::Map<String, serde_json::Value> {
+            std_ext::lock_read(&self.0).clone()
+        }
+    }
 
     /// Add an endpoint serving static data.
     /// For example it can be used, to serve version information.
@@ -1706,15 +1764,17 @@ pub(crate) mod static_data {
     /// * `/vehicle/v15/data/version`
     /// # Arguments
     /// * `dynamic_router` - The dynamic router to add the endpoint to.
-    /// * `data` - The version data to return.
+    /// * `data` - The version data to return, which the owner may replace later.
     /// * `path` - The path to serve the data from.
     ///   There is no processing of this, it will be returned as is in the response.
     pub async fn add_static_data_endpoint(
         dynamic_router: &DynamicRouter,
-        data: serde_json::Map<String, serde_json::Value>,
+        data: StaticData,
         path: &str,
     ) {
-        let data_docs = data.clone();
+        // The documented example is a snapshot: the specification is generated
+        // once, while the payload keeps changing behind the route.
+        let data_docs = data.snapshot();
         let router = ApiRouter::new()
             .api_route(
                 path,
@@ -1727,10 +1787,10 @@ pub(crate) mod static_data {
     }
 
     pub(crate) async fn get(
-        State(state): State<serde_json::Map<String, serde_json::Value>>,
+        State(state): State<StaticData>,
         Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
     ) -> Response {
-        let mut response_map = state.clone();
+        let mut response_map = state.snapshot();
         if query.include_schema {
             let schema = match serde_json::to_value(
                 create_schema!(serde_json::Map<String, serde_json::Value>),
@@ -1947,6 +2007,26 @@ pub(crate) mod tests {
         let readded_ecu = registry.ecu("MYECU").unwrap();
         assert!(!Arc::ptr_eq(&updated_ecu, &readded_ecu));
         assert!(lock_read(&readded_ecu.service_executions).is_empty());
+    }
+
+    #[tokio::test]
+    async fn registry_swap_returns_the_complete_previous_state_for_rollback() {
+        let previous = SovdIdentities::new(live_ecus(&["A"]), live_groups(&["OLD"]));
+        let candidate = SovdIdentities::new(live_ecus(&["B"]), live_groups(&["NEW"]));
+        let registry = SovdRegistry::new(previous);
+        let previous_ecu = registry.ecu("A").expect("A is live");
+
+        let displaced = registry.swap_for_update(candidate).await;
+        assert!(registry.ecu("B").is_some());
+        assert!(registry.ecu("A").is_none());
+
+        let rejected = registry.restore(displaced).await;
+        drop(rejected);
+        let restored_ecu = registry.ecu("A").expect("A was restored");
+        assert!(Arc::ptr_eq(&previous_ecu, &restored_ecu));
+        assert!(registry.ecu("B").is_none());
+        assert!(registry.functional_group("OLD").is_some());
+        assert!(registry.functional_group("NEW").is_none());
     }
 
     #[tokio::test]
@@ -2241,6 +2321,25 @@ pub(crate) mod tests {
             .await
             .expect("recovery to the live topology is always admitted")
             .apply();
+        assert_eq!(ecu_lock_names(&*view.current_locks().await).await, ["A"]);
+    }
+
+    #[tokio::test]
+    async fn an_applied_topology_reservation_returns_its_inverse() {
+        let provider = SovdLockStateProvider::new(vec!["A".to_owned()]);
+        let view = provider.view();
+        let restore = provider
+            .reserve_lock_resources(vec!["B".to_owned()])
+            .await
+            .expect("the replacement is admitted")
+            .apply_reversible()
+            .expect("a changed topology returns its inverse");
+
+        let rejected = restore
+            .apply_reversible()
+            .expect("restoring the previous topology returns the rejected one");
+        drop(rejected);
+
         assert_eq!(ecu_lock_names(&*view.current_locks().await).await, ["A"]);
     }
 
