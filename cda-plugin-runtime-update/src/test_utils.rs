@@ -11,53 +11,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    communication_control::{TransportControl, TransportState, error::CommControlError},
-    runtime_update_api::{
-        LockStateProvider, RecoveryError, RejectedSetDisposition, ReloadError, ReloadFailure,
-        RuntimeReloaderPlugin, RuntimeUpdateError, UploadFile, VerificationError,
-    },
+    runtime_update_api::{LockStateProvider, RuntimeUpdateError, UploadFile, VerificationError},
     storage_api::{
         Collection, CollectionName, DirectFileAccess, ReadableStream, Storage, Transaction,
     },
 };
 use cda_storage::LocalStorage;
-
-pub(crate) struct StubTransport {
-    state: tokio::sync::Mutex<TransportState>,
-}
-
-impl StubTransport {
-    pub(crate) fn new() -> Arc<Self> {
-        Self::with_state(TransportState::Disabled)
-    }
-
-    pub(crate) fn with_state(state: TransportState) -> Arc<Self> {
-        Arc::new(Self {
-            state: tokio::sync::Mutex::new(state),
-        })
-    }
-}
-
-#[async_trait]
-impl TransportControl for StubTransport {
-    async fn enable(&self) -> Result<(), CommControlError> {
-        *self.state.lock().await = TransportState::Enabled;
-        Ok(())
-    }
-
-    async fn disable(&self) -> Result<(), CommControlError> {
-        *self.state.lock().await = TransportState::Disabled;
-        Ok(())
-    }
-
-    async fn state(&self) -> TransportState {
-        *self.state.lock().await
-    }
-}
 
 pub(crate) async fn write_file(
     storage: &impl Storage,
@@ -232,64 +195,4 @@ pub async fn init_collection(
             .unwrap();
     }
     tx.commit().await.unwrap();
-}
-
-pub struct RecordingReloadHandler {
-    pub reload_calls: Arc<Mutex<Vec<()>>>,
-}
-
-impl RecordingReloadHandler {
-    pub fn new() -> Self {
-        Self {
-            reload_calls: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-}
-
-#[async_trait]
-impl RuntimeReloaderPlugin for RecordingReloadHandler {
-    async fn reload_databases(
-        &self,
-        _on_reject: RejectedSetDisposition,
-    ) -> Result<(), ReloadFailure> {
-        self.reload_calls.lock().unwrap().push(());
-        Ok(())
-    }
-}
-
-/// A [`RuntimeReloaderPlugin`] that does nothing, useful as a default in tests.
-pub struct NoopReloadHandler;
-
-#[async_trait]
-impl RuntimeReloaderPlugin for NoopReloadHandler {
-    async fn reload_databases(
-        &self,
-        _on_reject: RejectedSetDisposition,
-    ) -> Result<(), ReloadFailure> {
-        Ok(())
-    }
-}
-
-/// A [`RuntimeReloaderPlugin`] whose database reload always fails, useful for
-/// exercising the async-failure path of an execution that has otherwise been
-/// accepted (i.e. that got past all synchronous pre-checks in `start_execution`).
-///
-/// It reports the unrecoverable shape: the candidate was rejected and the
-/// restored state could not be prepared either, which is what the real
-/// reloader emits when its second preparation fails.
-pub struct FailingReloadHandler;
-
-#[async_trait]
-impl RuntimeReloaderPlugin for FailingReloadHandler {
-    async fn reload_databases(
-        &self,
-        _on_reject: RejectedSetDisposition,
-    ) -> Result<(), ReloadFailure> {
-        Err(ReloadFailure::RecoveryFailed {
-            original: ReloadError::General("Simulated reload failure".to_string()),
-            recovery: RecoveryError::RestoredPreparation(ReloadError::General(
-                "simulated restored-state rejection".to_owned(),
-            )),
-        })
-    }
 }
