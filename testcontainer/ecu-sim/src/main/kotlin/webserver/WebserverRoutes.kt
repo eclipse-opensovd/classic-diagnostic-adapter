@@ -46,6 +46,10 @@ fun findByEcuName(ecuName: String): SimEcu? {
             return ecu
         }
     }
+    val canEcu = can.CanNetworks.findEcuByName(ecuName, true)
+    if (canEcu != null) {
+        return canEcu
+    }
     throw NotFoundException()
 }
 
@@ -60,6 +64,10 @@ fun Route.addStateRoutes() {
         networkInstances().forEach { network ->
             network.reset()
         }
+        // The CAN networks share their SimEcu instances with the DoIP entities
+        // reset above; the ISO-TP endpoints keep no cross-message state, so this
+        // is a no-op kept for symmetry.
+        can.CanNetworks.all().forEach { net -> net.reset() }
         call.respond(HttpStatusCode.NoContent)
     }
 

@@ -11,22 +11,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// SPDX-License-Identifier: Apache-2.0
-//
-// See the NOTICE file(s) distributed with this work for additional
-// information regarding copyright ownership.
-//
-// This program and the accompanying materials are made available under the
-// terms of the Apache License Version 2.0 which is available at
-// https://www.apache.org/licenses/LICENSE-2.0
-
 use std::{fmt::Write, sync::Arc};
 
 use cda_interfaces::{
     runtime_update_api::{
         BulkDataCreated, BulkDataCreatedList, BulkDataDescriptor, BulkDataList, HashAlgorithm,
-        LockStateProvider, RuntimeFilesQuery, RuntimeFilesUpdateSecurityHandler,
-        RuntimeUpdateError, UpdateFileType, UploadFile,
+        LockStateProvider, RuntimeFilesQuery, RuntimeUpdateError, RuntimeUpdateSecurityPlugin,
+        UploadFile,
     },
     storage_api::{
         Collection, CollectionName, DirectFileAccess, RandomAccessData, Storage, StorageError,
@@ -34,18 +25,6 @@ use cda_interfaces::{
     },
 };
 use sha2::{Digest, Sha256};
-
-pub(crate) fn mime_for_key(key: &str) -> String {
-    match std::path::Path::new(key)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_lowercase)
-        .as_deref()
-    {
-        Some("toml") => "application/toml".to_string(),
-        _ => "application/octet-stream".to_string(),
-    }
-}
 
 /// Lazily initializes `destination` from `source` the first time a file targets that collection.
 /// No-op if the destination already existed or was already initialized in this transaction.
@@ -107,7 +86,8 @@ pub(crate) async fn list_collection_files(
     for key in &keys {
         let mut item = BulkDataDescriptor {
             id: key.clone(),
-            mimetype: mime_for_key(key),
+            mimetype: "application/octet-stream".to_owned(),
+            name: Some(key.clone()),
             size: None,
             hash: None,
             hash_algorithm: None,
@@ -165,9 +145,7 @@ pub(crate) async fn list_current_files(
     storage: &impl Storage,
     query: &RuntimeFilesQuery,
 ) -> Result<BulkDataList, RuntimeUpdateError> {
-    let mut items =
-        get_collection_items(storage, &CollectionName::DiagnosticDatabase, query).await?;
-    items.extend(get_collection_items(storage, &CollectionName::Configuration, query).await?);
+    let items = get_collection_items(storage, &CollectionName::DiagnosticDatabase, query).await?;
     Ok(BulkDataList {
         items,
         schema: None,
@@ -178,9 +156,8 @@ pub(crate) async fn list_backup_files(
     storage: &impl Storage,
     query: &RuntimeFilesQuery,
 ) -> Result<BulkDataList, RuntimeUpdateError> {
-    let mut items =
+    let items =
         get_collection_items(storage, &CollectionName::DiagnosticDatabaseBackup, query).await?;
-    items.extend(get_collection_items(storage, &CollectionName::ConfigurationBackup, query).await?);
     Ok(BulkDataList {
         items,
         schema: None,
@@ -189,12 +166,15 @@ pub(crate) async fn list_backup_files(
 
 /// Remove a file from the next-update snapshot for the relevant collection.
 ///
-/// The `NextUpdate` collection must already be initialized (i.e. at least one file has been
-/// uploaded). If it is not initialized, [`RuntimeUpdateError::FileNotFound`] is returned.
-/// Returns [`RuntimeUpdateError::FileNotFound`]
-/// if the key does not exist in the `NextUpdate` collection.
+/// If the `NextUpdate` collection isn't initialized yet (i.e. no file has been uploaded for that
+/// category), it is lazily initialized from the corresponding current collection first, so that
+/// files which are only part of `runtimefiles-current` can still be deleted from the pending
+/// next-update state.
+///
+/// Returns [`RuntimeUpdateError::FileNotFound`] if the key does not exist in the `NextUpdate`
+/// collection (nor, when freshly initialized, in the current collection).
 pub(crate) async fn delete_nextupdate_file(
-    storage: &impl Storage,
+    storage: &(impl Storage + 'static),
     file_id: &str,
 ) -> Result<(), RuntimeUpdateError> {
     let key = file_id.to_lowercase();
@@ -204,21 +184,38 @@ pub(crate) async fn delete_nextupdate_file(
         .and_then(|e| e.to_str())
         .map(str::to_lowercase);
 
-    let next_collection_name = match ext.as_deref() {
-        Some("mdd") => CollectionName::DiagnosticDatabaseNextUpdate,
-        Some("toml") => CollectionName::ConfigurationNextUpdate,
+    let (next_collection_name, current_collection_name) = match ext.as_deref() {
+        Some("mdd") => (
+            CollectionName::DiagnosticDatabaseNextUpdate,
+            CollectionName::DiagnosticDatabase,
+        ),
         _ => return Err(RuntimeUpdateError::InvalidFileType(file_id.to_string())),
     };
 
+    let next_already_exists = match storage.get_collection(&next_collection_name).await {
+        Ok(_) => true,
+        Err(StorageError::CollectionNotFound(_)) => false,
+        Err(e) => return Err(RuntimeUpdateError::from(e)),
+    };
+
+    if !next_already_exists {
+        let mut tx = storage.begin_transaction()?;
+        let mut initialized = false;
+        init_collection_from_copy_if_missing(
+            storage,
+            &mut tx,
+            next_already_exists,
+            &mut initialized,
+            &current_collection_name,
+            &next_collection_name,
+        )
+        .await?;
+        tx.commit().await?;
+    }
+
     let next_col = storage
-        .get_collection(&next_collection_name)
-        .await
-        .map_err(|e| match e {
-            StorageError::CollectionNotFound(_) => {
-                RuntimeUpdateError::FileNotFound(file_id.to_string())
-            }
-            other => RuntimeUpdateError::from(other),
-        })?;
+        .get_or_create_collection(&next_collection_name)
+        .await?;
 
     let next_keys = next_col.list().await?;
     if !next_keys.iter().any(|k| k == &key) {
@@ -233,7 +230,15 @@ pub(crate) async fn delete_nextupdate_file(
 
 pub(crate) async fn delete_all_nextupdate(
     storage: &impl Storage,
-) -> Result<(), RuntimeUpdateError> {
+) -> Result<Vec<String>, RuntimeUpdateError> {
+    let mut deleted_ids = Vec::new();
+    for collection_name in [CollectionName::DiagnosticDatabaseNextUpdate] {
+        match storage.get_collection(&collection_name).await {
+            Ok(collection) => deleted_ids.extend(collection.list().await?),
+            Err(StorageError::CollectionNotFound(_)) => {}
+            Err(e) => return Err(RuntimeUpdateError::from(e)),
+        }
+    }
     let mut tx = storage.begin_transaction()?;
 
     match storage
@@ -244,56 +249,41 @@ pub(crate) async fn delete_all_nextupdate(
         Err(e) => return Err(RuntimeUpdateError::from(e)),
     }
 
-    match storage
-        .delete_collection(&mut tx, &CollectionName::ConfigurationNextUpdate)
-        .await
-    {
-        Ok(()) | Err(StorageError::CollectionNotFound(_)) => {}
-        Err(e) => return Err(RuntimeUpdateError::from(e)),
-    }
-
     tx.commit().await?;
-    Ok(())
+    Ok(deleted_ids)
 }
 
-/// Returns `true` if both backup collections (MDD and configuration) are empty or do not exist.
+/// Returns `true` if the MDD backup collection is empty or does not exist.
 ///
 /// Used as a pre-condition check before starting a Rollback execution.
 pub(crate) async fn is_backup_empty(storage: &impl Storage) -> Result<bool, RuntimeUpdateError> {
     let mdd_backup = storage
         .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
         .await?;
-    let cfg_backup = storage
-        .get_or_create_collection(&CollectionName::ConfigurationBackup)
-        .await?;
-    Ok(mdd_backup.is_empty().await? && cfg_backup.is_empty().await?)
+    Ok(mdd_backup.is_empty().await?)
 }
 
-pub(crate) async fn delete_all_backup(storage: &impl Storage) -> Result<(), RuntimeUpdateError> {
+pub(crate) async fn delete_all_backup(
+    storage: &impl Storage,
+) -> Result<Vec<String>, RuntimeUpdateError> {
     let mdd_backup = storage
         .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
         .await?;
-    let cfg_backup = storage
-        .get_or_create_collection(&CollectionName::ConfigurationBackup)
-        .await?;
-
     let mut tx = storage.begin_transaction()?;
+    let deleted_ids = mdd_backup.list().await?;
     mdd_backup.delete_all(&mut tx).await?;
-    cfg_backup.delete_all(&mut tx).await?;
     tx.commit().await?;
-    Ok(())
+    Ok(deleted_ids)
 }
 
-/// Computes the "next update" state from the pending `NextUpdate` collections.
+/// Computes the MDD "next update" state, falling back to the currently active database when no
+/// update is pending yet.
 ///
-/// For each collection pair (MDD and Configuration), the logic is:
+/// The logic is:
 /// - If the `NextUpdate` collection **exists** (even if empty), its contents represent the target
-///   state for that category - an empty `NextUpdate` means "delete all" for that category.
-/// - If the `NextUpdate` collection **does not exist** (`CollectionNotFound`), an empty list is
-///   returned for that category - no update is pending.
-///
-/// MDD and Configuration are handled **independently** - one may be initialized while the other
-/// returns empty.
+///   state - an empty `NextUpdate` means "delete all".
+/// - If the `NextUpdate` collection **does not exist** (`CollectionNotFound`), the contents of the
+///   current `DiagnosticDatabase` collection are returned instead.
 ///
 /// This is a **read-only** operation - no writes or transactions are performed.
 ///
@@ -304,17 +294,14 @@ pub async fn compute_nextupdate_state(
     storage: &impl Storage,
     query: &RuntimeFilesQuery,
 ) -> Result<BulkDataList, RuntimeUpdateError> {
-    let mdd_items = get_collection_items(
+    let mdd_items = get_nextupdate_or_current_items(
         storage,
         &CollectionName::DiagnosticDatabaseNextUpdate,
+        &CollectionName::DiagnosticDatabase,
         query,
     )
     .await?;
-    let config_items =
-        get_collection_items(storage, &CollectionName::ConfigurationNextUpdate, query).await?;
-
     let mut items = mdd_items;
-    items.extend(config_items);
     items.sort_by(|a, b| a.id.cmp(&b.id));
 
     Ok(BulkDataList {
@@ -323,19 +310,37 @@ pub async fn compute_nextupdate_state(
     })
 }
 
-/// Upload files into the appropriate `NextUpdate` collections.
+/// Returns the items of `next_collection` if it exists, otherwise falls back to the items of
+/// `current_collection`.
 ///
-/// MDD files go to `DiagnosticDatabaseNextUpdate`, TOML files go to `ConfigurationNextUpdate`.
-/// Each collection is lazily initialized from its current counterpart on first write.
-/// Only one TOML config file per request is allowed; uploading a config replaces any existing
-/// content in the config next-update collection.
+/// If no update has been staged yet (`next_collection` doesn't exist), the next update mirrors
+/// the currently active database.
+async fn get_nextupdate_or_current_items(
+    storage: &impl Storage,
+    next_collection: &CollectionName,
+    current_collection: &CollectionName,
+    query: &RuntimeFilesQuery,
+) -> Result<Vec<BulkDataDescriptor>, RuntimeUpdateError> {
+    match storage.get_collection(next_collection).await {
+        Ok(collection) => Ok(list_collection_files(&*collection, query).await?.items),
+        Err(StorageError::CollectionNotFound(_)) => {
+            get_collection_items(storage, current_collection, query).await
+        }
+        Err(e) => Err(RuntimeUpdateError::from(e)),
+    }
+}
+
+/// Upload MDD files into `DiagnosticDatabaseNextUpdate`.
+///
+/// The collection is lazily initialized from the current database on first write. All other file
+/// types, including TOML configuration files, are rejected.
 ///
 /// Each file is written and committed individually. Immediately after each commit, the file's
 /// integrity is verified via `security_handler`. If verification fails, the failing file is
 /// deleted (best-effort) and the error is returned; previously accepted files are kept.
 pub(crate) async fn upload_files<
     S: Storage + 'static,
-    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
+    T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
     L: LockStateProvider,
 >(
     storage: &S,
@@ -343,29 +348,27 @@ pub(crate) async fn upload_files<
     files: Vec<UploadFile>,
 ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
     let mut result = BulkDataCreatedList::default();
-    let mut config_seen = false;
+
+    if let Some(file) = files.iter().find(|file| {
+        std::path::Path::new(&file.filename)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_none_or(|extension| !extension.eq_ignore_ascii_case("mdd"))
+    }) {
+        return Err(RuntimeUpdateError::InvalidFileType(file.filename.clone()));
+    }
 
     // Check existence BEFORE begin_transaction (disk reads).
     let mdd_already_exists = storage
         .get_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
         .await
         .is_ok();
-    let cfg_already_exists = storage
-        .get_collection(&CollectionName::ConfigurationNextUpdate)
-        .await
-        .is_ok();
-
     // Ensure directories exist on disk (must be before begin_transaction).
     let mdd_collection = storage
         .get_or_create_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
         .await?;
 
-    let cfg_collection = storage
-        .get_or_create_collection(&CollectionName::ConfigurationNextUpdate)
-        .await?;
-
     let mut mdd_initialized = false;
-    let mut cfg_initialized = false;
 
     for file in files {
         let ext = std::path::Path::new(&file.filename)
@@ -397,43 +400,6 @@ pub(crate) async fn upload_files<
                     security_handler,
                     &mdd_collection,
                     &key,
-                    UpdateFileType::Mdd,
-                )
-                .await?;
-
-                result.items.push(BulkDataCreated { id: key });
-            }
-            Some("toml") => {
-                if config_seen {
-                    return Err(RuntimeUpdateError::ValidationFailed(
-                        "Only one config file per request is allowed".to_string(),
-                    ));
-                }
-                config_seen = true;
-
-                let mut tx = storage.begin_transaction()?;
-                init_collection_from_copy_if_missing(
-                    storage,
-                    &mut tx,
-                    cfg_already_exists,
-                    &mut cfg_initialized,
-                    &CollectionName::Configuration,
-                    &CollectionName::ConfigurationNextUpdate,
-                )
-                .await?;
-
-                cfg_collection.delete_all(&mut tx).await?;
-
-                let mut stream: &[u8] = &file.data;
-                cfg_collection.write(&mut tx, &key, &mut stream).await?;
-                tx.commit().await?;
-
-                check_file_integrity_and_roll_back_on_error(
-                    storage,
-                    security_handler,
-                    &cfg_collection,
-                    &key,
-                    UpdateFileType::Config,
                 )
                 .await?;
 
@@ -448,17 +414,16 @@ pub(crate) async fn upload_files<
 
 async fn check_file_integrity_and_roll_back_on_error<
     S: Storage + 'static,
-    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
+    T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
     L: LockStateProvider,
 >(
     storage: &S,
     security_handler: &T,
     collection: &Arc<impl Collection + DirectFileAccess>,
     key: &String,
-    file_type: UpdateFileType,
 ) -> Result<(), RuntimeUpdateError> {
     if let Err(verification_error) = security_handler
-        .check_file_integrity(file_type, &collection.file_path(key)?)
+        .check_file_integrity(&collection.file_path(key)?)
         .await
     {
         tracing::warn!(
@@ -534,8 +499,8 @@ mod tests {
 
     use super::{compute_nextupdate_state, compute_sha256, list_collection_files, upload_files};
     use crate::test_utils::{
-        MockLockProvider, MockSecurityHandler, make_storage, make_upload_files, make_valid_config,
-        make_valid_mdd, make_valid_mdd_with_revision, write_file,
+        MockLockProvider, MockSecurityHandler, make_storage, make_upload_files, make_valid_mdd,
+        make_valid_mdd_with_revision, write_file,
     };
 
     async fn upload<S: cda_interfaces::storage_api::Storage + 'static>(
@@ -550,8 +515,12 @@ mod tests {
         .await
     }
 
+    enum RejectKind {
+        Mdd,
+    }
+
     struct RejectingSecurityHandler {
-        reject_type: cda_interfaces::runtime_update_api::UpdateFileType,
+        reject_type: RejectKind,
     }
 
     #[async_trait::async_trait]
@@ -562,7 +531,7 @@ mod tests {
             + Send
             + Sync
             + 'static,
-    > cda_interfaces::runtime_update_api::RuntimeFilesUpdateSecurityHandler<L, C>
+    > cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
         for RejectingSecurityHandler
     {
         async fn check_apply_allowed(
@@ -575,19 +544,10 @@ mod tests {
 
         async fn check_file_integrity(
             &self,
-            type_: cda_interfaces::runtime_update_api::UpdateFileType,
             _path: &std::path::Path,
         ) -> Result<(), cda_interfaces::runtime_update_api::VerificationError> {
-            if matches!(
-                (&type_, &self.reject_type),
-                (
-                    cda_interfaces::runtime_update_api::UpdateFileType::Mdd,
-                    cda_interfaces::runtime_update_api::UpdateFileType::Mdd,
-                ) | (
-                    cda_interfaces::runtime_update_api::UpdateFileType::Config,
-                    cda_interfaces::runtime_update_api::UpdateFileType::Config,
-                )
-            ) {
+            let rejected = matches!(self.reject_type, RejectKind::Mdd);
+            if rejected {
                 return Err(cda_interfaces::runtime_update_api::VerificationError(
                     "rejected".to_string(),
                 ));
@@ -599,11 +559,13 @@ mod tests {
     async fn upload_rejecting<S: cda_interfaces::storage_api::Storage + 'static>(
         storage: &S,
         files: Vec<cda_interfaces::runtime_update_api::UploadFile>,
-        reject_type: cda_interfaces::runtime_update_api::UpdateFileType,
+        reject_kind: RejectKind,
     ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
         upload_files::<S, RejectingSecurityHandler, MockLockProvider>(
             storage,
-            &RejectingSecurityHandler { reject_type },
+            &RejectingSecurityHandler {
+                reject_type: reject_kind,
+            },
             files,
         )
         .await
@@ -621,7 +583,7 @@ mod tests {
             + Send
             + Sync
             + 'static,
-    > cda_interfaces::runtime_update_api::RuntimeFilesUpdateSecurityHandler<L, C>
+    > cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
         for RejectingByNameSecurityHandler
     {
         async fn check_apply_allowed(
@@ -634,7 +596,6 @@ mod tests {
 
         async fn check_file_integrity(
             &self,
-            _type_: cda_interfaces::runtime_update_api::UpdateFileType,
             path: &std::path::Path,
         ) -> Result<(), cda_interfaces::runtime_update_api::VerificationError> {
             if path.file_name().and_then(|n| n.to_str()) == Some(self.reject_filename) {
@@ -868,7 +829,7 @@ mod tests {
         let json = serde_json::to_string(&item).unwrap();
         assert_eq!(
             json,
-            r#"{"id":"plain.mdd","mimetype":"application/octet-stream"}"#
+            r#"{"id":"plain.mdd","mimetype":"application/octet-stream","name":"plain.mdd"}"#
         );
     }
 
@@ -888,6 +849,8 @@ mod tests {
             include_hash: Some(HashAlgorithm::Sha256),
             include_file_size: true,
             include_revision: true,
+            created_after: None,
+            created_before: None,
         };
         let result = list_collection_files(&*collection, &query).await.unwrap();
 
@@ -1038,7 +1001,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_files_in_current_no_nextupdate_returns_empty() {
+    async fn two_files_in_current_no_nextupdate_mirrors_current() {
         let (storage, _dir) = make_storage();
         let collection = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
@@ -1051,9 +1014,12 @@ mod tests {
         let query = RuntimeFilesQuery::default();
         let result = compute_nextupdate_state(&storage, &query).await.unwrap();
 
-        assert!(
-            result.items.is_empty(),
-            "no NextUpdate collection = no pending changes = empty"
+        let mut ids: Vec<_> = result.items.iter().map(|i| i.id.clone()).collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["alpha.mdd".to_string(), "beta.mdd".to_string()],
+            "no NextUpdate collection = no pending changes = mirrors current"
         );
     }
 
@@ -1145,50 +1111,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compute_nextupdate_empty_when_config_not_initialized() {
-        let (storage, _dir) = make_storage();
-        let cfg = storage
-            .get_or_create_collection(&CollectionName::Configuration)
-            .await
-            .unwrap();
-        write_test_file_by_name(&storage, &*cfg, "config.toml", b"[cfg]").await;
-
-        let query = RuntimeFilesQuery::default();
-        let result = compute_nextupdate_state(&storage, &query).await.unwrap();
-        assert!(
-            result.items.is_empty(),
-            "no ConfigurationNextUpdate = no pending changes = empty"
-        );
-    }
-
-    #[tokio::test]
-    async fn compute_nextupdate_shows_config_nextupdate_when_initialized() {
-        let (storage, _dir) = make_storage();
-        let cfg = storage
-            .get_or_create_collection(&CollectionName::Configuration)
-            .await
-            .unwrap();
-        write_test_file_by_name(&storage, &*cfg, "old.toml", b"[old]").await;
-        let cfg_next = storage
-            .get_or_create_collection(&CollectionName::ConfigurationNextUpdate)
-            .await
-            .unwrap();
-        write_test_file_by_name(&storage, &*cfg_next, "new.toml", b"[new]").await;
-
-        let query = RuntimeFilesQuery::default();
-        let result = compute_nextupdate_state(&storage, &query).await.unwrap();
-        let ids: Vec<&str> = result.items.iter().map(|i| i.id.as_str()).collect();
-        assert!(
-            ids.contains(&"new.toml"),
-            "should show ConfigurationNextUpdate content"
-        );
-        assert!(
-            !ids.contains(&"old.toml"),
-            "should NOT show current config when NextUpdate initialized"
-        );
-    }
-
-    #[tokio::test]
     async fn compute_nextupdate_empty_mdd_nextupdate_shows_empty_mdd() {
         let (storage, _dir) = make_storage();
         let db = storage
@@ -1221,32 +1143,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compute_nextupdate_mdd_and_config_independent() {
-        let (storage, _dir) = make_storage();
-        let mdd_next = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
-            .await
-            .unwrap();
-        write_test_file_by_name(&storage, &*mdd_next, "ecu1.mdd", b"data").await;
-        let cfg = storage
-            .get_or_create_collection(&CollectionName::Configuration)
-            .await
-            .unwrap();
-        write_test_file_by_name(&storage, &*cfg, "config.toml", b"[cfg]").await;
-
-        let query = RuntimeFilesQuery::default();
-        let result = compute_nextupdate_state(&storage, &query).await.unwrap();
-        let ids: Vec<&str> = result.items.iter().map(|i| i.id.as_str()).collect();
-        assert!(ids.contains(&"ecu1.mdd"), "MDD from NextUpdate");
-        assert!(
-            !ids.contains(&"config.toml"),
-            "Config has no NextUpdate = not shown"
-        );
-        assert_eq!(result.items.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn delete_nextupdate_returns_not_found_when_not_initialized() {
+    async fn delete_nextupdate_initializes_from_current_when_not_initialized() {
         let (storage, _dir) = make_storage();
         let db = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
@@ -1255,10 +1152,20 @@ mod tests {
         write_test_file_by_name(&storage, &*db, "ecu1.mdd", b"data1").await;
         write_test_file_by_name(&storage, &*db, "ecu2.mdd", b"data2").await;
 
-        let result = super::delete_nextupdate_file(&storage, "ecu1.mdd").await;
+        super::delete_nextupdate_file(&storage, "ecu1.mdd")
+            .await
+            .expect("delete should succeed by initializing NextUpdate from current first");
+
+        let query = RuntimeFilesQuery::default();
+        let result = compute_nextupdate_state(&storage, &query).await.unwrap();
+        let ids: Vec<&str> = result.items.iter().map(|i| i.id.as_str()).collect();
         assert!(
-            matches!(result, Err(RuntimeUpdateError::FileNotFound(_))),
-            "NextUpdate not initialized = FileNotFound, not init-from-current"
+            !ids.contains(&"ecu1.mdd"),
+            "deleted file must not appear in next-update state"
+        );
+        assert!(
+            ids.contains(&"ecu2.mdd"),
+            "sibling file from current must still appear in next-update state"
         );
     }
 
@@ -1300,43 +1207,6 @@ mod tests {
             result,
             Err(RuntimeUpdateError::InvalidFileType(_))
         ));
-    }
-
-    #[tokio::test]
-    async fn delete_all_nextupdate_then_compute_returns_empty() {
-        let (storage, _dir) = make_storage();
-        let db = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
-        write_test_file_by_name(&storage, &*db, "ecu1.mdd", b"data").await;
-        let cfg = storage
-            .get_or_create_collection(&CollectionName::Configuration)
-            .await
-            .unwrap();
-        write_test_file_by_name(&storage, &*cfg, "app.toml", b"[app]").await;
-
-        // Initialize NextUpdate collections
-        let mdd_next = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
-            .await
-            .unwrap();
-        write_test_file_by_name(&storage, &*mdd_next, "other.mdd", b"other").await;
-        let cfg_next = storage
-            .get_or_create_collection(&CollectionName::ConfigurationNextUpdate)
-            .await
-            .unwrap();
-        write_test_file_by_name(&storage, &*cfg_next, "other.toml", b"[other]").await;
-
-        super::delete_all_nextupdate(&storage).await.unwrap();
-
-        // After delete_all_nextupdate, collections are gone -> no pending changes = empty
-        let query = RuntimeFilesQuery::default();
-        let result = compute_nextupdate_state(&storage, &query).await.unwrap();
-        assert!(
-            result.items.is_empty(),
-            "no NextUpdate collections = empty nextupdate"
-        );
     }
 
     #[tokio::test]
@@ -1412,57 +1282,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_valid_config_stored_in_configuration_next_update() {
-        let (storage, _dir) = make_storage();
-        let config = make_valid_config();
-        let files = make_upload_files(&[("opensovd-cda.toml", &config)]);
-
-        let result = upload(&storage, files).await.unwrap();
-
-        assert_eq!(result.items.len(), 1);
-        assert_eq!(result.items.first().unwrap().id, "opensovd-cda.toml");
-
-        let col = storage
-            .get_or_create_collection(&CollectionName::ConfigurationNextUpdate)
-            .await
-            .unwrap();
-        let keys = col.list().await.unwrap();
-        assert!(keys.contains(&"opensovd-cda.toml".to_string()));
-    }
-
-    #[tokio::test]
-    async fn upload_second_config_returns_err() {
-        let (storage, _dir) = make_storage();
-        let config = make_valid_config();
-        let files = make_upload_files(&[
-            ("opensovd-cda.toml", &config),
-            ("opensovd-cda.toml", &config),
-        ]);
-
-        let err = upload(&storage, files).await.unwrap_err();
-
-        assert!(matches!(
-            err,
-            RuntimeUpdateError::ValidationFailed(ref msg) if msg.contains("one config")
-        ));
-    }
-
-    #[tokio::test]
-    async fn upload_mdd_and_config_together() {
-        let (storage, _dir) = make_storage();
-        let mdd = make_valid_mdd("ComboECU");
-        let config = make_valid_config();
-        let files = make_upload_files(&[("combo.mdd", &mdd), ("opensovd-cda.toml", &config)]);
-
-        let result = upload(&storage, files).await.unwrap();
-
-        assert_eq!(result.items.len(), 2);
-        let ids: Vec<&str> = result.items.iter().map(|f| f.id.as_str()).collect();
-        assert!(ids.contains(&"combo.mdd"));
-        assert!(ids.contains(&"opensovd-cda.toml"));
-    }
-
-    #[tokio::test]
     async fn field_without_filename_is_skipped() {
         let (storage, _dir) = make_storage();
         let mdd = make_valid_mdd("RealECU");
@@ -1494,27 +1313,6 @@ mod tests {
         let keys = col.list().await.unwrap();
         assert!(keys.contains(&"existing.mdd".to_string()));
         assert!(keys.contains(&"new.mdd".to_string()));
-    }
-
-    #[tokio::test]
-    async fn upload_config_always_replaces_previous_content() {
-        let (storage, _dir) = make_storage();
-        let cfg = storage
-            .get_or_create_collection(&CollectionName::Configuration)
-            .await
-            .unwrap();
-        write_test_file_by_name(&storage, &*cfg, "old.toml", b"[old]\nval = 1").await;
-
-        let config = b"[new]\nval = 2".to_vec();
-        let files = make_upload_files(&[("new.toml", &config)]);
-        upload(&storage, files).await.unwrap();
-
-        let col = storage
-            .get_or_create_collection(&CollectionName::ConfigurationNextUpdate)
-            .await
-            .unwrap();
-        let keys = col.list().await.unwrap();
-        assert_eq!(keys, vec!["new.toml"]);
     }
 
     #[tokio::test]
@@ -1588,39 +1386,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_config_replaces_even_when_nextupdate_exists() {
-        let (storage, _dir) = make_storage();
-        let cfg_next = storage
-            .get_or_create_collection(&CollectionName::ConfigurationNextUpdate)
-            .await
-            .unwrap();
-        write_test_file_by_name(&storage, &*cfg_next, "old.toml", b"[old]").await;
-
-        let config = b"[replaced]\nfoo = true".to_vec();
-        let files = make_upload_files(&[("replaced.toml", &config)]);
-        upload(&storage, files).await.unwrap();
-
-        let col = storage
-            .get_or_create_collection(&CollectionName::ConfigurationNextUpdate)
-            .await
-            .unwrap();
-        let keys = col.list().await.unwrap();
-        assert_eq!(keys, vec!["replaced.toml"]);
-    }
-
-    #[tokio::test]
     async fn upload_integrity_failure_returns_validation_error() {
         let (storage, _dir) = make_storage();
         let mdd = make_valid_mdd("TestECU");
         let files = make_upload_files(&[("test.mdd", &mdd)]);
 
-        let err = upload_rejecting(
-            &storage,
-            files,
-            cda_interfaces::runtime_update_api::UpdateFileType::Mdd,
-        )
-        .await
-        .unwrap_err();
+        let err = upload_rejecting(&storage, files, RejectKind::Mdd)
+            .await
+            .unwrap_err();
 
         assert!(
             matches!(err, RuntimeUpdateError::ValidationFailed(_)),
@@ -1635,12 +1408,7 @@ mod tests {
         let mdd = make_valid_mdd("TestECU");
         let files = make_upload_files(&[("test.mdd", &mdd)]);
 
-        let _ = upload_rejecting(
-            &storage,
-            files,
-            cda_interfaces::runtime_update_api::UpdateFileType::Mdd,
-        )
-        .await;
+        let _ = upload_rejecting(&storage, files, RejectKind::Mdd).await;
 
         let col = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
@@ -1663,7 +1431,7 @@ mod tests {
         let _ = upload_rejecting(
             &storage,
             make_upload_files(&[("ecu2.mdd", &mdd2)]),
-            cda_interfaces::runtime_update_api::UpdateFileType::Mdd,
+            RejectKind::Mdd,
         )
         .await;
 
@@ -1681,39 +1449,9 @@ mod tests {
         let mdd = make_valid_mdd("TestECU");
         let files = make_upload_files(&[("test.mdd", &mdd)]);
 
-        let result = upload_rejecting(
-            &storage,
-            files,
-            cda_interfaces::runtime_update_api::UpdateFileType::Mdd,
-        )
-        .await;
+        let result = upload_rejecting(&storage, files, RejectKind::Mdd).await;
 
         assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn upload_config_integrity_failure_removes_written_config() {
-        let (storage, _dir) = make_storage();
-        let config = make_valid_config();
-        let files = make_upload_files(&[("opensovd-cda.toml", &config)]);
-
-        let upload_err = upload_rejecting(
-            &storage,
-            files,
-            cda_interfaces::runtime_update_api::UpdateFileType::Config,
-        )
-        .await
-        .unwrap_err();
-        let col = storage
-            .get_or_create_collection(&CollectionName::ConfigurationNextUpdate)
-            .await
-            .unwrap();
-        let keys = col.list().await.unwrap();
-        assert!(
-            keys.is_empty(),
-            "{}",
-            format!("keys={keys:#?}, upload_err={upload_err:?}")
-        );
     }
 
     #[tokio::test]

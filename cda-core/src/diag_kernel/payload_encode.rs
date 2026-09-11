@@ -37,22 +37,26 @@ impl<S: SecurityPlugin> PayloadEncoder for EcuManager<S> {
             DiagServiceError::BadPayload("Expected at least 1 byte to read SID".to_owned())
         })?;
 
-        // iterate through the services and for each service, resolve the parameters
-        // sort the parameters by byte_pos & bit_pos, and take the first parameter
-        // this is the service id. check if the provided rawdata matches the expected
-        // bytes for the service id, and if yes, return this service.
-        // If no service with a matching SIDRQ can be found, DiagServiceError::NotFound
-        // is returned to the caller.
-        let matched_services = self.get_services_from_variant_and_parent_refs(|service| {
-            service
-                .request_id()
-                .is_some_and(|service_id| raw_data_sid == service_id)
-        });
-        let mapped_service = matched_services.first().ok_or_else(|| {
-            DiagServiceError::NotFound(format!(
-                "No matching generic service found for SID {raw_data_sid:#04X}"
-            ))
-        })?;
+        // First narrow down to all services matching the SID (first byte), then
+        // further narrow down by comparing the full sequence of coded-constant
+        // bytes (SID, sub-function, DID, ...) against the provided raw payload.
+        // This is required because multiple services commonly share the same
+        // SID (e.g. every WriteDataByIdentifier DID is typically its own
+        // service entry, all sharing SID 0x2E), so matching on the SID alone is
+        // not sufficient to identify the correct service - doing so would pick
+        // an arbitrary service with that SID, causing the wrong service to be
+        // used for the access check (and thus reported in any resulting error).
+        // If no service with a matching prefix can be found,
+        // DiagServiceError::NotFound is returned to the caller.
+        let sid_matched_services = self.lookup_services_by_sid(raw_data_sid)?;
+        let mapped_service = sid_matched_services
+            .iter()
+            .find(|service| service.matches_request_prefix(&rawdata))
+            .ok_or_else(|| {
+                DiagServiceError::NotFound(format!(
+                    "No matching generic service found for request prefix: {rawdata:02X?}"
+                ))
+            })?;
         let mapped_dc = mapped_service.diag_comm().map(datatypes::DiagComm).ok_or(
             DiagServiceError::InvalidDatabase("Service is missing DiagComm".to_owned()),
         )?;
@@ -176,6 +180,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         value: Option<&serde_json::Value>,
         payload: &mut Vec<u8>,
         parent_byte_pos: usize,
+        sibling_values: Option<&HashMap<String, serde_json::Value>>,
     ) -> Result<(), DiagServiceError> {
         //  ISO_22901-1:2008-11 7.3.5.4
         //  MATCHING-REQUEST-PARAM, DYNAMIC and NRC-CONST are only allowed in responses
@@ -188,9 +193,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 self.map_param_value_to_uds(param, value, payload, parent_byte_pos)
             }
             datatypes::ParamType::Reserved => Self::map_reserved_param_to_uds(param, payload),
-            datatypes::ParamType::TableStruct => Err(DiagServiceError::ParameterConversionError(
-                "Mapping TableStructParam DoP to UDS payload not implemented".to_owned(),
-            )),
+            datatypes::ParamType::TableStruct => {
+                self.map_table_struct_to_uds(param, value, payload, parent_byte_pos, sibling_values)
+            }
             datatypes::ParamType::Dynamic => Err(DiagServiceError::ParameterConversionError(
                 "Mapping Dynamic DoP to UDS payload not implemented".to_owned(),
             )),
@@ -209,9 +214,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
             datatypes::ParamType::TableEntry => Err(DiagServiceError::ParameterConversionError(
                 "Mapping TableEntry DoP to UDS payload not implemented".to_owned(),
             )),
-            datatypes::ParamType::TableKey => Err(DiagServiceError::ParameterConversionError(
-                "Mapping TableKey DoP to UDS payload not implemented".to_owned(),
-            )),
+            datatypes::ParamType::TableKey => {
+                Self::map_table_key_to_uds(param, value, payload, parent_byte_pos)
+            }
         }
     }
 
@@ -274,7 +279,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                         )]
                         let value_len_u32 = value.len() as u32;
 
-                        value.len() > u32::MAX as usize || max > value_len_u32
+                        value.len() > u32::MAX as usize || value_len_u32 > max
                     })
                 {
                     return Err(DiagServiceError::InvalidRequest(
@@ -297,13 +302,22 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     "EndOfPdu basic structure lookup failed".to_owned(),
                 ))?;
 
+                // The EndOfPdu field's own BYTE-POSITION only anchors the *first*
+                // repeated structure. Each subsequent item must be appended directly
+                // after the previously encoded one, because `DiagCodedType::encode`
+                // writes at an absolute byte offset (resizing/overwriting `payload`),
+                // rather than appending. Reusing a single fixed offset for every item
+                // would make each item overwrite the previous one instead of
+                // following it, silently discarding all but the last array element.
+                let field_start_pos =
+                    (param.byte_position() as usize).saturating_add(parent_byte_pos);
                 for v in value {
-                    self.map_struct_to_uds(
-                        &structure,
-                        (param.byte_position() as usize).saturating_add(parent_byte_pos),
-                        v,
-                        payload,
-                    )?;
+                    // Use the current end of the payload as the position for this
+                    // item, but never go backwards past the field's own start
+                    // position (relevant for the very first item, in case earlier
+                    // padding/reserved bits have not extended `payload` that far).
+                    let item_byte_pos = payload.len().max(field_start_pos);
+                    self.map_struct_to_uds(&structure, item_byte_pos, v, payload)?;
                 }
                 Ok(())
             }
@@ -395,8 +409,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     "Expected Reserved specific data".to_owned(),
                 ))?;
         let bit_length = reserved_param.bit_length();
+        let data_type = super::reserved_param_data_type(bit_length);
         let coded_type = datatypes::DiagCodedType::new_high_low_byte_order(
-            datatypes::DataType::UInt32,
+            data_type,
             datatypes::DiagCodedTypeVariant::StandardLength(datatypes::StandardLengthType {
                 bit_length,
                 bit_mask: None,
@@ -600,6 +615,216 @@ impl<S: SecurityPlugin> EcuManager<S> {
         }
     }
 
+    /// Encode a TABLE-KEY parameter: resolve the key string to its wire
+    /// representation using the table's key DOP and compu method.
+    fn map_table_key_to_uds(
+        param: &datatypes::Parameter,
+        value: Option<&serde_json::Value>,
+        payload: &mut Vec<u8>,
+        parent_byte_pos: usize,
+    ) -> Result<(), DiagServiceError> {
+        let value = value.ok_or_else(|| {
+            DiagServiceError::InvalidRequest(format!(
+                "Required TABLE-KEY parameter '{}' missing",
+                param.short_name().unwrap_or_default()
+            ))
+        })?;
+
+        let key_str = value.as_str().ok_or_else(|| {
+            DiagServiceError::InvalidRequest(format!(
+                "TABLE-KEY parameter '{}' must be a string, got: {value}",
+                param.short_name().unwrap_or_default()
+            ))
+        })?;
+
+        let table_key_data =
+            param
+                .specific_data_as_table_key()
+                .ok_or(DiagServiceError::InvalidDatabase(
+                    "TABLE-KEY param missing TableKey specific data".to_owned(),
+                ))?;
+
+        let table_dop = table_key_data.table_key_reference_as_table_dop().ok_or(
+            DiagServiceError::InvalidDatabase("TABLE-KEY has no TableDop reference".to_owned()),
+        )?;
+
+        let key_dop = table_dop.key_dop().map(datatypes::DataOperation).ok_or(
+            DiagServiceError::InvalidDatabase("TableDop missing key_dop".to_owned()),
+        )?;
+
+        let rows = table_dop.rows().ok_or(DiagServiceError::InvalidDatabase(
+            "TableDop missing rows".to_owned(),
+        ))?;
+
+        // Verify the row exists (validates the key value)
+        let row_exists = rows.iter().any(|row| {
+            row.short_name().is_some_and(|name| name == key_str)
+                || row.key().is_some_and(|k| k == key_str)
+        });
+        if !row_exists {
+            let available: Vec<&str> = rows.iter().filter_map(|r| r.short_name()).collect();
+            return Err(DiagServiceError::InvalidRequest(format!(
+                "TABLE-KEY value '{key_str}' does not match any row. Available: {available:?}"
+            )));
+        }
+
+        // Encode the key value using the key DOP's compu method
+        match key_dop.variant()? {
+            datatypes::DataOperationVariant::Normal(normal_dop) => {
+                let diag_type = normal_dop.diag_coded_type()?;
+                let uds_data = json_value_to_uds_data(
+                    &diag_type,
+                    normal_dop.compu_method().map(Into::into),
+                    normal_dop.physical_type().map(Into::into),
+                    value,
+                )?;
+                diag_type.encode(
+                    uds_data,
+                    payload,
+                    parent_byte_pos.saturating_add(param.byte_position() as usize),
+                    param.bit_position() as usize,
+                )?;
+                Ok(())
+            }
+            _ => Err(DiagServiceError::InvalidDatabase(
+                "TABLE-KEY key_dop must be a NormalDOP".to_owned(),
+            )),
+        }
+    }
+
+    /// Encode a TABLE-STRUCT parameter: look up which row was selected by the
+    /// companion TABLE-KEY, then encode that row's structure (if any).
+    fn map_table_struct_to_uds(
+        &self,
+        param: &datatypes::Parameter,
+        value: Option<&serde_json::Value>,
+        payload: &mut Vec<u8>,
+        parent_byte_pos: usize,
+        sibling_values: Option<&HashMap<String, serde_json::Value>>,
+    ) -> Result<(), DiagServiceError> {
+        let table_struct_data =
+            param
+                .specific_data_as_table_struct()
+                .ok_or(DiagServiceError::InvalidDatabase(
+                    "TABLE-STRUCT param missing TableStruct specific data".to_owned(),
+                ))?;
+
+        // Follow back-reference to the TABLE-KEY param
+        let table_key_param =
+            table_struct_data
+                .table_key()
+                .ok_or(DiagServiceError::InvalidDatabase(
+                    "TABLE-STRUCT missing table_key back-reference".to_owned(),
+                ))?;
+        let table_key_param = datatypes::Parameter(table_key_param);
+
+        // Get the TABLE-KEY's short_name so we can look up the selected key
+        // value from the sibling parameters
+        let key_param_name =
+            table_key_param
+                .short_name()
+                .ok_or(DiagServiceError::InvalidDatabase(
+                    "TABLE-KEY param referenced by TABLE-STRUCT has no short_name".to_owned(),
+                ))?;
+
+        // Look up the selected key value from the sibling JSON values
+        let sibling_values = sibling_values.ok_or_else(|| {
+            DiagServiceError::InvalidRequest(
+                "TABLE-STRUCT requires sibling parameter context to resolve the TABLE-KEY value"
+                    .to_owned(),
+            )
+        })?;
+        let key_value = sibling_values.get(key_param_name).ok_or_else(|| {
+            DiagServiceError::InvalidRequest(format!(
+                "TABLE-STRUCT references TABLE-KEY '{key_param_name}' but it is not in the \
+                 request parameters"
+            ))
+        })?;
+        let key_str = key_value.as_str().ok_or_else(|| {
+            DiagServiceError::InvalidRequest(format!(
+                "TABLE-KEY '{key_param_name}' must be a string, got: {key_value}"
+            ))
+        })?;
+
+        // Resolve the TableDop and find the selected row
+        let table_key_data = table_key_param.specific_data_as_table_key().ok_or(
+            DiagServiceError::InvalidDatabase(
+                "TABLE-KEY param missing TableKey specific data".to_owned(),
+            ),
+        )?;
+        let table_dop = table_key_data.table_key_reference_as_table_dop().ok_or(
+            DiagServiceError::InvalidDatabase("TABLE-KEY has no TableDop reference".to_owned()),
+        )?;
+        let rows = table_dop.rows().ok_or(DiagServiceError::InvalidDatabase(
+            "TableDop missing rows".to_owned(),
+        ))?;
+        let selected_row = rows
+            .iter()
+            .find(|row| {
+                row.short_name().is_some_and(|name| name == key_str)
+                    || row.key().is_some_and(|k| k == key_str)
+            })
+            .ok_or_else(|| {
+                DiagServiceError::InvalidRequest(format!(
+                    "TABLE-KEY value '{key_str}' does not match any table row"
+                ))
+            })?;
+
+        // Get the row's structure DOP (may be None for rows with no struct data)
+        let structure_dop = selected_row.structure();
+
+        match structure_dop {
+            None => {
+                // No structure for this row - accept empty input or None
+                if let Some(v) = value
+                    && !v.as_object().is_some_and(serde_json::Map::is_empty)
+                {
+                    return Err(DiagServiceError::InvalidRequest(format!(
+                        "TABLE-STRUCT for row '{}' has no structure, but non-empty data was \
+                         provided: {v}",
+                        selected_row.short_name().unwrap_or_default()
+                    )));
+                }
+                Ok(())
+            }
+            Some(structure_dop_ref) => {
+                let structure_dop = datatypes::DataOperation(structure_dop_ref);
+                match structure_dop.variant()? {
+                    datatypes::DataOperationVariant::Structure(struct_dop) => {
+                        // The JSON value should be either:
+                        // - {<row_short_name>: {<params>}} (full form)
+                        // - {} (acceptable if structure has no required params)
+                        let row_name = selected_row.short_name().unwrap_or_default();
+                        let struct_value = value.and_then(|v| v.as_object()).and_then(|obj| {
+                            if obj.is_empty() {
+                                // Empty object - treat as empty struct data
+                                None
+                            } else {
+                                obj.get(row_name)
+                            }
+                        });
+
+                        let struct_json = match struct_value {
+                            Some(v) => v.clone(),
+                            None => serde_json::Value::Object(serde_json::Map::new()),
+                        };
+
+                        self.map_struct_to_uds(
+                            &struct_dop,
+                            parent_byte_pos.saturating_add(param.byte_position() as usize),
+                            &struct_json,
+                            payload,
+                        )
+                    }
+                    _ => Err(DiagServiceError::InvalidDatabase(format!(
+                        "TABLE-STRUCT row '{}' structure DOP is not a Structure variant",
+                        selected_row.short_name().unwrap_or_default()
+                    ))),
+                }
+            }
+        }
+    }
+
     fn map_struct_to_uds(
         &self,
         structure: &datatypes::StructureDop,
@@ -632,7 +857,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 DiagServiceError::InvalidDatabase("Unable to find short name for param".to_owned())
             })?;
 
-            self.map_param_to_uds(&param, value.get(short_name), payload, struct_byte_pos)
+            self.map_param_to_uds(
+                &param,
+                value.get(short_name),
+                payload,
+                struct_byte_pos,
+                None,
+            )
         })
     }
 
@@ -675,7 +906,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
             } else {
                 effective_byte_pos
             };
-            self.map_param_to_uds(param, json_values.get(short_name), uds, parent_byte_pos)?;
+            self.map_param_to_uds(
+                param,
+                json_values.get(short_name),
+                uds,
+                parent_byte_pos,
+                Some(json_values),
+            )?;
         }
         Ok(())
     }
@@ -797,14 +1034,17 @@ fn process_coded_constants(
 #[cfg(test)]
 mod tests {
     use cda_interfaces::{
-        PayloadDecoder, PayloadEncoder, diagservices::UdsPayloadData, service_ids,
+        PayloadDecoder, PayloadEncoder, diagservices::UdsPayloadData, service_ids, util::std_ext,
     };
     use cda_plugin_security::DefaultSecurityPluginData;
     use serde_json::json;
 
     use super::*;
     use crate::diag_kernel::test_utils::ecu_manager_builder::{
-        create_ecu_manager_with_length_key_request_service, create_ecu_manager_with_mux_service,
+        create_ecu_manager_with_end_pdu_request_service,
+        create_ecu_manager_with_length_key_request_service,
+        create_ecu_manager_with_multiple_routine_control_services,
+        create_ecu_manager_with_multiple_write_did_services, create_ecu_manager_with_mux_service,
         create_ecu_manager_with_mux_service_and_default_case,
         create_ecu_manager_with_param_length_info_service,
         create_ecu_manager_with_phys_const_normal_dop_service,
@@ -1646,6 +1886,265 @@ mod tests {
             uds_bytes.get(1).copied().unwrap(),
             0x01,
             "MODE byte should be 0x01 (text-table key 'ACTIVE' resolved to coded value 1)"
+        );
+    }
+
+    /// Regression test for a fixed-count `EndOfPdu` array parameter (`min_items ==
+    /// max_items == 2`), where each item is a struct containing a single
+    /// leading-length-prefixed byte field (`RepeatedItem { leading_length_field:
+    /// <leading-length ByteField> }`).
+    ///
+    /// Each `leading_length_field` value is encoded as `[len_byte, ...data]`. With
+    /// two distinct 1-byte values (`0xAA` and `0xBB`), the correctly encoded
+    /// request must contain BOTH items back-to-back:
+    /// `SID, 0x01, 0xAA,  0x01, 0xBB` (6 bytes total).
+    ///
+    /// Before the fix, `map_param_value_to_uds`'s `EndOfPdu` handling computed the
+    /// struct byte position once, outside the loop over array items, and reused it
+    /// for every item. Since `DiagCodedType::encode` writes at an *absolute* byte
+    /// offset (overwriting, not appending), every item after the first one clobbers
+    /// the bytes of the previous item at the same offset. The resulting payload only
+    /// contains the last-encoded item, i.e. `SID, 0x01, 0xBB` (3 bytes) - the first
+    /// `RepeatedItem` entry (and its leading-length field) is silently lost.
+    #[tokio::test]
+    async fn test_end_of_pdu_request_encodes_all_items_not_just_last() {
+        let (ecu_manager, service, sid) =
+            create_ecu_manager_with_end_pdu_request_service(2, Some(2));
+
+        let payload_data = UdsPayloadData::ParameterMap(
+            serde_json::from_value(json!({
+                "repeated_items": [
+                    { "leading_length_field": "AA" },
+                    { "leading_length_field": "BB" }
+                ]
+            }))
+            .unwrap(),
+        );
+
+        let result = ecu_manager
+            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data), None)
+            .await;
+
+        let service_payload = result
+            .unwrap_or_else(|e| panic!("Encoding the two-item EndOfPdu request failed: {e:?}"));
+        let uds_bytes = &service_payload.data;
+
+        assert_eq!(
+            uds_bytes.as_slice(),
+            &[sid, 0x01, 0xAA, 0x01, 0xBB][..],
+            "Expected both RepeatedItem entries to be appended sequentially, but the second item \
+             overwrote the first at the same absolute byte offset"
+        );
+    }
+
+    /// Regression test for the `EndOfPdu` item-count validation bug where the
+    /// comparison `max > value_len` was used instead of `value_len > max`.
+    ///
+    /// With `min_items = 1` and `max_items = Some(20)`, providing a single item is valid
+    /// (`1` is within `[1, 20]`), but the buggy comparison (`20 > 1` => `true`) incorrectly
+    /// rejected the request with "`EndOfPdu` expected different amount of items".
+    #[tokio::test]
+    async fn test_end_of_pdu_accepts_item_count_within_min_max_range() {
+        let (ecu_manager, service, sid) =
+            create_ecu_manager_with_end_pdu_request_service(1, Some(20));
+
+        let payload_data = UdsPayloadData::ParameterMap(
+            serde_json::from_value(json!({
+                "repeated_items": [
+                    { "leading_length_field": "AA" }
+                ]
+            }))
+            .unwrap(),
+        );
+
+        let result = ecu_manager
+            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data), None)
+            .await;
+
+        let service_payload = result.unwrap_or_else(|e| {
+            panic!(
+                "Encoding a single-item EndOfPdu request (within min/max range) should succeed, \
+                 but failed with: {e:?}"
+            )
+        });
+
+        assert_eq!(service_payload.data.as_slice(), &[sid, 0x01, 0xAA][..]);
+    }
+
+    /// Regression test ensuring that providing MORE items than `max_number_of_items`
+    /// is still correctly rejected after fixing the comparison direction.
+    #[tokio::test]
+    async fn test_end_of_pdu_rejects_item_count_above_max() {
+        let (ecu_manager, service, _sid) =
+            create_ecu_manager_with_end_pdu_request_service(1, Some(1));
+
+        let payload_data = UdsPayloadData::ParameterMap(
+            serde_json::from_value(json!({
+                "repeated_items": [
+                    { "leading_length_field": "AA" },
+                    { "leading_length_field": "BB" }
+                ]
+            }))
+            .unwrap(),
+        );
+
+        let result = ecu_manager
+            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data), None)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Expected an error when providing more items than max_number_of_items allows"
+        );
+    }
+
+    /// Regression test for `check_genericservice` incorrectly matching services
+    /// by SID alone. When multiple services share the same SID (e.g. several
+    /// `WriteDataByIdentifier` services, each for a different DID, all sharing
+    /// SID `0x2E`), the raw payload bytes *following* the SID (the DID) must
+    /// also be compared, otherwise an arbitrary same-SID service can be
+    /// selected - resulting in the wrong service being used for the
+    /// precondition/access check (and thus the wrong service name being
+    /// reported in any resulting error).
+    #[tokio::test]
+    async fn test_check_genericservice_matches_correct_did_not_first_same_sid_service() {
+        let (
+            ecu_manager,
+            unrestricted_did,
+            unrestricted_name,
+            programming_only_did,
+            programming_only_name,
+        ) = create_ecu_manager_with_multiple_write_did_services();
+
+        // Default state: LockedSecurity / DefaultSession - does NOT satisfy the
+        // ProgrammingSecurity precondition of the second service.
+        {
+            let mut guard = std_ext::lock_write(&ecu_manager.runtime_state.service_states);
+            guard.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_string());
+            guard.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_string());
+        }
+
+        let sid = service_ids::WRITE_DATA_BY_IDENTIFIER;
+        let did_hi = |did: u16| (did >> 8) as u8;
+        let did_lo = |did: u16| (did & 0xFF) as u8;
+
+        // Raw payload for the unrestricted DID must succeed, regardless of
+        // which same-SID service happens to be evaluated first.
+        let unrestricted_payload = vec![sid, did_hi(unrestricted_did), did_lo(unrestricted_did)];
+        let unrestricted_result = ecu_manager
+            .check_genericservice(&skip_sec_plugin!(), unrestricted_payload)
+            .await;
+        assert!(
+            unrestricted_result.is_ok(),
+            "Expected genericservice call for unrestricted DID {unrestricted_did:#06X} \
+             ({unrestricted_name}) to succeed, got: {:?}",
+            unrestricted_result.err()
+        );
+
+        // Raw payload for the DID that requires ProgrammingSecurity must be
+        // rejected, and the error must reference the *actually matched*
+        // service, not an arbitrary same-SID service.
+        let programming_only_payload = vec![
+            sid,
+            did_hi(programming_only_did),
+            did_lo(programming_only_did),
+        ];
+        let programming_only_result = ecu_manager
+            .check_genericservice(&skip_sec_plugin!(), programming_only_payload)
+            .await;
+        let err = programming_only_result.expect_err(&format!(
+            "Expected genericservice call for restricted DID {programming_only_did:#06X} \
+             ({programming_only_name}) to fail due to unmet ProgrammingSecurity precondition"
+        ));
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains(&programming_only_name),
+            "Expected error message to reference the actually matched service \
+             '{programming_only_name}', got: {err_msg}"
+        );
+        assert!(
+            !err_msg.contains(&unrestricted_name),
+            "Error message should not reference the unrelated service '{unrestricted_name}', got: \
+             {err_msg}"
+        );
+    }
+
+    /// Regression test for `check_genericservice` incorrectly matching services
+    /// by SID alone, for a service (`RoutineControl`, SID `0x31`) whose
+    /// disambiguating bytes span a sub-function byte *and* a routine
+    /// identifier, rather than a single DID immediately following the SID.
+    /// Matching by SID alone would arbitrarily pick a same-SID service,
+    /// resulting in the wrong service being used for the precondition/access
+    /// check (and thus the wrong service name being reported in any resulting
+    /// error).
+    #[tokio::test]
+    async fn test_check_genericservice_matches_correct_routine_not_first_same_sid_service() {
+        let (
+            ecu_manager,
+            unrestricted_routine_id,
+            unrestricted_name,
+            programming_only_routine_id,
+            programming_only_name,
+        ) = create_ecu_manager_with_multiple_routine_control_services();
+
+        // Default state: LockedSecurity / DefaultSession - does NOT satisfy the
+        // ProgrammingSecurity precondition of the second service.
+        {
+            let mut guard = std_ext::lock_write(&ecu_manager.runtime_state.service_states);
+            guard.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_string());
+            guard.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_string());
+        }
+
+        let sid = service_ids::ROUTINE_CONTROL;
+        let subfunction = cda_interfaces::subfunction_ids::routine::REQUEST_RESULTS;
+        let id_hi = |id: u16| (id >> 8) as u8;
+        let id_lo = |id: u16| (id & 0xFF) as u8;
+
+        // Raw payload for the unrestricted routine ID must succeed, regardless
+        // of which same-SID service happens to be evaluated first.
+        let unrestricted_payload = vec![
+            sid,
+            subfunction,
+            id_hi(unrestricted_routine_id),
+            id_lo(unrestricted_routine_id),
+        ];
+        let unrestricted_result = ecu_manager
+            .check_genericservice(&skip_sec_plugin!(), unrestricted_payload)
+            .await;
+        assert!(
+            unrestricted_result.is_ok(),
+            "Expected genericservice call for unrestricted routine ID \
+             {unrestricted_routine_id:#06X} ({unrestricted_name}) to succeed, got: {:?}",
+            unrestricted_result.err()
+        );
+
+        // Raw payload for the routine ID that requires ProgrammingSecurity must
+        // be rejected, and the error must reference the *actually matched*
+        // service, not an arbitrary same-SID service.
+        let programming_only_payload = vec![
+            sid,
+            subfunction,
+            id_hi(programming_only_routine_id),
+            id_lo(programming_only_routine_id),
+        ];
+        let programming_only_result = ecu_manager
+            .check_genericservice(&skip_sec_plugin!(), programming_only_payload)
+            .await;
+        let err = programming_only_result.expect_err(&format!(
+            "Expected genericservice call for restricted routine ID \
+             {programming_only_routine_id:#06X} ({programming_only_name}) to fail due to unmet \
+             ProgrammingSecurity precondition"
+        ));
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains(&programming_only_name),
+            "Expected error message to reference the actually matched service \
+             '{programming_only_name}', got: {err_msg}"
+        );
+        assert!(
+            !err_msg.contains(&unrestricted_name),
+            "Error message should not reference the unrelated service '{unrestricted_name}', got: \
+             {err_msg}"
         );
     }
 }

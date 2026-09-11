@@ -29,8 +29,11 @@ path = "src/lib.rs"
 cda-interfaces = { workspace = true }
 cda-database = { workspace = true }
 cda-plugin-security = { workspace = true }
+override-macros = { workspace = true }
 
 # external
+async-trait = { workspace = true }
+linkme = { workspace = true }
 num-traits = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
@@ -41,6 +44,9 @@ schemars = { workspace = true }
 
 # logging & tracing
 tracing = { workspace = true }
+
+[build-dependencies]
+cda-build = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

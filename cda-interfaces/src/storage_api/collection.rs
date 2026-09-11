@@ -34,12 +34,6 @@ pub enum CollectionName {
     DiagnosticDatabaseNextUpdate,
     /// Backup of the diagnostic database before an update.
     DiagnosticDatabaseBackup,
-    /// Configuration collection for CDA settings.
-    Configuration,
-    /// Staging area for a pending configuration update.
-    ConfigurationNextUpdate,
-    /// Backup of the configuration before an update.
-    ConfigurationBackup,
     /// A user-defined collection with an arbitrary name.
     Custom(String),
 }
@@ -52,9 +46,6 @@ impl CollectionName {
             Self::DiagnosticDatabase => "diagnostic_database",
             Self::DiagnosticDatabaseNextUpdate => "diagnostic_database_next_update",
             Self::DiagnosticDatabaseBackup => "diagnostic_database_backup",
-            Self::Configuration => "configuration",
-            Self::ConfigurationNextUpdate => "configuration_next_update",
-            Self::ConfigurationBackup => "configuration_backup",
             Self::Custom(name) => name.as_str(),
         }
     }

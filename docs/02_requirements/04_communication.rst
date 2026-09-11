@@ -168,8 +168,9 @@ Vehicle Identification
        within the tester's configured subnet.
     4. Match discovered DoIP entity logical addresses against known ECUs from the
        diagnostic databases.
-    5. Continuously listen for spontaneous VAM broadcasts after initial discovery
-       to detect gateways that come online later or reconnect after disconnection.
+    5. Depending on the configured spontaneous VAM handling mode (see
+       :need:`req~doip-vam-handling-mode`), continuously listen for spontaneous VAM broadcasts after
+       initial discovery to detect gateways that come online later or reconnect after disconnection.
 
     .. uml::
         :caption: Vehicle Identification Overview
@@ -200,6 +201,48 @@ Vehicle Identification
     requiring static IP configuration. Subnet filtering prevents unintended
     communication with entities on unrelated networks. Continuous VAM listening
     ensures the CDA adapts to dynamic network conditions.
+
+
+Spontaneous VAM Handling Mode
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. req:: Spontaneous VAM Handling Mode
+    :id: req~doip-vam-handling-mode
+    :links: arch~doip-vam-handling-mode
+    :status: draft
+
+    The CDA must support a configurable ``[communication] vam_handling_mode`` for handling spontaneous
+    (unsolicited) VAM broadcasts received outside of an active VIR/VAM discovery exchange:
+
+    - **always** (default) -- any spontaneous VAM matching a known ECU logical address from the diagnostic
+      databases triggers a connection attempt and variant detection, regardless of whether that entity has
+      been seen before.
+    - **persisted-only** -- spontaneous VAMs are only acted upon while a persisted ECU topology exists (see
+      :need:`req~dt-ecu-list-persistence`). This includes VAMs from entities not yet present in the
+      persisted topology; such new ECUs/gateways are discovered and added to the topology like in
+      **always** mode. When no persisted topology exists, spontaneous VAMs must be ignored until an
+      explicit ``networkreset`` is executed and a topology has been persisted. When ECU list persistence
+      is configured as disabled (see :need:`req~dt-ecu-list-persistence`), a persisted topology can never
+      exist, so **persisted-only** behaves identically to **never** in that configuration.
+    - **never** -- spontaneous VAM listening must be disabled entirely; reconnection to gateways is only
+      possible via explicit ``networkreset`` execution or the configured DoIP connection retry mechanism
+      (see :need:`req~doip-communication-parameters`).
+
+    Regardless of the configured mode, spontaneous VAM handling must only be active while ECU/DoIP
+    communication has actually been initialized. While ``init_mode`` (see
+    :need:`req~dt-deferred-initialization`) is ``OnDemand`` or ``Disabled`` and communication has not yet
+    been triggered, no spontaneous VAM listener must be running; it is started only once initialization
+    proceeds.
+
+    **Rationale**
+
+    Always reacting to spontaneous VAMs is convenient for dynamic environments, but may be undesirable in
+    setups that require the first-ever detection to only occur following an explicit, authorized trigger
+    (e.g. ``networkreset``), while still allowing organic discovery of new ECUs/gateways once an initial
+    topology has been established. Suppressing spontaneous VAM handling until communication is initialized
+    ensures the CDA remains fully quiet on the vehicle network for as long as
+    :need:`req~dt-deferred-initialization` postpones communication, regardless of the configured
+    ``vam_handling_mode``.
 
 
 Routing Activation

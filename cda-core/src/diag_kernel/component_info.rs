@@ -678,7 +678,9 @@ mod tests {
         DataType,
         database_builder::{DiagClassType, DiagCommParams, DiagLayerParams, EcuDataBuilder},
     };
-    use cda_interfaces::{DiagComm, DiagCommType, Protocol};
+    use cda_interfaces::{
+        Connectivity, DiagComm, DiagCommType, Protocol, VariantState, util::std_ext,
+    };
     use cda_plugin_security::DefaultSecurityPluginData;
 
     use super::*;
@@ -1267,6 +1269,39 @@ mod tests {
         assert!(
             result.is_empty(),
             "Expected no operations for non-routine-control DB"
+        );
+    }
+
+    /// Verify that `get_components_operations_info` returns the base-variant services even when
+    /// no specific variant has been detected yet (i.e. `variant_index` is `None`).
+    #[test]
+    fn test_get_components_operations_info_falls_back_to_base_variant_when_not_tested() {
+        let ecu_manager = build_ecu_manager_with_routine_subfunctions(
+            "MyRoutine",
+            &[subfunction_ids::routine::START],
+        );
+
+        // Simulate the ECU state immediately after startup: variant detection has never run.
+        {
+            let mut ecu_state = std_ext::lock_write(&ecu_manager.runtime_state.ecu_state);
+            ecu_state.connectivity = Connectivity::Offline;
+            ecu_state.variant_state = VariantState::NotTested;
+            ecu_state.variant_index = None;
+        }
+
+        let result = ecu_manager.get_components_operations_info(&skip_sec_plugin!());
+
+        assert_eq!(
+            result.len(),
+            1,
+            "Expected one operation from base variant even though variant is not yet detected"
+        );
+        let op = result.first().expect("Expected at least one operation");
+        assert_eq!(op.id, "MyRoutine");
+        assert!(!op.has_stop, "Expected has_stop = false");
+        assert!(
+            !op.has_request_results,
+            "Expected has_request_results = false"
         );
     }
 

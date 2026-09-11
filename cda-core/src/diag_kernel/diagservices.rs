@@ -70,6 +70,15 @@ pub struct MappedResponseData {
 }
 
 impl DiagServiceResponse for DiagServiceResponseStruct {
+    fn empty_positive(service: DiagComm) -> Self {
+        Self {
+            service,
+            data: Vec::new(),
+            mapped_data: None,
+            response_type: DiagServiceResponseType::Positive,
+        }
+    }
+
     fn service_name(&self) -> String {
         self.service.name.clone()
     }
@@ -443,5 +452,20 @@ mod tests {
         assert!(matches!(
             extract_nrc_from_raw_data(&data),
             Err(DiagServiceError::UnexpectedResponse(Some(msg))) if msg.contains("extra bytes")));
+    }
+
+    #[test]
+    fn test_empty_positive_is_positive_and_empty() {
+        let service = DiagComm {
+            name: "TesterPresent".to_owned(),
+            type_: cda_interfaces::DiagCommType::Operations,
+            lookup_name: None,
+            subfunction_id: None,
+        };
+        let response = DiagServiceResponseStruct::empty_positive(service);
+        assert_eq!(response.response_type(), DiagServiceResponseType::Positive);
+        assert!(response.is_empty());
+        assert!(response.get_raw().is_empty());
+        assert_eq!(response.service_name(), "TesterPresent");
     }
 }

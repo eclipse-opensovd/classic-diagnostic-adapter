@@ -12,13 +12,16 @@
  */
 
 use std::{
-    sync::{Arc, LazyLock},
+    future::Future,
+    panic::AssertUnwindSafe,
+    sync::LazyLock,
     time::{Duration, Instant},
 };
 
 use cda_health::config::HealthConfig;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, HashMapExtensions,
+    communication_control::CommunicationSettings,
     config::ConfigSanity,
     datatypes::{
         ComParamConfig, ComParamPrecedence, ComParams, ComponentsConfig, DatabaseNamingConvention,
@@ -27,14 +30,15 @@ use cda_interfaces::{
 };
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 use cda_tracing::LoggingConfig;
-use futures::FutureExt as _;
+use futures::FutureExt;
 use http::{Method, StatusCode};
 use opensovd_cda_lib::{
-    cda_version,
     config::configfile::{
-        Configuration, DatabaseConfig, EcuComParams, EcuConfig, RuntimeUpdateConfig, ServerConfig,
-        StrictConfig,
+        CanAddressingMode, CanConfig, CanEcuMapping, Configuration, DatabaseConfig, EcuComParams,
+        EcuConfig, RuntimeUpdateConfig, ServerConfig, StrictConfig, TransportOverride,
+        TransportType,
     },
+    update::UpdatePluginBuilder,
 };
 use sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response as NetworkStructureResponse;
 use tokio::sync::{Mutex, MutexGuard, OnceCell};
@@ -52,6 +56,21 @@ static EXCLUSIVE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static CDA_SHUTDOWN: LazyLock<Mutex<Option<tokio::sync::broadcast::Sender<()>>>> =
     LazyLock::new(|| Mutex::new(None));
 
+/// The running CDA's task, awaited by [`stop_cda`] so that the instance is only
+/// observed as stopped once its port is released. Otherwise a following
+/// [`start_cda`] races it for the same port.
+static CDA_TASK: LazyLock<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
+    LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// The communication settings the shared CDA is currently running with, or
+/// `None` while no CDA is running.
+///
+/// A test inherits whichever instance the previous one left behind, so
+/// [`ensure_cda_running`] uses this to tell an unusable leftover (stopped, or
+/// running in deferred mode) from the plain instance most tests expect.
+static RUNNING_CDA_COMMUNICATION: LazyLock<Mutex<Option<CommunicationSettings>>> =
+    LazyLock::new(|| Mutex::new(None));
+
 /// Tokio isolates the runtime for each test.
 /// As we want to share the webserver over all tests, so we do not have to spin it up every time,
 /// a new static runtime is created in which the webserver task is running.
@@ -64,8 +83,19 @@ static ECU_SIM_PROCESS: LazyLock<Mutex<Option<std::process::Child>>> =
 const CDA_INTEGRATION_TEST_USE_DOCKER: &str = "CDA_INTEGRATION_TEST_USE_DOCKER";
 const CDA_INTEGRATION_TEST_TESTER_ADDRESS: &str = "CDA_INTEGRATION_TEST_TESTER_ADDRESS";
 const CDA_INTEGRATION_TEST_COVERAGE: &str = "CDA_INTEGRATION_TEST_COVERAGE";
-
-const MAIN_HEALTH_COMPONENT_KEY: &str = "main";
+const CDA_INTEGRATION_TEST_USE_CAN: &str = "CDA_INTEGRATION_TEST_USE_CAN";
+/// Mixed mode: `DoIP` and CAN run simultaneously. TMCC3000/HOVR4000/JGWT5000
+/// are pinned to CAN, FLXC1000 to `DoIP`, the remaining ECUs bind at first
+/// detection.
+const CDA_INTEGRATION_TEST_USE_MIXED: &str = "CDA_INTEGRATION_TEST_USE_MIXED";
+/// Port of the socketcand daemon that fronts the shared (v)can bus. CDA and the
+/// ecu-sim both connect to it as rawmode clients.
+const SOCKETCAND_PORT: u16 = 29536;
+/// Name of the CAN bus exposed by socketcand.
+const CAN_BUS_NAME: &str = "vcan0";
+/// socketcand host CDA + ecu-sim use *inside* their containers: the socketcand
+/// service is reachable by its compose service name over the bridge network.
+const CAN_DOCKER_SOCKETCAND_HOST: &str = "socketcand";
 
 pub(crate) struct TestRuntime {
     pub(crate) config: Configuration,
@@ -78,13 +108,42 @@ pub(crate) struct EcuSim {
     pub(crate) control_port: u16,
 }
 
+/// Whether runtime initialization brings the CDA up along with the rest of the
+/// infrastructure.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CdaStartup {
+    /// Start the CDA as part of the setup and wait for it to report ready.
+    Immediate,
+    /// Start only the ECU simulator. The test starts the CDA itself, e.g. via
+    /// [`restart_cda`].
+    Deferred,
+}
+
 pub(crate) async fn setup_integration_test<'a>(
+    exclusive: bool,
+) -> Result<(&'a TestRuntime, Option<MutexGuard<'a, ()>>), TestingError> {
+    setup(CdaStartup::Immediate, exclusive).await
+}
+
+/// Like [`setup_integration_test`], but leaves the CDA stopped. The ECU
+/// simulator runs and the caller starts the CDA itself, e.g. via
+/// [`restart_cda`], for tests that control exactly when it starts.
+pub(crate) async fn setup_integration_test_without_cda<'a>(
+    exclusive: bool,
+) -> Result<(&'a TestRuntime, Option<MutexGuard<'a, ()>>), TestingError> {
+    setup(CdaStartup::Deferred, exclusive).await
+}
+
+async fn setup<'a>(
+    cda: CdaStartup,
     exclusive: bool,
 ) -> Result<(&'a TestRuntime, Option<MutexGuard<'a, ()>>), TestingError> {
     let lock_guard = EXCLUSIVE_LOCK.lock().await;
 
+    // The infrastructure is process-wide, so only the first test through here
+    // decides whether the CDA is started as part of initialization.
     let runtime = match TEST_RUNTIME
-        .get_or_try_init(|| async { initialize_runtime().await })
+        .get_or_try_init(|| async { initialize_runtime(cda).await })
         .await
     {
         Ok(runtime) => runtime,
@@ -94,6 +153,13 @@ pub(crate) async fn setup_integration_test<'a>(
         }
     };
 
+    // Every later test has to establish the CDA state it needs itself, rather
+    // than depending on the mode the first test happened to pick.
+    match cda {
+        CdaStartup::Immediate => ensure_cda_running(&runtime.config).await?,
+        CdaStartup::Deferred => stop_shared_cda().await,
+    }
+
     // Make sure we have a clean state at the beginning of the test
     ecusim::reset_sim(&runtime.ecu_sim).await?;
     if exclusive {
@@ -102,16 +168,13 @@ pub(crate) async fn setup_integration_test<'a>(
         tracing::debug!("forwarding exclusive lock");
         Ok((runtime, Some(lock_guard)))
     } else {
-        // For non-exclusive tests, just return the cloned Arc.
         Ok((runtime, None))
     }
 }
 
-async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
+async fn initialize_runtime(cda: CdaStartup) -> Result<TestRuntime, TestingError> {
     let tracing = cda_tracing::new();
-    let layers = vec![cda_tracing::new_term_subscriber(
-        &cda_tracing::LoggingConfig::default(),
-    )];
+    let layers = vec![cda_tracing::new_term_subscriber(&LoggingConfig::default())];
     cda_tracing::init_tracing(tracing.with(layers)).map_err(|e| {
         TestingError::SetupError(format!("Failed to initialize tracing for tests: {e}"))
     })?;
@@ -123,6 +186,9 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
     let (cda_port, gateway_port, sim_control_port) = if use_docker() {
         (
             find_available_tcp_port(&host)?,
+            // gateway_port is written to `.env` as SIM_GATEWAY_PORT but the JVM
+            // reads SIM_DOIP_PORT, so this allocation is currently dead (kept as
+            // a pre-existing behaviour; cleanup tracked separately).
             find_available_tcp_port(&host)?,
             find_available_tcp_port(&host)?,
         )
@@ -130,7 +196,13 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         (20002, 13400, 8181) // default ports for local usage
     };
 
-    let config = cda_test_config(host.clone(), cda_port, gateway_port)?;
+    let config = if use_mixed() {
+        cda_test_config_mixed(host.clone(), cda_port, gateway_port)?
+    } else if use_can() {
+        cda_test_config_can(host.clone(), cda_port)?
+    } else {
+        cda_test_config(host.clone(), cda_port, gateway_port)?
+    };
     config.validate_sanity().map_err(|e| {
         TestingError::SetupError(format!("Configuration sanity check failed: {e:?}"))
     })?;
@@ -143,15 +215,31 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
     register_panic_hook();
     if use_docker() {
         write_config_toml(&test_container_dir()?, config.clone())?;
-        start_docker_compose(cda_port, gateway_port, sim_control_port)?;
+        start_docker_compose(cda, cda_port, gateway_port, sim_control_port)?;
     } else {
-        start_ecu_sim(&ecu_sim).await?;
-        start_cda(config.clone());
+        if can_infra() {
+            start_ecu_sim_can(&ecu_sim).await?;
+        } else {
+            start_ecu_sim_doip(&ecu_sim).await?;
+        }
+        if cda == CdaStartup::Immediate {
+            start_cda(config.clone());
+        }
     }
 
-    if let Err(e) = wait_for_cda_online(&config.server).await {
-        dump_docker_logs();
-        return Err(e);
+    match cda {
+        CdaStartup::Immediate => {
+            if let Err(e) = wait_for_cda_online(&config.server).await {
+                dump_docker_logs();
+                return Err(e);
+            }
+            mark_cda_started(&config).await;
+        }
+        // Nothing else to wait for. `start_ecu_sim_*` already waited for the sim.
+        CdaStartup::Deferred if use_docker() => {
+            wait_for_ecu_sim_ready(&ecu_sim.host, ecu_sim.control_port).await?;
+        }
+        CdaStartup::Deferred => {}
     }
 
     Ok(TestRuntime { config, ecu_sim })
@@ -162,18 +250,93 @@ fn cda_test_config(
     cda_port: u16,
     gateway_port: u16,
 ) -> Result<Configuration, TestingError> {
-    let config = Configuration {
+    let mut config = base_test_config(host, cda_port, per_ecu_configs_for_doip())?;
+    enable_doip(&mut config, gateway_port);
+    Ok(config)
+}
+
+/// CAN-only configuration: no `DoIP` transport, so no gateway port either.
+fn cda_test_config_can(host: String, cda_port: u16) -> Result<Configuration, TestingError> {
+    let mut config = base_test_config(host, cda_port, per_ecu_configs_for_can())?;
+    config.can = Some(test_can_config(vec![]));
+    Ok(config)
+}
+
+/// Mixed `DoIP`+CAN configuration: both transports are live. The three ECUs
+/// that already have CAN-style per-ECU configs are pinned to CAN; FLXC1000 is
+/// pinned to `DoIP` so the session/security/variant tests (which target it)
+/// run deterministically over `DoIP`; the remaining ECUs are left unpinned to
+/// exercise sticky first-detection binding.
+fn cda_test_config_mixed(
+    host: String,
+    cda_port: u16,
+    gateway_port: u16,
+) -> Result<Configuration, TestingError> {
+    let mut ecu = per_ecu_configs_for_doip();
+    // Pinned-to-CAN ECUs use the CAN-style protocol handling.
+    for (name, cfg) in per_ecu_configs_for_can() {
+        ecu.insert(name, cfg);
+    }
+    let mut config = base_test_config(host, cda_port, ecu)?;
+    enable_doip(&mut config, gateway_port);
+    let pins = [
+        ("TMCC3000", TransportType::Can),
+        ("HOVR4000", TransportType::Can),
+        ("JGWT5000", TransportType::Can),
+        ("FLXC1000", TransportType::DoIP),
+    ]
+    .into_iter()
+    .map(|(ecu_name, transport)| TransportOverride {
+        ecu_name: ecu_name.to_owned(),
+        transport,
+    })
+    .collect();
+    config.can = Some(test_can_config(pins));
+    Ok(config)
+}
+
+/// Turns on the `DoIP` transport of a [`base_test_config`].
+fn enable_doip(config: &mut Configuration, gateway_port: u16) {
+    config.doip.enabled = true;
+    config.doip.gateway_port = gateway_port;
+}
+
+fn test_can_config(transport_overrides: Vec<TransportOverride>) -> CanConfig {
+    CanConfig {
+        interface: format!("socketcand:127.0.0.1:{SOCKETCAND_PORT}:{CAN_BUS_NAME}"),
+        ecu_mappings: can_ecu_mappings(),
+        transport_overrides,
+        response_timeout_ms: 2000,
+        probe_timeout_ms: 500,
+        // The suites ran with the keep-alive since its introduction; keep
+        // it on (the default is off for resident operation).
+        keepalive_interval_ms: 2000,
+        ..CanConfig::default()
+    }
+}
+
+/// Transport-less base of every test configuration (server, database,
+/// com-params, ...). The `DoIP` section is present but disabled; callers add
+/// their transports via [`enable_doip`] and/or by setting `config.can`.
+fn base_test_config(
+    host: String,
+    cda_port: u16,
+    ecu: HashMap<String, EcuConfig>,
+) -> Result<Configuration, TestingError> {
+    Ok(Configuration {
         server: opensovd_cda_lib::config::configfile::ServerConfig {
             address: host.clone(),
             port: cda_port,
         },
         doip: opensovd_cda_lib::config::configfile::DoipConfig {
             tester_address: host,
-            gateway_port,
+            enabled: false,
+            gateway_port: 0,
             ..Default::default()
         },
+        can: None,
         database: DatabaseConfig {
-            path: mdd_file_path()?,
+            seed_dir: mdd_file_path()?,
             naming_convention: DatabaseNamingConvention::default(),
             exit_no_database_loaded: true,
             fallback_to_base_variant: true,
@@ -189,6 +352,13 @@ fn cda_test_config(
             // are unaffected because the DB value takes precedence.
             let mut p = ComParams::default();
             p.doip.logical_functional_address.value = 0xFFFF;
+            // Faster reconnect ladder against the local simulator: with the
+            // production default of 5s, recovering from a simulated gateway
+            // restart (several failed reconnect rounds while the entities are
+            // down) can take longer than the 30s `wait_for_ecus_online`
+            // budget. Precedence Config so the MDD cannot override it.
+            p.doip.connection_retry_delay.value = std::time::Duration::from_secs(1);
+            p.doip.connection_retry_delay.precedence = ComParamPrecedence::Config;
             p
         },
         flat_buf: FlatbBufConfig::default(),
@@ -206,80 +376,122 @@ fn cda_test_config(
             user_memory_scope: "Development".to_owned(),
             ..Default::default()
         },
-        ecu: {
-            let mut map = HashMap::new();
-            map.insert(
-                "TMCC3000".to_owned(),
-                EcuConfig {
-                    ignore_protocol: Some(true),
-                    com_params: Some(
-                        EcuComParams::try_from(ComParams {
-                            doip: DoipComParams {
-                                logical_gateway_address: ComParamConfig {
-                                    name: "logical_gateway_address".to_string(),
-                                    value: 0x3000,
-                                    precedence: ComParamPrecedence::Config,
-                                },
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        })
-                        .expect("Failed to create EcuConfig for TMCC3000"),
-                    ),
-                    ..Default::default()
-                },
-            );
-            map.insert(
-                "HOVR4000".to_owned(),
-                EcuConfig {
-                    com_params: Some(
-                        EcuComParams::try_from(ComParams {
-                            doip: DoipComParams {
-                                logical_gateway_address: ComParamConfig {
-                                    name: "logical_gateway_address".to_string(),
-                                    value: 0x4000,
-                                    precedence: ComParamPrecedence::Config,
-                                },
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        })
-                        .expect("Failed to create EcuConfig for HOVR4000"),
-                    ),
-                    protocol: Some("DMC_DoIP".to_owned()),
-                    ignore_protocol: Some(false),
-                },
-            );
-            map.insert(
-                "JGWT5000".to_owned(),
-                EcuConfig {
-                    ignore_protocol: Some(true),
-                    com_params: Some(
-                        EcuComParams::try_from(ComParams {
-                            doip: DoipComParams {
-                                logical_gateway_address: ComParamConfig {
-                                    name: "logical_gateway_address".to_string(),
-                                    value: 0x5000,
-                                    precedence: ComParamPrecedence::Config,
-                                },
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        })
-                        .expect("Failed to create EcuConfig for JGWT5000"),
-                    ),
-                    ..Default::default()
-                },
-            );
-            map
-        },
+        ecu,
         runtime_update_config: RuntimeUpdateConfig {
             init_storage_from_database_path: true,
             ..RuntimeUpdateConfig::default()
         },
+        communication: CommunicationSettings::default(),
         strict: StrictConfig::default(),
-    };
-    Ok(config)
+    })
+}
+
+fn per_ecu_configs_for_doip() -> HashMap<String, EcuConfig> {
+    let mut map = HashMap::new();
+    map.insert(
+        "TMCC3000".to_owned(),
+        EcuConfig {
+            ignore_protocol: Some(true),
+            com_params: Some(
+                EcuComParams::try_from(ComParams {
+                    doip: DoipComParams {
+                        logical_gateway_address: ComParamConfig {
+                            name: "logical_gateway_address".to_string(),
+                            value: 0x3000,
+                            precedence: ComParamPrecedence::Config,
+                        },
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .expect("Failed to create EcuConfig for TMCC3000"),
+            ),
+            ..Default::default()
+        },
+    );
+    map.insert(
+        "HOVR4000".to_owned(),
+        EcuConfig {
+            com_params: Some(
+                EcuComParams::try_from(ComParams {
+                    doip: DoipComParams {
+                        logical_gateway_address: ComParamConfig {
+                            name: "logical_gateway_address".to_string(),
+                            value: 0x4000,
+                            precedence: ComParamPrecedence::Config,
+                        },
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .expect("Failed to create EcuConfig for HOVR4000"),
+            ),
+            protocol: Some("DMC_DoIP".to_owned()),
+            ignore_protocol: Some(false),
+        },
+    );
+    map.insert(
+        "JGWT5000".to_owned(),
+        EcuConfig {
+            ignore_protocol: Some(true),
+            com_params: Some(
+                EcuComParams::try_from(ComParams {
+                    doip: DoipComParams {
+                        logical_gateway_address: ComParamConfig {
+                            name: "logical_gateway_address".to_string(),
+                            value: 0x5000,
+                            precedence: ComParamPrecedence::Config,
+                        },
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .expect("Failed to create EcuConfig for JGWT5000"),
+            ),
+            ..Default::default()
+        },
+    );
+    map
+}
+
+fn per_ecu_configs_for_can() -> HashMap<String, EcuConfig> {
+    // For CAN we let the MDD's protocol layer win where it exists, and
+    // fall back to `ignore_protocol = true` for the protocol-less MDDs
+    // (TMCC3000, JGWT5000).
+    let mut map = HashMap::new();
+    for name in ["TMCC3000", "HOVR4000", "JGWT5000"] {
+        map.insert(
+            name.to_owned(),
+            EcuConfig {
+                ignore_protocol: Some(true),
+                ..Default::default()
+            },
+        );
+    }
+    map
+}
+
+fn can_ecu_mappings() -> Vec<CanEcuMapping> {
+    // The Kotlin sim assigns each example ECU a distinct (rxId, txId)
+    // pair. CDA must mirror the same mapping on its side so that the
+    // per-ECU ISO-TP sockets connect to the right arbitration IDs.
+    let pairs: &[(&str, u32, u32)] = &[
+        ("FLXC1000", 0x700, 0x708),
+        ("TMC1001", 0x710, 0x718),
+        ("FSNR2000", 0x720, 0x728),
+        ("TMCC3000", 0x730, 0x738),
+        ("HOVR4000", 0x740, 0x748),
+        ("JGWT5000", 0x750, 0x758),
+    ];
+    pairs
+        .iter()
+        .map(|(name, req, resp)| CanEcuMapping {
+            ecu_name: (*name).to_owned(),
+            request_id: *req,
+            response_id: *resp,
+            addressing_mode: CanAddressingMode::Standard,
+        })
+        .collect()
 }
 
 pub(crate) fn host() -> String {
@@ -293,143 +505,72 @@ pub(crate) fn host() -> String {
     }
 }
 
-fn start_cda(config: Configuration) {
-    // Some unwraps are used here, this is on purpose
-    // as we want the tests to fail hard if CDA fails to start.
-    TOKIO_RUNTIME.spawn(async move {
-        let webserver_config = cda_sovd::WebServerConfig {
-            host: config.server.address.clone(),
-            port: config.server.port,
-        };
-
-        let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
-        *CDA_SHUTDOWN.lock().await = Some(shutdown_tx);
-
-        let clonable_shutdown_signal = async move {
-            shutdown_rx.recv().await.ok();
-        }
-        .shared();
-
-        // Launch the webserver with deferred initialization
-        let (dynamic_router, webserver_join_handle) =
-            match cda_sovd::launch_webserver(webserver_config, clonable_shutdown_signal.clone())
-                .await
-            {
-                Ok((router, jh)) => (router, jh),
-                Err(e) => {
-                    tracing::error!(error = ?e, "Failed to launch webserver");
-                    std::process::exit(1);
-                }
-            };
-
-        let health = cda_health::add_health_routes(&dynamic_router, cda_version().to_owned()).await;
-        let main_health_provider = {
-            let provider = Arc::new(cda_health::StatusHealthProvider::new(
-                cda_health::Status::Starting,
-            ));
-            health
-                .register_provider(
-                    MAIN_HEALTH_COMPONENT_KEY,
-                    Arc::clone(&provider) as Arc<dyn cda_health::HealthProvider>,
-                )
-                .await
-                .map_err(|e| {
-                    tracing::error!(error = %e, "Failed to register main health provider");
-                    std::process::exit(1);
-                })
-                .ok();
-            provider
-        };
-        let health = Some(health);
-
-        let vehicle_data = opensovd_cda_lib::load_vehicle_data::<_, DefaultSecurityPluginData>(
-            &config,
-            clonable_shutdown_signal.clone(),
-            health.as_ref(),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!({error=?e});
-            std::process::exit(1);
-        })
-        .unwrap();
-
-        // Register version endpoints
-        if let serde_json::Value::Object(version_info) = serde_json::json!({
-            "id": "version",
-            "data": {
-                "name": "Eclipse OpenSOVD Classic Diagnostic Adapter",
-                "api": {
-                    "version": "1.1"
+pub(crate) fn start_cda(config: Configuration) {
+    start_cda_with_setup(
+        config,
+        opensovd_cda_lib::Setup::<DefaultSecurityPluginData, DefaultSecurityPlugin>::new()
+            .with_existing_tracing()
+            .with_update_plugin(opensovd_cda_lib::update::update_plugin_fn(
+                |infra: opensovd_cda_lib::setup::CdaRuntime<DefaultSecurityPluginData>| async {
+                    opensovd_cda_lib::update::create_default_update_plugin::<
+                        DefaultSecurityPluginData,
+                        DefaultSecurityPlugin,
+                    >(infra)
+                    .await
                 },
-                "implementation": {
-                    "version": cda_version(),
-                }
-            }
-        }) {
-            cda_sovd::add_static_data_endpoint(
-                &dynamic_router,
-                version_info.clone(),
-                "/vehicle/v15/apps/sovd2uds/data/version",
-            )
-            .await;
-            cda_sovd::add_static_data_endpoint(
-                &dynamic_router,
-                version_info,
-                "/vehicle/v15/data/version",
-            )
-            .await;
-        }
+            )),
+    );
+}
 
-        cda_sovd::add_vehicle_routes::<_, _, DefaultSecurityPlugin>(
-            &dynamic_router,
-            cda_sovd::VehicleConfig {
-                flash_files_path: config.flash_files_path.clone(),
-                functional_group_config: config.functional_description,
-                components_config: config.components,
-            },
-            cda_sovd::VehicleResources {
-                ecu_uds: vehicle_data.uds_manager,
-                file_manager: vehicle_data.file_managers,
-                locks: vehicle_data.locks,
-                update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            },
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!({error=?e});
-            std::process::exit(1);
-        })
-        .unwrap();
+/// Start a CDA instance on the shared `TOKIO_RUNTIME` with a custom [`Setup`].
+///
+/// The shutdown sender is stored in `CDA_SHUTDOWN` so that [`stop_cda`] and
+/// [`restart_cda`] work regardless of which setup was used.
+pub(crate) fn start_cda_with_setup<UPB>(
+    config: Configuration,
+    setup: opensovd_cda_lib::Setup<DefaultSecurityPluginData, DefaultSecurityPlugin, UPB>,
+) where
+    UPB: UpdatePluginBuilder<DefaultSecurityPluginData> + Send + 'static,
+{
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
+    let setup = setup.with_shutdown_signal(cda_interfaces::shutdown_signal(async move {
+        shutdown_rx.recv().await.ok();
+    }));
 
-        tracing::info!("CDA fully initialized and ready to serve requests");
-        main_health_provider
-            .update_status(cda_health::Status::Up)
-            .await;
-
-        // Wait for shutdown signal
-        clonable_shutdown_signal.await;
-        tracing::info!("Shutting down...");
-        webserver_join_handle
+    let handle = TOKIO_RUNTIME.spawn(async move {
+        *CDA_SHUTDOWN.lock().await = Some(shutdown_tx);
+        opensovd_cda_lib::run_with_ext_from_config(config, setup)
             .await
-            .map_err(|e| {
-                tracing::error!({error=?e}, "Webserver task join error");
-                std::process::exit(1);
-            })
-            .ok();
+            .expect("CDA exited with error");
     });
+    *CDA_TASK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
 }
 
-async fn stop_cda() -> Result<(), TestingError> {
-    if let Some(sender) = CDA_SHUTDOWN.lock().await.as_ref() {
-        sender.send(()).ok();
-        Ok(())
-    } else {
-        Err(TestingError::ProcessFailed("CDA not running".to_owned()))
+pub(crate) async fn stop_cda() -> Result<(), TestingError> {
+    let Some(sender) = CDA_SHUTDOWN.lock().await.take() else {
+        return Err(TestingError::ProcessFailed("CDA not running".to_owned()));
+    };
+    sender.send(()).ok();
+    // Await the task, not just the shutdown signal. A following `start_cda`
+    // binds the same port and would race the still-open listener.
+    let task = CDA_TASK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(task) = task {
+        task.await.ok();
     }
+    Ok(())
 }
 
+/// Writes the compose `.env`, builds the images and brings the stack up.
+///
+/// With [`CdaStartup::Deferred`] only the ecu-sim is started. `--no-deps` keeps
+/// compose from pulling in the `cda` service the test starts itself.
 fn start_docker_compose(
+    cda: CdaStartup,
     cda_port: u16,
     gateway_port: u16,
     sim_control_port: u16,
@@ -461,6 +602,7 @@ fn start_docker_compose(
         .arg("--build-arg")
         .arg("SOURCE_GIT_SHA=unknown")
         .env("DOCKER_BUILDKIT", "1")
+        .env("COMPOSE_PROFILES", compose_profiles())
         .current_dir(&test_container_dir);
 
     let status = cmd
@@ -468,10 +610,18 @@ fn start_docker_compose(
         .map_err(|e| TestingError::ProcessFailed(format!("Failed to build docker compose: {e}")))?;
     check_command_success(status, "docker compose build failed")?;
 
-    docker_compose_up(None)
+    match cda {
+        CdaStartup::Immediate => docker_compose_up(None, false),
+        CdaStartup::Deferred => docker_compose_up(Some("ecu-sim".to_owned()), true),
+    }
 }
 
-fn docker_compose_up(container: Option<String>) -> Result<(), TestingError> {
+/// `docker compose up -d` for a single service (or all services when
+/// `container` is `None`).
+///
+/// `no_deps` maps to `--no-deps`: without it compose (re)starts the service's
+/// `depends_on` targets, resurrecting containers a test stopped on purpose.
+fn docker_compose_up(container: Option<String>, no_deps: bool) -> Result<(), TestingError> {
     let test_container_dir = test_container_dir()?;
     let mut cmd = std::process::Command::new("docker");
     cmd.arg("compose");
@@ -482,7 +632,14 @@ fn docker_compose_up(container: Option<String>) -> Result<(), TestingError> {
         append_coverage_compose_files(&mut cmd);
     }
 
-    cmd.arg("up").arg("-d").env("DOCKER_BUILDKIT", "1");
+    cmd.arg("up")
+        .arg("-d")
+        .env("DOCKER_BUILDKIT", "1")
+        .env("COMPOSE_PROFILES", compose_profiles());
+
+    if no_deps {
+        cmd.arg("--no-deps");
+    }
 
     if let Some(container_name) = container {
         cmd.arg(container_name);
@@ -508,6 +665,7 @@ fn docker_compose_down(container: Option<String>) -> Result<(), TestingError> {
     cmd.arg("down")
         .arg("--remove-orphans")
         .env("DOCKER_BUILDKIT", "1")
+        .env("COMPOSE_PROFILES", compose_profiles())
         .current_dir(&test_container_dir);
 
     if let Some(container_name) = container {
@@ -536,10 +694,15 @@ fn dump_docker_logs() {
 
     tracing::error!("========== Docker Compose Logs ==========");
 
+    // Set the active compose profiles so profile-gated services (e.g. the
+    // `socketcand` daemon under the `can` profile) are included in the dump -
+    // without this only the default services (cda, ecu-sim) are known here, and
+    // the socketcand side stays invisible when debugging CAN failures.
     let output = std::process::Command::new("docker")
         .arg("compose")
         .arg("logs")
         .arg("--no-color")
+        .env("COMPOSE_PROFILES", compose_profiles())
         .current_dir(&test_container_dir)
         .output();
 
@@ -614,7 +777,14 @@ fn write_config_toml(
     config.functional_description.description_database = "functional_groups".into();
 
     "0.0.0.0".clone_into(&mut config.server.address);
-    "/app/odx".clone_into(&mut config.database.path);
+    "/app/odx".clone_into(&mut config.database.seed_dir);
+
+    // In docker the socketcand daemon runs in its own service, reachable by
+    // service name over the bridge network (not the host loopback used locally).
+    if let Some(can) = config.can.as_mut() {
+        can.interface =
+            format!("socketcand:{CAN_DOCKER_SOCKETCAND_HOST}:{SOCKETCAND_PORT}:{CAN_BUS_NAME}");
+    }
 
     let config_path = test_container_dir.join("cda-test-config.toml");
     let toml_content = toml::to_string_pretty(&config).map_err(|e| {
@@ -661,6 +831,45 @@ fn write_config_toml(
     Ok(())
 }
 
+/// Build the docker-compose `.env` file contents. Pure (no I/O, no env
+/// lookups) so the exact bytes fed to compose can be unit-tested.
+fn docker_env_content(
+    can: bool,
+    cda_port: u16,
+    gateway_port: u16,
+    sim_control_port: u16,
+) -> String {
+    let mut env_content = format!(
+        "# Auto-generated environment file for integration tests\n# ECU Simulator Control \
+         Port\nSIM_CONTROL_PORT={sim_control_port}\n# ECU Simulator Gateway \
+         Port\nSIM_GATEWAY_PORT={gateway_port}\n# CDA Service Port\nCDA_PORT={cda_port}\n",
+    );
+
+    if can {
+        use std::fmt::Write as _;
+
+        // Point the ecu-sim at the socketcand service over the compose bridge,
+        // and compile the CDA image with the socketcand transport.
+        //
+        // NOTE: emit one short `writeln!` per line rather than a single long
+        // literal: rustfmt's `format_strings` rewraps long literals at the
+        // column limit and can mangle an `\n` escape at the wrap point into a
+        // stray backslash in the emitted file. Short lines are never
+        // rewrapped, so this stays correct across `cargo fmt`.
+        let _ = writeln!(env_content, "# socketcand daemon the ecu-sim connects to");
+        let _ = writeln!(
+            env_content,
+            "SIM_CAN_SOCKETCAND_HOST={CAN_DOCKER_SOCKETCAND_HOST}"
+        );
+        let _ = writeln!(env_content, "SIM_CAN_SOCKETCAND_PORT={SOCKETCAND_PORT}");
+        let _ = writeln!(env_content, "SIM_CAN_SOCKETCAND_BUS={CAN_BUS_NAME}");
+        let _ = writeln!(env_content, "# Extra cargo features for the CDA image");
+        let _ = writeln!(env_content, "CDA_FEATURES=can-socketcand");
+    }
+
+    env_content
+}
+
 fn write_docker_env_file(
     test_container_dir: &std::path::Path,
     cda_port: u16,
@@ -668,11 +877,7 @@ fn write_docker_env_file(
     sim_control_port: u16,
 ) -> Result<(), TestingError> {
     let env_file_path = test_container_dir.join(".env");
-    let env_content = format!(
-        "# Auto-generated environment file for integration tests\n# ECU Simulator Control \
-         Port\nSIM_CONTROL_PORT={sim_control_port}\n# ECU Simulator Gateway \
-         Port\nSIM_GATEWAY_PORT={gateway_port}\n# CDA Service Port\nCDA_PORT={cda_port}\n",
-    );
+    let env_content = docker_env_content(can_infra(), cda_port, gateway_port, sim_control_port);
 
     std::fs::write(&env_file_path, env_content)
         .map_err(|e| TestingError::ProcessFailed(format!("Failed to write .env file: {e}")))?;
@@ -681,9 +886,9 @@ fn write_docker_env_file(
     Ok(())
 }
 
-pub(crate) async fn start_ecu_sim(sim: &EcuSim) -> Result<(), TestingError> {
+pub(crate) async fn start_ecu_sim_doip(sim: &EcuSim) -> Result<(), TestingError> {
     if use_docker() {
-        docker_compose_up(Some("ecu-sim".to_owned()))?;
+        docker_compose_up(Some("ecu-sim".to_owned()), false)?;
     } else {
         let ecu_sim_dir = ecu_sim_dir()?;
         if !ecu_sim_dir.exists() {
@@ -705,6 +910,71 @@ pub(crate) async fn start_ecu_sim(sim: &EcuSim) -> Result<(), TestingError> {
     wait_for_ecu_sim_ready(&sim.host, sim.control_port).await
 }
 
+/// Starts the ecu-sim the same way the current test mode originally started
+/// it: with the CAN stack when CAN infrastructure is in use (pure-CAN and
+/// mixed runs), plain `DoIP` otherwise. Tests that restart the sim must use
+/// this so the sim comes back on the same transports.
+///
+/// In docker mode the compose service carries its CAN configuration in the
+/// generated `.env`, so restarting the container restores the right
+/// transports for every mode; `start_ecu_sim_can` only implements the local
+/// (non-docker) jar path.
+pub(crate) async fn start_ecu_sim_for_mode(sim: &EcuSim) -> Result<(), TestingError> {
+    if !use_docker() && can_infra() {
+        start_ecu_sim_can(sim).await
+    } else {
+        start_ecu_sim_doip(sim).await
+    }
+}
+
+pub(crate) async fn start_ecu_sim_can(sim: &EcuSim) -> Result<(), TestingError> {
+    // Local (non-docker) CAN path: spawn the same `ecu-sim-all.jar` as the DoIP
+    // path but with `SIM_CAN_SOCKETCAND_*` set so the JVM connects to a
+    // socketcand daemon. The daemon and its (v)can bus must already be running
+    // locally (e.g. `socketcand -i vcan0` on 127.0.0.1:29536). In docker mode
+    // the daemon runs in its own compose service (see `write_docker_env_file` /
+    // docker-compose.yml), not here.
+    let ecu_sim_dir = ecu_sim_dir()?;
+    if !ecu_sim_dir.exists() {
+        return Err(TestingError::PathNotFound(format!(
+            "ecu-sim run script not found at {}",
+            ecu_sim_dir.display()
+        )));
+    }
+    let jar = ecu_sim_dir.join("build/libs/ecu-sim-all.jar");
+    if !jar.exists() {
+        return Err(TestingError::PathNotFound(format!(
+            "ecu-sim-all.jar not found at {}. Run `./gradlew shadowJar` in the ecu-sim directory \
+             first.",
+            jar.display()
+        )));
+    }
+
+    // Use `java` from PATH by default; CDA_INTEGRATION_TEST_JAVA_BIN
+    // overrides it for systems where the required JDK (>= 21) is not the
+    // default one.
+    let java_bin =
+        std::env::var("CDA_INTEGRATION_TEST_JAVA_BIN").unwrap_or_else(|_| "java".to_owned());
+    let child = std::process::Command::new(&java_bin)
+        .arg("-jar")
+        .arg(&jar)
+        .env("SIM_DOIP_PORT", "13400")
+        .env("SIM_REST_PORT", sim.control_port.to_string())
+        .env("SIM_NETWORK_INTERFACE", "127.0.0.1")
+        .env("SIM_CAN_SOCKETCAND_HOST", "127.0.0.1")
+        .env("SIM_CAN_SOCKETCAND_PORT", SOCKETCAND_PORT.to_string())
+        .env("SIM_CAN_SOCKETCAND_BUS", CAN_BUS_NAME)
+        .spawn()
+        .map_err(|e| {
+            TestingError::ProcessFailed(format!(
+                "Failed to start ecu-sim CAN sim with {java_bin}: {e}"
+            ))
+        })?;
+
+    *ECU_SIM_PROCESS.lock().await = Some(child);
+    wait_for_ecu_sim_ready(&sim.host, sim.control_port).await
+}
+
 pub(crate) async fn stop_ecu_sim() -> Result<(), TestingError> {
     if use_docker() {
         docker_compose_down(Some("ecu-sim".to_owned()))
@@ -723,27 +993,145 @@ fn stop_ecu_sim_sync() -> Result<(), TestingError> {
     TOKIO_RUNTIME.block_on(async { stop_ecu_sim().await })
 }
 
-fn docker_compose_restart(container: Option<String>) -> Result<(), TestingError> {
+/// (Re)starts the shared CDA with `config`. A CDA that is not currently running
+/// is not an error, so this doubles as a plain start.
+pub(crate) async fn restart_cda(config: &Configuration) -> Result<(), TestingError> {
+    mark_cda_stopped().await;
+    if use_docker() {
+        write_config_toml(&test_container_dir()?, config.clone())?;
+        // Restart atomically so the container restart policy cannot race a
+        // separate stop/up sequence and leave CDA unavailable.
+        // `--no-deps` prevents restarting an ECU sim a test stopped on purpose.
+        // The restarted process reloads the bind-mounted configuration.
+        docker_compose_restart("cda")?;
+    } else {
+        // `stop_cda` only fails when nothing is running.
+        stop_cda().await.ok();
+        start_cda(config.clone());
+    }
+    wait_for_cda_online(&config.server).await?;
+    mark_cda_started(config).await;
+    Ok(())
+}
+
+/// Restarts the shared CDA after applying a test-specific configuration change.
+pub(crate) async fn restart_cda_with_config<F>(
+    config: &Configuration,
+    configure: F,
+) -> Result<(), TestingError>
+where
+    F: FnOnce(&mut Configuration),
+{
+    let mut config = config.clone();
+    configure(&mut config);
+    restart_cda(&config).await
+}
+
+/// Restarts the shared CDA with `temporary_config`, runs `body`, then tears it
+/// down and restores `config` even if `body` panics.
+pub(crate) async fn with_temporary_cda<F, G, Fut, FutPre>(
+    config: &Configuration,
+    temporary_config: Configuration,
+    pre_start: G,
+    body: F,
+) where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ()>,
+    G: FnOnce() -> FutPre,
+    FutPre: Future<Output = ()>,
+{
+    pre_start().await;
+
+    restart_cda(&temporary_config)
+        .await
+        .expect("Failed to start CDA");
+
+    let outcome = AssertUnwindSafe(body()).catch_unwind().await;
+
+    restart_cda(config)
+        .await
+        .expect("Failed to restore normal CDA");
+
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// Restores the shared CDA if the previous test left none running, or left one
+/// running with different [`CommunicationSettings`]. Restarting is expensive, so
+/// it only happens when the running instance cannot serve this test.
+async fn ensure_cda_running(config: &Configuration) -> Result<(), TestingError> {
+    let running_with = RUNNING_CDA_COMMUNICATION.lock().await.clone();
+    if running_with.as_ref() == Some(&config.communication) && cda_is_online(&config.server).await {
+        return Ok(());
+    }
+
+    tracing::info!("Shared CDA is missing or misconfigured, restarting it for this test");
+    restart_cda(config).await
+}
+
+/// Stops the shared CDA, leaving the ECU simulator up, so that a test starting
+/// its own CDA sees a quiet vehicle network.
+async fn stop_shared_cda() {
+    mark_cda_stopped().await;
+    if use_docker() {
+        // A no-op (and a success) when the container does not exist.
+        let _ = docker_compose_stop("cda");
+    } else {
+        // Fails only when nothing is running, which is the desired state anyway.
+        stop_cda().await.ok();
+    }
+}
+
+/// One-shot readiness probe: whether a CDA is serving right now, as opposed to
+/// [`wait_for_cda_online`]'s polling.
+async fn cda_is_online(cfg: &ServerConfig) -> bool {
+    let url = format!("http://{}:{}/health/ready", cfg.address, cfg.port);
+    reqwest::Client::new()
+        .get(url)
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await
+        .is_ok_and(|response| response.status() == StatusCode::NO_CONTENT)
+}
+
+async fn mark_cda_started(config: &Configuration) {
+    *RUNNING_CDA_COMMUNICATION.lock().await = Some(config.communication.clone());
+}
+
+async fn mark_cda_stopped() {
+    *RUNNING_CDA_COMMUNICATION.lock().await = None;
+}
+
+fn docker_compose_restart(container: &str) -> Result<(), TestingError> {
     let test_container_dir = test_container_dir()?;
     let mut cmd = std::process::Command::new("docker");
-    cmd.arg("compose").arg("restart");
-    if let Some(container_name) = container {
-        cmd.arg(container_name);
+    cmd.arg("compose");
+    if coverage_mode() {
+        append_coverage_compose_files(&mut cmd);
     }
-    let status = cmd.current_dir(&test_container_dir).status().map_err(|e| {
-        TestingError::ProcessFailed(format!("Failed to restart docker compose: {e}"))
-    })?;
+    let status = cmd
+        .arg("restart")
+        .arg("--no-deps")
+        .arg(container)
+        .current_dir(&test_container_dir)
+        .status()
+        .map_err(|e| {
+            TestingError::ProcessFailed(format!("Failed to restart docker compose: {e}"))
+        })?;
     check_command_success(status, "docker compose restart failed")
 }
 
-pub(crate) async fn restart_cda(config: &Configuration) -> Result<(), TestingError> {
-    if use_docker() {
-        docker_compose_restart(Some("cda".to_owned()))?;
-    } else {
-        stop_cda().await?;
-        start_cda(config.clone());
-    }
-    wait_for_cda_online(&config.server).await
+fn docker_compose_stop(container: &str) -> Result<(), TestingError> {
+    let test_container_dir = test_container_dir()?;
+    let status = std::process::Command::new("docker")
+        .arg("compose")
+        .arg("stop")
+        .arg(container)
+        .current_dir(&test_container_dir)
+        .status()
+        .map_err(|e| TestingError::ProcessFailed(format!("Failed to stop docker compose: {e}")))?;
+    check_command_success(status, "docker compose stop failed")
 }
 
 fn use_docker() -> bool {
@@ -752,6 +1140,51 @@ fn use_docker() -> bool {
 
 fn coverage_mode() -> bool {
     std::env::var(CDA_INTEGRATION_TEST_COVERAGE).is_ok_and(|s| s == "true")
+}
+
+pub(crate) fn use_can() -> bool {
+    std::env::var(CDA_INTEGRATION_TEST_USE_CAN).is_ok_and(|s| s == "true")
+}
+
+fn use_mixed() -> bool {
+    std::env::var(CDA_INTEGRATION_TEST_USE_MIXED).is_ok_and(|s| s == "true")
+}
+
+/// Whether the CAN infrastructure (socketcand + sim CAN stack) is needed:
+/// true in pure-CAN and in mixed mode.
+pub(crate) fn can_infra() -> bool {
+    use_can() || use_mixed()
+}
+
+/// Compose profiles to activate: the `can` profile (which includes the
+/// socketcand service) whenever CAN infrastructure is needed (pure-CAN and
+/// mixed runs), so `DoIP`-only runs need no vcan module.
+fn compose_profiles() -> &'static str {
+    if can_infra() { "can" } else { "" }
+}
+
+/// Guard, returning `true` (and logging a skip notice), for tests that cannot
+/// run in the pure-CAN suite: either they exercise `DoIP`-only mechanisms
+/// (`VAM`, sim restart) or they depend on session/security timing not yet
+/// reliable over the CAN transport. Each gated call site documents its
+/// specific reason. In MIXED mode these tests DO run: the ECUs they target
+/// (FLXC1000/FLXCNG1000) are served over `DoIP` there.
+pub(crate) fn skip_for_can(test_name: &str, reason: &str) -> bool {
+    if use_can() {
+        eprintln!("[can] skipping {test_name}: {reason}");
+        return true;
+    }
+    false
+}
+
+/// Guard for tests that need the CAN infrastructure (pure-CAN or mixed
+/// mode); mirrors [`skip_for_can`].
+pub(crate) fn skip_for_doip(test_name: &str, reason: &str) -> bool {
+    if !can_infra() {
+        eprintln!("[doip] skipping {test_name}: {reason}");
+        return true;
+    }
+    false
 }
 
 async fn wait_for_http_ready(
@@ -1083,5 +1516,66 @@ fn check_command_success(
         Ok(())
     } else {
         Err(TestingError::ProcessFailed(error_msg.to_owned()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn docker_env_can_socketcand_lines_are_well_formed() {
+        let content = docker_env_content(true, 20002, 13400, 8181);
+
+        // Guards against string-literal mangling (e.g. a stray backslash in a
+        // value), which would silently keep the ecu-sim off the CAN bus.
+        assert!(
+            content.contains("SIM_CAN_SOCKETCAND_HOST=socketcand\n"),
+            "host line malformed:\n{content}"
+        );
+        assert!(
+            !content.contains("socketcand\\"),
+            "host value has a stray backslash:\n{content}"
+        );
+        assert!(
+            content.contains(&format!("SIM_CAN_SOCKETCAND_PORT={SOCKETCAND_PORT}\n")),
+            "port line malformed:\n{content}"
+        );
+        assert!(
+            content.contains(&format!("SIM_CAN_SOCKETCAND_BUS={CAN_BUS_NAME}\n")),
+            "bus line malformed:\n{content}"
+        );
+        assert!(
+            content.contains("CDA_FEATURES=can-socketcand\n"),
+            "features line malformed:\n{content}"
+        );
+        // Every line is a comment or a well-formed KEY=VALUE line.
+        for line in content
+            .lines()
+            .filter(|l| !l.is_empty() && !l.trim_start().starts_with('#'))
+        {
+            let (key, _) = line
+                .split_once('=')
+                .unwrap_or_else(|| panic!("not KEY=VALUE: {line:?}"));
+            assert_eq!(key, key.trim(), "key has stray whitespace: {line:?}");
+            assert!(
+                key.chars()
+                    .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()),
+                "unexpected key {key:?} in line {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn docker_env_without_can_has_no_socketcand_vars() {
+        let content = docker_env_content(false, 20002, 13400, 8181);
+        assert!(
+            !content.contains("SOCKETCAND"),
+            "unexpected CAN vars:\n{content}"
+        );
+        assert!(
+            !content.contains("CDA_FEATURES"),
+            "unexpected CDA_FEATURES:\n{content}"
+        );
     }
 }

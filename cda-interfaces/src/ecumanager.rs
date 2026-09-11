@@ -11,10 +11,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{fmt::Display, future::Future};
-
 use async_trait::async_trait;
 use serde::Serialize;
+use strum_macros::Display;
 
 use crate::{
     DiagComm, DiagServiceError, DoipComParams, DynamicPlugin, EcuSchemas, HashMap,
@@ -133,21 +132,12 @@ pub struct MuxCaseInfo {
 /// Derived from [`Connectivity`] + [`VariantState`] via [`EcuStatus::to_ecu_state()`].
 ///
 /// ECU connectivity state, eg. reachable via underlying transport
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Display, Serialize, PartialEq, Eq)]
 pub enum Connectivity {
     /// ECU responded to the last communication attempt.
     Online,
     /// ECU is currently unreachable (never connected, or lost connection).
     Offline,
-}
-
-impl Display for Connectivity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Online => f.write_str("Online"),
-            Self::Offline => f.write_str("Offline"),
-        }
-    }
 }
 
 /// ECU variant detection result.
@@ -268,15 +258,21 @@ pub struct EcuRuntimeState {
     pub ecu_state: std::sync::Arc<std::sync::RwLock<EcuState>>,
     /// Active service states keyed by SID (0x10 = session, 0x27 = security, etc.).
     pub service_states: std::sync::Arc<std::sync::RwLock<HashMap<u8, String>>>,
+    /// Publishes every write to `ecu_state.variant_state`, so callers can await
+    /// variant detection's conclusion instead of polling. `Arc`-wrapped so that
+    /// cloning `EcuRuntimeState` shares one channel, like `ecu_state` itself.
+    variant_state_tx: std::sync::Arc<tokio::sync::watch::Sender<VariantState>>,
 }
 
 impl EcuRuntimeState {
     /// Create initial state for a newly constructed ECU (not yet variant-detected).
     #[must_use]
     pub fn new() -> Self {
+        let (variant_state_tx, _rx) = tokio::sync::watch::channel(VariantState::NotTested);
         Self {
             ecu_state: std::sync::Arc::new(std::sync::RwLock::new(EcuState::default())),
             service_states: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
+            variant_state_tx: std::sync::Arc::new(variant_state_tx),
         }
     }
 
@@ -284,6 +280,22 @@ impl EcuRuntimeState {
     #[must_use]
     pub fn status(&self) -> EcuState {
         std_ext::lock_read(&self.ecu_state).clone()
+    }
+
+    /// Subscribes to variant-state changes, seeded with the current value, so a
+    /// subscriber arriving after detection concluded observes it immediately.
+    #[must_use]
+    pub fn variant_state_rx(&self) -> tokio::sync::watch::Receiver<VariantState> {
+        self.variant_state_tx.subscribe()
+    }
+
+    /// Publishes a new variant-state value to subscribers.
+    ///
+    /// Always notifies, even when the value is unchanged, so a detection attempt
+    /// that settles into the same terminal state still wakes anything blocked on
+    /// `changed()`.
+    pub fn publish_variant_state(&self, state: VariantState) {
+        self.variant_state_tx.send_replace(state);
     }
 }
 
@@ -346,13 +358,40 @@ impl ServicePayload {
         self.is_negative_response_for_sid(sent_sid) || self.is_positive_response_for_sid(sent_sid)
     }
 
-    /// Returns `true` if the UDS subfunction byte (byte index 1) has bit 7 set,
-    /// indicating the `suppressPosRspMsgIndicationBit` (SPRMIB) is active.
-    /// When this bit is set, the ECU is not expected to send a positive response, so callers
-    /// should not treat the absence of a positive response as an error.
+    /// Returns `true` if this request's SID uses a subfunction byte (byte index 1) with
+    /// `suppressPosRspMsgIndicationBit` (SPRMIB) semantics per ISO 14229-1, and that bit
+    /// (bit 7) is set. When set, the ECU is not expected to send a positive response, so
+    /// callers should not treat the absence of a positive response as an error.
+    ///
+    /// Only a subset of services actually carry a subfunction byte with SPRMIB semantics
+    /// (`DiagnosticSessionControl`, `ECUReset`, `ReadDTCInformation`, `CommunicationControl`,
+    /// `SecurityAccess`, `Authentication`, `DynamicallyDefineDataIdentifier`, `RoutineControl`,
+    /// `ControlDTCSetting`, `ResponseOnEvent`, `LinkControl`, `TesterPresent`). Other services
+    /// either have no subfunction byte at all, or use byte index 1 for something else entirely -
+    /// most notably `ReadDataByIdentifier`/`WriteDataByIdentifier`, where byte index 1 is the
+    /// *high byte of the 2-byte data identifier* and can legitimately have bit 7 set (e.g. any
+    /// DID in the `0xF1xx`-`0xFFxx` range), which must never be misread as SPRMIB.
     #[must_use]
     pub fn is_suppress_positive_response(&self) -> bool {
-        self.data.get(1).is_some_and(|&b| b & 0x80 != 0)
+        let Some(&sid) = self.data.first() else {
+            return false;
+        };
+        let sprmib_capable = matches!(
+            sid,
+            service_ids::SESSION_CONTROL
+                | service_ids::ECU_RESET
+                | service_ids::READ_DTC_INFORMATION
+                | service_ids::COMMUNICATION_CONTROL
+                | service_ids::SECURITY_ACCESS
+                | service_ids::AUTHENTICATION
+                | service_ids::DYNAMICALLY_DEFINE_DATA_IDENTIFIER
+                | service_ids::ROUTINE_CONTROL
+                | service_ids::CONTROL_DTC_SETTING
+                | service_ids::RESPONSE_ON_EVENT
+                | service_ids::LINK_CONTROL
+                | service_ids::TESTER_PRESENT
+        );
+        sprmib_capable && self.data.get(1).is_some_and(|&b| b & 0x80 != 0)
     }
 
     /// Validates that a positive response echoes back the expected identifier bytes
@@ -450,6 +489,59 @@ pub trait EcuAddresses: Send + Sync + 'static {
     fn ecu_name(&self) -> String;
     #[must_use]
     fn logical_address_eq<T: EcuAddresses>(&self, other: &T) -> bool;
+
+    /// Stable key used to serialize requests that must not overlap on the same
+    /// transport target; see [`request_lock_key_for`] for the semantics.
+    ///
+    /// This default assumes the gateway/logical address pair is genuinely
+    /// resolved. Implementations that can carry unresolved fallback addresses
+    /// (all ECUs of a CAN-only database share the com-param default) must
+    /// override it with [`request_lock_key_for`], their resolved-ness flag
+    /// and their CAN IDs, otherwise unrelated ECUs end up serialized behind
+    /// one semaphore.
+    #[must_use]
+    fn request_lock_key(&self) -> String {
+        request_lock_key_for(
+            true,
+            self.logical_gateway_address(),
+            self.logical_address(),
+            None,
+            "",
+        )
+    }
+}
+
+/// Builds the key under which requests to the same transport target are
+/// serialized (the per-ECU request semaphore).
+///
+/// A transport target is shared by every candidate description of the same
+/// physical node (a duplicate group), and concurrent requests to one node
+/// must never overlap - on CAN they would even corrupt each other's
+/// segmented transfers via doubled flow control. In priority order:
+///
+/// 1. Resolved `DoIP` gateway/logical address pair - the established key;
+///    duplicate-group ECUs share their pair on purpose.
+/// 2. The CAN arbitration ID pair from the MDD com-params - the target
+///    identity for ECUs without `DoIP` addressing (CAN-only databases);
+///    candidate models sharing one pair share the key.
+/// 3. The unique ECU name - when nothing identifies the target, the shared
+///    com-param fallback addresses must NOT collapse unrelated ECUs onto one
+///    semaphore.
+#[must_use]
+pub fn request_lock_key_for(
+    addresses_resolved: bool,
+    logical_gateway_address: u16,
+    logical_address: u16,
+    can_ids: Option<crate::CanIds>,
+    ecu_name: &str,
+) -> String {
+    if addresses_resolved {
+        format!("logical:0x{logical_gateway_address:04X}@0x{logical_address:04X}")
+    } else if let Some(ids) = can_ids {
+        format!("can:{:#X}@{:#X}", ids.request.raw(), ids.response.raw())
+    } else {
+        format!("ecu:{}", ecu_name.to_lowercase())
+    }
 }
 
 /// Encodes UDS request payloads from structured data.
@@ -748,6 +840,7 @@ pub trait Dtc: Send + Sync + 'static {
 }
 
 /// Provides variant detection and ECU variant identity.
+#[async_trait]
 pub trait VariantDetection: Send + Sync + 'static {
     /// Returns the current ECU status (connectivity + variant state).
     #[must_use]
@@ -756,10 +849,10 @@ pub trait VariantDetection: Send + Sync + 'static {
     /// Runs variant detection against the provided service responses.
     /// # Errors
     /// Returns `DiagServiceError` if no matching variant is found and fallback is disabled.
-    fn detect_variant<T: DiagServiceResponse + Sized>(
+    async fn detect_variant<T: DiagServiceResponse + Sized>(
         &mut self,
         service_responses: HashMap<String, T>,
-    ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
+    ) -> Result<(), DiagServiceError>;
 
     /// Returns the map of service requests used for variant detection.
     #[must_use]
@@ -767,11 +860,11 @@ pub trait VariantDetection: Send + Sync + 'static {
 
     /// Mark this ECU as duplicate. Sets the variant state to [`VariantState::Duplicate`] and
     /// unloads the database. Database will be reloaded before next variant detection.
-    fn mark_as_duplicate(&mut self);
+    async fn mark_as_duplicate(&mut self);
 
     /// Mark this ECU as having no variant detected. Sets the variant state to
     /// [`VariantState::NotDetected`] and unloads the database.
-    fn mark_as_no_variant_detected(&mut self);
+    async fn mark_as_no_variant_detected(&mut self);
 }
 
 /// Callback interface for connectivity changes for ECUs behind a `DoIP` gateway.
@@ -1101,5 +1194,207 @@ mod tests {
         // Response: positive with wrong DID
         let response = make_payload(vec![0x6E, 0xF2, 0x00]);
         assert!(!response.has_matching_echo_bytes(&request));
+    }
+
+    // is_suppress_positive_response
+
+    #[test]
+    fn rdbi_with_did_high_byte_f1_is_not_suppress_positive_response() {
+        // Regression test: ReadDataByIdentifier's byte index 1 is the high byte of the
+        // 2-byte DID, not a subfunction byte. DID 0xF100 ("Identification") has bit 7 set
+        // in its high byte and must NOT be misread as suppressPosRspMsgIndicationBit.
+        let request = make_payload(vec![service_ids::READ_DATA_BY_IDENTIFIER, 0xF1, 0x00]);
+        assert!(!request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn wdbi_with_did_high_byte_set_is_not_suppress_positive_response() {
+        let request = make_payload(vec![
+            service_ids::WRITE_DATA_BY_IDENTIFIER,
+            0xF1,
+            0x90,
+            0xAA,
+        ]);
+        assert!(!request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn session_control_with_sprmib_bit_set_is_suppress_positive_response() {
+        // DiagnosticSessionControl subfunction 0x03 with SPRMIB (bit 7) set.
+        let request = make_payload(vec![service_ids::SESSION_CONTROL, 0x83]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn session_control_without_sprmib_bit_is_not_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::SESSION_CONTROL, 0x03]);
+        assert!(!request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn ecu_reset_with_sprmib_bit_set_is_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::ECU_RESET, 0x81]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn communication_control_with_sprmib_bit_set_is_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::COMMUNICATION_CONTROL, 0x83, 0x01]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn tester_present_with_sprmib_bit_set_is_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::TESTER_PRESENT, 0x80]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn control_dtc_setting_with_sprmib_bit_set_is_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::CONTROL_DTC_SETTING, 0x81]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn link_control_with_sprmib_bit_set_is_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::LINK_CONTROL, 0x83]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn routine_control_with_high_bit_set_is_suppress_positive_response() {
+        // RoutineControl (0x31) does carry SPRMIB semantics per ISO 14229-1: bits 6-0 of
+        // the subfunction byte are the routineControlType, and bit 7 is SPRMIB.
+        let request = make_payload(vec![service_ids::ROUTINE_CONTROL, 0x81, 0xF1, 0x90]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn routine_control_without_high_bit_is_not_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::ROUTINE_CONTROL, 0x01, 0xF1, 0x90]);
+        assert!(!request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn read_dtc_information_with_sprmib_bit_set_is_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::READ_DTC_INFORMATION, 0x82]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn security_access_with_sprmib_bit_set_is_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::SECURITY_ACCESS, 0x81]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn dynamically_define_data_identifier_with_sprmib_bit_set_is_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::DYNAMICALLY_DEFINE_DATA_IDENTIFIER, 0x81]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn response_on_event_with_sprmib_bit_set_is_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::RESPONSE_ON_EVENT, 0x80]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn empty_payload_is_not_suppress_positive_response() {
+        let request = make_payload(vec![]);
+        assert!(!request.is_suppress_positive_response());
+    }
+
+    // request_lock_key_for: the per-ECU request-serialization key
+
+    #[test]
+    fn resolved_addresses_share_the_key_per_target() {
+        // Duplicate-group ECUs share their resolved address pair on purpose:
+        // both names map onto the same key, serializing requests to the
+        // shared physical node.
+        let a = request_lock_key_for(true, 0x1000, 0x0712, None, "R0_13_453");
+        let b = request_lock_key_for(true, 0x1000, 0x0712, None, "R_MID453");
+        assert_eq!(a, b);
+        assert_eq!(a, "logical:0x1000@0x0712");
+        // Distinct resolved addresses keep distinct keys.
+        assert_ne!(a, request_lock_key_for(true, 0x1000, 0x0713, None, "OTHER"));
+        // Resolved DoIP addressing outranks CAN IDs: the established key
+        // stays stable when an MDD carries both.
+        assert_eq!(
+            request_lock_key_for(
+                true,
+                0x1000,
+                0x0712,
+                Some(crate::CanIds::try_from_raw(0x712, 0x732).expect("valid pair")),
+                "R0_13_453"
+            ),
+            a
+        );
+    }
+
+    #[test]
+    fn can_ids_share_the_key_per_node() {
+        // CAN-only duplicate group: R0_13_453 and R_MID453 both derive
+        // 0x712/0x732 from their MDDs - one physical radio, two candidate
+        // descriptions. They must share the key so their requests serialize.
+        let a = request_lock_key_for(
+            false,
+            0,
+            0,
+            Some(crate::CanIds::try_from_raw(0x712, 0x732).expect("valid pair")),
+            "R0_13_453",
+        );
+        let b = request_lock_key_for(
+            false,
+            0,
+            0,
+            Some(crate::CanIds::try_from_raw(0x712, 0x732).expect("valid pair")),
+            "R_MID453",
+        );
+        assert_eq!(a, b);
+        assert_eq!(a, "can:0x712@0x732");
+        // Distinct nodes keep distinct keys.
+        assert_ne!(
+            a,
+            request_lock_key_for(
+                false,
+                0,
+                0,
+                Some(crate::CanIds::try_from_raw(0x79B, 0x7BB).expect("valid pair")),
+                "BMS453"
+            )
+        );
+    }
+
+    #[test]
+    fn unresolved_addresses_without_can_ids_key_by_name() {
+        // Neither resolved DoIP addressing nor CAN IDs: the shared com-param
+        // fallback addresses must not collapse unrelated ECUs onto one
+        // semaphore, so the unique name is the key.
+        let a = request_lock_key_for(false, 0, 0, None, "BMS453");
+        let b = request_lock_key_for(false, 0, 0, None, "BIC453");
+        assert_ne!(a, b);
+        assert_eq!(a, "ecu:bms453");
+        // Case-insensitive: the ECU map is lowercase-keyed, config casing may
+        // differ.
+        assert_eq!(
+            request_lock_key_for(false, 0, 0, None, "Bms453"),
+            request_lock_key_for(false, 0, 0, None, "BMS453")
+        );
+        // The three key namespaces can never collide.
+        assert_ne!(
+            request_lock_key_for(false, 0x1000, 0x0712, None, "ecu1"),
+            request_lock_key_for(true, 0x1000, 0x0712, None, "ecu1")
+        );
+        assert_ne!(
+            request_lock_key_for(
+                false,
+                0,
+                0,
+                Some(crate::CanIds::try_from_raw(0x1000, 0x0712).expect("valid pair")),
+                "ecu1"
+            ),
+            request_lock_key_for(true, 0x1000, 0x0712, None, "ecu1")
+        );
     }
 }

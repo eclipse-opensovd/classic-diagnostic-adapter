@@ -29,7 +29,8 @@ Diagnostic Database Update Plugin
     This behavior and additional security requirements must be modifiable through a trait provided to the plugin,
     to support more specific OEM requirements for security and individual environments during the update process.
 
-    The diagnostic database update plugin must provide the following bulk-data categories/endpoints:
+    The diagnostic database update plugin must provide the following bulk-data categories/endpoints for
+    file management, and a separate ``operations`` endpoint for applying/rolling back/cleaning up updates:
 
     .. list-table:: Bulk-Data Paths for Diagnostic Database Update Preparation
        :header-rows: 1
@@ -48,11 +49,11 @@ Diagnostic Database Update Plugin
 
        * - POST
          - ``/apps/sovd2uds/bulk-data/runtimefiles-nextupdate``
-         - Adds files to the next update of the diagnostic database, using multipart form data. The files provided through this endpoint are added to the pending update.
+         - Adds files to the next update of the diagnostic database. Two content types are supported: ``multipart/form-data`` (one or more files, filenames taken from each part's ``filename`` parameter), and ``application/octet-stream`` (a single file per request, whose filename must be provided via the ``Content-Disposition`` header, e.g. ``Content-Disposition: attachment; filename="foo.mdd"``). Returns 201 with all created IDs and a ``Location`` header for the first created file.
 
        * - DELETE
          - ``/apps/sovd2uds/bulk-data/runtimefiles-nextupdate``
-         - Removes all pending changes to the next update of the diagnostic database, to reset the state of the next update to the currently active database.
+         - Removes all pending changes to the next update of the diagnostic database, to reset the state of the next update to the currently active database. Returns 200 with ``deleted_ids`` and ``errors``.
 
        * - DELETE
          - ``/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/{id}``
@@ -64,18 +65,25 @@ Diagnostic Database Update Plugin
 
        * - DELETE
          - ``/apps/sovd2uds/bulk-data/runtimefiles-backup``
-         - Deletes the backup of the previously used diagnostic database, to free up storage space. This also means that rolling back to the previous state isn't possible anymore after deleting the backup.
+         - Deletes the backup of the previously used diagnostic database, to free up storage space. This also means that rolling back to the previous state isn't possible anymore after deleting the backup. Returns 200 with ``deleted_ids`` and ``errors``.
+
+    .. list-table:: Operations Paths for Applying/Rolling Back/Cleaning Up Diagnostic Database Updates
+       :header-rows: 1
+
+       * - Method
+         - Path
+         - Description
 
        * - GET
-         - ``/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions``
-         - Returns the list of current executions. Always contains at most one entry. Supports the ``include-schema`` query parameter.
+         - ``/apps/sovd2uds/operations/runtimefilesupdate/executions``
+         - Returns the list of current execution identifiers. Always contains at most one entry.
 
        * - GET
-         - ``/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions/{id}``
+         - ``/apps/sovd2uds/operations/runtimefilesupdate/executions/{id}``
          - Returns the status of a specific execution by its ID.
 
        * - POST
-         - ``/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions``
+         - ``/apps/sovd2uds/operations/runtimefilesupdate/executions``
          - Starts a new execution (Apply, Rollback, or Cleanup). Returns 202 Accepted with the execution ID.
 
     .. note:: The following query parameters must be supported for the GET endpoints:
@@ -83,43 +91,10 @@ Diagnostic Database Update Plugin
        - ``x-sovd2uds-include-hash`` (string, default: not present -- supported is only sha256) - to include file hashes of the files
        - ``x-sovd2uds-include-file-size`` (boolean, default: false) - to include file sizes of the files
        - ``x-sovd2uds-include-revision`` (boolean, default: false) - to include the revision inside the files
+       - ``created-after`` and ``created-before`` (string:date-time) are accepted for ISO 17978-3 compatibility but do not currently filter results.
 
-    **Configuration File Support**
-
-    In addition to MDD database files (``.mdd``), the plugin supports uploading CDA configuration
-    files (``.toml``) through the **same** ``runtimefiles-*`` bulk-data endpoints. The upload handler
-    routes each file to the appropriate internal storage collection based on its extension:
-
-    - ``.mdd`` files go to the ``DiagnosticDatabase*`` collections.
-    - ``.toml`` files go to the ``Configuration*`` collections.
-
-    Only one ``.toml`` configuration file per upload request is supported; uploading more than one
-    in a single ``POST`` to ``runtimefiles-nextupdate`` is rejected.
-
-    All GET endpoints (``runtimefiles-current``, ``runtimefiles-nextupdate``, ``runtimefiles-backup``)
-    return both MDD and configuration file entries in a single combined response.
-
-    The HTTP handler implementation for these endpoints resides in
-    ``cda-sovd/src/sovd/apps/sovd2uds/bulk_data/runtimefiles.rs``.
-
-    **Coupled MDD and Configuration Updates**
-
-    When an MDD file update requires a simultaneous configuration change (e.g., a new MDD file
-    introduces changes that require updated communication parameters in the CDA configuration), both
-    files must be uploaded to ``runtimefiles-nextupdate`` and applied via a **single** ``Apply``
-    execution. A single ``Apply`` execution will atomically apply all pending MDD and configuration
-    changes together in one transaction, provided both ``NextUpdate`` collections are populated.
-
-    .. warning::
-
-        There is **no guaranteed atomic coupling** when MDD and configuration updates are applied
-        in separate executions. Applying them independently means they take effect at different
-        points in time, which may leave the system in a partially updated state during the interval
-        between the two applies.
-
-        Users must account for this by uploading all related files (MDD and configuration) in the
-        same ``runtimefiles-nextupdate`` batch and triggering a single ``Apply``. This is an accepted
-        limitation of the unified endpoint design.
+    The runtime update plugin accepts MDD database files (``.mdd``). CDA configuration files cannot
+    be updated through the runtime-files endpoints.
 
     **Limitations to bulk-data operations**
 
@@ -144,6 +119,41 @@ Diagnostic Database Update Plugin
     The verification includes, but is not limited to, signature verification, hash verification, and version checks
     of the currently active database, as well as the new one.
 
+    **Providing a Custom Update Plugin**
+
+    Applications embedding CDA can replace the complete runtime update implementation at startup.
+    Implement ``cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin`` and pass a builder
+    to ``Setup::with_update_plugin``. The builder receives ``CdaRuntime``, which exposes the live
+    configuration, lock provider, storage directory, update guard, and reload-related
+    infrastructure required by an implementation. The UDS manager and `DoIP` gateway are exposed
+    only as replace-only capabilities (``gateway_replacer``, ``uds_manager_replacer``, typed
+    ``ReplaceComponent<_>``): an implementation can install a freshly built replacement, but has
+    no read access to the live component and therefore cannot drive UDS requests or enable
+    transport directly. See ``docs/04_adr/06_deferred_initialization.rst`` for the rationale.
+
+    The ``update_plugin_fn`` helper adapts an async closure without requiring a separate builder
+    type:
+
+    .. code:: rust
+
+       use opensovd_cda_lib::{Setup, run_with_ext_from_config};
+       use opensovd_cda_lib::update::update_plugin_fn;
+
+       let setup = Setup::<MySecurityPlugin, MySecurityLoader>::new()
+           .with_update_plugin(update_plugin_fn(|runtime| async move {
+               Ok(MyRuntimeUpdatePlugin::new(runtime))
+           }));
+
+       run_with_ext_from_config(config, setup).await?;
+
+    CDA mounts the returned plugin on the standard ``runtimefiles-*`` endpoints and wraps it
+    with read/write mutual exclusion. A replacement plugin therefore implements the complete
+    update lifecycle (listing, upload, deletion, apply, rollback, cleanup, and execution status).
+
+    Implementations that only need custom authorization, signature checks, version policy, or
+    reload behavior should normally retain ``DefaultRuntimeUpdatePlugin`` and provide custom
+    ``RuntimeUpdateSecurityPlugin`` and/or ``RuntimeReloaderPlugin`` implementations instead.
+
 
     **Application of the update**
 
@@ -152,15 +162,14 @@ Diagnostic Database Update Plugin
 
     To apply all the pending updates to the current diagnostic database, an additional endpoint is required:
 
-    ``POST /apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions`` with a JSON-payload containing the property
-    ``mode``, with the following possible values (all case-insensitive):
+    ``POST /apps/sovd2uds/operations/runtimefilesupdate/executions`` with a JSON-payload containing a
+    ``parameters`` object with the property ``mode``, following the standard convention of wrapping
+    operation-specific inputs in a ``parameters`` field, with the following possible values for ``mode``
+    (all case-insensitive):
 
     - ``Apply`` - to apply the pending updates.
     - ``Rollback`` - to roll back to the backup state of the diagnostic database (also clears pending nextupdate)
     - ``Cleanup`` - to reset all pending updates, as well as deleting the backup
-
-    The same endpoint must also be made available as ``/apps/sovd2uds/operations/diagnostic-database-update``
-    to allow triggering the actions through a standard compliant operation.
 
     **Execution Lifecycle**
 
@@ -168,15 +177,14 @@ Diagnostic Database Update Plugin
     be rejected with a conflict error.
 
     Execution entries are retained in memory and remain queryable via
-    ``GET /apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions/{id}`` until the next execution is
+    ``GET /apps/sovd2uds/operations/runtimefilesupdate/executions/{id}`` until the next execution is
     started. When a new execution is started, all previous terminal-state (``Completed`` or ``Failed``)
     entries are removed. Entries must not be removed based on time (no TTL). This ensures that the result
     of the last execution remains available for inspection without requiring indefinite memory growth.
 
-    The list endpoint ``GET /apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions`` returns all
-    currently tracked executions and always contains at most one entry. It supports the ``include-schema``
-    query parameter to include the JSON Schema of the response. No vehicle lock is required to use the
-    list or status endpoints.
+    The list endpoint ``GET /apps/sovd2uds/operations/runtimefilesupdate/executions`` returns all
+    currently tracked execution identifiers and always contains at most one entry. No vehicle lock is
+    required to use the list or status endpoints.
 
     After applying, or rolling back the diagnostic database, the new database must be active immediately, without
     requiring a restart of the CDA, and the old state must be available as a backup until the next update is applied,

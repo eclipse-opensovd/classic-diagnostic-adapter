@@ -15,19 +15,16 @@ use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
     DataParseError, DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, HashMap,
-    HashMapExtensions, dlt_ctx, service_ids,
+    HashMapExtensions, dlt_ctx, is_tester_present_nrc,
 };
 use doip_definitions::payload::{ActivationType, DoipPayload, RoutingActivationRequest};
 use thiserror::Error;
-use tokio::{
-    sync::{Mutex, RwLock, broadcast, mpsc, watch},
-    task::{JoinError, JoinSet},
-};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
 
 use crate::{
-    ConnectionError, DiagnosticResponse, DiscoveredGateway, DoipConnection, DoipEcu,
-    DoipTransportConfig, EcuTimeouts, GatewayConnectionConfig, GatewayDoipConfig, GatewaySetup,
-    NRC_BUSY_REPEAT_REQUEST, NRC_RESPONSE_PENDING, NRC_TEMPORARILY_NOT_AVAILABLE,
+    ConnectionError, ConnectionTasks, DiagnosticResponse, DiscoveredGateway, DoipConnection,
+    DoipEcu, DoipTransportConfig, EcuTimeouts, GatewayConnectionConfig, GatewayDoipConfig,
+    GatewaySetup,
     connection_receiver::spawn_gateway_receiver_task,
     connection_sender::spawn_gateway_sender_task,
     connections::EcuError::EcuConnectionError,
@@ -41,7 +38,7 @@ pub(crate) struct GatewayState<T> {
     pub doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>>,
     pub ecus: Arc<HashMap<String, RwLock<T>>>,
     pub gateway_ecu_map: HashMap<u16, Vec<u16>>,
-    pub connection_tasks: Arc<Mutex<JoinSet<Result<(), JoinError>>>>,
+    pub connection_tasks: Arc<ConnectionTasks>,
 }
 
 struct GatewayConnectionHandles {
@@ -265,7 +262,7 @@ fn create_ecu_receiver_map(
 )]
 async fn connection_handler(
     gateway: GatewaySetup,
-    connection_tasks: Arc<Mutex<JoinSet<Result<(), JoinError>>>>,
+    connection_tasks: Arc<ConnectionTasks>,
 ) -> Result<GatewayConnectionHandles, EcuError> {
     // channel to send messages to the gateway / ecus
     let (intx, inrx) = mpsc::channel::<DoipPayload>(50);
@@ -303,33 +300,36 @@ async fn connection_handler(
     // task to handle connection resets and reconnects
     let conn_reset = Arc::<EcuConnectionTarget>::clone(&gateway_conn);
 
-    let mut tasks = connection_tasks.lock().await;
-    tasks.spawn(spawn_connection_reset_task(
-        gateway.clone(),
-        conn_reset_rx,
-        conn_reset,
-    ));
+    connection_tasks
+        .push(spawn_connection_reset_task(
+            gateway.clone(),
+            conn_reset_rx,
+            conn_reset,
+        ))
+        .await;
 
     // communication between send / receiver task to unlock the connection in the receiver task
     // when sender task wants to send something
     let (send_pending_tx, send_pending_rx) = watch::channel::<bool>(false);
-    tasks.spawn(spawn_gateway_sender_task(
-        Arc::<EcuConnectionTarget>::clone(&gateway_conn),
-        inrx,
-        conn_reset_tx.clone(),
-        send_pending_tx.clone(),
-    ));
-    tasks.spawn(spawn_gateway_receiver_task(
-        gateway,
-        outtx,
-        Arc::<EcuConnectionTarget>::clone(&gateway_conn),
-        ReceiverChannels {
-            send_pending_rx,
-            reset_tx: conn_reset_tx,
-        },
-    ));
-    drop(tasks);
-
+    connection_tasks
+        .push(spawn_gateway_sender_task(
+            Arc::<EcuConnectionTarget>::clone(&gateway_conn),
+            inrx,
+            conn_reset_tx.clone(),
+            send_pending_tx.clone(),
+        ))
+        .await;
+    connection_tasks
+        .push(spawn_gateway_receiver_task(
+            gateway,
+            outtx,
+            Arc::<EcuConnectionTarget>::clone(&gateway_conn),
+            ReceiverChannels {
+                send_pending_rx,
+                reset_tx: conn_reset_tx,
+            },
+        ))
+        .await;
     // no need to wait until the connection is alive, we will reconnect automatically anyway
     Ok(GatewayConnectionHandles {
         sender: intx,
@@ -356,6 +356,16 @@ fn spawn_connection_reset_task(
                 let mut reconnect_attempts = 0u32;
                 if let Some(reason) = conn_reset_rx.recv().await {
                     tracing::info!(reason = %reason, "Resetting connection");
+                    // This task owns the connectivity notifications for the
+                    // gateway lifecycle: disconnected here, connected after a
+                    // successful reset. Emitting them from one place keeps
+                    // their order strict - notifications racing in from the
+                    // dying connection's IO tasks used to arrive after the
+                    // reconnect's connected and pinned healthy ECUs Offline.
+                    gateway
+                        .connectivity_handler
+                        .on_gateway_disconnected(&gateway.ecu_names)
+                        .await;
                     let mut conn_guard = conn_reset.lock_connection().await;
 
                     'reconnect: loop {
@@ -397,13 +407,21 @@ fn spawn_connection_reset_task(
                                 if reconnect_attempts
                                     >= gateway.connection.ecu_timeouts.max_retry_attempts
                                 {
+                                    // Do NOT end the task here: it is the only
+                                    // reconnect path for this gateway, and the
+                                    // outage may simply outlast the retry
+                                    // budget (e.g. a restarting gateway). Keep
+                                    // listening so the next reset request - a
+                                    // failed send, or the pending ones already
+                                    // queued - starts a fresh retry round.
                                     tracing::error!(
                                         attempts = reconnect_attempts,
                                         max_attempts =
                                             gateway.connection.ecu_timeouts.max_retry_attempts,
-                                        "Max reconnect attempts reached, giving up"
+                                        "Max reconnect attempts reached, giving up until the next \
+                                         reset request"
                                     );
-                                    return;
+                                    break 'reconnect;
                                 }
                             }
                         }
@@ -431,42 +449,25 @@ pub(crate) async fn try_read(
         match reader.read().await {
             Some(Ok(msg)) => match msg.payload {
                 DoipPayload::DiagnosticMessage(msg) => {
-                    // handle NRCs
-                    if let Some(&0x7F) = msg.message.first() {
-                        let request_sid = msg.message.get(1).copied().unwrap_or(0);
-                        let error_code = msg.message.get(2).copied().unwrap_or(0);
+                    let source_address = u16::from_be_bytes(msg.source_address);
+                    let target_address = u16::from_be_bytes(msg.target_address);
 
-                        if request_sid == service_ids::TESTER_PRESENT {
-                            return Ok(DiagnosticResponse::TesterPresentNRC(error_code));
-                        }
-
-                        let source_address = u16::from_be_bytes(msg.source_address);
-                        let response = match error_code {
-                            NRC_RESPONSE_PENDING => {
-                                tracing::debug!(
-                                    message = ?msg.message,
-                                    "UDS NRC - Response pending"
-                                );
-                                DiagnosticResponse::Pending {
-                                    source_address,
-                                    request_sid,
-                                }
-                            }
-                            NRC_BUSY_REPEAT_REQUEST => DiagnosticResponse::BusyRepeatRequest {
-                                source_address,
-                                request_sid,
-                            },
-                            NRC_TEMPORARILY_NOT_AVAILABLE => {
-                                DiagnosticResponse::TemporarilyNotAvailable {
-                                    source_address,
-                                    request_sid,
-                                }
-                            }
-                            _ => return Ok(DiagnosticResponse::Msg(msg)),
-                        };
-                        return Ok(response);
+                    // TesterPresent NRCs (7F 3E xx) arrive from the functional
+                    // broadcast keep-alive on the shared TCP connection. They
+                    // carry a real ECU source address but are unrelated to any
+                    // pending physical request. Intercept them as a dedicated
+                    // event so the receiver can log-and-drop without routing
+                    // them to a per-ECU channel.
+                    if is_tester_present_nrc(&msg.message) {
+                        let code = msg.message.get(2).copied().unwrap_or(0);
+                        return Ok(DiagnosticResponse::TesterPresentNRC(code));
                     }
-                    Ok(DiagnosticResponse::Msg(msg))
+
+                    Ok(DiagnosticResponse::Msg {
+                        data: msg.message,
+                        source_address,
+                        target_address,
+                    })
                 }
                 DoipPayload::DiagnosticMessageNack(nack) => Ok(DiagnosticResponse::Nack(nack)),
                 DoipPayload::GenericNack(nack) => Ok(DiagnosticResponse::GenericNack(nack)),

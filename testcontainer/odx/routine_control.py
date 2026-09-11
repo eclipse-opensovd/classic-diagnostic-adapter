@@ -11,7 +11,7 @@
 
 from odxtools.diaglayers.diaglayerraw import DiagLayerRaw
 from odxtools.specialdatagroup import SpecialDataGroup
-from routines import add_routine
+from routines import add_routine, add_time_circuits_routine
 
 
 def add_routine_control_services(
@@ -62,3 +62,8 @@ def add_routine_control_services(
         description="Calibrate Sensors Request Results",
         sdgs=sdgs_map.get("CalibrateSensors_RequestResults"),
     )
+
+    # 31 01/02/03 10 03 - TimeCircuits Start/Stop/RequestResults
+    # Uses a TABLE-KEY/TABLE-STRUCT pair to switch the Start request's
+    # payload structure based on the "travelMethod" row key
+    add_time_circuits_routine(dlr, sdgs_by_service=sdgs_map)

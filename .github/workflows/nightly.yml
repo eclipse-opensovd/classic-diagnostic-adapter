@@ -60,7 +60,7 @@ jobs:
         continue-on-error: true
         uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@07140bdd84f20b66fd4aff58a83c5148deec388c
         with:
-          toolchain: nightly-2025-07-14
+          toolchain: nightly-2026-07-21
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fail-on-format-error: "false"
           fail-on-clippy-error: "false"

@@ -512,6 +512,455 @@ mdd-files, or to prepare for operations which affect the whole vehicle (e.g. dis
          - Functions affecting the whole vehicle (i.e. communication disable/enable)
 
 
+.. _requirements_sovd_api_locks:
+
+Locks
+^^^^^
+
+Locks allow clients to claim exclusive or non-exclusive access to a diagnostic entity
+(vehicle, ECU, or functional group) and to coordinate diagnostic communication across
+multiple concurrent clients. The same CRUD API and enforcement semantics apply to all
+three lock scopes.
+
+.. req:: Lock API
+    :id: req~sovd-api-lock-api
+    :links: arch~sovd-api-lock-api
+    :status: draft
+
+    All three lock scopes -- vehicle (``/locks``), ECU (``/components/{ecu-name}/locks``),
+    and functional group (``/functions/functionalgroups/{group-name}/locks``) -- must expose
+    the following operations:
+
+    .. list-table:: Lock endpoints
+       :header-rows: 1
+       :widths: 10 40 50
+
+       * - Method
+         - Path
+         - Description
+       * - POST
+         - ``.../locks``
+         - Acquire a lock. If the caller already owns the active lock, extends its expiration
+           instead.
+       * - GET
+         - ``.../locks``
+         - List active and defunct locks for the entity. The ``owned`` flag is relative to
+           the caller.
+       * - GET
+         - ``.../locks/{id}``
+         - Return expiration details for a specific lock.
+       * - PUT
+         - ``.../locks/{id}``
+         - Extend the expiration of an existing lock. Only the lock owner may call this.
+       * - DELETE
+         - ``.../locks/{id}``
+         - Release the lock. Only the lock owner may call this.
+
+    The request body for POST and PUT must support the following fields:
+
+    .. list-table:: Lock request fields
+       :header-rows: 1
+       :widths: 25 20 55
+
+       * - Field
+         - Type
+         - Description
+       * - ``lock_expiration``
+         - unsigned integer
+         - Duration in seconds from the time of the request after which the lock
+           automatically expires.
+       * - ``break_lock``
+         - boolean (optional, default ``false``)
+         - Whether an existing lock shall be broken/preempted. See :need:`req~sovd-api-lock-priority`.
+       * - ``x_sov2uds_isexclusive``
+         - boolean (optional, default: configurable)
+         - Whether the lock is exclusive. See :need:`req~sovd-api-lock-exclusivity` and
+           :need:`req~sovd-api-lock-exclusivity-policy`.
+       * - any
+         - any (optional)
+         - Vendor-specific data passed to the vendor specific lock preemption mechanism.
+           See :need:`req~sovd-api-lock-priority`.
+
+    The POST response must include ``id`` (UUID string) and ``owned`` (boolean, always
+    ``true`` for the creating client). The GET ``/locks/{id}`` response must include
+    ``lock_expiration`` as an ISO 8601 string.
+
+    Keys and Values must be case-insensitive.
+
+    **Rationale**
+
+    A unified lock API across all three scopes reduces client implementation complexity and
+    ensures consistent lock management regardless of the diagnostic entity type.
+
+
+.. req:: Lock Exclusivity
+    :id: req~sovd-api-lock-exclusivity
+    :links: arch~sovd-api-lock-exclusivity
+    :status: draft
+
+    A lock must be either exclusive or non-exclusive, controlled by the ``x_sovd2uds_isexclusive`` field
+    in the POST/PUT request body. When the field is omitted, the configured default applies
+    (see :need:`req~sovd-api-lock-exclusivity-policy`).
+
+    **Exclusive lock** (``x_sovd2uds_isexclusive: true``)
+
+    While an exclusive lock is held, all requests to the locked entity's ECU-communication
+    endpoints from clients that do not own the lock must be rejected with HTTP 423.
+
+    **Non-exclusive lock** (``x_sovd2uds_isexclusive: false``)
+
+    While a non-exclusive lock is held:
+
+    - Write and state-modifying requests from non-owning clients must be rejected with
+      HTTP 423.
+    - Read-only requests (``GET /data/{id}``, ``GET /faults``, ``GET /faults/{dtc}``)
+      remain accessible to any client.
+
+    **Rationale**
+
+    Non-exclusive locks allow monitoring or logging clients to continue reading diagnostic
+    data while a primary client holds the entity for active diagnostic communication.
+
+
+.. req:: Lock Exclusivity Policy
+    :id: req~sovd-api-lock-exclusivity-policy
+    :links: arch~sovd-api-lock-exclusivity-policy
+    :status: draft
+
+    The CDA must support a global configuration option, ``lock_exclusivity_policy``, that
+    determines the value applied to the ``x_sovd2uds_isexclusive`` field (see
+    :need:`req~sovd-api-lock-exclusivity`) when a lock POST or PUT request omits it. This
+    option is modeled as an enumeration to allow additional exclusivity policies to be
+    introduced in the future without renaming or restructuring the configuration option.
+
+    The following values must be supported:
+
+    .. list-table:: ``lock_exclusivity_policy`` values
+       :header-rows: 1
+       :widths: 25 75
+
+       * - Value
+         - Behavior
+       * - ``exclusive_by_default`` (default)
+         - A lock request that omits ``x_sovd2uds_isexclusive`` is treated as exclusive.
+       * - ``non_exclusive_by_default``
+         - A lock request that omits ``x_sovd2uds_isexclusive`` is treated as
+           non-exclusive.
+
+    This option applies globally across all three lock scopes (vehicle, ECU, and
+    functional group). Requests that explicitly set ``x_sovd2uds_isexclusive`` are
+    unaffected by this option.
+
+    **Rationale**
+
+    Defaulting to exclusive locks favors a safe-by-default posture, preventing accidental
+    concurrent access to a diagnostic entity when a client omits the exclusivity field.
+    Deployments that prefer the non-exclusive default, for example to support monitoring-friendly
+    workflows without requiring every client to set the field explicitly, may set this option to
+    ``non_exclusive_by_default``. Modeling the option as an enumeration keeps the configuration
+    surface future-proof for additional exclusivity policies without introducing further
+    boolean flags.
+
+
+.. req:: Lock Expiration
+    :id: req~sovd-api-lock-expiration
+    :links: arch~sovd-api-lock-expiration
+    :status: draft
+
+    Every lock must carry a positive expiration duration in seconds (``lock_expiration``
+    field).
+
+    - A zero or negative ``lock_expiration`` value must be rejected with HTTP 400.
+    - When the expiration elapses the CDA must automatically release the lock and execute
+      its associated cleanup actions (stop Tester Present, reset ECU session and security
+      access).
+    - The lock owner may extend the expiration at any time before it elapses by issuing a
+      ``PUT`` on ``/locks/{id}``.
+
+    **Rationale**
+
+    Automatic expiration prevents abandoned locks from clients that disconnect unexpectedly
+    from blocking other clients indefinitely.
+
+
+.. req:: ECU Lock Endpoint Enforcement
+    :id: req~sovd-api-lock-ecu-enforcement
+    :links: arch~sovd-api-lock-ecu-enforcement
+    :status: draft
+
+    When an ECU lock is held, the following rules must apply to requests targeting that
+    ECU's communication endpoints. The caller's identity is determined from the JWT claims.
+
+    .. list-table:: ECU lock enforcement rules
+       :header-rows: 1
+       :widths: 42 29 29
+
+       * - Condition
+         - Write endpoints
+         - Read endpoints
+       * - No active lock held on the ECU
+         - Rejected -- HTTP 409
+         - Allowed
+       * - Caller owns an active non-exclusive lock
+         - Allowed
+         - Allowed
+       * - Non-exclusive lock held by another client
+         - Rejected -- HTTP 423
+         - Allowed
+       * - Caller owns an active exclusive lock
+         - Allowed
+         - Allowed
+       * - Exclusive lock held by another client
+         - Rejected -- HTTP 423
+         - Rejected -- HTTP 423
+       * - Caller holds the vehicle/functional/ecu lock
+         - Allowed
+         - Allowed
+       * - Caller holds a defunct lock for this ECU
+         - Rejected -- HTTP 409
+         - Rejected -- HTTP 409
+
+    **Write endpoints**: ``PUT /data/{id}``, ``PUT /configurations/{id}``,
+    ``POST /operations/{op}/executions``, ``GET /operations/{op}/executions/{id}``,
+    ``DELETE /operations/{op}/executions/{id}``, ``PUT /modes/*``,
+    ``DELETE /faults``, ``DELETE /faults/{dtc}``, ``POST /genericservice``,
+    download endpoints.
+
+    **Read endpoints**: ``GET /data/{id}``, ``GET /configurations/{id}``,
+    ``GET /faults``, ``GET /faults/{dtc}``.
+
+    **Error Messages**
+
+    Errors shall follow the standard SOVD error pattern. In case a lock was preempted,
+    the error code ``lock-broken`` must be used, with an additional ``parameters`` field,
+    including the properties ``broken_by```, ``broken_at`` and ``current_holder``.
+
+    When a resource is accessed, which requires a lock, or is currently locked by a different
+    client, the error code ``vendor-code`` shall be used, with the ``vendor_code`` indicating
+    the exact reason. A lock error enum shall be used for all lock related errors, which by
+    default will be outputted as vendor specific errors, with the enum value as the vendor code.
+
+    **Rationale**
+
+    Requiring a lock for write operations prevents concurrent modification of ECU state.
+    Allowing reads without a lock when no exclusive lock is held supports monitoring
+    clients that do not need to coordinate with active diagnostic sessions.
+
+    Exclusive locks are required on critical ECU operations like flashing, when a stray
+    read operation can cause failures.
+
+
+.. req:: Functional Group Lock Endpoint Enforcement
+    :id: req~sovd-api-lock-fg-enforcement
+    :links: arch~sovd-api-lock-fg-enforcement
+    :status: draft
+
+    The same enforcement rules defined in :need:`req~sovd-api-lock-ecu-enforcement` apply
+    to requests targeting a functional group's communication endpoints:
+    ``/functions/functionalgroups/{group-name}/data``,
+    ``/functions/functionalgroups/{group-name}/operations``, and
+    ``/functions/functionalgroups/{group-name}/modes``.
+
+
+.. req:: Lock Requirement Policy
+    :id: req~sovd-api-lock-requirement-policy
+    :links: arch~sovd-api-lock-requirement-policy
+    :status: draft
+
+    The CDA must support a configurable option, ``lock_requirement_policy``, that
+    determines which categories of requests require an active lock on the target entity.
+    This option is modeled as an enumeration to allow additional requirement policies to be
+    introduced in the future without renaming or restructuring the configuration option.
+
+    The following values must be supported:
+
+    .. list-table:: ``lock_requirement_policy`` values
+       :header-rows: 1
+       :widths: 25 75
+
+       * - Value
+         - Behavior
+       * - ``require_for_write_operations`` (default)
+         - A lock is required only for write endpoints, as defined in the enforcement
+           tables of :need:`req~sovd-api-lock-ecu-enforcement` and
+           :need:`req~sovd-api-lock-fg-enforcement`. Read endpoints remain accessible when
+           no active lock is held on the entity.
+       * - ``require_for_all_operations``
+         - A lock is required for both write and read endpoints. The "No active lock held
+           on the ECU" / "No active lock held on the functional group" row of the
+           enforcement tables in :need:`req~sovd-api-lock-ecu-enforcement` and
+           :need:`req~sovd-api-lock-fg-enforcement` applies to read endpoints as well: such
+           requests must be rejected with **HTTP 409 (Conflict)**. All other rows of those
+           enforcement tables, and all other lock behavior (exclusivity, defunct locks,
+           vehicle lock equivalence), apply identically regardless of the selected value.
+
+    This option applies uniformly to both ECU-scoped and functional-group-scoped
+    communication endpoints.
+
+    **Rationale**
+
+    Some deployments require every diagnostic interaction with an ECU or functional group --
+    including read-only monitoring requests -- to be attributable to an active, identifiable
+    lock owner, for example to satisfy audit or safety-case requirements. Other deployments
+    want unlocked reads to remain possible for monitoring or logging clients. Modeling the
+    option as an enumeration keeps the configuration surface future-proof for additional
+    requirement policies without introducing further boolean flags.
+
+
+.. req:: Lock Acquisition Policy
+    :id: req~sovd-api-lock-acquisition-policy
+    :links: arch~sovd-api-lock-acquisition-policy
+    :status: draft
+
+    The CDA must support a configurable option, ``lock_acquisition_policy``, controlling
+    whether a vehicle lock must already exist before an ECU or functional group lock may be
+    acquired. This option is modeled as an enumeration to allow additional acquisition
+    policies to be introduced in the future without renaming or restructuring the
+    configuration option.
+
+    The following values must be supported:
+
+    .. list-table:: ``lock_acquisition_policy`` values
+       :header-rows: 1
+       :widths: 25 75
+
+       * - Value
+         - Behavior
+       * - ``unrestricted`` (default)
+         - ECU and functional group locks may be acquired independently of whether a vehicle
+           lock exists.
+       * - ``vehicle_lock_required``
+         - An ECU or functional group lock POST request must be rejected with
+           **HTTP 409 (Conflict)** unless an active vehicle lock currently exists, regardless
+           of the identity of the requesting client or the vehicle lock's owner.
+
+    This requirement is independent of, and must not be confused with,
+    :need:`req~sovd-api-lock-vehicle-blocking`: that requirement governs what happens to
+    *other* clients while a vehicle lock is held (blocking their acquisition of child
+    locks), whereas ``lock_acquisition_policy: vehicle_lock_required`` governs whether a
+    vehicle lock must exist *at all*, for any client including the one requesting the child
+    lock, before a child lock acquisition may proceed.
+
+    **Rationale**
+
+    Some deployments require all ECU- and functional-group-level diagnostic locking to occur
+    strictly within the scope of an overarching vehicle-level claim, ensuring no diagnostic
+    entity can be locked in isolation without an active vehicle-wide session already having
+    been established. Modeling the option as an enumeration keeps the configuration surface
+    future-proof for additional acquisition policies (e.g. hierarchical or vendor-specific
+    schemes) without introducing further boolean flags.
+
+
+.. req:: Vehicle Lock Blocks Child Lock Acquisition
+    :id: req~sovd-api-lock-vehicle-blocking
+    :links: arch~sovd-api-lock-vehicle-blocking
+    :status: draft
+
+    When a vehicle lock is held by a client, any other clients attempt to acquire an ECU
+    lock or a functional group lock must be rejected with HTTP 409.
+
+    The vehicle lock owner may still acquire ECU or functional group locks.
+
+    **Rationale**
+
+    The vehicle lock represents a claim over the complete set of diagnostic entities on the
+    vehicle. Permitting other clients to acquire child locks while the vehicle lock is held
+    would violate that claim.
+
+
+.. req:: Lock Priority Preemption
+    :id: req~sovd-api-lock-priority
+    :links: arch~sovd-api-lock-priority
+    :status: draft
+
+    The CDA must support a vendor-configurable lock preemption mechanism applicable to vehicle locks.
+
+    A lock POST request may include additional fields in the request body, these can be used
+    by a vendor specific implementation to allow lock overrides.
+
+    Note, the vendor specific implementation must be aware of the current lock holders additional fields,
+    since they can impact the priority decision.
+
+    The mechanism retrieves:
+    - the requesting client's JWT claims,
+    - the additional values from the request body, and
+    - the identity of the current lock holder and additional metadata.
+
+    The mechanism returns:
+
+    - whether the requesting client has sufficient priority to preempt the current holder,
+      and
+    - the identity string of the requesting client to be recorded as
+      ``broken_by`` in the defunct lock.
+
+    If the mechanism grants preemption, the existing lock transitions to a defunct state
+    (see :need:`req~sovd-api-lock-defunct`) and the requesting client immediately acquires
+    the lock.
+
+    If no vendor mechanism is configured, or if the mechanism does not grant preemption,
+    conflicting POST requests are rejected with HTTP 423 as normal.
+
+    **Rationale**
+
+    In multi-client environments certain clients (e.g. OEM tooling, safety-critical
+    services) require guaranteed access to diagnostic entities for specific use-cases, even when
+    another client holds the lock. Delegating the preemption decision to a vendor mechanism
+    allows vendors to implement any priority scheme without modifying the CDA core.
+
+
+.. req:: Defunct Lock State
+    :id: req~sovd-api-lock-defunct
+    :links: arch~sovd-api-lock-defunct
+    :status: draft
+
+    When a lock is preempted by a higher-priority client it must transition to a
+    **defunct** state. The following rules apply:
+
+    - Cleanup (Tester Present stop, ECU session and security access reset) is executed
+      at preemption time.
+    - The defunct lock must remain visible in ``GET /locks`` until its original expiration
+      time elapses, or it is deleted.
+    - The defunct lock response must include the standard lock fields (``id``, ``owned``,
+      ``lock_expiration``) together with the following vendor-prefixed extension fields:
+
+      - ``x_sovd2uds_broken_by`` -- the identity of the preempting client, as returned
+        by the vendor mechanism.
+      - ``x_sovd2uds_broken_at`` -- the ISO 8601 timestamp at which preemption occurred.
+      - ``x_sovd2uds_current_holder`` -- identity of the current lock holder
+    - When the defunct lock's original expiration elapses it is silently removed; no
+      cleanup is triggered.
+    - When the defunct lock is deleted, no cleanup is triggered.
+    - The new (higher-priority) lock operates normally and performs its own cleanup on
+      release or expiry.
+
+    **Rationale**
+
+    Retaining the defunct lock gives the preempted client an observable signal that their
+    lock was superseded, identifying who took it and when, and if a lock is still held.
+
+
+
+.. req:: HTTP 409 for Preempted Clients
+    :id: req~sovd-api-lock-defunct-enforcement
+    :links: arch~sovd-api-lock-defunct-enforcement
+    :status: draft
+
+    When a client whose lock has been made defunct attempts to call any ECU communication
+    endpoint, the CDA must return **HTTP 409 (Conflict)**.
+
+    HTTP 409 applies to all communication endpoints (e.g. data, configurations, operations,
+    modes, faults, genericservice, x-sovd2uds-download). It does not apply to the ``/locks``
+    sub-resource itself.
+
+    **Rationale**
+
+    HTTP 409 distinguishes preemption from other failures, giving the preempted client an actionable signal
+    that a higher-priority client has taken over the diagnostic entity.
+
+    This is also the reason for the error being applied to all read communications, even if the higher
+    prioritized lock is non-exclusive.
+
+
 .. _requirements_sovd_api_functional_communication:
 
 Functional communication
@@ -525,7 +974,9 @@ Functional communication
     Functional communications needs to be possible. A standardized resource collection must be made available within the
     ``/functions/functionalgroups/{groupName}`` resource.
 
-    The available functionality must be defined in an additional diagnostic description used solely for defining functional communication services. Since this file may contain multiple logical link definitions, a configuration option can be provided to filter the available links.
+    The available functionality must be defined in an additional diagnostic description used solely for defining
+    functional communication services. Since this file may contain multiple logical link definitions, a configuration
+    option can be provided to filter the available links.
 
     The following entities must be available in the functional groups resource collection:
 
@@ -598,7 +1049,9 @@ MDD Embedded files
     :links: arch~sovd-api-mdd-embedded-files
     :status: draft
 
-    The CDA must support reading embedded files from the mdd file, and provide them via the ``/components/{ecu-name}/files/{file-name}`` endpoint.
+    The CDA must support reading embedded files from the MDD file, and provide them via the
+    ``/components/{ecuName}/x-sovd2uds-bulk-data/mdd-embedded-files`` endpoint (listing) and
+    ``/components/{ecuName}/x-sovd2uds-bulk-data/mdd-embedded-files/{id}`` endpoint (retrieval).
 
     **Rationale**
 

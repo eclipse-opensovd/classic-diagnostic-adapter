@@ -12,7 +12,10 @@
  */
 
 //
-use cda_interfaces::{DiagServiceError, dlt_ctx, util::decode_hex};
+use cda_interfaces::{
+    DiagServiceError, dlt_ctx,
+    util::{decode_hex, try_strip_hex_prefix},
+};
 
 use crate::{
     datatypes::{self, DataType},
@@ -278,7 +281,7 @@ impl TryInto<Vec<u8>> for &Limit {
                         reason = "Expected behavior when converting from float to u8"
                     )]
                     Ok((float_value as u8).to_be_bytes().to_vec())
-                } else if let Some(stripped) = value.to_lowercase().strip_prefix("0x") {
+                } else if let Some(stripped) = try_strip_hex_prefix(value) {
                     decode_hex(stripped)
                 } else {
                     decode_hex(value)

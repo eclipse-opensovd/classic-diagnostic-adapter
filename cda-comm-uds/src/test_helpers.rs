@@ -15,6 +15,7 @@
 
 use std::time::Duration;
 
+use async_trait::async_trait;
 use cda_interfaces::{
     DiagComm, DiagServiceError, DoipComParams, EcuAddresses, EcuState, EcuStateManager, HashMap,
     HashMapExtensions, UdsComParams, VariantDetection,
@@ -25,12 +26,45 @@ use cda_interfaces::{
 /// Minimal test double satisfying `UdsEcuDb + VariantDetection`.
 pub(crate) struct TestEcuDb {
     service_states: tokio::sync::Mutex<std::collections::HashMap<u8, String>>,
+    /// Configurable `CP_P6Max`-backed timeout, so tests can verify that
+    /// callers fall back to this comparam-derived value instead of using a
+    /// hardcoded literal. Defaults to 5s to match the previous fixed value.
+    timeout_default: Duration,
+    /// Configurable `CP_RepeatReqCountApp`, so tests can verify the exact
+    /// number of application-layer retries performed on timeout/transmission/
+    /// receive errors. Defaults to 2 to match the `CP_RepeatReqCountApp`
+    /// comparam default.
+    repeat_req_count_app: u32,
 }
 
 impl TestEcuDb {
     pub fn new() -> Self {
         Self {
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            timeout_default: Duration::from_secs(5),
+            repeat_req_count_app: 2,
+        }
+    }
+
+    /// Create a test double with a custom `timeout_default` (`CP_P6Max`).
+    pub fn with_timeout_default(timeout_default: Duration) -> Self {
+        Self {
+            service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            timeout_default,
+            repeat_req_count_app: 2,
+        }
+    }
+
+    /// Create a test double with a custom `timeout_default` (`CP_P6Max`) and
+    /// `repeat_req_count_app` (`CP_RepeatReqCountApp`).
+    pub fn with_timeout_default_and_repeat_req_count_app(
+        timeout_default: Duration,
+        repeat_req_count_app: u32,
+    ) -> Self {
+        Self {
+            service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            timeout_default,
+            repeat_req_count_app,
         }
     }
 }
@@ -116,7 +150,7 @@ impl UdsComParams for TestEcuDb {
         Duration::from_secs(2)
     }
     fn repeat_req_count_app(&self) -> u32 {
-        3
+        self.repeat_req_count_app
     }
     fn rc_21_retry_policy(&self) -> RetryPolicy {
         RetryPolicy::ContinueUntilTimeout
@@ -146,7 +180,7 @@ impl UdsComParams for TestEcuDb {
         Duration::from_millis(10)
     }
     fn timeout_default(&self) -> Duration {
-        Duration::from_secs(5)
+        self.timeout_default
     }
 }
 
@@ -163,27 +197,28 @@ impl EcuStateManager for TestEcuDb {
         async move { states.lock().await.get(&sid).cloned() }
     }
 
-    async fn session(&self) -> Result<String, DiagServiceError> {
-        Ok("default".to_string())
+    fn session(&self) -> impl Future<Output = Result<String, DiagServiceError>> + Send {
+        std::future::ready(Ok("default".to_string()))
     }
 
     fn default_session(&self) -> Result<String, DiagServiceError> {
         Ok("default".to_string())
     }
 
-    async fn security_access(&self) -> Result<String, DiagServiceError> {
-        Ok("locked".to_string())
+    fn security_access(&self) -> impl Future<Output = Result<String, DiagServiceError>> + Send {
+        std::future::ready(Ok("locked".to_string()))
     }
 
     async fn lookup_session_change(&self, _session: &str) -> Result<DiagComm, DiagServiceError> {
         unimplemented!()
     }
 
-    async fn set_default_states(&self) -> Result<(), DiagServiceError> {
-        Ok(())
+    fn set_default_states(&self) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
+        std::future::ready(Ok(()))
     }
 }
 
+#[async_trait]
 impl VariantDetection for TestEcuDb {
     fn ecu_status(&self) -> EcuState {
         unimplemented!()
@@ -200,11 +235,11 @@ impl VariantDetection for TestEcuDb {
         unimplemented!()
     }
 
-    fn mark_as_duplicate(&mut self) {
+    async fn mark_as_duplicate(&mut self) {
         unimplemented!()
     }
 
-    fn mark_as_no_variant_detected(&mut self) {
+    async fn mark_as_no_variant_detected(&mut self) {
         unimplemented!()
     }
 }

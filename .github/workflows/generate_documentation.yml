@@ -101,7 +101,8 @@ jobs:
     needs:
       - build_documentation_and_trace_requirements
       - build_rustdoc_security_plugin
-    if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-pages/')) && github.event_name == 'push'
+    # only run on `main` and `gh-pages` branches and do not run on forks
+    if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-pages/')) && github.event_name == 'push' && github.repository_owner == 'eclipse-opensovd'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

@@ -28,9 +28,9 @@ workspace = true
 # internal dependencies
 async-trait = { workspace = true }
 cda-interfaces = { workspace = true }
-cda-plugin-runtime-update = { workspace = true }
+cda-comm-doip = { workspace = true }
 cda-plugin-security = { workspace = true }
-cda-tracing = { workspace = true }
+cda-plugin-communication-management = { workspace = true }
 opensovd-axum-extra = { workspace = true, features = [
   "forwarded",
   "x-forwarded-host",
@@ -40,7 +40,7 @@ opensovd-axum-extra = { workspace = true, features = [
 sovd-interfaces = { workspace = true }
 
 # external
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true, features = ["net", "sync"] }
 
 # openapi generation
 aide = { workspace = true, features = [
@@ -105,5 +105,6 @@ dlt-tracing = ["cda-interfaces/dlt-tracing"]
 
 [dev-dependencies]
 cda-interfaces = { workspace = true, features = ["test-utils"] }
+cda-plugin-communication-management = { workspace = true, features = ["test-utils"] }
 cda-plugin-security = { workspace = true, features = ["test-utils"] }
 mockall = { workspace = true }

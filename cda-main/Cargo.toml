@@ -31,7 +31,9 @@ path = "src/lib.rs"
 
 [dependencies]
 cda-core = { workspace = true }
+cda-comm-can = { workspace = true }
 cda-comm-doip = { workspace = true }
+cda-transport-router = { workspace = true }
 cda-comm-uds = { workspace = true }
 cda-database = { workspace = true }
 cda-interfaces = { workspace = true }
@@ -40,6 +42,7 @@ cda-tracing = { workspace = true }
 cda-plugin-security = { workspace = true }
 cda-health = { workspace = true }
 cda-extra = { workspace = true, optional = true }
+cda-plugin-communication-management = { workspace = true }
 cda-plugin-runtime-update = { workspace = true }
 cda-storage = { workspace = true }
 # args
@@ -77,16 +80,32 @@ tracing-subscriber = { workspace = true, features = [
 [dev-dependencies]
 chrono = { workspace = true }
 tempfile = { workspace = true }
+override-macros = { workspace = true }
+linkme = { workspace = true }
+cda-plugin-security = { workspace = true, features = ["test-utils"] }
 
 [build-dependencies]
 chrono = { workspace = true }
 
 [features]
 default = ["health", "openssl", "config-optional"]
+# Uses Rust's system allocator so allocator-interposition profilers such as
+# Heaptrack and Valgrind can attribute CDA allocations.
+heap-profiling = []
 tokio-tracing = ["cda-interfaces/tokio-tracing", "cda-tracing/tokio-tracing"]
 openssl = ["cda-comm-doip/openssl"]
-openssl-vendored = ["openssl", "cda-comm-doip/openssl-vendored"]
+openssl-vendored = [
+  "openssl",
+  "cda-comm-doip/openssl-vendored",
+]
 mbedtls = ["cda-comm-doip/mbedtls"]
+can = ["cda-comm-can/can"]
+# Userspace ISO-TP over raw CAN (`rawcan:<ifname>` interface scheme):
+# vcan suffices, no can_isotp kernel module needed.
+can-isotp-userspace = ["can", "cda-comm-can/can-isotp-userspace"]
+# CAN frames over a socketcand daemon (`socketcand:<host>:<port>:<bus>`
+# interface scheme): the client needs no kernel CAN; also available off-Linux.
+can-socketcand = ["can-isotp-userspace", "cda-comm-can/can-socketcand"]
 dlt-tracing = ["cda-tracing/dlt-tracing"]
 integration-tests = []
 

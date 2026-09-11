@@ -41,29 +41,25 @@ impl DataType {
 
         if matches!(self, DataType::Int32 | DataType::UInt32) && bit_len > 64 {
             return Err(DiagServiceError::BadPayload(format!(
-                "Length must be at most 64 bit for {:?}, got {bit_len} bit",
-                &self
+                "Length must be at most 64 bit for {self:?}, got {bit_len} bit",
             )));
         }
 
         if DataType::Float32 == self && bit_len != 32 {
             return Err(DiagServiceError::BadPayload(format!(
-                "Length must be exactly 32 bit for {:?}, got {bit_len} bit",
-                &self
+                "Length must be exactly 32 bit for {self:?}, got {bit_len} bit",
             )));
         }
 
         if DataType::Float64 == self && bit_len != 64 {
             return Err(DiagServiceError::BadPayload(format!(
-                "Length must be exactly 64 bit for {:?}, got {bit_len} bit",
-                &self
+                "Length must be exactly 64 bit for {self:?}, got {bit_len} bit",
             )));
         }
 
         if DataType::Unicode2String == self && !bit_len.is_multiple_of(16) {
             return Err(DiagServiceError::BadPayload(format!(
-                "Length must be a multiple of 16 bit for {:?}, got {bit_len} bit",
-                &self
+                "Length must be a multiple of 16 bit for {self:?}, got {bit_len} bit",
             )));
         }
 
@@ -421,10 +417,10 @@ impl DiagCodedType {
 
         let len = end_pos.saturating_sub(byte_pos);
         if len < mmlt.min_length as usize {
-            return Err(DiagServiceError::BadPayload(format!(
-                "Not enough data in payload, needed at least {} bytes, got {} bytes",
-                mmlt.min_length, len
-            )));
+            return Err(DiagServiceError::NotEnoughData {
+                expected: byte_pos.saturating_add(mmlt.min_length as usize),
+                actual: uds_payload.len(),
+            });
         }
 
         Ok((
@@ -2874,6 +2870,15 @@ mod tests {
         let (data, bit_len) = diag_type.decode(&payload, 1, 0).unwrap();
         assert_eq!(data, vec![0xBB, 0xCC, 0xDD]);
         assert_eq!(bit_len, 24);
+
+        let error = diag_type.decode(&payload, 4, 0).unwrap_err();
+        assert_eq!(
+            error,
+            DiagServiceError::NotEnoughData {
+                expected: 5,
+                actual: 4
+            }
+        );
     }
 
     #[test]

@@ -28,6 +28,7 @@ path = "src/lib.rs"
 # internal dependencies
 cda-interfaces = { workspace = true }
 # external
+async-trait = { workspace = true }
 thiserror = { workspace = true }
 # DoIP
 doip-definitions = { workspace = true }

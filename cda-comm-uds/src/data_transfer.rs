@@ -191,7 +191,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         parameters: FlashTransferStartParams<'_>,
     ) -> Result<(), DiagServiceError> {
-        use std::sync::atomic::Ordering;
+        let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
 
         let FlashTransferStartParams {
             file_path,
@@ -204,15 +204,6 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
             return Err(DiagServiceError::InvalidRequest(
                 "Transfer length must be greater than 0".to_owned(),
             ));
-        }
-
-        // even if the data transfer job is done,
-        // data_transfer_exit must be called before starting a new one
-        if let Some(transfer) = self.data_transfers.lock().await.get(ecu_name) {
-            return Err(DiagServiceError::InvalidRequest(format!(
-                "Transfer data already running with id {}",
-                transfer.meta_data.id
-            )));
         }
 
         let file = File::open(file_path).await.map_err(|e| {
@@ -239,7 +230,6 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
                 DiagServiceError::InvalidRequest(format!("Failed to seek to offset in file: {e:?}"))
             })?;
 
-        let ecu = self.uds_ecu_db(ecu_name)?;
         let request = ecu
             .read()
             .await
@@ -255,28 +245,40 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
 
         let (sender, receiver) = watch::channel::<bool>(false);
 
-        // lock the transfers, to make sure the task only accesses the transfers once
-        // we are fully initialized
+        // Shared access keeps this transfer from overlapping an exclusive
+        // operation, e.g. a communication shutdown or a flash transfer.
+        let communication_guard = self.communication_access.acquire().map_err(|error| {
+            self.build_communication_not_ready_err(format!(
+                "Diagnostic communication unavailable: {error}"
+            ))
+        })?;
+
+        // Check-and-insert under a single mutex hold, so concurrent requests for
+        // the same ECU are serialized.
+        // Note: even if the transfer job is done, data_transfer_exit must be called first.
         let mut transfer_lock = self.data_transfers.lock().await;
-        if self.update_in_progress.load(Ordering::Acquire) {
-            return Err(DiagServiceError::InvalidRequest(
-                "Runtime update in progress, flash transfer blocked".to_owned(),
-            ));
-        }
+        let entry = match transfer_lock.entry(ecu_name_clone) {
+            std::collections::hash_map::Entry::Occupied(occupied) => {
+                return Err(DiagServiceError::InvalidRequest(format!(
+                    "Transfer data already running with id {}",
+                    occupied.get().meta_data.id
+                )));
+            }
+            std::collections::hash_map::Entry::Vacant(vacant) => vacant,
+        };
+
         let uds = self.clone();
         let transfer_task = spawn_named!(&format!("flashtransfer-{ecu_name}"), async move {
             uds.transfer_ecu_data(&ecu_name, length, request, sender, reader)
                 .await;
         });
 
-        transfer_lock.insert(
-            ecu_name_clone,
-            EcuDataTransfer {
-                meta_data: transfer_meta_data,
-                status_receiver: receiver,
-                task: transfer_task,
-            },
-        );
+        entry.insert(EcuDataTransfer {
+            meta_data: transfer_meta_data,
+            status_receiver: receiver,
+            task: transfer_task,
+            _communication_guard: communication_guard,
+        });
         Ok(())
     }
 
@@ -306,6 +308,9 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
                 "Data transfer for ECU {ecu_name} not found during exit"
             ))
         })?;
+        // Release the transfers lock before awaiting; holding it across
+        // `.await` would block all other transfers.
+        drop(lock);
 
         if let Err(e) = transfer.status_receiver.changed().await {
             return Err(DiagServiceError::InvalidRequest(format!(
@@ -316,7 +321,6 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
         transfer.task.await.map_err(|e| {
             DiagServiceError::InvalidRequest(format!("Failed to await data transfer task: {e:?}"))
         })?;
-
         Ok(())
     }
 

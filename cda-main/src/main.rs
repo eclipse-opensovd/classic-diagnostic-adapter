@@ -12,6 +12,6 @@
  */
 
 #[tokio::main]
-async fn main() -> Result<(), opensovd_cda_lib::AppError> {
+async fn main() -> Result<(), opensovd_cda_lib::error::AppError> {
     opensovd_cda_lib::run_from_cli().await
 }

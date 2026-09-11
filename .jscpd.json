@@ -1,0 +1,11 @@
+{
+  "ignore": [
+    "**/target/**",
+    "**/.git/**",
+    "**/*.lock",
+    "cda-database/src/flatbuf/**",
+    "cda-database/src/proto/**"
+  ],
+  "minLines": 10,
+  "minTokens": 70
+}

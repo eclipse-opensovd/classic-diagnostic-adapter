@@ -11,6 +11,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// `CanConfig` is always available: the `config` module of cda-comm-can is not
+// gated on the `can` feature, only the SocketCAN transport code is. This keeps
+// the configuration schema (and all public function signatures that mention
+// `CanConfig`) identical across feature combinations, which matters because
+// cargo feature unification can otherwise produce mismatched signatures
+// between crates (e.g. integration-tests vs. opensovd_cda_lib under
+// `--all-features`). A `[can]` section in a non-`can` build is rejected with
+// an actionable error in `Configuration::validate_sanity` instead.
+pub use cda_comm_can::config::{CanAddressingMode, CanConfig, CanEcuMapping, TransportOverride};
 pub use cda_comm_doip::config::DoipConfig;
 pub use cda_database::DatabaseConfig;
 use cda_interfaces::{
@@ -21,114 +30,16 @@ use cda_interfaces::{
         SdMappingsTruthyValue,
     },
 };
+pub use cda_interfaces::{
+    TransportType,
+    communication_control::{
+        CommunicationInitMode, CommunicationSettings, PostUpdateCommunicationMode,
+    },
+};
 pub use cda_plugin_runtime_update::config::RuntimeUpdateConfig;
 use serde::{Deserialize, Serialize};
 
-/// Type-safe per-ECU communication parameter overrides.
-///
-/// Internally stores a partial TOML table (only the keys the user explicitly
-/// wrote) so that Figment merge semantics can layer them on top of the global
-/// [`ComParams`].  The public API exposes typed construction and the JSON schema
-/// reflects the full [`ComParams`] structure for documentation/validation.
-#[derive(Clone, Debug)]
-pub struct EcuComParams(pub(crate) toml::Table);
-
-/// Construct per-ECU overrides from a fully-typed [`ComParams`].
-///
-/// All fields in the provided `ComParams` will be serialized and will
-/// override the corresponding global values at resolve time.
-///
-/// # Errors
-/// Returns an error if `params` cannot be serialized to a TOML table.
-impl TryFrom<ComParams> for EcuComParams {
-    type Error = toml::ser::Error;
-    fn try_from(com_params: ComParams) -> Result<Self, Self::Error> {
-        let value = toml::Value::try_from(com_params)?;
-        let table = value
-            .as_table()
-            .cloned()
-            .expect("ComParams must serialize to a TOML table");
-        Ok(Self(table))
-    }
-}
-
-impl Serialize for EcuComParams {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.0.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for EcuComParams {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use figment::providers::Format as _;
-
-        let table = toml::Table::deserialize(deserializer)?;
-
-        // Validate: the partial table must be merge-compatible with ComParams.
-        let toml_str = toml::to_string(&table).map_err(serde::de::Error::custom)?;
-        let validated: ComParams = figment::Figment::from(
-            figment::providers::Serialized::defaults(ComParams::default()),
-        )
-        .merge(figment::providers::Toml::string(&toml_str))
-        .extract()
-        .map_err(serde::de::Error::custom)?;
-
-        // Detect silently-ignored keys by round-tripping through the typed ComParams.
-        // Any input key that doesn't appear in the re-serialized output was unknown to
-        // the schema and would be silently dropped at resolve time.
-        let reference = toml::Value::try_from(&validated).map_err(serde::de::Error::custom)?;
-        let reference_table = reference
-            .as_table()
-            .ok_or_else(|| serde::de::Error::custom("Serialized ComParams is not a table"))?;
-        let unknown = find_unknown_keys(&table, reference_table, "");
-        if !unknown.is_empty() {
-            return Err(serde::de::Error::custom(format!(
-                "unknown com_param field(s) (possible typo): {unknown}",
-                unknown = unknown.join(", ")
-            )));
-        }
-
-        Ok(Self(table))
-    }
-}
-
-fn find_unknown_keys(input: &toml::Table, reference: &toml::Table, prefix: &str) -> Vec<String> {
-    let mut unknown = Vec::new();
-    for (key, value) in input {
-        let full_path = if prefix.is_empty() {
-            key.clone()
-        } else {
-            format!("{prefix}.{key}")
-        };
-        match reference.get(key) {
-            None => unknown.push(full_path),
-            Some(ref_value) => {
-                if let (toml::Value::Table(input_sub), toml::Value::Table(ref_sub)) =
-                    (value, ref_value)
-                {
-                    unknown.extend(find_unknown_keys(input_sub, ref_sub, &full_path));
-                }
-            }
-        }
-    }
-    unknown
-}
-
-impl Default for EcuComParams {
-    fn default() -> Self {
-        Self(toml::Table::new())
-    }
-}
-
-impl schemars::JsonSchema for EcuComParams {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        <ComParams as schemars::JsonSchema>::schema_name()
-    }
-
-    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        <ComParams as schemars::JsonSchema>::json_schema(generator)
-    }
-}
+pub use super::com_params::EcuComParams;
 
 /// Strict-mode flags that opt in to stricter runtime validation.
 ///
@@ -166,6 +77,10 @@ pub struct Configuration {
     pub server: ServerConfig,
     /// `DoIP` (Diagnostics over IP) transport layer settings.
     pub doip: DoipConfig,
+    /// Optional CAN bus transport configuration.
+    /// When enabled, the adapter can communicate with ECUs over CAN bus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can: Option<CanConfig>,
     /// Diagnostic database loading and naming settings.
     pub database: DatabaseConfig,
     /// Logging, file output, and tracing backend settings.
@@ -190,6 +105,8 @@ pub struct Configuration {
     pub ecu: HashMap<String, EcuConfig>,
     /// Configuration for update plugin, i.e. storage paths
     pub runtime_update_config: RuntimeUpdateConfig,
+    /// Diagnostic communication initialization and post-update behavior.
+    pub communication: CommunicationSettings,
     /// Strict-mode validation flags.
     pub strict: StrictConfig,
 }
@@ -240,6 +157,7 @@ impl Default for Configuration {
                 tester_address: "10.2.1.240".to_owned(),
                 ..Default::default()
             },
+            can: None,
             logging: cda_tracing::LoggingConfig::default(),
             com_params: ComParams::default(),
             flat_buf: FlatbBufConfig::default(),
@@ -271,8 +189,111 @@ impl Default for Configuration {
             faults: FaultConfig::default(),
             ecu: HashMap::default(),
             runtime_update_config: RuntimeUpdateConfig::default(),
+            communication: CommunicationSettings::default(),
             strict: StrictConfig::default(),
         }
+    }
+}
+
+impl Configuration {
+    /// A CDA without any transport cannot talk to a single ECU; refuse to
+    /// start instead of serving a healthy-looking API that can do nothing.
+    fn validate_transport_presence(&self) -> Result<(), ConfigSanityError> {
+        // CAN support is compile-time optional. The config type itself parses
+        // in every build (see the `CanConfig` re-export above), so reject a
+        // configured [can] section here with an actionable message instead of
+        // failing later during gateway setup.
+        #[cfg(not(feature = "can"))]
+        if self.can.is_some() {
+            return Err(ConfigSanityError::InvalidValue {
+                field: "can".to_owned(),
+                reason: "[can] is configured, but this binary was built without CAN support. \
+                         Rebuild with `--features can` or remove the [can] section."
+                    .to_owned(),
+            });
+        }
+
+        if !self.doip.enabled && self.can.is_none() {
+            return Err(ConfigSanityError::InvalidValue {
+                field: "doip.enabled".to_owned(),
+                reason: "No transport configured: doip.enabled = false and no [can] section. \
+                         Enable DoIP or configure CAN."
+                    .to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// CAN ECU mappings must be unambiguous: a duplicate ECU name silently
+    /// loses one mapping, two ECUs sharing an arbitration-ID pair open two
+    /// ISO-TP sockets on identical IDs (cross-talk with undefined delivery),
+    /// and `request_id == response_id` makes an ECU answer itself. All three
+    /// are config footguns that are expensive to debug from the bus side.
+    fn validate_can_mappings(&self) -> Result<(), ConfigSanityError> {
+        let Some(ref can) = self.can else {
+            return Ok(());
+        };
+
+        let mut names = cda_interfaces::HashSet::default();
+        let mut id_pairs = cda_interfaces::HashSet::default();
+        for mapping in &can.ecu_mappings {
+            if mapping.request_id == mapping.response_id {
+                return Err(ConfigSanityError::InvalidValue {
+                    field: "can.ecu_mappings".to_owned(),
+                    reason: format!(
+                        "ECU '{}' uses the same CAN ID {:#X} as request_id and response_id",
+                        mapping.ecu_name, mapping.request_id
+                    ),
+                });
+            }
+            if !names.insert(mapping.ecu_name.to_lowercase()) {
+                return Err(ConfigSanityError::InvalidValue {
+                    field: "can.ecu_mappings".to_owned(),
+                    reason: format!(
+                        "Duplicate mapping for ECU '{}' (names are matched case-insensitively)",
+                        mapping.ecu_name
+                    ),
+                });
+            }
+            if !id_pairs.insert((mapping.request_id, mapping.response_id)) {
+                return Err(ConfigSanityError::InvalidValue {
+                    field: "can.ecu_mappings".to_owned(),
+                    reason: format!(
+                        "ECU '{}' reuses the CAN ID pair {:#X}/{:#X} of another mapping",
+                        mapping.ecu_name, mapping.request_id, mapping.response_id
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Transport pins must be satisfiable: a pin to a transport that cannot
+    /// serve the ECU would only surface as `EcuOffline` at runtime.
+    fn validate_transport_overrides(&self) -> Result<(), ConfigSanityError> {
+        let Some(ref can) = self.can else {
+            return Ok(());
+        };
+        for transport_override in &can.transport_overrides {
+            match transport_override.transport {
+                // A pin to CAN is validated at gateway setup, not here: the
+                // ECU may get its CAN addressing from the MDD com-params,
+                // which the config layer cannot see.
+                TransportType::Can => {}
+                TransportType::DoIP => {
+                    if !self.doip.enabled {
+                        return Err(ConfigSanityError::InvalidValue {
+                            field: "can.transport_overrides".to_owned(),
+                            reason: format!(
+                                "Pins ECU '{}' to DoIP, but doip.enabled = false",
+                                transport_override.ecu_name
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -280,6 +301,10 @@ impl ConfigSanity for Configuration {
     fn validate_sanity(&self) -> Result<(), ConfigSanityError> {
         self.database.naming_convention.validate_sanity()?;
         self.doip.validate_sanity()?;
+        self.validate_transport_presence()?;
+        self.validate_can_mappings()?;
+        self.validate_transport_overrides()?;
+
         // Add more checks for Configuration fields here if needed
         Ok(())
     }
@@ -294,10 +319,6 @@ mod tests {
     };
 
     use super::*;
-
-    fn parse_ecu_com_params(toml_str: &str) -> Result<EcuComParams, toml::de::Error> {
-        toml::from_str(toml_str)
-    }
 
     #[tokio::test]
     async fn load_config_toml() -> Result<(), Box<dyn std::error::Error>> {
@@ -391,6 +412,130 @@ description_database = "teapot"
                 DiagnosticServiceAffixPosition::Prefix,
                 vec!["Control_".to_string()]
             ))
+        );
+        Ok(())
+    }
+
+    /// A `[can]` section must parse in every build (the config type is not
+    /// feature-gated), but `validate_sanity` must reject it when the binary
+    /// was built without CAN support.
+    #[tokio::test]
+    async fn can_section_parses_and_sanity_depends_on_feature()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config_str = r#"
+[can]
+interface = "vcan0"
+"#;
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract()?;
+        let can = config.can.as_ref().expect("can section should be parsed");
+        assert_eq!(can.interface, "vcan0");
+
+        #[cfg(feature = "can")]
+        config
+            .validate_sanity()
+            .expect("can section should pass sanity with can feature");
+        #[cfg(not(feature = "can"))]
+        {
+            let err = config
+                .validate_sanity()
+                .expect_err("can section should fail sanity without can feature");
+            assert!(
+                err.to_string().contains("--features can"),
+                "error should tell the user how to enable CAN support, got: {err}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Ambiguous `[[can.ecu_mappings]]` configurations must be rejected:
+    /// duplicate ECU names, reused arbitration-ID pairs, and
+    /// `request_id == response_id` all lead to silent misbehavior on the bus.
+    #[cfg(feature = "can")]
+    #[tokio::test]
+    async fn can_ecu_mappings_sanity_rejects_ambiguity() -> Result<(), Box<dyn std::error::Error>> {
+        fn config_with_mappings(
+            mappings: &str,
+        ) -> Result<Configuration, Box<dyn std::error::Error>> {
+            let config_str = format!(
+                r#"
+[can]
+interface = "vcan0"
+{mappings}"#
+            );
+            let figment = Figment::from(Serialized::defaults(Configuration::default()))
+                .merge(Toml::string(&config_str));
+            Ok(figment.extract()?)
+        }
+
+        let valid = config_with_mappings(
+            r#"
+[[can.ecu_mappings]]
+ecu_name = "ECU1"
+request_id = 0x7E0
+response_id = 0x7E8
+
+[[can.ecu_mappings]]
+ecu_name = "ECU2"
+request_id = 0x7E1
+response_id = 0x7E9
+"#,
+        )?;
+        valid
+            .validate_sanity()
+            .expect("distinct mappings should pass sanity");
+
+        let duplicate_name = config_with_mappings(
+            r#"
+[[can.ecu_mappings]]
+ecu_name = "ECU1"
+request_id = 0x7E0
+response_id = 0x7E8
+
+[[can.ecu_mappings]]
+ecu_name = "ecu1"
+request_id = 0x7E1
+response_id = 0x7E9
+"#,
+        )?;
+        let err = duplicate_name
+            .validate_sanity()
+            .expect_err("case-insensitive duplicate ECU name should fail sanity");
+        assert!(err.to_string().contains("Duplicate mapping"), "got: {err}");
+
+        let duplicate_pair = config_with_mappings(
+            r#"
+[[can.ecu_mappings]]
+ecu_name = "ECU1"
+request_id = 0x7E0
+response_id = 0x7E8
+
+[[can.ecu_mappings]]
+ecu_name = "ECU2"
+request_id = 0x7E0
+response_id = 0x7E8
+"#,
+        )?;
+        let err = duplicate_pair
+            .validate_sanity()
+            .expect_err("reused CAN ID pair should fail sanity");
+        assert!(err.to_string().contains("CAN ID pair"), "got: {err}");
+
+        let self_answering = config_with_mappings(
+            r#"
+[[can.ecu_mappings]]
+ecu_name = "ECU1"
+request_id = 0x7E0
+response_id = 0x7E0
+"#,
+        )?;
+        let err = self_answering
+            .validate_sanity()
+            .expect_err("request_id == response_id should fail sanity");
+        assert!(
+            err.to_string().contains("request_id and response_id"),
+            "got: {err}"
         );
         Ok(())
     }
@@ -541,186 +686,6 @@ ignore_case = true
         assert!(
             desc.contains("the application will exit if no database could be loaded"),
             "Expected doc comment in description, got: {desc}"
-        );
-    }
-
-    #[tokio::test]
-    async fn load_config_toml_per_ecu_com_params() {
-        let config_str = r"
-[ecu.TMCC3000.com_params.doip.logical_gateway_address]
-value = 12288
-
-[ecu.TMCC3000.com_params.doip.logical_functional_address]
-value = 65535
-";
-        let figment = Figment::from(Serialized::defaults(Configuration::default()))
-            .merge(Toml::string(config_str));
-        let config: Configuration = figment.extract().expect("Failed to parse config file");
-
-        let tmcc = config
-            .ecu
-            .get("TMCC3000")
-            .expect("TMCC3000 ecu config should be present");
-        let ecu_com_params = tmcc.com_params.as_ref().expect("com_params should be Some");
-        let resolved =
-            crate::resolve_com_params("TMCC3000", &config.com_params, Some(ecu_com_params))
-                .expect("resolve should succeed");
-
-        assert_eq!(
-            resolved.doip.logical_gateway_address.value, 12288u16,
-            "logical_gateway_address.default should be 12288"
-        );
-        assert_eq!(
-            resolved.doip.logical_functional_address.value, 65535u16,
-            "logical_functional_address.default should be 65535"
-        );
-    }
-
-    /// A per-ECU field that IS set in the TOML overrides the global value.
-    #[tokio::test]
-    async fn ecu_com_params_override_replaces_global_field() {
-        // Global has logical_gateway_address.value = 0 (Rust default).
-        // Per-ECU table sets it to 12288.
-        let ecu_toml = r"
-[doip.logical_gateway_address]
-value = 12288
-";
-        let ecu_overrides = parse_ecu_com_params(ecu_toml).expect("Failed to parse ECU com params");
-        let global = ComParams::default();
-        let effective = crate::resolve_com_params("test", &global, Some(&ecu_overrides))
-            .expect("Resolve should succeed");
-
-        assert_eq!(
-            effective.doip.logical_gateway_address.value, 12288u16,
-            "Per-ECU override should replace global logical_gateway_address.default"
-        );
-    }
-
-    /// A per-ECU field that is NOT set in the TOML retains the global value.
-    #[tokio::test]
-    async fn ecu_com_params_unset_field_retains_global_value() {
-        // Global has logical_gateway_address.value = 0x1234.
-        // Per-ECU table only sets logical_functional_address.
-        let ecu_toml = r"
-[doip.logical_functional_address]
-value = 9999
-";
-        let ecu_overrides = parse_ecu_com_params(ecu_toml).expect("Failed to parse ECU com params");
-        let mut global = ComParams::default();
-        global.doip.logical_gateway_address.value = 0x1234u16;
-
-        let effective = crate::resolve_com_params("test", &global, Some(&ecu_overrides))
-            .expect("resolve should succeed");
-
-        assert_eq!(
-            effective.doip.logical_gateway_address.value, 0x1234u16,
-            "unset per-ECU field should retain global value"
-        );
-        assert_eq!(
-            effective.doip.logical_functional_address.value, 9999u16,
-            "set per-ECU field should override global"
-        );
-    }
-
-    #[tokio::test]
-    async fn ecu_com_params_precedence_config_survives_figment_merge() {
-        let ecu_toml = r#"
-[doip.logical_gateway_address]
-value = 12288
-precedence = "Config"
-"#;
-        let ecu_overrides = parse_ecu_com_params(ecu_toml).expect("Failed to parse ECU com params");
-        let global = ComParams::default();
-        let effective = crate::resolve_com_params("test", &global, Some(&ecu_overrides))
-            .expect("resolve should succeed");
-
-        assert_eq!(
-            effective.doip.logical_gateway_address.precedence,
-            cda_interfaces::datatypes::ComParamPrecedence::Config,
-            "precedence = Config should survive figment merge"
-        );
-    }
-
-    #[tokio::test]
-    async fn ecu_com_params_precedence_defaults_to_database_when_unset() {
-        let ecu_toml = r"
-[doip.logical_gateway_address]
-value = 12288
-";
-        let ecu_overrides = parse_ecu_com_params(ecu_toml).expect("Failed to parse ECU com params");
-        let global = ComParams::default();
-        let effective = crate::resolve_com_params("test", &global, Some(&ecu_overrides))
-            .expect("resolve should succeed");
-
-        assert_eq!(
-            effective.doip.logical_gateway_address.precedence,
-            cda_interfaces::datatypes::ComParamPrecedence::Database,
-            "precedence should default to Database when not set in TOML"
-        );
-    }
-
-    #[test]
-    fn ecu_com_params_rejects_unknown_field() {
-        // timeout_daefault is spelled wrong, should be timeout_default
-        let typo_toml = r#"
-[uds.timeout_daefault]
-name = "CP_P6Max"
-precedence = "Config"
-
-[uds.timeout_daefault.default]
-secs = 5
-nanos = 0
-"#;
-        let result = parse_ecu_com_params(typo_toml);
-        assert!(
-            result.is_err(),
-            "should reject unknown field 'timeout_daefault'"
-        );
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("timeout_daefault"),
-            "error should name the offending field, got: {err}"
-        );
-    }
-
-    #[test]
-    fn ecu_com_params_rejects_leaf_typo() {
-        let typo_toml = r"
-[uds.timeout_default.value]
-secnds = 5
-nanos = 0
-";
-        let result = parse_ecu_com_params(typo_toml);
-        assert!(result.is_err(), "should reject unknown leaf key 'secss'");
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("secnds"),
-            "error should name the offending key, got: {err}"
-        );
-    }
-
-    /// Validates that the figment extraction error path is reachable: when the
-    /// per-ECU TOML contains a scalar where a struct is expected, `extract` fails.
-    /// This anchors the `Err(e) => { ...; return None }` branch in
-    /// `resolve_com_params` to a real, reproducible input without requiring
-    /// access to the private function itself.
-    #[test]
-    fn figment_extraction_fails_on_incompatible_type_in_ecu_table() {
-        let global = ComParams::default();
-
-        // A plain scalar where figment expects the ComParamConfig struct.
-        let bad_toml = r"
-[doip]
-logical_gateway_address = 9999
-";
-        let result = Figment::from(Serialized::defaults(&global))
-            .merge(Toml::string(bad_toml))
-            .extract::<ComParams>();
-
-        assert!(
-            result.is_err(),
-            "figment extraction must fail when the TOML contains an incompatible type; confirms \
-             the resolve_com_params Err branch is reachable"
         );
     }
 

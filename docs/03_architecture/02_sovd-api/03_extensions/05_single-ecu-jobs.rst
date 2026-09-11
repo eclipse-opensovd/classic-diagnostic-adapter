@@ -40,6 +40,6 @@ Single ECU Jobs
          - /x-single-ecu-jobs/{id}
          - Reads the data for an entry
 
-    Read the Single ECU Jobs OpenAPI specification for details: :download:`Single ECU Jobs Specification <02_sovd-api/openapi/single-ecu-jobs.yaml>`
+    Read the Single ECU Jobs OpenAPI specification for details: :download:`Single ECU Jobs Specification <../openapi/single-ecu-jobs.yaml>`
 
     .. uml:: /03_architecture/02_sovd-api/03_extensions/images/single_ecu_jobs.puml

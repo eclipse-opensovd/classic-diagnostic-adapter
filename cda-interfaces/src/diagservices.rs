@@ -12,7 +12,7 @@
  */
 
 use crate::{
-    DataParseError, DiagServiceError, HashMap,
+    DataParseError, DiagComm, DiagServiceError, HashMap,
     datatypes::{DtcField, DtcRecord},
     util,
 };
@@ -47,6 +47,27 @@ pub struct DiagServiceJsonResponse {
 }
 
 pub trait DiagServiceResponse: Sized + Send + Sync + 'static + Clone {
+    /// Build a positive, empty response representing a request that the ECU
+    /// legitimately did not answer because the `suppressPosRspMsgIndicationBit`
+    /// (SPRMIB) was set. Such a response is a success (`response_type` is
+    /// `Positive`) with no payload (`is_empty` is `true`), so callers render it
+    /// as an empty/no-content result rather than an error.
+    ///
+    /// The result is intentionally indistinguishable from a normally-decoded
+    /// empty positive response (see [`is_empty`](Self::is_empty)): both flow
+    /// through the same consumer paths to a `204 No Content`.
+    fn empty_positive(service: DiagComm) -> Self;
+    /// Returns `true` if the response carries no payload data.
+    ///
+    /// This is a predicate over *any* response, regardless of how it was
+    /// produced: it is `true` both for a response that was decoded from a real
+    /// but payload-less positive reply (e.g. a bare `ECUReset` positive ack, or
+    /// a service whose response defines no data parameters) and for a response
+    /// synthesized via [`empty_positive`](Self::empty_positive) when the ECU
+    /// legitimately sent nothing (SPRMIB). These two cases are intentionally
+    /// indistinguishable here: consumers (notably the SOVD HTTP layer) use this,
+    /// together with [`response_type`](Self::response_type) being `Positive`, to
+    /// render a `204 No Content` result in either case.
     fn is_empty(&self) -> bool;
     fn service_name(&self) -> String;
     fn response_type(&self) -> DiagServiceResponseType;
@@ -105,6 +126,7 @@ pub mod mock {
         pub DiagServiceResponse {}
 
         impl diagservices::DiagServiceResponse for DiagServiceResponse {
+            fn empty_positive(service: crate::DiagComm) -> Self;
             fn is_empty(&self) -> bool;
             fn service_name(&self) -> String;
             fn get_raw(&self) -> &[u8];

@@ -118,7 +118,6 @@ pub(crate) struct EcuState {
     pub(crate) communication_control_type: Option<CommunicationControlType>,
     pub(crate) temporal_era_id: Option<i32>,
     pub(crate) dtc_setting_type: Option<DtcSettingType>,
-    pub(crate) running_calibration: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

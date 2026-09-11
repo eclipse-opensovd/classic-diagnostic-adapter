@@ -268,3 +268,9 @@ impl QueryParams {
         }
     }
 }
+
+impl Response {
+    pub(crate) fn header(&self, name: http::header::HeaderName) -> Option<&http::HeaderValue> {
+        self.header_map.get(name)
+    }
+}

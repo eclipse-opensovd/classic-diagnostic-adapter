@@ -11,6 +11,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::time::Duration;
+
 use aide::OperationOutput;
 use axum::{
     Json,
@@ -25,6 +27,7 @@ use axum::{
 };
 use cda_interfaces::{
     DiagServiceError, HashMap, HashMapExtensions, HashSet,
+    communication_control::CommunicationError,
     diagservices::{DiagServiceResponse, MappedNRC},
     file_manager::MddError,
 };
@@ -50,11 +53,37 @@ pub enum ApiError {
     Conflict(String),
     #[error("Not Responding: {0}")]
     NotResponding(String),
+    #[error("Service Unavailable: {message}")]
+    ServiceUnavailable {
+        message: String,
+        retry_after: Option<Duration>,
+        error_code: ErrorCode,
+        vendor_code: Option<VendorErrorCode>,
+    },
     #[error("The value of the parameter is not of the allowed values")]
     InvalidParameter { possible_values: HashSet<String> },
 }
 
 impl ApiError {
+    pub(crate) fn from_communication_error(
+        value: CommunicationError,
+        retry_after: Duration,
+    ) -> Self {
+        match value {
+            CommunicationError::Failed(failure) => ApiError::ServiceUnavailable {
+                message: failure.to_string(),
+                retry_after: Some(retry_after),
+                error_code: ErrorCode::SovdServerFailure,
+                vendor_code: None,
+            },
+            value => ApiError::ServiceUnavailable {
+                message: value.to_string(),
+                retry_after: Some(retry_after),
+                error_code: ErrorCode::VendorSpecific,
+                vendor_code: Some(VendorErrorCode::CommunicationNotReady),
+            },
+        }
+    }
     #[must_use]
     pub fn error_and_vendor_code(&self) -> (ErrorCode, Option<VendorErrorCode>) {
         match &self {
@@ -69,6 +98,11 @@ impl ApiError {
                 ErrorCode::VendorSpecific,
                 Some(VendorErrorCode::InvalidParameter),
             ),
+            ApiError::ServiceUnavailable {
+                error_code,
+                vendor_code,
+                ..
+            } => (error_code.clone(), vendor_code.clone()),
             _ => (ErrorCode::SovdServerFailure, None),
         }
     }
@@ -111,6 +145,21 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::AmbiguousParameters { .. } => {
                 ApiError::BadRequest(value.to_string())
             }
+            DiagServiceError::CommunicationNotReady {
+                message,
+                retry_after,
+            } => ApiError::ServiceUnavailable {
+                message,
+                retry_after: Some(retry_after),
+                error_code: ErrorCode::VendorSpecific,
+                vendor_code: Some(VendorErrorCode::CommunicationNotReady),
+            },
+            DiagServiceError::CommunicationDisabled(_) => ApiError::ServiceUnavailable {
+                message: value.to_string(),
+                retry_after: None,
+                error_code: ErrorCode::VendorSpecific,
+                vendor_code: Some(VendorErrorCode::CommunicationNotReady),
+            },
             DiagServiceError::AccessDenied(_) => ApiError::Forbidden(Some(value.to_string())),
         }
     }
@@ -167,7 +216,7 @@ pub struct ErrorWrapper {
     pub include_schema: bool,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum VendorErrorCode {
     /// The requested resource was not found.
@@ -193,6 +242,9 @@ pub enum VendorErrorCode {
     /// A severe error occurred that needs further investigation, safe operation is still possible
     /// but this indicates an issue that should be investigated
     SevereError,
+    /// ECU communication is not currently available. Retry after the interval
+    /// given in the `Retry-After` header.
+    CommunicationNotReady,
     /// Indicates that something went terribly wrong and safe operation cannot be guaranteed at
     /// this point. The application still tries to serve requests in the best effort,
     /// but correctness may be affected by this error.
@@ -216,71 +268,64 @@ impl IntoResponse for ErrorWrapper {
         } else {
             None
         };
-        match self.error {
+        // Every variant but `ServiceUnavailable` differs only in status,
+        // message and codes, so they share the construction below.
+        let (status, message, error_code, vendor_code, parameters) = match self.error {
+            ApiError::ServiceUnavailable {
+                message,
+                retry_after,
+                error_code,
+                vendor_code,
+            } => {
+                return service_unavailable_response(
+                    message,
+                    retry_after,
+                    error_code,
+                    vendor_code,
+                    schema,
+                );
+            }
             ApiError::Forbidden(message) => (
                 StatusCode::FORBIDDEN,
-                Json(
-                    sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
-                        message: message.unwrap_or_else(|| "Forbidden".into()),
-                        error_code: ErrorCode::InsufficientAccessRights,
-                        vendor_code: None,
-                        parameters: None,
-                        error_source: None,
-                        schema,
-                    },
-                ),
+                message.unwrap_or_else(|| "Forbidden".into()),
+                ErrorCode::InsufficientAccessRights,
+                None,
+                None,
             ),
             ApiError::NotFound(message) => (
                 StatusCode::NOT_FOUND,
-                Json(
-                    sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
-                        message: message.unwrap_or_else(|| "Not Found".into()),
-                        error_code: ErrorCode::VendorSpecific,
-                        vendor_code: Some(VendorErrorCode::NotFound),
-                        parameters: None,
-                        error_source: None,
-                        schema,
-                    },
-                ),
+                message.unwrap_or_else(|| "Not Found".into()),
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::NotFound),
+                None,
             ),
             ApiError::InternalServerError(message) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
-                        message: message.unwrap_or_else(|| "Internal Server Error".into()),
-                        error_code: ErrorCode::SovdServerFailure,
-                        vendor_code: None,
-                        parameters: None,
-                        error_source: None,
-                        schema,
-                    },
-                ),
+                message.unwrap_or_else(|| "Internal Server Error".into()),
+                ErrorCode::SovdServerFailure,
+                None,
+                None,
             ),
             ApiError::Conflict(message) => (
                 StatusCode::CONFLICT,
-                Json(
-                    sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
-                        message,
-                        error_code: ErrorCode::PreconditionsNotFulfilled,
-                        vendor_code: None,
-                        parameters: None,
-                        error_source: None,
-                        schema,
-                    },
-                ),
+                message,
+                ErrorCode::PreconditionsNotFulfilled,
+                None,
+                None,
             ),
             ApiError::BadRequest(message) => (
                 StatusCode::BAD_REQUEST,
-                Json(
-                    sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
-                        message,
-                        error_code: ErrorCode::VendorSpecific,
-                        vendor_code: Some(VendorErrorCode::BadRequest),
-                        parameters: None,
-                        error_source: None,
-                        schema,
-                    },
-                ),
+                message,
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::BadRequest),
+                None,
+            ),
+            ApiError::NotResponding(message) => (
+                StatusCode::GATEWAY_TIMEOUT,
+                message,
+                ErrorCode::NotResponding,
+                None,
+                None,
             ),
             ApiError::InvalidParameter { possible_values } => {
                 let mut parameters = HashMap::new();
@@ -299,34 +344,52 @@ impl IntoResponse for ErrorWrapper {
                 );
                 (
                     StatusCode::BAD_REQUEST,
-                    Json(
-                        sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
-                            message: "The parameter value is not valid".to_owned(),
-                            error_code: ErrorCode::VendorSpecific,
-                            vendor_code: Some(VendorErrorCode::InvalidParameter),
-                            parameters: Some(parameters),
-                            error_source: None,
-                            schema,
-                        },
-                    ),
+                    "The parameter value is not valid".to_owned(),
+                    ErrorCode::VendorSpecific,
+                    Some(VendorErrorCode::InvalidParameter),
+                    Some(parameters),
                 )
             }
-            ApiError::NotResponding(message) => (
-                StatusCode::GATEWAY_TIMEOUT,
-                Json(
-                    sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
-                        message,
-                        error_code: ErrorCode::NotResponding,
-                        vendor_code: None,
-                        parameters: None,
-                        error_source: None,
-                        schema,
-                    },
-                ),
-            ),
-        }
-        .into_response()
+        };
+
+        (
+            status,
+            Json(ApiErrorResponse::<VendorErrorCode> {
+                message,
+                error_code,
+                vendor_code,
+                parameters,
+                error_source: None,
+                schema,
+            }),
+        )
+            .into_response()
     }
+}
+
+/// Built separately from `ErrorWrapper::into_response`'s common construction,
+/// because a plain `(StatusCode, Json<_>)` tuple cannot carry the `Retry-After`
+/// header this variant needs.
+fn service_unavailable_response(
+    message: String,
+    retry_after: Option<Duration>,
+    error_code: ErrorCode,
+    vendor_code: Option<VendorErrorCode>,
+    schema: Option<schemars::Schema>,
+) -> Response {
+    let response = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ApiErrorResponse::<VendorErrorCode> {
+            message,
+            error_code,
+            vendor_code,
+            parameters: None,
+            error_source: None,
+            schema,
+        }),
+    )
+        .into_response();
+    crate::sovd::with_retry_after(response, retry_after)
 }
 
 pub(crate) fn nrc_to_api_error_response(

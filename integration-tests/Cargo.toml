@@ -27,6 +27,7 @@ cda-interfaces = { workspace = true }
 cda-core = { workspace = true }
 cda-database = { workspace = true }
 cda-sovd = { workspace = true }
+cda-plugin-communication-management = { workspace = true }
 sovd-interfaces = { workspace = true }
 cda-tracing = { workspace = true }
 cda-plugin-security = { workspace = true }
@@ -74,9 +75,10 @@ chrono = { workspace = true }
 futures = { workspace = true }
 # libc
 libc = { workspace = true }
-
 # compile time format
 const_format = { workspace = true }
+# temp directories for isolated tests
+tempfile = { workspace = true }
 
 [build-dependencies]
 cda-build = { workspace = true }
@@ -85,6 +87,11 @@ cda-build = { workspace = true }
 # We need the health endpoint to check if the CDA is online
 default = ["opensovd_cda_lib/health"]
 integration-tests = []
+# Variant of the integration tests that exercises the CAN transport
+# (`CDA_INTEGRATION_TEST_USE_CAN=true`). Compiles in `can-socketcand` so the
+# CDA-side socketcand backend is actually wired in; the ECU simulator reaches
+# the same vcan bus through a socketcand daemon.
+can-integration-tests = ["integration-tests", "opensovd_cda_lib/can-socketcand"]
 
 # Integration tests are only compiled when the feature is enabled.
 [[test]]

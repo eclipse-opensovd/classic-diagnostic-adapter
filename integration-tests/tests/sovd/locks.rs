@@ -615,8 +615,6 @@ pub(crate) async fn create_lock(
 }
 
 pub(crate) fn default_timeout() -> Duration {
-    // Duration::from_hours is only available in rust >= 1.91.0, we want to support 1.88.0
-    #[cfg_attr(nightly, allow(unknown_lints, clippy::duration_suboptimal_units))]
     Duration::from_secs(3600)
 }
 

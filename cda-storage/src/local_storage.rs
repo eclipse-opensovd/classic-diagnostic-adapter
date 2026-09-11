@@ -37,6 +37,7 @@ use crate::{
 ///
 /// Collections are stored as subdirectories under `{root}/collections/`. The WAL and staging
 /// files live under `{root}/journal/`.
+/// [[ dimpl~storage-local-filesystem-implementation, Local filesystem implementation of the Storage Access API, dimpl ]]
 pub struct LocalStorage {
     /// Base directory for collection data.
     collections_dir: PathBuf,
@@ -182,66 +183,76 @@ impl Storage for LocalStorage {
         ))
     }
 
-    async fn create_collection(
+    fn create_collection(
         &self,
         tx: &mut Transaction,
         name: &CollectionName,
-    ) -> Result<Arc<LocalCollection>, StorageError> {
-        let dir = self.collection_dir(name)?;
-        if dir.exists() {
-            return Err(StorageError::TransactionConflict(format!(
-                "Collection already exists: {name}"
-            )));
-        }
+    ) -> impl std::future::Future<Output = Result<Arc<LocalCollection>, StorageError>> + Send {
+        let result = (|| {
+            let dir = self.collection_dir(name)?;
+            if dir.exists() {
+                return Err(StorageError::TransactionConflict(format!(
+                    "Collection already exists: {name}"
+                )));
+            }
 
-        let op = Operation::CreateCollection { name: name.clone() };
-        wal::append_operation(tx.journal_path(), &op)?;
-        tx.record(op);
+            let op = Operation::CreateCollection { name: name.clone() };
+            wal::append_operation(tx.journal_path(), &op)?;
+            tx.record(op);
 
-        // Return a collection handle that points to where the directory *will* be after commit.
-        Ok(Arc::new(LocalCollection::new(
-            name.clone(),
-            dir,
-            Arc::clone(&self.data_lock),
-        )))
+            // Return a collection handle that points to where the directory *will* be after commit.
+            Ok(Arc::new(LocalCollection::new(
+                name.clone(),
+                dir,
+                Arc::clone(&self.data_lock),
+            )))
+        })();
+        std::future::ready(result)
     }
 
-    async fn delete_collection(
+    fn delete_collection(
         &self,
         tx: &mut Transaction,
         name: &CollectionName,
-    ) -> Result<(), StorageError> {
-        let dir = self.collection_dir(name)?;
-        if !dir.exists() {
-            return Err(StorageError::CollectionNotFound(name.to_string()));
-        }
+    ) -> impl std::future::Future<Output = Result<(), StorageError>> + Send {
+        let result = (|| {
+            let dir = self.collection_dir(name)?;
+            if !dir.exists() {
+                return Err(StorageError::CollectionNotFound(name.to_string()));
+            }
 
-        let op = Operation::DeleteCollection { name: name.clone() };
-        wal::append_operation(tx.journal_path(), &op)?;
-        tx.record(op);
+            let op = Operation::DeleteCollection { name: name.clone() };
+            wal::append_operation(tx.journal_path(), &op)?;
+            tx.record(op);
 
-        Ok(())
+            Ok(())
+        })();
+        std::future::ready(result)
     }
 
-    async fn copy_collection(
+    fn copy_collection(
         &self,
         tx: &mut Transaction,
         source: &CollectionName,
         dest: &CollectionName,
-    ) -> Result<(), StorageError> {
-        let source_dir = self.collection_dir(source)?;
-        if !source_dir.exists() {
-            return Err(StorageError::CollectionNotFound(source.to_string()));
-        }
+    ) -> impl std::future::Future<Output = Result<(), StorageError>> + Send {
+        let result = (|| {
+            let source_dir = self.collection_dir(source)?;
+            if !source_dir.exists() {
+                return Err(StorageError::CollectionNotFound(source.to_string()));
+            }
 
-        let op = Operation::CopyCollection {
-            source: source.clone(),
-            dest: dest.clone(),
-        };
-        wal::append_operation(tx.journal_path(), &op)?;
-        tx.record(op);
+            let op = Operation::CopyCollection {
+                source: source.clone(),
+                dest: dest.clone(),
+                dest_existed: self.collection_dir(dest)?.exists(),
+            };
+            wal::append_operation(tx.journal_path(), &op)?;
+            tx.record(op);
 
-        Ok(())
+            Ok(())
+        })();
+        std::future::ready(result)
     }
 }
 
@@ -257,6 +268,7 @@ struct LocalStorageCommitter {
 
 #[async_trait]
 impl TransactionCommitter for LocalStorageCommitter {
+    /// [[ dimpl~storage-atomic-commit, Atomic commit of a staged transaction via WAL and backup-rename, dimpl ]]
     async fn apply(
         &self,
         operations: Vec<Operation>,
@@ -363,68 +375,69 @@ impl LocalStorageCommitter {
     /// In these cases, it's better to continue with the commit instead of failing it,
     /// as the end result is the same (the file/directory is gone).
     fn apply_operations(&self, operations: &[Operation]) -> Result<(), StorageError> {
-        for op in operations {
-            match op {
-                Operation::Write {
-                    collection,
-                    key,
-                    staged_path,
-                } => {
-                    let target_dir = self.collections_dir.join(collection.as_str());
-                    std::fs::create_dir_all(&target_dir)?;
-                    let target = target_dir.join(key);
+        operations
+            .iter()
+            .try_for_each(|op| -> Result<(), StorageError> {
+                match op {
+                    Operation::Write {
+                        collection,
+                        key,
+                        staged_path,
+                    } => {
+                        let target_dir = self.collections_dir.join(collection.as_str());
+                        std::fs::create_dir_all(&target_dir)?;
+                        let target = target_dir.join(key);
 
-                    // Backup existing file if present.
-                    if target.exists() {
-                        let backup = append_extension(&target, BACKUP_EXTENSION);
-                        std::fs::rename(&target, &backup)?;
-                    }
+                        // Backup existing file if present.
+                        if target.exists() {
+                            let backup = append_extension(&target, BACKUP_EXTENSION);
+                            std::fs::rename(&target, &backup)?;
+                        }
 
-                    // Move staged file into place.
-                    std::fs::rename(staged_path, &target)?;
-                }
-                Operation::Delete { collection, key } => {
-                    let target = self.collections_dir.join(collection.as_str()).join(key);
-                    if target.exists() {
-                        let backup = append_extension(&target, BACKUP_EXTENSION);
-                        std::fs::rename(&target, &backup)?;
+                        // Move staged file into place.
+                        std::fs::rename(staged_path, &target)?;
                     }
-                }
-                Operation::DeleteAll { collection } => {
-                    let dir = self.collections_dir.join(collection.as_str());
-                    if dir.exists() {
-                        backup_all_files_in_dir(&dir)?;
+                    Operation::Delete { collection, key } => {
+                        let target = self.collections_dir.join(collection.as_str()).join(key);
+                        if target.exists() {
+                            let backup = append_extension(&target, BACKUP_EXTENSION);
+                            std::fs::rename(&target, &backup)?;
+                        }
                     }
-                }
-                Operation::CreateCollection { name } => {
-                    let dir = self.collections_dir.join(name.as_str());
-                    std::fs::create_dir_all(&dir)?;
-                }
-                Operation::DeleteCollection { name } => {
-                    let dir = self.collections_dir.join(name.as_str());
-                    if dir.exists() {
-                        let backup = append_extension(&dir, BACKUP_EXTENSION);
-                        std::fs::rename(&dir, &backup)?;
+                    Operation::DeleteAll { collection } => {
+                        let dir = self.collections_dir.join(collection.as_str());
+                        if dir.exists() {
+                            backup_all_files_in_dir(&dir)?;
+                        }
                     }
-                }
-                Operation::CopyCollection { source, dest } => {
-                    let source_dir = self.collections_dir.join(source.as_str());
-                    let dest_dir = self.collections_dir.join(dest.as_str());
+                    Operation::CreateCollection { name } => {
+                        let dir = self.collections_dir.join(name.as_str());
+                        std::fs::create_dir_all(&dir)?;
+                    }
+                    Operation::DeleteCollection { name } => {
+                        let dir = self.collections_dir.join(name.as_str());
+                        if dir.exists() {
+                            let backup = append_extension(&dir, BACKUP_EXTENSION);
+                            std::fs::rename(&dir, &backup)?;
+                        }
+                    }
+                    Operation::CopyCollection { source, dest, .. } => {
+                        let source_dir = self.collections_dir.join(source.as_str());
+                        let dest_dir = self.collections_dir.join(dest.as_str());
 
-                    // Back up existing destination for rollback, then create a fresh directory.
-                    // This ensures "replace" semantics: the destination ends up with exactly
-                    // the source's contents, not a merge of old and new files.
-                    if dest_dir.exists() {
-                        let backup = append_extension(&dest_dir, BACKUP_EXTENSION);
-                        std::fs::rename(&dest_dir, &backup)?;
-                    }
+                        // Back up an existing destination before creating the replacement.
+                        if dest_dir.exists() {
+                            let backup = append_extension(&dest_dir, BACKUP_EXTENSION);
+                            std::fs::rename(&dest_dir, &backup)?;
+                        }
 
-                    std::fs::create_dir_all(&dest_dir)?;
-                    copy_dir_contents(&source_dir, &dest_dir)?;
+                        // Create a fresh directory to provide replace rather than merge semantics.
+                        std::fs::create_dir_all(&dest_dir)?;
+                        copy_dir_contents(&source_dir, &dest_dir)?;
+                    }
                 }
-            }
-        }
-        Ok(())
+                Ok(())
+            })
     }
 }
 

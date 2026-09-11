@@ -13,7 +13,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use cda_interfaces::{EcuConnectivityHandler, HashMap, dlt_ctx};
+use cda_interfaces::{HashMap, dlt_ctx};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::{broadcast, mpsc, watch},
@@ -100,27 +100,6 @@ pub(super) fn handle_diagnostic_message_ack(
         skip_all,
         fields(dlt_context = dlt_ctx!("DOIP"))
     )]
-pub(super) async fn handle_diagnostic_message(
-    gateway_name: &str,
-    outtx: &HashMap<u16, broadcast::Sender<Result<DiagnosticResponse, EcuError>>>,
-    msg: doip_definitions::payload::DiagnosticMessage,
-) {
-    let addr = u16::from_be_bytes(msg.source_address);
-    // ISO 13400-2:2012 9.5 states that only a server should send ACKs,
-    // therefore forwarding the message to the client without sending an ACK to the gateway.
-    tracing::debug!(
-            gateway_name = %gateway_name,
-            ecu_address = %addr,
-            "Received message from ECU");
-    outtx
-        .get(&addr)
-        .map(|router| router.send(Ok(DiagnosticResponse::Msg(msg))));
-}
-
-#[tracing::instrument(
-        skip_all,
-        fields(dlt_context = dlt_ctx!("DOIP"))
-    )]
 pub(super) fn handle_alive_check_request() {
     tracing::debug!("Received Alive Check Response. Probably ECU responded too slow");
 }
@@ -147,8 +126,6 @@ pub(super) async fn handle_response(
     outtx: &HashMap<u16, broadcast::Sender<Result<DiagnosticResponse, EcuError>>>,
     reset_tx: &mpsc::Sender<ConnectionResetReason>,
     response: Option<Result<DiagnosticResponse, ConnectionError>>,
-    ecu_names: &[String],
-    connectivity_handler: &Arc<dyn EcuConnectivityHandler>,
 ) {
     let Some(result) = response else {
         return;
@@ -158,20 +135,12 @@ pub(super) async fn handle_response(
             handle_ok_response(gateway_name, gateway_ip, outtx, response).await;
         }
         Err(err) => {
-            handle_connection_error(
-                gateway_name,
-                gateway_ip,
-                reset_tx,
-                err,
-                ecu_names,
-                connectivity_handler,
-            )
-            .await;
+            handle_connection_error(gateway_name, gateway_ip, reset_tx, err).await;
         }
     }
 }
 
-/// Handles all variants of a successfully decoded `DiagnosticResponse`.
+/// Handles all variants of a successfully decoded [`DiagnosticResponse`].
 #[tracing::instrument(
         skip_all,
         fields(dlt_context = dlt_ctx!("DOIP"))
@@ -192,22 +161,21 @@ async fn handle_ok_response(
                 response,
             );
         }
-        DiagnosticResponse::Pending { source_address, .. }
-        | DiagnosticResponse::BusyRepeatRequest { source_address, .. }
-        | DiagnosticResponse::TemporarilyNotAvailable { source_address, .. } => {
-            outtx
-                .get(&source_address)
-                .map(|router| router.send(Ok(response)));
+        DiagnosticResponse::Msg {
+            source_address: addr,
+            ..
+        } => {
+            tracing::debug!(
+                gateway_name = %gateway_name,
+                ecu_address = %addr,
+                "Received message from ECU"
+            );
+            outtx.get(&addr).map(|router| router.send(Ok(response)));
         }
-        DiagnosticResponse::Msg(msg) => {
-            handle_diagnostic_message(gateway_name, outtx, msg).await;
-        }
-        DiagnosticResponse::Nack(nack) => {
+        DiagnosticResponse::Nack(ref nack) => {
             tracing::debug!(nack = ?nack, "Received NACK");
             let addr = u16::from_be_bytes(nack.source_address);
-            outtx
-                .get(&addr)
-                .map(|router| router.send(Ok(DiagnosticResponse::Nack(nack))));
+            outtx.get(&addr).map(|router| router.send(Ok(response)));
         }
         DiagnosticResponse::GenericNack(_) => {
             handle_generic_nack();
@@ -231,11 +199,15 @@ async fn handle_connection_error(
     gateway_ip: &str,
     reset_tx: &mpsc::Sender<ConnectionResetReason>,
     err: ConnectionError,
-    ecu_names: &[String],
-    connectivity_handler: &Arc<dyn EcuConnectivityHandler>,
 ) {
     match err {
         ConnectionError::Closed => {
+            // Connectivity notifications are owned by the connection-reset
+            // task: it serializes disconnected -> (reconnect) -> connected.
+            // Emitting disconnected from here raced the reset task - the
+            // read loop hits Closed repeatedly while a reconnect is already
+            // succeeding, and a late disconnected arriving after the reset
+            // task's connected left healthy ECUs marked Offline for good.
             if let Err(e) = reset_tx
                 .send("Connection has been closed.".to_owned())
                 .await
@@ -247,10 +219,6 @@ async fn handle_connection_error(
                     "Failed to send connection reset request"
                 );
             }
-            // Notify UDS layer that ECUs on this connection are disconnected
-            connectivity_handler
-                .on_gateway_disconnected(ecu_names)
-                .await;
         }
         _ => {
             // for POC purposes we just log the error and do not reset the connection
@@ -294,8 +262,6 @@ where
         mut send_pending_rx,
         reset_tx,
     } = channels;
-    let ecu_names = gateway.ecu_names;
-    let connectivity_handler = gateway.connectivity_handler;
 
     cda_interfaces::spawn_named!(&format!("gateway-receiver-{}", gateway_id.ip), async move {
         'receive: loop {
@@ -338,8 +304,6 @@ where
                             &outtx,
                             &reset_tx,
                             response,
-                            &ecu_names,
-                            &connectivity_handler,
                         ).await;
                     }
                 }
@@ -358,7 +322,6 @@ struct GatewayIdentity {
 #[cfg(test)]
 mod tests {
     use cda_interfaces::HashMapExtensions;
-    use doip_definitions::payload::DiagnosticMessage;
     use tokio::sync::broadcast;
 
     use super::*;
@@ -380,16 +343,21 @@ mod tests {
         let target: u16 = 0x0001;
         let (outtx, mut ecu_rx) = make_outtx(source);
 
-        let msg = DiagnosticMessage {
-            source_address: source.to_be_bytes(),
-            target_address: target.to_be_bytes(),
-            message: vec![0x50, 0x01],
-        };
-
-        handle_diagnostic_message("gw", &outtx, msg).await;
-        // The message must have been forwarded to the ECU channel
-        let resp = ecu_rx.try_recv().expect("expected DiagnosticResponse::Msg");
-        assert!(matches!(resp, Ok(DiagnosticResponse::Msg(_))));
+        handle_ok_response(
+            "gw",
+            "1.2.3.4",
+            &outtx,
+            DiagnosticResponse::Msg {
+                source_address: source,
+                target_address: target,
+                data: vec![0x50, 0x01],
+            },
+        )
+        .await;
+        let resp = ecu_rx
+            .try_recv()
+            .expect("expected DiagnosticResponse::Diagnostic");
+        assert!(matches!(resp, Ok(DiagnosticResponse::Msg { .. })));
     }
 
     #[tokio::test]
@@ -397,19 +365,21 @@ mod tests {
         let addr: u16 = 0x0030;
         let (outtx, mut rx) = make_outtx(addr);
 
+        // A raw pending NRC arrives as DiagnosticResponse::Diagnostic (no pre-classification)
         handle_ok_response(
             "gw",
             "1.2.3.4",
             &outtx,
-            DiagnosticResponse::Pending {
+            DiagnosticResponse::Msg {
                 source_address: addr,
-                request_sid: 0x42,
+                target_address: 0x0001,
+                data: vec![0x7F, 0x22, 0x78],
             },
         )
         .await;
 
-        let msg = rx.try_recv().expect("expected Pending on channel");
-        assert!(matches!(msg, Ok(DiagnosticResponse::Pending { .. })));
+        let msg = rx.try_recv().expect("expected Diagnostic on channel");
+        assert!(matches!(msg, Ok(DiagnosticResponse::Msg { .. })));
     }
 
     #[tokio::test]

@@ -14,7 +14,7 @@
 pub mod sovd2uds {
     pub mod bulk_data {
         pub use cda_interfaces::runtime_update_api::{
-            BulkDataCreated, BulkDataCreatedList, BulkDataList,
+            BulkDataCreated, BulkDataCreatedList, BulkDataDeleted, BulkDataList,
         };
 
         pub mod flash_files {
@@ -24,19 +24,34 @@ pub mod sovd2uds {
         }
 
         pub mod runtimefiles {
+            pub use cda_interfaces::runtime_update_api::RuntimeFilesQuery;
+        }
+    }
+
+    pub mod operations {
+        pub mod runtimefilesupdate {
             pub use cda_interfaces::runtime_update_api::{
-                ExecutionMode, ExecutionStatus, RuntimeFilesQuery, UpdateExecution,
+                ExecutionMode, ExecutionStatus, UpdateExecution,
             };
 
-            /// Request body for an execution.
+            /// The operation-specific parameters for a diagnostic database update execution.
             #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-            pub struct ExecutionRequest {
+            pub struct ExecutionParameters {
                 /// The operation to perform on the staged runtime files.
                 pub mode: ExecutionMode,
             }
 
+            /// Request body for an execution.
+            ///
+            /// Follows the standard operations convention of wrapping the
+            /// operation-specific inputs in a `parameters` field.
+            #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+            pub struct ExecutionRequest {
+                pub parameters: ExecutionParameters,
+            }
+
             /// The discriminant of an execution's status without the inner payload.
-            #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+            #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
             #[serde(rename_all = "lowercase")]
             pub enum ExecutionStatusKind {
                 Running,
@@ -51,34 +66,33 @@ pub mod sovd2uds {
                 pub id: String,
             }
 
-            /// Response body returned by `GET /executions/{id}`.
-            #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
-            pub struct ExecutionResponse {
-                /// Unique execution identifier.
-                pub id: String,
+            /// Operation-specific values reported for an execution.
+            #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+            pub struct ExecutionResponseParameters {
                 /// The operation that was requested.
                 pub mode: ExecutionMode,
+                /// Human-readable failure description, present only when `status` is `failed`.
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                pub reason: Option<String>,
+            }
+
+            /// Response body returned by `GET /executions/{id}`.
+            #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+            pub struct ExecutionResponse {
                 /// Current lifecycle state of the execution.
                 pub status: ExecutionStatusKind,
-                /// Human-readable failure description, present only when `status` is `failed`.
-                #[serde(skip_serializing_if = "Option::is_none")]
-                pub reason: Option<String>,
+                /// Operation-specific status details.
+                pub parameters: ExecutionResponseParameters,
                 #[schemars(skip)]
-                #[serde(skip_serializing_if = "Option::is_none")]
+                #[serde(default, skip_serializing_if = "Option::is_none")]
                 pub schema: Option<schemars::Schema>,
             }
 
             /// Response body returned by `GET /executions`.
-            #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+            #[derive(serde::Serialize, schemars::JsonSchema)]
             pub struct ExecutionListResponse {
-                pub items: Vec<ExecutionResponse>,
-                #[schemars(skip)]
-                #[serde(skip_serializing_if = "Option::is_none")]
-                pub schema: Option<schemars::Schema>,
+                pub items: Vec<crate::common::operations::OperationIdItem>,
             }
-
-            /// Query parameters for the executions list endpoint.
-            pub type ExecutionsQuery = crate::IncludeSchemaQuery;
 
             impl From<UpdateExecution> for ExecutionResponse {
                 fn from(exec: UpdateExecution) -> Self {
@@ -88,12 +102,38 @@ pub mod sovd2uds {
                         ExecutionStatus::Failed(msg) => (ExecutionStatusKind::Failed, Some(msg)),
                     };
                     Self {
-                        id: exec.id,
-                        mode: exec.mode,
                         status,
-                        reason,
+                        parameters: ExecutionResponseParameters {
+                            mode: exec.mode,
+                            reason,
+                        },
                         schema: None,
                     }
+                }
+            }
+
+            #[cfg(test)]
+            mod tests {
+                use super::*;
+
+                #[test]
+                fn failed_execution_places_mode_and_reason_in_parameters() {
+                    let response = ExecutionResponse::from(UpdateExecution {
+                        id: "execution-id".to_string(),
+                        mode: ExecutionMode::Apply,
+                        status: ExecutionStatus::Failed("verification failed".to_string()),
+                    });
+
+                    assert_eq!(
+                        serde_json::to_value(response).unwrap(),
+                        serde_json::json!({
+                            "status": "failed",
+                            "parameters": {
+                                "mode": "apply",
+                                "reason": "verification failed"
+                            }
+                        })
+                    );
                 }
             }
         }

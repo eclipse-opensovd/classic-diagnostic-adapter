@@ -14,7 +14,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cda_interfaces::{EcuConnectivityHandler, EcuRuntimeState, HashMap, dlt_ctx};
+use cda_interfaces::{
+    EcuConnectivityHandler, EcuRuntimeState, HashMap, VariantDetectionRequest,
+    VariantDetectionSender, dlt_ctx,
+};
 
 use crate::coordinator::{
     EcuConnected, EcuCoordinatorHandle, EcuDisconnected, RestoreDisconnectHandling,
@@ -34,6 +37,11 @@ use crate::coordinator::{
 #[derive(Clone)]
 pub struct EcuStateCoordinator {
     handles: Arc<HashMap<String, EcuCoordinatorHandle>>,
+    /// A real `Offline` -> `Online` transition pushes the ECU into this
+    /// channel for variant re-detection; without it a reconnected ECU
+    /// stays `NotTested` until the next UDS request, too late for
+    /// state-only consumers like the network structure.
+    redetect: VariantDetectionSender,
 }
 
 impl EcuStateCoordinator {
@@ -41,8 +49,15 @@ impl EcuStateCoordinator {
     ///
     /// Each ECU gets its own actor spawned, sharing the `EcuRuntimeState` from the
     /// `EcuManager` stored in `ecus`.
+    ///
+    /// `redetect` receives reconnected ECUs for variant re-detection; a
+    /// coordinator that swallows reconnects leaves ECUs undetected, so it
+    /// is required. Tests pass a channel and drop the receiver.
     #[must_use]
-    pub fn new(runtime_states: HashMap<String, EcuRuntimeState>) -> Self {
+    pub fn new(
+        runtime_states: HashMap<String, EcuRuntimeState>,
+        redetect: VariantDetectionSender,
+    ) -> Self {
         let handles: HashMap<String, EcuCoordinatorHandle> = runtime_states
             .into_iter()
             .map(|(ecu_name, state)| {
@@ -53,6 +68,7 @@ impl EcuStateCoordinator {
 
         Self {
             handles: Arc::new(handles),
+            redetect,
         }
     }
 
@@ -65,7 +81,22 @@ impl EcuStateCoordinator {
         tracing::info!(ecu_name, "ECU connected - setting connectivity to Online");
 
         if let Some(handle) = self.handles.get(ecu_name) {
-            let _ = handle.actor_ref.tell(EcuConnected).await;
+            let transitioned = handle.actor_ref.ask(EcuConnected).await.unwrap_or_default();
+            // Push a re-detection whenever the reconnected ECU has no valid
+            // variant: a real Offline -> Online transition resets it to
+            // NotTested, and a reconnect during variant detection (when
+            // disconnect events are suppressed, so no transition is seen)
+            // can leave a stale offline verdict behind. Triggering on every
+            // such reconnect mirrors the transport announcing the ECU;
+            // detection runs are coalesced downstream.
+            let needs_detection =
+                transitioned || crate::transport::needs_variant_detection(&handle.ecu_status());
+            if needs_detection {
+                let _ = self
+                    .redetect
+                    .send(VariantDetectionRequest::new(vec![ecu_name.to_owned()]))
+                    .await;
+            }
         }
     }
 
@@ -129,7 +160,9 @@ impl EcuConnectivityHandler for EcuStateCoordinator {
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::{Connectivity, EcuRuntimeState, HashMap, VariantState};
+    use cda_interfaces::{
+        Connectivity, EcuRuntimeState, HashMap, VariantDetectionSender, VariantState,
+    };
 
     use super::EcuStateCoordinator;
 
@@ -149,7 +182,9 @@ mod tests {
         let runtime_states: HashMap<String, EcuRuntimeState> =
             HashMap::from_iter([("TestECU".to_string(), runtime_state.clone())]);
 
-        let coordinator = EcuStateCoordinator::new(runtime_states);
+        let (redetect_tx, _redetect_rx) = tokio::sync::mpsc::channel(8);
+        let coordinator =
+            EcuStateCoordinator::new(runtime_states, VariantDetectionSender::new(redetect_tx));
         (coordinator, runtime_state)
     }
 
@@ -201,7 +236,9 @@ mod tests {
         let runtime_state = EcuRuntimeState::new();
         let runtime_states: HashMap<String, EcuRuntimeState> =
             HashMap::from_iter([("TestECU".to_string(), runtime_state.clone())]);
-        let coordinator = EcuStateCoordinator::new(runtime_states);
+        let (redetect_tx, _redetect_rx) = tokio::sync::mpsc::channel(8);
+        let coordinator =
+            EcuStateCoordinator::new(runtime_states, VariantDetectionSender::new(redetect_tx));
 
         coordinator.handle_ecu_connected("TestECU").await;
 

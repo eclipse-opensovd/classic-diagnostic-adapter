@@ -15,21 +15,9 @@ use std::time::Duration;
 
 use tokio::sync::{RwLock, mpsc};
 
-use crate::{DiagServiceError, EcuAddresses, HashMap, ServicePayload};
-
-#[derive(Debug, Clone)]
-pub enum UdsResponse {
-    /// Raw UDS message response, which can be a positive or negative response.
-    Message(ServicePayload),
-    /// NRC 0x78 - Response pending.
-    ResponsePending(u16),
-    /// Tester was replied with NRC
-    TesterPresentNRC(u8),
-    /// NRC 0x21 - Busy repeat request.
-    BusyRepeatRequest(u16),
-    /// NRC 0x94 - Temporarily not available.
-    TemporarilyNotAvailable(u16),
-}
+use crate::{
+    DiagServiceError, EcuAddresses, HashMap, ServicePayload, Shutdown, uds::TransportResponse,
+};
 
 /// Parameters for sending a UDS message over the network.
 #[derive(Debug, Clone)]
@@ -40,19 +28,11 @@ pub struct TransmissionParameters {
     pub repeat_request_count_transmission: u32,
 }
 
-/// The gateway is the communication layer between the ECUs and the CDA.
-/// It handles physical transmission of messages, protocol specifics (like ACKs and NACKs for DOIP),
-/// and provides information about the ECUs on the network, like their online state.
-pub trait EcuGateway: Clone + Send + Sync + 'static {
-    /// Retrieves the network address of the gateway for a given logical address.
-    /// For DOIP, this is the IP address of the gateway.
-    /// This function is used to build the network structure of the ECUs.
-    /// Returns `None` if the logical address cannot be resolved to a network address.
-    fn get_gateway_network_address(
-        &self,
-        logical_address: u16,
-    ) -> impl Future<Output = Option<String>> + Send;
-
+/// Physical transmission of UDS messages on a single transport.
+///
+/// Handles protocol specifics (like ACKs and NACKs for DOIP) and provides
+/// information about the ECUs on the network, like their online state.
+pub trait PhysicalTransport: Shutdown + Clone + Send + Sync + 'static {
     /// Transmits the given UDS message to the network/bus and handles protocol specific
     /// acknowledgements and responses.
     /// The implementation will take care of assembling lower level frames into UDS messages.
@@ -78,21 +58,22 @@ pub trait EcuGateway: Clone + Send + Sync + 'static {
         &self,
         transmission_params: TransmissionParameters,
         message: ServicePayload,
-        response_sender: mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
+        response_sender: mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
         expect_uds_reply: bool,
-    ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
+    ) -> impl Future<Output = Result<tokio::task::JoinHandle<()>, DiagServiceError>> + Send;
 
-    /// Checks if an ECU is online.
-    /// Returns an error if the ECU is not online or if the ECU cannot be reached.
-    /// Otherwise, returns `Ok(())`.
-    /// # Errors
-    ///  `DiagServiceError::EcuOffline` if the ECU cannot be reached, is not found, or is offline.
+    /// Checks if an ECU is currently reachable on this transport.
     fn ecu_online<T: EcuAddresses>(
         &self,
         ecu_name: &str,
         ecu_db: &RwLock<T>,
     ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
+}
 
+/// Functional diagnostic send.
+/// `DoIP` implements this; CAN returns `RequestNotSupported` until functional
+/// addressing is implemented.
+pub trait FunctionalTransport: PhysicalTransport {
     /// Send a functional request to a gateway using functional addressing.
     /// The gateway will broadcast the request to all ECUs behind it.
     /// This method waits for responses from multiple ECUs within the specified timeout.
@@ -124,6 +105,78 @@ pub trait EcuGateway: Clone + Send + Sync + 'static {
         timeout: Duration,
         expect_positive_response: bool,
     ) -> impl Future<
-        Output = Result<HashMap<String, Result<UdsResponse, DiagServiceError>>, DiagServiceError>,
+        Output = Result<
+            HashMap<String, Result<ServicePayload, DiagServiceError>>,
+            DiagServiceError,
+        >,
     > + Send;
+}
+
+/// Network topology queries.
+pub trait NetworkTopology: Send + Sync {
+    /// Retrieves the network address of the gateway for a given logical address.
+    /// For DOIP, this is the IP address of the gateway.
+    /// This function is used to build the network structure of the ECUs.
+    /// Returns `None` if the logical address cannot be resolved to a network address.
+    fn get_gateway_network_address(
+        &self,
+        logical_address: u16,
+    ) -> impl Future<Output = Option<String>> + Send;
+
+    /// Network address of a specific ECU, looked up by name.
+    ///
+    /// Fallback for ECUs whose logical addresses are unresolved com-param
+    /// defaults (CAN-only databases all share the fallback `0x0000`, so the
+    /// address-based [`Self::get_gateway_network_address`] cannot identify
+    /// them). Transports whose addressing is genuinely logical-address-based
+    /// (`DoIP`) keep the default `None`.
+    fn get_ecu_network_address(
+        &self,
+        _ecu_name: &str,
+    ) -> impl Future<Output = Option<String>> + Send {
+        std::future::ready(None)
+    }
+}
+
+/// Core gateway supertrait: physical and functional sends + topology queries.
+pub trait EcuGateway: FunctionalTransport + NetworkTopology {}
+impl<T> EcuGateway for T where T: FunctionalTransport + NetworkTopology {}
+
+/// Transport-neutral routing knowledge for one ECU description.
+///
+/// This reports whether the transport can currently be selected. It does not
+/// replace `EcuState`, `Connectivity`, or `VariantState`.
+pub trait TransportProbe: Send + Sync {
+    /// Return this transport's current routing status for the ECU.
+    fn route_status(&self, ecu_name: &str) -> impl Future<Output = RouteStatus> + Send;
+
+    /// Resolve `ProbeRequired` by actively probing the ECU.
+    /// Transports which cannot actively probe return false and should report
+    /// `Unavailable`, not `ProbeRequired`, from `route_status()`.
+    fn probe_ecu(&self, ecu_name: &str) -> impl Future<Output = bool> + Send;
+}
+
+/// The current routing readiness status for an ECU on a specific transport.
+///
+/// `RouteReadiness` is deliberately not an ECU state and must never be exposed
+/// through SOVD or written into `EcuRuntimeState` directly:
+///
+/// - `Connectivity::{Online, Offline}` records whether the physical ECU responded to communication.
+/// - `VariantState::{NotTested, Detected, Duplicate, NotDetected}` records diagnostic-database
+///   identity/variant resolution.
+/// - `RouteReadiness` answers only: **may the router select this transport now, or should it
+///   perform an on-demand transport probe first?**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteStatus {
+    /// This transport has no resolved endpoint/addressing for the ECU and is
+    /// not a route candidate.
+    NotConfigured,
+    /// This transport has a confirmed usable route to the ECU.
+    Ready,
+    /// The transport has an endpoint for the ECU and supports a bounded active
+    /// probe which must succeed before the router binds to it.
+    ProbeRequired,
+    /// The transport has an endpoint for the ECU, but it is currently not a
+    /// usable route and cannot be made usable by an on-demand probe.
+    Unavailable,
 }

@@ -19,6 +19,7 @@ dependencies = [
   "sphinxcontrib-plantuml==0.31.0",
   "sphinx-codelinks==1.2.0",
   "myst-parser==5.0.0",
+  "furo>=2025.9.25",
 ]
 
 [tool.uv.sources]

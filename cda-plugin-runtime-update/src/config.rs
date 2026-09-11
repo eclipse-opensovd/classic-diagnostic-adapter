@@ -18,7 +18,7 @@ pub struct RuntimeUpdateConfig {
     /// Maximum upload body size in bytes for multipart file uploads.
     /// Default: 50MB. Axum's built-in limit is 2MB which is too low for MDD files.
     pub upload_body_limit_bytes: usize,
-    /// Directory where the updatable configuration and database are stored.
+    /// Directory where the updatable database is stored.
     pub storage_dir: String,
     /// Value of the Retry-After header (in seconds) sent when the service is
     /// temporarily unavailable due to a busy transaction.
@@ -30,11 +30,6 @@ pub struct RuntimeUpdateConfig {
     /// Default: `false`.
     #[serde(default)]
     pub init_storage_from_database_path: bool,
-    /// When `true` and the `Configuration` storage collection is empty,
-    /// seed it from the configuration file loaded from disk on first startup.
-    /// Default: `false`.
-    #[serde(default)]
-    pub init_storage_from_config_file: bool,
 }
 
 fn default_retry_after_seconds() -> u64 {
@@ -48,7 +43,6 @@ impl Default for RuntimeUpdateConfig {
             storage_dir: ".".to_owned(),
             retry_after_seconds: default_retry_after_seconds(),
             init_storage_from_database_path: false,
-            init_storage_from_config_file: false,
         }
     }
 }

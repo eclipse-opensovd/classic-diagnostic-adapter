@@ -185,6 +185,8 @@ pub(crate) mod docs_endpoint {
 }
 
 pub(crate) mod diag_service {
+    use std::sync::Arc;
+
     use aide::{UseApi, transform::TransformOperation};
     use axum::{
         Json,
@@ -208,14 +210,13 @@ pub(crate) mod diag_service {
     use crate::{
         create_schema, openapi,
         sovd::{
-            FgServiceExecution,
+            FgServiceExecution, acquire_and_reserve_execution,
             components::{ecu::DiagServicePathParam, get_content_type_and_accept},
             error::{ApiError, ErrorWrapper, VendorErrorCode},
             finalize_execution,
             functions::functional_groups::{handle_ecu_response, map_to_json},
             get_payload_data, guard_execution,
             locks::validate_fg_lock,
-            remove_reserved_execution, reserve_execution,
         },
     };
 
@@ -372,7 +373,8 @@ pub(crate) mod diag_service {
             locks,
             functional_group_name,
             fg_executions,
-            update_in_progress,
+            communication_activities,
+            communication_access,
             ..
         }): State<WebserverFgState<T>>,
         body: Bytes,
@@ -404,17 +406,18 @@ pub(crate) mod diag_service {
         // conflict and, if none, inserts a placeholder so that a second
         // concurrent POST for the same operation sees 409 Conflict.
         let operation_lower = operation.to_lowercase();
-        let exec_id = match reserve_execution(
-            &fg_executions,
+        let (exec_id, guard) = match acquire_and_reserve_execution(
+            &*communication_access,
+            Arc::clone(&fg_executions),
+            Arc::clone(&communication_activities),
             &operation_lower,
             &operation,
             include_schema,
-            &update_in_progress,
         )
         .await
         {
-            Ok(id) => id,
-            Err(err) => return err.into_response(),
+            Ok(v) => v,
+            Err(e) => return e.into_response(),
         };
 
         let is_async = if suppress_service {
@@ -432,7 +435,7 @@ pub(crate) mod diag_service {
             {
                 Ok(is_async) => is_async,
                 Err(e) => {
-                    remove_reserved_execution(&fg_executions, &operation_lower, &exec_id).await;
+                    guard.cleanup().await;
                     return e.into_response();
                 }
             }
@@ -441,7 +444,7 @@ pub(crate) mod diag_service {
         let (content_type, _) = match get_content_type_and_accept(&headers) {
             Ok(v) => v,
             Err(e) => {
-                remove_reserved_execution(&fg_executions, &operation_lower, &exec_id).await;
+                guard.cleanup().await;
                 return ErrorWrapper {
                     error: e,
                     include_schema,
@@ -460,7 +463,7 @@ pub(crate) mod diag_service {
             {
                 Ok(value) => value,
                 Err(e) => {
-                    remove_reserved_execution(&fg_executions, &operation_lower, &exec_id).await;
+                    guard.cleanup().await;
                     return ErrorWrapper {
                         error: e,
                         include_schema,
@@ -473,7 +476,7 @@ pub(crate) mod diag_service {
         let map_to_json = match map_to_json(include_schema, &accept) {
             Ok(value) => value,
             Err(e) => {
-                remove_reserved_execution(&fg_executions, &operation_lower, &exec_id).await;
+                guard.cleanup().await;
                 return e.into_response();
             }
         };
@@ -516,7 +519,7 @@ pub(crate) mod diag_service {
             )
             .await
         } else {
-            remove_reserved_execution(&fg_executions, &operation_lower, &exec_id).await;
+            guard.cleanup().await;
             build_operation_response(response_data, errors, include_schema)
         }
     }
@@ -574,6 +577,7 @@ pub(crate) mod diag_service {
             locks,
             functional_group_name,
             fg_executions,
+            communication_activities,
             ..
         }): State<WebserverFgState<T>>,
     ) -> Response {
@@ -620,6 +624,7 @@ pub(crate) mod diag_service {
             if let Some(op_map) = fg_executions.write().await.get_mut(&operation) {
                 op_map.shift_remove(&exec_id);
             }
+            crate::sovd::release_communication_activity(&communication_activities, &exec_id).await;
             return StatusCode::NO_CONTENT.into_response();
         }
 
@@ -650,12 +655,14 @@ pub(crate) mod diag_service {
             if let Some(op_map) = fg_executions.write().await.get_mut(&operation) {
                 op_map.shift_remove(&exec_id);
             }
+            crate::sovd::release_communication_activity(&communication_activities, &exec_id).await;
             StatusCode::NO_CONTENT.into_response()
         } else if query.force {
             // force=true - remove execution even though Stop had errors, return 200 with errors.
             if let Some(op_map) = fg_executions.write().await.get_mut(&operation) {
                 op_map.shift_remove(&exec_id);
             }
+            crate::sovd::release_communication_activity(&communication_activities, &exec_id).await;
             build_operation_response(response_data, errors, include_schema)
         } else {
             // force=false and Stop had errors - reset in_flight, keep execution alive for retry.
@@ -738,7 +745,8 @@ pub(crate) mod diag_service {
         };
         use axum_extra::extract::WithRejection;
         use cda_interfaces::{
-            DiagComm, DiagCommType, DynamicPlugin, HashMap, UdsEcu, subfunction_ids,
+            DiagComm, DiagCommType, DynamicPlugin, HashMap, UdsEcu,
+            communication_control::CommunicationGuard, subfunction_ids,
         };
         use cda_plugin_security::Secured;
         use http::StatusCode;
@@ -797,6 +805,7 @@ pub(crate) mod diag_service {
                 locks,
                 functional_group_name,
                 fg_executions,
+                communication_activities,
                 ..
             }): State<WebserverFgState<T>>,
         ) -> Response {
@@ -864,11 +873,7 @@ pub(crate) mod diag_service {
 
             // suppress_service: skip UDS send, return stored state directly.
             if query.suppress_service {
-                if let Some(op_map) = fg_executions.write().await.get_mut(&operation)
-                    && let Some(exec) = op_map.get_mut(&exec_id)
-                {
-                    exec.in_flight = false;
-                }
+                clear_in_flight(&fg_executions, &operation, exec_id).await;
                 return fg_get_by_id_response(
                     stored.status,
                     stored.parameters,
@@ -890,11 +895,7 @@ pub(crate) mod diag_service {
             {
                 Ok(sf) => sf.has_request_results,
                 Err(e) => {
-                    if let Some(op_map) = fg_executions.write().await.get_mut(&operation)
-                        && let Some(exec) = op_map.get_mut(&exec_id)
-                    {
-                        exec.in_flight = false;
-                    }
+                    clear_in_flight(&fg_executions, &operation, exec_id).await;
                     return ErrorWrapper {
                         error: e.into(),
                         include_schema,
@@ -906,11 +907,7 @@ pub(crate) mod diag_service {
             // When there is no RequestResults subfunction, return the stored
             // execution state together with an error entry.
             if !has_request_results {
-                if let Some(op_map) = fg_executions.write().await.get_mut(&operation)
-                    && let Some(exec) = op_map.get_mut(&exec_id)
-                {
-                    exec.in_flight = false;
-                }
+                clear_in_flight(&fg_executions, &operation, exec_id).await;
                 return fg_get_by_id_response(
                     stored.status,
                     stored.parameters,
@@ -931,16 +928,48 @@ pub(crate) mod diag_service {
                 );
             }
 
+            let ctx = RequestResultsContext::new(&fg_executions, &communication_activities);
             send_request_results(
                 &uds,
                 &security_plugin,
                 &functional_group_name,
                 &operation,
                 exec_id,
-                &fg_executions,
+                ctx,
                 include_schema,
             )
             .await
+        }
+
+        /// Marks the execution as no longer in flight.
+        async fn clear_in_flight(
+            fg_executions: &RwLock<HashMap<String, IndexMap<Uuid, FgServiceExecution>>>,
+            operation: &str,
+            exec_id: Uuid,
+        ) {
+            if let Some(op_map) = fg_executions.write().await.get_mut(operation)
+                && let Some(exec) = op_map.get_mut(&exec_id)
+            {
+                exec.in_flight = false;
+            }
+        }
+
+        /// Context for functional group request results, grouping execution-related state.
+        struct RequestResultsContext<'a> {
+            fg_executions: &'a RwLock<HashMap<String, IndexMap<Uuid, FgServiceExecution>>>,
+            communication_activities: &'a tokio::sync::Mutex<HashMap<Uuid, CommunicationGuard>>,
+        }
+
+        impl<'a> RequestResultsContext<'a> {
+            fn new(
+                fg_executions: &'a RwLock<HashMap<String, IndexMap<Uuid, FgServiceExecution>>>,
+                communication_activities: &'a tokio::sync::Mutex<HashMap<Uuid, CommunicationGuard>>,
+            ) -> Self {
+                Self {
+                    fg_executions,
+                    communication_activities,
+                }
+            }
         }
 
         /// Sends `REQUEST_RESULTS` to the functional group, collects
@@ -952,9 +981,13 @@ pub(crate) mod diag_service {
             functional_group_name: &str,
             operation: &str,
             exec_id: Uuid,
-            fg_executions: &RwLock<HashMap<String, IndexMap<Uuid, FgServiceExecution>>>,
+            ctx: RequestResultsContext<'_>,
             include_schema: bool,
         ) -> Response {
+            let RequestResultsContext {
+                fg_executions,
+                communication_activities,
+            } = ctx;
             let results = uds
                 .send_functional_group(
                     functional_group_name,
@@ -991,6 +1024,10 @@ pub(crate) mod diag_service {
                     exec.status = status.clone();
                     exec.in_flight = false;
                 }
+            }
+            if status == ExecutionStatus::Completed {
+                crate::sovd::release_communication_activity(communication_activities, &exec_id)
+                    .await;
             }
 
             fg_get_by_id_response(status, response_data, errors, include_schema)

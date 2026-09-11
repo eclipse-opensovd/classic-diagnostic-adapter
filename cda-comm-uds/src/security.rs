@@ -48,6 +48,7 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
                 ecu_name,
                 &default_security_access,
                 None,
+                None,
                 security_plugin,
                 None,
             )
@@ -73,10 +74,11 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
         ecu_name: &str,
         level: &str,
         authentication_data: Option<UdsPayloadData>,
+        request_seed_data: Option<UdsPayloadData>,
         security_plugin: &DynamicPlugin,
         expiration: Option<Duration>,
     ) -> Result<(SecurityAccess, Self::Response), DiagServiceError> {
-        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
+        let ecu_diag_service = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
         let security_access = ecu_diag_service
             .read()
             .await
@@ -85,8 +87,14 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
         match &security_access {
             SecurityAccess::RequestSeed(dc) => Ok((
                 security_access.clone(),
-                self.send(ecu_name, dc.clone(), security_plugin, None, false)
-                    .await?,
+                self.send(
+                    ecu_name,
+                    dc.clone(),
+                    security_plugin,
+                    request_seed_data,
+                    false,
+                )
+                .await?,
             )),
             SecurityAccess::SendKey(dc) => {
                 let result = self
@@ -116,7 +124,7 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
         ecu_name: &str,
         level: &str,
     ) -> Result<String, DiagServiceError> {
-        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
+        let ecu_diag_service = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
         let security_access = ecu_diag_service
             .read()
             .await

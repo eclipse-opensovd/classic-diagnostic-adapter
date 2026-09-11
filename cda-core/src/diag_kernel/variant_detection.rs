@@ -14,7 +14,7 @@
 use cda_database::datatypes;
 use cda_interfaces::{
     DiagComm, DiagCommType, DiagServiceError, HashMap, datatypes::DatabaseNamingConvention,
-    diagservices::DiagServiceResponse, dlt_ctx,
+    diagservices::DiagServiceResponse, dlt_ctx, util::byte_field_matches_hex_pattern,
 };
 type DiagServiceId = String;
 
@@ -128,7 +128,12 @@ pub(super) fn evaluate_variant<T: DiagServiceResponse + Sized>(
                                         .iter()
                                         .find(|(name, _)| **name == expected_param)
                                         .map(|(_name, value)| {
-                                            let matches = value.replace('"', "") == expected_value;
+                                            let received = value.replace('"', "");
+                                            let matches = received == expected_value
+                                                || byte_field_matches_hex_pattern(
+                                                    &received,
+                                                    expected_value,
+                                                );
                                             tracing::debug!(
                                                 service = %service,
                                                 parameter = %expected_param,

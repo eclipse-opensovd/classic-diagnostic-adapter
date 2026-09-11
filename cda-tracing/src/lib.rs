@@ -320,7 +320,14 @@ impl Default for LogFileConfig {
 impl Default for TokioTracingConfig {
     fn default() -> Self {
         Self {
-            #[cfg_attr(nightly, allow(unknown_lints, clippy::duration_suboptimal_units))]
+            #[cfg_attr(
+                nightly,
+                allow(
+                    unknown_lints,
+                    clippy::duration_suboptimal_units,
+                    reason = "from_hours not available in Rust 1.88"
+                )
+            )]
             retention: std::time::Duration::from_secs(60 * 60), // 1h
             server: "127.0.0.1:6669".to_owned(),
             recording_path: None,

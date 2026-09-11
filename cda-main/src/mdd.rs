@@ -19,21 +19,21 @@ use std::{
 
 use cda_core::{EcuManager, EcuManagerConfig};
 use cda_database::{FileManager, ProtoLoadConfig, update_mdd_uncompressed};
-use cda_health::StatusHealthProvider;
 use cda_interfaces::{
     EcuAddresses, EcuManager as EcuManagerTrait, EcuManagerType, FunctionalDescriptionConfig,
     HashMap, HashMapEntry, HashMapExtensions, HashSet, Protocol,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     file_manager::{Chunk, ChunkType},
+    health::HealthProvider,
     storage_api::{Collection, CollectionName, DirectFileAccess, Storage},
 };
 use cda_plugin_security::SecurityPlugin;
+use cda_storage::LocalStorage;
 use tokio::sync::RwLock;
 
 use crate::{
     AppError, DatabaseMap, FileManagerMap,
     config::configfile::{Configuration, EcuConfig},
-    resolve_com_params,
 };
 
 pub(crate) const DB_HEALTH_COMPONENT_KEY: &str = "database";
@@ -129,10 +129,10 @@ fn get_mdd_files_and_size(files: ReadDir) -> Vec<(PathBuf, u64)> {
 pub async fn load_databases<S: SecurityPlugin>(
     config: &Configuration,
     mdd_paths: &[PathBuf],
-    db_health_provider: Option<&Arc<StatusHealthProvider>>,
+    db_health_provider: Option<&Arc<dyn HealthProvider>>,
 ) -> Result<(DatabaseMap<S>, FileManagerMap), AppError> {
     if let Some(provider) = db_health_provider {
-        provider.update_status(cda_health::Status::Starting).await;
+        provider.set_status(cda_health::Status::Starting).await;
     }
     let start = std::time::Instant::now();
 
@@ -157,7 +157,7 @@ pub async fn load_databases<S: SecurityPlugin>(
                 }
                 Err(e) => {
                     if let Some(provider) = db_health_provider {
-                        provider.update_status(cda_health::Status::Failed).await;
+                        provider.set_status(cda_health::Status::Failed).await;
                     }
                     return Err(AppError::DataError(e.to_string()));
                 }
@@ -203,37 +203,40 @@ pub async fn load_databases<S: SecurityPlugin>(
         "Loaded databases"
     );
 
-    let status = if databases.is_empty() {
+    // When `exit_no_database_loaded = false` the operator has explicitly opted
+    // into running without any ECU databases.  Marking health `Failed` in that
+    // case would block the readiness probe forever, so treat empty-but-allowed
+    // as `Up`.
+    let status = if databases.is_empty() && config.database.exit_no_database_loaded {
         cda_health::Status::Failed
     } else {
         cda_health::Status::Up
     };
     if let Some(provider) = db_health_provider {
-        provider.update_status(status).await;
+        provider.set_status(status).await;
     }
 
     Ok((databases, file_managers))
 }
 
-/// Returns paths to MDD files, preferring files found in the CDA storage at `storage_dir`.
-/// Falls back to the configured `database_path` directory if storage is unavailable or empty.
-pub async fn resolve_mdd_paths(storage_dir: &str, database_path: &str) -> Vec<PathBuf> {
-    let storage_paths = load_mdd_paths_from_storage(storage_dir).await;
+/// Returns paths to MDD files, preferring files found in the CDA `storage`.
+/// Falls back to the configured `database.seed_dir` directory if storage is unavailable or empty.
+pub async fn resolve_mdd_paths(storage: &LocalStorage, database_dir: &str) -> Vec<PathBuf> {
+    let storage_paths = load_mdd_paths_from_storage(storage).await;
     if let Some(storage_paths) = storage_paths
         && !storage_paths.is_empty()
     {
         tracing::info!(
             count = storage_paths.len(),
-            storage_dir,
-            "Using MDD files from CDA storage (overrides configured database path)"
+            "Using MDD files from CDA storage (overrides configured database dir)"
         );
         storage_paths
     } else {
         tracing::info!(
-            configured_path = %database_path,
-            "No MDD files found in storage, falling back to configured database path"
+            seed_dir = %database_dir,
+            "No MDD files found in storage, falling back to configured database dir"
         );
-        match std::fs::read_dir(database_path) {
+        let mdd_files = match std::fs::read_dir(database_dir) {
             Ok(files) => get_mdd_files_and_size(files)
                 .into_iter()
                 .map(|(p, _)| p)
@@ -242,21 +245,15 @@ pub async fn resolve_mdd_paths(storage_dir: &str, database_path: &str) -> Vec<Pa
                 tracing::error!(error = %e, "Failed to read directory");
                 vec![]
             }
-        }
+        };
+        seed_storage_if_nonexistent_from_mdd_files(storage, &mdd_files).await;
+        mdd_files
     }
 }
 
-/// Returns paths to all MDD files found in the CDA storage at `storage_dir`.
-/// Falls back to an empty list if the storage is unavailable or the collection cannot be accessed.
-async fn load_mdd_paths_from_storage(storage_dir: &str) -> Option<Vec<PathBuf>> {
-    let storage = match cda_storage::LocalStorage::new(storage_dir) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::debug!(error = %e, "Storage not available, skipping storage MDD lookup");
-            return None;
-        }
-    };
-
+/// Returns paths to all MDD files found in the CDA `storage`.
+/// Falls back to an empty list if the storage collection cannot be accessed.
+async fn load_mdd_paths_from_storage(storage: &LocalStorage) -> Option<Vec<PathBuf>> {
     let collection = match storage
         .get_or_create_collection(&CollectionName::DiagnosticDatabase)
         .await
@@ -290,62 +287,44 @@ async fn load_mdd_paths_from_storage(storage_dir: &str) -> Option<Vec<PathBuf>> 
     )
 }
 
-/// Seeds the `DiagnosticDatabase` storage collection from `database_path` when the collection
-/// is empty. This copies all `.mdd` files from the filesystem into storage so that the runtime
+/// Seeds the `DiagnosticDatabase` storage collection from `mdd_files` when the collection
+/// does not exist. This copies the passed file paths into storage so that the runtime
 /// update plugin has a populated baseline to work with.
-pub async fn seed_storage_from_database_path(storage_dir: &str, database_path: &str) {
-    let mdd_files = match std::fs::read_dir(database_path) {
-        Ok(entries) => get_mdd_files_and_size(entries),
-        Err(e) => {
-            tracing::warn!(error = %e, database_path, "Cannot read database path for seeding");
-            return;
-        }
-    };
+pub async fn seed_storage_if_nonexistent_from_mdd_files(
+    storage: &LocalStorage,
+    mdd_files: &[PathBuf],
+) {
+    let mut seed_entries = vec![];
 
-    if mdd_files.is_empty() {
-        tracing::debug!(database_path, "No MDD files found in database path to seed");
-        return;
-    }
-
-    let entries = mdd_files.into_iter().filter_map(|(path, _)| {
+    for path in mdd_files {
         let key = path
             .file_name()
             .and_then(|n| n.to_str())
             .map(str::to_lowercase)
             .unwrap_or_default();
+
         if key.is_empty() {
-            return None;
-        }
-        match std::fs::read(&path) {
-            Ok(data) => Some((key, data)),
-            Err(e) => {
-                tracing::warn!(path = %path.display(),
-                    error = %e, "Failed to read MDD file for seeding, skipping");
-                None
+            tracing::warn!(path = %path.display(), "Unable to determine filename of MDD file as key for seeding. Skipping.");
+        } else {
+            match tokio::fs::File::open(path).await {
+                Ok(file) => seed_entries.push((key, file)),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), error = %error, "Failed to open MDD file for seeding. Skipping.");
+                }
             }
         }
-    });
+    }
 
-    let storage = match cda_storage::LocalStorage::new(storage_dir) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "Storage not available, skipping seed");
-            return;
-        }
-    };
-
-    if let Some(count) = cda_storage::storage_seed::seed_storage_collection(
-        &storage,
+    if let Some(count) = cda_storage::storage_seed::seed_storage_collection_if_nonexistent(
+        storage,
         &CollectionName::DiagnosticDatabase,
-        entries,
+        seed_entries,
     )
     .await
     {
         tracing::info!(
             count,
-            database_path,
-            storage_dir,
-            "Seeded DiagnosticDatabase collection from database path"
+            "Seeded DiagnosticDatabase collection from MDD files."
         );
     }
 }
@@ -366,52 +345,84 @@ pub(crate) fn handle_ecu_config_keys<S: SecurityPlugin>(
         }
     }
     if strict && !unmatched.is_empty() {
-        return Err(AppError::ConfigurationError(format!(
-            "[strict] ecu_config is enabled and the following per-ECU config entries do not match \
-             any loaded database: {}",
-            unmatched.join(", ")
-        )));
+        return Err(AppError::ConfigurationError {
+            message: format!(
+                "[strict] ecu_config is enabled and the following per-ECU config entries do not \
+                 match any loaded database: {}",
+                unmatched.join(", ")
+            ),
+            source: None,
+        });
     }
     Ok(())
 }
 
-/// Scans `databases` for ECUs sharing the same logical and gateway address and marks them as
-/// duplicates of each other by calling `set_duplicating_ecu_names` on each affected manager.
+/// The transport target an ECU description talks to, as far as duplicate
+/// detection is concerned: several ECU descriptions sharing one target are
+/// candidate models of the same physical node (e.g. the radio variants of a
+/// vehicle), and variant detection decides which one is actually installed.
+#[derive(Hash, PartialEq, Eq)]
+enum DuplicateTargetKey {
+    /// Resolved `DoIP` gateway/logical address pair.
+    Doip { gateway: u16, logical: u16 },
+    /// CAN arbitration ID pair from the MDD com-params, for ECUs without
+    /// resolved `DoIP` addressing (e.g. CAN-only databases).
+    Can(cda_interfaces::CanIds),
+}
+
+/// Scans `databases` for ECUs sharing the same transport target - the
+/// resolved `DoIP` gateway/logical address pair, or (for ECUs without `DoIP`
+/// addressing) the CAN arbitration ID pair from the MDD com-params - and
+/// marks them as duplicates of each other by calling
+/// `set_duplicating_ecu_names` on each affected manager.
 async fn mark_duplicate_ecus_by_address<S: SecurityPlugin>(
     databases: &HashMap<String, RwLock<EcuManager<S>>>,
 ) {
-    let mut ecus_by_address: HashMap<u16, HashMap<u16, Vec<String>>> = HashMap::new();
+    use cda_interfaces::CanComParamProvider as _;
+
+    let mut ecus_by_target: HashMap<DuplicateTargetKey, Vec<String>> = HashMap::new();
     for (name, db_lock) in databases {
         let db = db_lock.read().await;
-        let logical_address = db.logical_address();
-        let gateway_address = db.logical_gateway_address();
-        ecus_by_address
-            .entry(gateway_address)
-            .or_default()
-            .entry(logical_address)
-            .or_default()
-            .push(name.clone());
+        let key = if db.doip_addresses_resolved() {
+            DuplicateTargetKey::Doip {
+                gateway: db.logical_gateway_address(),
+                logical: db.logical_address(),
+            }
+        } else if let Some(ids) = db.can_ids() {
+            DuplicateTargetKey::Can(ids)
+        } else {
+            // Without resolved DoIP addressing the addresses are com-param
+            // fallback values shared by every such ECU (e.g. a functional
+            // description), and without CAN IDs there is no other target
+            // identity - no evidence of an actual collision, so grouping
+            // would spuriously mark unrelated ECUs as duplicates and
+            // suppress base-variant fallback for all of them.
+            tracing::debug!(
+                ecu_name = %name,
+                "Skipping duplicate detection - neither resolved DoIP addressing nor CAN IDs"
+            );
+            continue;
+        };
+        ecus_by_target.entry(key).or_default().push(name.clone());
     }
 
-    for logical_map in ecus_by_address.values() {
-        for ecu_names in logical_map.values() {
-            if ecu_names.len() <= 1 {
+    for ecu_names in ecus_by_target.values() {
+        if ecu_names.len() <= 1 {
+            continue;
+        }
+
+        for ecu_name in ecu_names {
+            let Some(db_lock) = databases.get(ecu_name) else {
                 continue;
-            }
+            };
 
-            for ecu_name in ecu_names {
-                let Some(db_lock) = databases.get(ecu_name) else {
-                    continue;
-                };
-
-                let mut db = db_lock.write().await;
-                let duplicates: HashSet<String> = ecu_names
-                    .iter()
-                    .filter(|&name| name != ecu_name)
-                    .cloned()
-                    .collect();
-                db.set_duplicating_ecu_names(duplicates);
-            }
+            let mut db = db_lock.write().await;
+            let duplicates: HashSet<String> = ecu_names
+                .iter()
+                .filter(|&name| name != ecu_name)
+                .cloned()
+                .collect();
+            db.set_duplicating_ecu_names(duplicates);
         }
     }
 }
@@ -517,7 +528,7 @@ fn load_ecu_from_file<S: SecurityPlugin>(
 ) -> Option<EcuLoadResult<S>> {
     let mut proto_data = proto_data;
     let diag_database = build_diagnostic_database(&mut proto_data, ctx)?;
-    let effective_com_params = resolve_com_params(
+    let effective_com_params = crate::config::com_params::resolve_com_params(
         &ctx.ecu_name,
         ctx.com_params,
         per_ecu_cfg.and_then(|c| c.com_params.as_ref()),
@@ -659,55 +670,24 @@ fn insert_or_update_ecu<S: SecurityPlugin>(
 
 #[cfg(test)]
 mod tests {
-    use crate::resolve_com_params;
+    use std::path::PathBuf;
 
-    #[test]
-    fn resolve_com_params_returns_none_on_figment_extraction_failure() {
-        use cda_interfaces::datatypes::ComParams;
-        let global = ComParams::default();
-        let mut table = toml::Table::new();
-        table.insert(
-            "uds".to_owned(),
-            toml::Value::String("not_a_struct".to_owned()),
-        );
-        let ecu_params = crate::config::configfile::EcuComParams(table);
-        let result = resolve_com_params("BAD_ECU", &global, Some(&ecu_params));
-        assert!(
-            result.is_none(),
-            "resolve_com_params must return None when figment extraction fails"
-        );
-    }
+    use cda_interfaces::storage_api::{CollectionName, DirectFileAccess, Storage};
+    use tempfile::TempDir;
 
-    use cda_interfaces::storage_api::{Collection as _, CollectionName, DirectFileAccess, Storage};
-    use cda_storage::LocalStorage;
-
-    use super::{resolve_mdd_paths, seed_storage_from_database_path};
-
-    /// Helper: create a temp dir with `.mdd` files containing given data.
-    fn create_database_dir(files: &[(&str, &[u8])]) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("create temp dir");
-        for (name, data) in files {
-            std::fs::write(dir.path().join(name), data).expect("write file");
-        }
-        dir
-    }
+    use super::*;
 
     #[tokio::test]
-    async fn seed_copies_mdd_files_into_empty_storage() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
-        let db_dir = create_database_dir(&[
+    async fn seed_copies_mdd_files_into_nonexistent_storage() {
+        let fixture = Fixture::new_with_mdd_files(&[
             ("ecu_a.mdd", b"MDD_CONTENT_A"),
             ("ecu_b.mdd", b"MDD_CONTENT_B"),
         ]);
 
-        seed_storage_from_database_path(
-            storage_dir.path().to_str().unwrap(),
-            db_dir.path().to_str().unwrap(),
-        )
-        .await;
+        seed_storage_if_nonexistent_from_mdd_files(&fixture.storage, &fixture.mdd_files).await;
 
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
-        let collection = storage
+        let collection = fixture
+            .storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
             .await
             .unwrap();
@@ -719,33 +699,27 @@ mod tests {
 
     #[tokio::test]
     async fn seed_skips_when_collection_already_populated() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
-        let db_dir = create_database_dir(&[("new.mdd", b"NEW_DATA")]);
+        let fixture = Fixture::new_with_mdd_files(&[("new.mdd", b"NEW_DATA")]);
 
         // Pre-populate storage with an existing entry.
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
-        let collection = storage
+        let collection = fixture
+            .storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
             .await
             .unwrap();
-        let mut tx = storage.begin_transaction().unwrap();
+        let mut tx = fixture.storage.begin_transaction().unwrap();
         let mut data: &[u8] = b"EXISTING";
         collection
             .write(&mut tx, "existing.mdd", &mut data)
             .await
             .unwrap();
         tx.commit().await.unwrap();
-        drop(storage);
 
-        seed_storage_from_database_path(
-            storage_dir.path().to_str().unwrap(),
-            db_dir.path().to_str().unwrap(),
-        )
-        .await;
+        seed_storage_if_nonexistent_from_mdd_files(&fixture.storage, &fixture.mdd_files).await;
 
         // Verify collection was NOT modified.
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
-        let collection = storage
+        let collection = fixture
+            .storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
             .await
             .unwrap();
@@ -754,61 +728,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seed_ignores_non_mdd_files() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
-        let db_dir = create_database_dir(&[
-            ("valid.mdd", b"MDD_DATA"),
-            ("readme.txt", b"TEXT"),
-            ("data.bin", b"BIN"),
-        ]);
+    async fn seed_handles_no_database_files() {
+        let fixture = Fixture::new_with_mdd_files(&[]);
 
-        seed_storage_from_database_path(
-            storage_dir.path().to_str().unwrap(),
-            db_dir.path().to_str().unwrap(),
-        )
-        .await;
+        seed_storage_if_nonexistent_from_mdd_files(&fixture.storage, &fixture.mdd_files).await;
 
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
-        let collection = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
-        let keys = collection.list().await.unwrap();
-        assert_eq!(keys, vec!["valid.mdd"]);
-    }
-
-    #[tokio::test]
-    async fn seed_handles_empty_database_dir() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
-        let db_dir = tempfile::tempdir().expect("empty db dir");
-
-        seed_storage_from_database_path(
-            storage_dir.path().to_str().unwrap(),
-            db_dir.path().to_str().unwrap(),
-        )
-        .await;
-
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
-        let collection = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-            .await
-            .unwrap();
-        assert!(collection.is_empty().await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn seed_handles_nonexistent_database_path() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
-
-        // Should not panic, just return early.
-        seed_storage_from_database_path(
-            storage_dir.path().to_str().unwrap(),
-            "/tmp/nonexistent_cda_test_path_12345",
-        )
-        .await;
-
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
-        let collection = storage
+        let collection = fixture
+            .storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
             .await
             .unwrap();
@@ -817,17 +743,12 @@ mod tests {
 
     #[tokio::test]
     async fn seed_lowercases_mdd_filenames_as_keys() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
-        let db_dir = create_database_dir(&[("ECU_UPPER.mdd", b"UPPER_DATA")]);
+        let fixture = Fixture::new_with_mdd_files(&[("ECU_UPPER.mdd", b"UPPER_DATA")]);
 
-        seed_storage_from_database_path(
-            storage_dir.path().to_str().unwrap(),
-            db_dir.path().to_str().unwrap(),
-        )
-        .await;
+        seed_storage_if_nonexistent_from_mdd_files(&fixture.storage, &fixture.mdd_files).await;
 
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
-        let collection = storage
+        let collection = fixture
+            .storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
             .await
             .unwrap();
@@ -837,18 +758,13 @@ mod tests {
 
     #[tokio::test]
     async fn seed_preserves_file_content_through_storage_roundtrip() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
         let original_data = b"MDD_BINARY_PAYLOAD_1234567890";
-        let db_dir = create_database_dir(&[("FLXC1000.mdd", original_data)]);
+        let fixture = Fixture::new_with_mdd_files(&[("FLXC1000.mdd", original_data)]);
 
-        seed_storage_from_database_path(
-            storage_dir.path().to_str().unwrap(),
-            db_dir.path().to_str().unwrap(),
-        )
-        .await;
+        seed_storage_if_nonexistent_from_mdd_files(&fixture.storage, &fixture.mdd_files).await;
 
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
-        let collection = storage
+        let collection = fixture
+            .storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
             .await
             .unwrap();
@@ -862,22 +778,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_mdd_paths_ignores_non_mdd_files() {
+        let fixture = Fixture::new_with_mdd_files(&[
+            ("valid.mdd", b"MDD_DATA"),
+            ("readme.txt", b"TEXT"),
+            ("data.bin", b"BIN"),
+        ]);
+
+        let mdd_files =
+            resolve_mdd_paths(&fixture.storage, fixture.db_dir.path().to_str().unwrap()).await;
+
+        let [valid_file] = mdd_files.as_slice() else {
+            panic!("Exactly one file expected.");
+        };
+        assert_eq!(valid_file.file_name().unwrap(), "valid.mdd");
+    }
+
+    #[tokio::test]
     async fn resolve_mdd_paths_returns_storage_paths_after_seed() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
-        let db_dir = create_database_dir(&[("FLXC1000.mdd", b"MDD_A"), ("FSNR2000.mdd", b"MDD_B")]);
+        let fixture =
+            Fixture::new_with_mdd_files(&[("FLXC1000.mdd", b"MDD_A"), ("FSNR2000.mdd", b"MDD_B")]);
 
-        let storage_str = storage_dir.path().to_str().unwrap();
-        let db_str = db_dir.path().to_str().unwrap();
+        let db_str = fixture.db_dir.path().to_str().unwrap();
 
-        seed_storage_from_database_path(storage_str, db_str).await;
-        let paths = resolve_mdd_paths(storage_str, db_str).await;
+        seed_storage_if_nonexistent_from_mdd_files(&fixture.storage, &fixture.mdd_files).await;
+        let paths = resolve_mdd_paths(&fixture.storage, db_str).await;
 
         assert_eq!(paths.len(), 2, "Expected 2 MDD paths from storage");
         for p in &paths {
             assert!(p.exists(), "Resolved path must exist: {}", p.display());
             // Paths should come from storage, not from the original database dir.
             assert!(
-                !p.starts_with(db_dir.path()),
+                !p.starts_with(fixture.db_dir.path()),
                 "Path should come from storage, not the database dir: {}",
                 p.display()
             );
@@ -885,24 +817,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_mdd_paths_falls_back_when_storage_empty() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
-        let db_dir = create_database_dir(&[("ECU.mdd", b"DATA")]);
+    async fn resolve_mdd_paths_falls_back_when_storage_nonexistent() {
+        let fixture = Fixture::new_with_mdd_files(&[("ECU.mdd", b"DATA")]);
 
-        // Do NOT seed - storage remains empty.
-        let paths = resolve_mdd_paths(
-            storage_dir.path().to_str().unwrap(),
-            db_dir.path().to_str().unwrap(),
-        )
-        .await;
+        // Do NOT seed - storage remains nonexistent.
+        let paths =
+            resolve_mdd_paths(&fixture.storage, fixture.db_dir.path().to_str().unwrap()).await;
 
         let first = paths.first().expect("first should exist");
 
         assert_eq!(paths.len(), 1, "Expected 1 MDD path from fallback");
         assert!(
-            first.starts_with(db_dir.path()),
-            "Path should come from database dir when storage is empty: {}",
+            first.starts_with(fixture.db_dir.path()),
+            "Path should come from database dir when storage is nonexistent: {}",
             first.display()
         );
+    }
+
+    struct Fixture {
+        mdd_files: Vec<PathBuf>,
+        storage: LocalStorage,
+        db_dir: TempDir,
+        _storage_dir: TempDir, // carried along so it only gets dropped/deleted at the end of the test case
+    }
+    impl Fixture {
+        fn new_with_mdd_files(mdd_files: &[(&str, &[u8])]) -> Self {
+            let storage_dir = tempfile::tempdir().expect("storage dir");
+            let db_dir = tempfile::tempdir().expect("DB dir");
+
+            let mdd_files = mdd_files
+                .iter()
+                .map(|(name, data)| (db_dir.path().join(name), *data))
+                .collect::<Vec<_>>();
+
+            for (path, data) in &mdd_files {
+                std::fs::write(path, data).expect("write MDD file");
+            }
+
+            let storage = LocalStorage::new(storage_dir.path()).unwrap();
+
+            Self {
+                mdd_files: mdd_files.into_iter().map(|(path, _)| path).collect(),
+                _storage_dir: storage_dir,
+                storage,
+                db_dir,
+            }
+        }
     }
 }

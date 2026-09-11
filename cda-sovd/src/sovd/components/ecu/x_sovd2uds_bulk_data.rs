@@ -80,6 +80,7 @@ pub(crate) mod mdd_embedded_files {
                     hash_algorithm: None,
                     id: id.clone(),
                     mimetype: content_type_from_meta(meta),
+                    name: Some(meta.name.clone()),
                     size: Some(meta.uncompressed_size),
                     origin_path: Some(meta.name.clone()),
                     revision: None,
@@ -99,6 +100,7 @@ pub(crate) mod mdd_embedded_files {
                         items: vec![sovd_interfaces::sovd2uds::BulkDataDescriptor {
                             id: "example_file".to_owned(),
                             mimetype: "application/octet-stream".to_owned(),
+                            name: Some("example_file".to_owned()),
                             size: Some(1234),
                             hash: None,
                             hash_algorithm: None,

@@ -273,7 +273,8 @@ Vehicle Identification
     **Spontaneous VAM Listener**
 
     After initial discovery, a background task continuously listens on the gateway port
-    for spontaneous VAM broadcasts. This handles:
+    for spontaneous VAM broadcasts, subject to the configured spontaneous VAM handling mode (see
+    :need:`arch~doip-vam-handling-mode`). When active, this handles:
 
     - Gateways coming online after the initial VIR broadcast
     - Gateways reconnecting after a temporary disconnection
@@ -312,6 +313,72 @@ Vehicle Identification
         GWA --> UDP: Spontaneous VAM\n(entity came online)
         UDP --> CDA: New VAM received
         CDA -> CDA: Establish connection\nand trigger variant detection
+        @enduml
+
+
+Spontaneous VAM Handling Mode
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. arch:: Spontaneous VAM Handling Mode
+    :id: arch~doip-vam-handling-mode
+    :status: draft
+
+    The spontaneous VAM listener's behavior is governed by the configured
+    ``communication.vam_handling_mode``:
+
+    - **always** (default): the listener is active and any spontaneous VAM whose logical address matches a
+      known ECU from the diagnostic databases triggers connection establishment and variant detection, as
+      described in the Spontaneous VAM Listener section above.
+    - **persisted-only**: the listener is active only while a persisted ECU topology exists (see
+      :need:`arch~dt-ecu-list-persistence`); this is a one-time check of whether the persistence bucket is
+      present, not a per-VAM lookup of the responding entity's logical address. When a topology exists,
+      spontaneous VAMs are handled identically to **always** mode, including VAMs from entities not yet
+      present in the persisted topology -- such entities are discovered and added like any other. When no
+      persisted topology exists, the listener discards all spontaneous VAMs (logged only) until a topology
+      has been persisted (via startup detection or ``networkreset``, see
+      :need:`arch~plugin-vehicle-topology-reset-persistence`), at which point it starts handling spontaneous
+      VAMs normally without requiring a restart. When ``communication.ecu_list_persistence.enabled`` is
+      ``false`` (see :need:`arch~dt-ecu-list-persistence`), a persisted topology can never exist, so this
+      mode is functionally identical to **never** in that configuration.
+    - **never**: the spontaneous VAM listener task is not started. Gateways can only be (re-)discovered via
+      an explicit ``networkreset`` execution (see :need:`arch~plugin-vehicle-topology-reset-persistence`) or
+      via the DoIP connection retry mechanism operating on already-established connections (see
+      ``CP_DoIPConnectionRetryDelay`` / ``CP_DoIPConnectionRetryAttempts``).
+
+    Independent of ``vam_handling_mode``, the spontaneous VAM listener task itself is only started once
+    ECU/DoIP communication has actually been initialized (see :need:`arch~dt-deferred-initialization`).
+    While ``init_mode`` is ``OnDemand`` or ``Disabled`` and its trigger has not yet fired, no listener task
+    exists, regardless of the configured mode.
+
+    .. uml::
+        :caption: Spontaneous VAM Handling Mode
+
+        @startuml
+        skinparam backgroundColor #FFFFFF
+        skinparam sequenceArrowThickness 2
+
+        participant "DoIP Entity" as GW
+        participant "Spontaneous VAM\nListener" as Listener
+        participant "Persisted Topology" as Persist
+
+        == communication.vam_handling_mode = always ==
+        GW --> Listener: spontaneous VAM
+        Listener -> Listener: connect + trigger variant detection
+
+        == communication.vam_handling_mode = persisted-only ==
+        Listener -> Persist: does a persisted topology exist?
+        alt persisted topology exists
+            Persist --> Listener: yes
+            GW --> Listener: spontaneous VAM\n(known or new entity)
+            Listener -> Listener: connect + trigger variant detection
+        else no persisted topology
+            Persist --> Listener: no
+            GW --> Listener: spontaneous VAM
+            Listener -> Listener: discard (log only)
+        end
+
+        == communication.vam_handling_mode = never ==
+        note over Listener: listener task not started
         @enduml
 
 
@@ -540,17 +607,111 @@ Diagnostic Message Exchange
 
     **Receiving the Diagnostic Response**
 
-    After a successful ACK, the CDA waits for the diagnostic response. Multiple
-    intermediate responses may be received before the final response:
+    After a successful ACK, the CDA waits for the diagnostic response. All responses
+    (including pending NRCs) arrive as raw ``DiagnosticResponse::Msg`` events on the
+    per-ECU broadcast channel. ``doip_event_to_transport()`` classifies the three
+    pending-lifecycle NRCs with ``pending_nrc_from_raw()`` and forwards them as
+    ``TransportResponse::Pending``. It wraps every other response in
+    ``TransportResponse::UdsResponse`` with ``uds_response_from_raw()``.
 
-    - **NRC 0x78 (Response Pending)**: The ECU needs more time. The CDA continues waiting
-      according to ``CP_RC78Handling`` and ``CP_RC78CompletionTimeout``, using the enhanced
-      timeout ``CP_P6Star``.
-    - **NRC 0x21 (Busy, Repeat Request)**: The ECU is busy. Handling depends on
-      ``CP_RC21Handling``, ``CP_RC21CompletionTimeout``, and ``CP_RC21RequestTime``.
-    - **NRC 0x94 (Temporarily Not Available)**: Handling depends on ``CP_RC94Handling``,
-      ``CP_RC94CompletionTimeout``, and ``CP_RC94RequestTime``.
+    The only exception is TesterPresent NRCs (``7F 3E xx``), which are intercepted at
+    the DoIP decoding layer and routed to a dedicated ``TesterPresentNRC`` event so the
+    receiver can log-and-drop them without polluting per-ECU channels.
+
+    Multiple intermediate responses may be received before the final response:
+
+    - **NRC 0x78 (Response Pending)**: The ECU needs more time. Classified at the
+      transport boundary and handled by the UDS layer per ``CP_RC78Handling`` and
+      ``CP_RC78CompletionTimeout``, using the enhanced timeout ``CP_P6Star``.
+    - **NRC 0x21 (Busy, Repeat Request)**: The ECU is busy. Classified at the
+      transport boundary and handled per ``CP_RC21Handling``, ``CP_RC21CompletionTimeout``, and
+      ``CP_RC21RequestTime``.
+    - **NRC 0x94 (Temporarily Not Available)**: Classified at the transport boundary and
+      handled per ``CP_RC94Handling``, ``CP_RC94CompletionTimeout``, and
+      ``CP_RC94RequestTime``.
     - **Final Response**: The complete UDS response is returned to the caller.
+
+    **NRC Classification in the DoIP Receive Path**
+
+    The following diagram traces the complete path of a UDS negative response through
+    the DoIP receive pipeline, from raw TCP bytes to the typed ``TransportResponse``
+    variant that the UDS application layer consumes:
+
+    .. uml::
+        :caption: DoIP NRC Classification Flow
+
+        @startuml
+        skinparam backgroundColor #FFFFFF
+        skinparam componentStyle rectangle
+
+        title "DoIP NRC Classification Flow"
+
+        package "TCP Stream" as TCP {
+          (Raw DoIP frame\n0x8001 DiagnosticMessage) as Raw
+        }
+
+        package "connections.rs: try_read()" as DecodePkg {
+          (Decode DoIP header\nand payload) as Decode
+          (is_tester_present_nrc?) as TpCheck
+        }
+
+        package "connection_receiver.rs\nhandle_ok_response()" as RoutePkg {
+          (Broadcast to per-ECU\nchannel by source_address) as Route
+          (Log and drop) as Drop
+        }
+
+        package "lib.rs\ndoip_event_to_transport()" as ClassifyPkg {
+          (pending_nrc_from_raw?) as NrcCheck
+        }
+
+        package "TransportResponse" as RespPkg {
+          (TransportResponse::Pending\n{PendingNrc}) as Pending
+          (TransportResponse::UdsResponse\n{ServicePayload}) as Final
+        }
+
+        Raw --> Decode
+        Decode --> TpCheck
+
+        TpCheck --> Route : [NO]\nDiagnosticResponse::Msg
+        TpCheck --> Drop : [YES]\nTesterPresentNRC(code)
+
+        Route --> NrcCheck : Per-ECU broadcast\nchannel
+
+        NrcCheck --> Pending : [YES]\n0x78 / 0x21 / 0x94
+        NrcCheck --> Final : [NO]\nAll other responses
+
+        note bottom of Drop
+            TesterPresent NRCs (7F 3E xx)
+            from functional keep-alive are
+            intercepted here and never
+            reach the per-ECU channel.
+            The receiver logs them at
+            debug level and discards them.
+        end note
+
+        note bottom of NrcCheck
+            Shared classification using
+            pending_nrc_from_raw() from
+            cda-interfaces/src/uds.rs.
+            Identical logic for both
+            DoIP and CAN transports.
+        end note
+
+        note bottom of Final
+            This path carries both
+            positive responses and
+            non-pending negative responses
+            (all NRCs except 0x78/0x21/0x94).
+        end note
+        @enduml
+
+    The classification functions are defined in ``cda-interfaces/src/uds.rs``:
+
+    * ``is_tester_present_nrc(data)`` -- checks for ``0x7F 0x3E xx``
+    * ``pending_nrc_from_raw(data, source_address)`` -- classifies ``0x78``/``0x21``/``0x94``
+      into ``PendingNrc`` variants and returns ``None`` for all other responses
+    * ``uds_response_from_raw(data, source_address, target_address)`` -- wraps any
+      remaining response (positive or non-pending negative) into a ``ServicePayload``
 
     **Functional Addressing**
 

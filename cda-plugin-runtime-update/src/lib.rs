@@ -11,20 +11,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// SPDX-License-Identifier: Apache-2.0
-//
-// See the NOTICE file(s) distributed with this work for additional
-// information regarding copyright ownership.
-//
-// This program and the accompanying materials are made available under the
-// terms of the Apache License Version 2.0 which is available at
-// https://www.apache.org/licenses/LICENSE-2.0
-
-pub use default_runtime_update_plugin::DefaultRuntimeFilesUpdatePlugin;
+pub use default_runtime_update_plugin::DefaultRuntimeUpdatePlugin;
+pub use security::DefaultUpdateSecurityHandler;
 
 pub mod config;
+pub mod default_runtime_reloader_plugin;
+pub use default_runtime_reloader_plugin::{DefaultReloadContext, RuntimeReloaderConfig};
 pub mod default_runtime_update_plugin;
 pub mod operations;
+pub mod security;
 pub mod storage;
 
 /// Shared test utilities for the runtime update plugin tests.
@@ -38,15 +33,45 @@ pub(crate) mod test_utils {
     use async_trait::async_trait;
     use bytes::Bytes;
     use cda_interfaces::{
+        communication_control::{TransportControl, TransportState, error::CommControlError},
         runtime_update_api::{
-            LockStateProvider, ReloadError, RuntimeFileReloadHandler, RuntimeUpdateError,
-            UpdateFileType, UploadFile, VerificationError,
+            LockStateProvider, ReloadError, RuntimeReloaderPlugin, RuntimeUpdateError, UploadFile,
+            VerificationError,
         },
         storage_api::{
             Collection, CollectionName, DirectFileAccess, ReadableStream, Storage, Transaction,
         },
     };
     use cda_storage::LocalStorage;
+
+    pub(crate) struct StubTransport {
+        state: tokio::sync::Mutex<TransportState>,
+    }
+
+    impl StubTransport {
+        pub(crate) fn new() -> Arc<Self> {
+            Arc::new(Self {
+                state: tokio::sync::Mutex::new(TransportState::Disabled),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl TransportControl for StubTransport {
+        async fn enable(&self) -> Result<(), CommControlError> {
+            *self.state.lock().await = TransportState::Enabled;
+            Ok(())
+        }
+
+        async fn disable(&self) -> Result<(), CommControlError> {
+            *self.state.lock().await = TransportState::Disabled;
+            Ok(())
+        }
+
+        async fn state(&self) -> TransportState {
+            *self.state.lock().await
+        }
+    }
 
     pub(crate) async fn write_file(
         storage: &impl Storage,
@@ -87,7 +112,7 @@ pub(crate) mod test_utils {
 
     #[async_trait]
     impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'static>
-        cda_interfaces::runtime_update_api::RuntimeFilesUpdateSecurityHandler<L, C>
+        cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
         for MockSecurityHandler
     {
         async fn check_apply_allowed(
@@ -106,7 +131,6 @@ pub(crate) mod test_utils {
 
         async fn check_file_integrity(
             &self,
-            _type: UpdateFileType,
             _path: &std::path::Path,
         ) -> Result<(), VerificationError> {
             Ok(())
@@ -188,42 +212,55 @@ pub(crate) mod test_utils {
 
     pub struct RecordingReloadHandler {
         pub reload_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
-        pub config_calls: Arc<Mutex<Vec<PathBuf>>>,
     }
 
     impl RecordingReloadHandler {
         pub fn new() -> Self {
             Self {
                 reload_calls: Arc::new(Mutex::new(Vec::new())),
-                config_calls: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
 
     #[async_trait]
-    impl RuntimeFileReloadHandler for RecordingReloadHandler {
+    impl RuntimeReloaderPlugin for RecordingReloadHandler {
         async fn reload_databases(&self, paths: Vec<PathBuf>) -> Result<(), ReloadError> {
             self.reload_calls.lock().unwrap().push(paths);
             Ok(())
         }
+    }
 
-        async fn reload_configuration(&self, path: PathBuf) -> Result<(), ReloadError> {
-            self.config_calls.lock().unwrap().push(path);
+    /// A [`RuntimeReloaderPlugin`] that does nothing, useful as a default in tests.
+    pub struct NoopReloadHandler;
+
+    #[async_trait]
+    impl RuntimeReloaderPlugin for NoopReloadHandler {
+        async fn reload_databases(&self, _mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
             Ok(())
         }
     }
 
-    /// A [`RuntimeFileReloadHandler`] that does nothing, useful as a default in tests.
-    pub struct NoopReloadHandler;
+    /// A [`RuntimeReloaderPlugin`] whose database reload always fails, useful for
+    /// exercising the async-failure path of an execution that has otherwise been
+    /// accepted (i.e. that got past all synchronous pre-checks in `start_execution`).
+    pub struct FailingReloadHandler;
 
     #[async_trait]
-    impl RuntimeFileReloadHandler for NoopReloadHandler {
+    impl RuntimeReloaderPlugin for FailingReloadHandler {
         async fn reload_databases(&self, _mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
-            Ok(())
+            Err(ReloadError::General("Simulated reload failure".to_string()))
         }
+    }
 
-        async fn reload_configuration(&self, _config_path: PathBuf) -> Result<(), ReloadError> {
-            Ok(())
+    /// A [`RuntimeReloaderPlugin`] whose database reload panics, to exercise the
+    /// supervisor path for an execution task that ends without writing a
+    /// terminal status.
+    pub struct PanickingReloadHandler;
+
+    #[async_trait]
+    impl RuntimeReloaderPlugin for PanickingReloadHandler {
+        async fn reload_databases(&self, _mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
+            panic!("Simulated reload panic");
         }
     }
 }
@@ -303,20 +340,20 @@ mod tests {
             Ok(<_>::default())
         }
 
-        async fn delete_nextupdate(&self) -> Result<(), RuntimeUpdateError> {
+        async fn delete_nextupdate(&self) -> Result<Vec<String>, RuntimeUpdateError> {
             self.concurrent_writes.fetch_add(1, Ordering::SeqCst);
             self.write_barrier.wait().await;
             self.write_notify.notified().await;
             self.concurrent_writes.fetch_sub(1, Ordering::SeqCst);
-            Ok(())
+            Ok(vec![])
         }
 
         async fn delete_nextupdate_by_id(&self, _file_id: &str) -> Result<(), RuntimeUpdateError> {
             Ok(())
         }
 
-        async fn delete_backup(&self) -> Result<(), RuntimeUpdateError> {
-            Ok(())
+        async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
+            Ok(vec![])
         }
 
         async fn start_execution(

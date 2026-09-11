@@ -1,0 +1,24 @@
+/* SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+ *
+ * See the NOTICE file(s) distributed with this work for additional
+ * information regarding copyright ownership.
+ *
+ * This program and the accompanying materials are made available under the
+ * terms of the Apache License Version 2.0 which is available at
+ * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
+ * Diagrams are rendered ahead of time by PlantUML as PNG images with a
+ * plain white background, so a dark theme would always leave them looking
+ * broken (white boxes floating on a dark page), regardless of any other
+ * theming work. This documentation is intentionally light-mode only, so we
+ * hide Furo's light/dark toggle button. See force_light_theme.js for the
+ * matching script that keeps the page from following the OS/browser
+ * dark-mode preference.
+ */
+.theme-toggle-container {
+  display: none !important;
+}

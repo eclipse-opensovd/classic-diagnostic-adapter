@@ -16,8 +16,7 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, HashMapExtensions,
-    PayloadDecoder, ServicePayload, TransmissionParameters, UdsFunctionalGroup, UdsResponse,
-    UdsTransport,
+    PayloadDecoder, ServicePayload, TransmissionParameters, UdsFunctionalGroup, UdsTransport,
     datatypes::{ComponentDataInfo, ComponentOperationsInfo, RoutineSubfunctions},
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     dlt_ctx,
@@ -74,7 +73,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 };
                 for (ecu_name, uds_result) in uds_responses {
                     match uds_result {
-                        Ok(UdsResponse::Message(msg)) => {
+                        Ok(msg) => {
                             // Process the response using the ECU's convert_from_uds
                             let ecu_read = fgl_ecu.read().await;
                             let response = ecu_read
@@ -86,16 +85,6 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                                 )
                                 .await;
                             result_map.insert(ecu_name, response);
-                        }
-                        Ok(_) => {
-                            // Other UDS response types shouldn't occur in functional communication
-                            result_map.insert(
-                                ecu_name,
-                                Err(DiagServiceError::UnexpectedResponse(Some(
-                                    "Unexpected UDS response type in functional communication"
-                                        .to_string(),
-                                ))),
-                            );
                         }
                         Err(e) => {
                             result_map.insert(ecu_name, Err(e));
@@ -209,6 +198,17 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
             );
             return HashMap::new();
         }
+
+        let _guard = match self.require_communication_ready() {
+            Ok(guard) => guard,
+            Err(error) => {
+                let mut result_map = HashMap::new();
+                for ecu_name in ecu_list {
+                    result_map.insert(ecu_name, Err(error.clone()));
+                }
+                return result_map;
+            }
+        };
 
         let Some(globals_ecu) = self.ecus.get(&self.functional_description_database) else {
             tracing::warn!(
@@ -367,7 +367,7 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
         params: Option<HashMap<String, serde_json::Value>>,
         map_to_json: bool,
     ) -> Result<Self::Response, DiagServiceError> {
-        let ecu = self.uds_ecu_db(ecu_name)?;
+        let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
         let service = ecu
             .read()
             .await

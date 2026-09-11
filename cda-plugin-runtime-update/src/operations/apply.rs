@@ -12,13 +12,11 @@
  */
 
 use cda_interfaces::{
-    runtime_update_api::{RuntimeFileReloadHandler, RuntimeUpdateError},
+    runtime_update_api::{RuntimeReloaderPlugin, RuntimeUpdateError},
     storage_api::{CollectionName, Storage, Transaction},
 };
 
-use crate::operations::{
-    reload_configuration_if_present, reload_database_if_present, try_get_collection,
-};
+use crate::operations::{reload_database_if_present, try_get_collection};
 
 async fn swap_collection<S: Storage>(
     storage: &S,
@@ -32,30 +30,27 @@ async fn swap_collection<S: Storage>(
     Ok(storage.delete_collection(tx, next_update).await?)
 }
 
-/// Atomically applies pending MDD files (and optionally config) from the staging
-/// `NextUpdate` collections into the live `DiagnosticDatabase` (and `Configuration`)
-/// collections, backing up current files first.
+/// Atomically applies pending MDD files from staging into the live database,
+/// backing up current files first.
 ///
 /// The 'apply' performs a **snapshot swap**: the entire `NextUpdate` collection replaces the
 /// current collection. Files absent from `NextUpdate` are removed from current.
 ///
 /// # Parameters
 /// - `storage`: The storage backend.
-/// - `reload_handler`: Notified after commit so the runtime can hot-reload databases/config.
+/// - `reload_handler`: Notified after commit so the runtime can hot-reload databases.
 /// - `mdd_decompress`: If true, decompress MDD files in-place after commit.
 ///
 /// # Errors
 /// Returns [`RuntimeUpdateError`] if validation, transaction, or reload fails.
-pub async fn execute_apply<S: Storage, R: RuntimeFileReloadHandler>(
+pub async fn execute_apply<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
     storage: &S,
     reload_handler: &R,
     mdd_decompress: bool,
 ) -> Result<(), RuntimeUpdateError> {
     let mdd_next =
         try_get_collection(storage, &CollectionName::DiagnosticDatabaseNextUpdate).await?;
-    let cfg_next = try_get_collection(storage, &CollectionName::ConfigurationNextUpdate).await?;
-
-    if mdd_next.is_none() && cfg_next.is_none() {
+    if mdd_next.is_none() {
         return Err(RuntimeUpdateError::NoPendingUpdate);
     }
 
@@ -68,15 +63,6 @@ pub async fn execute_apply<S: Storage, R: RuntimeFileReloadHandler>(
             .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
             .await?;
     }
-    if cfg_next.is_some() {
-        storage
-            .get_or_create_collection(&CollectionName::Configuration)
-            .await?;
-        storage
-            .get_or_create_collection(&CollectionName::ConfigurationBackup)
-            .await?;
-    }
-
     let mut tx = storage.begin_transaction()?;
 
     if mdd_next.is_some() {
@@ -90,22 +76,7 @@ pub async fn execute_apply<S: Storage, R: RuntimeFileReloadHandler>(
         .await?;
     }
 
-    if cfg_next.is_some() {
-        swap_collection(
-            storage,
-            &mut tx,
-            &CollectionName::Configuration,
-            &CollectionName::ConfigurationBackup,
-            &CollectionName::ConfigurationNextUpdate,
-        )
-        .await?;
-    }
-
     tx.commit().await?;
-
-    if cfg_next.is_some() {
-        reload_configuration_if_present(storage, reload_handler).await?;
-    }
 
     if mdd_next.is_some() {
         reload_database_if_present(storage, reload_handler, mdd_decompress).await?;
@@ -116,9 +87,6 @@ pub async fn execute_apply<S: Storage, R: RuntimeFileReloadHandler>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use async_trait::async_trait;
     use cda_interfaces::{
         runtime_update_api::RuntimeUpdateError,
         storage_api::{
@@ -130,30 +98,6 @@ mod tests {
     use crate::test_utils::{
         NoopReloadHandler, RecordingReloadHandler, init_collection, make_storage,
     };
-
-    #[derive(Clone, Default)]
-    struct OrderingReloadHandler {
-        call_order: Arc<Mutex<Vec<&'static str>>>,
-    }
-
-    #[async_trait]
-    impl cda_interfaces::runtime_update_api::RuntimeFileReloadHandler for OrderingReloadHandler {
-        async fn reload_databases(
-            &self,
-            _paths: Vec<std::path::PathBuf>,
-        ) -> Result<(), cda_interfaces::runtime_update_api::ReloadError> {
-            self.call_order.lock().unwrap().push("databases");
-            Ok(())
-        }
-
-        async fn reload_configuration(
-            &self,
-            _path: std::path::PathBuf,
-        ) -> Result<(), cda_interfaces::runtime_update_api::ReloadError> {
-            self.call_order.lock().unwrap().push("configuration");
-            Ok(())
-        }
-    }
 
     #[tokio::test]
     async fn apply_updates_current_and_creates_backup() {
@@ -325,188 +269,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_with_config_updates_configuration() {
-        let (storage, _dir) = make_storage();
-
-        init_collection(
-            &storage,
-            &CollectionName::DiagnosticDatabaseNextUpdate,
-            &[("ecu1.mdd", b"mdd_data")],
-        )
-        .await;
-
-        init_collection(
-            &storage,
-            &CollectionName::Configuration,
-            &[("config.toml", b"[old_config]")],
-        )
-        .await;
-
-        init_collection(
-            &storage,
-            &CollectionName::ConfigurationNextUpdate,
-            &[("config.toml", b"[new_config]")],
-        )
-        .await;
-
-        execute_apply(&storage, &NoopReloadHandler, false)
-            .await
-            .unwrap();
-
-        // Configuration should have new config
-        let config_col = storage
-            .get_or_create_collection(&CollectionName::Configuration)
-            .await
-            .unwrap();
-        let handle = config_col.read("config.toml").await.unwrap();
-        let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
-        let mut buf = vec![0u8; size];
-        handle.read_at(0, &mut buf).unwrap();
-        assert_eq!(&buf, b"[new_config]");
-
-        // ConfigurationBackup should have old config
-        let backup_col = storage
-            .get_or_create_collection(&CollectionName::ConfigurationBackup)
-            .await
-            .unwrap();
-        let handle = backup_col.read("config.toml").await.unwrap();
-        let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
-        let mut buf = vec![0u8; size];
-        handle.read_at(0, &mut buf).unwrap();
-        assert_eq!(&buf, b"[old_config]");
-
-        // ConfigurationNextUpdate should be gone
-        let result = storage
-            .get_collection(&CollectionName::ConfigurationNextUpdate)
-            .await;
-        assert!(matches!(result, Err(StorageError::CollectionNotFound(_))));
-    }
-
-    #[tokio::test]
-    async fn apply_mdd_only_leaves_config_untouched() {
-        let (storage, _dir) = make_storage();
-
-        init_collection(
-            &storage,
-            &CollectionName::DiagnosticDatabaseNextUpdate,
-            &[("ecu1.mdd", b"mdd_new")],
-        )
-        .await;
-
-        init_collection(
-            &storage,
-            &CollectionName::Configuration,
-            &[("config.toml", b"[original]")],
-        )
-        .await;
-
-        execute_apply(&storage, &NoopReloadHandler, false)
-            .await
-            .unwrap();
-
-        // Configuration unchanged
-        {
-            let config_col = storage
-                .get_or_create_collection(&CollectionName::Configuration)
-                .await
-                .unwrap();
-            let handle = config_col.read("config.toml").await.unwrap();
-            let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
-            let mut buf = vec![0u8; size];
-            handle.read_at(0, &mut buf).unwrap();
-            assert_eq!(&buf, b"[original]");
-        }
-
-        let backup_col = storage
-            .get_or_create_collection(&CollectionName::ConfigurationBackup)
-            .await
-            .unwrap();
-        assert!(backup_col.is_empty().await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn apply_calls_reload_configuration_when_config_updated() {
-        let (storage, _dir) = make_storage();
-
-        init_collection(
-            &storage,
-            &CollectionName::DiagnosticDatabaseNextUpdate,
-            &[("ecu1.mdd", b"mdd_data")],
-        )
-        .await;
-
-        init_collection(
-            &storage,
-            &CollectionName::ConfigurationNextUpdate,
-            &[("config.toml", b"[new_config]")],
-        )
-        .await;
-
-        let handler = RecordingReloadHandler::new();
-        execute_apply(&storage, &handler, false).await.unwrap();
-
-        let config_calls = handler.config_calls.lock().unwrap();
-        assert_eq!(
-            config_calls.len(),
-            1,
-            "reload_configuration should be called once"
-        );
-        let Some(first_call) = config_calls.first() else {
-            panic!("expected call")
-        };
-        assert!(
-            first_call.ends_with("config.toml"),
-            "reload_configuration should receive the config file path"
-        );
-    }
-
-    #[tokio::test]
-    async fn apply_reloads_configuration_before_databases() {
-        let (storage, _dir) = make_storage();
-
-        init_collection(
-            &storage,
-            &CollectionName::DiagnosticDatabaseNextUpdate,
-            &[("ecu1.mdd", b"mdd_data")],
-        )
-        .await;
-
-        init_collection(
-            &storage,
-            &CollectionName::ConfigurationNextUpdate,
-            &[("config.toml", b"[new_config]")],
-        )
-        .await;
-
-        let handler = OrderingReloadHandler::default();
-        execute_apply(&storage, &handler, false).await.unwrap();
-
-        let call_order = handler.call_order.lock().unwrap();
-        assert_eq!(call_order.as_slice(), ["configuration", "databases"]);
-    }
-
-    #[tokio::test]
-    async fn apply_does_not_call_reload_configuration_without_config() {
-        let (storage, _dir) = make_storage();
-
-        init_collection(
-            &storage,
-            &CollectionName::DiagnosticDatabaseNextUpdate,
-            &[("ecu1.mdd", b"data")],
-        )
-        .await;
-
-        let handler = RecordingReloadHandler::new();
-        execute_apply(&storage, &handler, false).await.unwrap();
-
-        let config_calls = handler.config_calls.lock().unwrap();
-        assert!(
-            config_calls.is_empty(),
-            "reload_configuration should not be called"
-        );
-    }
-
-    #[tokio::test]
     async fn apply_with_mdd_decompress_false_succeeds() {
         let (storage, _dir) = make_storage();
 
@@ -521,83 +283,6 @@ mod tests {
         execute_apply(&storage, &NoopReloadHandler, false)
             .await
             .unwrap();
-    }
-
-    #[tokio::test]
-    async fn apply_config_only_without_mdd_succeeds() {
-        let (storage, _dir) = make_storage();
-
-        init_collection(
-            &storage,
-            &CollectionName::Configuration,
-            &[("config.toml", b"[old_config]")],
-        )
-        .await;
-
-        init_collection(
-            &storage,
-            &CollectionName::ConfigurationNextUpdate,
-            &[("config.toml", b"[new_config]")],
-        )
-        .await;
-
-        execute_apply(&storage, &NoopReloadHandler, false)
-            .await
-            .expect("config-only apply should succeed");
-
-        // Configuration should have new config
-        let config_col = storage
-            .get_or_create_collection(&CollectionName::Configuration)
-            .await
-            .unwrap();
-        let handle = config_col.read("config.toml").await.unwrap();
-        let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
-        let mut buf = vec![0u8; size];
-        handle.read_at(0, &mut buf).unwrap();
-        assert_eq!(&buf, b"[new_config]");
-
-        // ConfigurationNextUpdate should be gone
-        let result = storage
-            .get_collection(&CollectionName::ConfigurationNextUpdate)
-            .await;
-        assert!(matches!(result, Err(StorageError::CollectionNotFound(_))));
-
-        // DiagnosticDatabase should be untouched (not even created)
-        let mdd_result = storage
-            .get_collection(&CollectionName::DiagnosticDatabase)
-            .await;
-        assert!(
-            matches!(mdd_result, Err(StorageError::CollectionNotFound(_))),
-            "DiagnosticDatabase should not be touched in a config-only apply"
-        );
-    }
-
-    #[tokio::test]
-    async fn apply_config_only_calls_reload_configuration_but_not_reload_databases() {
-        let (storage, _dir) = make_storage();
-
-        init_collection(
-            &storage,
-            &CollectionName::ConfigurationNextUpdate,
-            &[("config.toml", b"[new_config]")],
-        )
-        .await;
-
-        let handler = RecordingReloadHandler::new();
-        execute_apply(&storage, &handler, false).await.unwrap();
-
-        let config_calls = handler.config_calls.lock().unwrap();
-        assert_eq!(
-            config_calls.len(),
-            1,
-            "reload_configuration should be called once"
-        );
-
-        let reload_calls = handler.reload_calls.lock().unwrap();
-        assert!(
-            reload_calls.is_empty(),
-            "reload_databases should not be called"
-        );
     }
 
     #[tokio::test]

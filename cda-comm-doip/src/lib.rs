@@ -12,15 +12,19 @@
  */
 
 use std::{
-    future::Future,
     sync::Arc,
     time::{Duration, Instant},
 };
 
+use async_trait::async_trait;
 use cda_interfaces::{
-    DiagServiceError, DoipComParams, DoipGatewaySetupError, EcuAddresses, EcuConnectivityHandler,
-    EcuGateway, HashMap, HashMapExtensions, ServicePayload, TransmissionParameters,
-    UDS_ID_RESPONSE_BITMASK, UdsResponse, dlt_ctx,
+    DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, FunctionalTransport,
+    HashMap, HashMapExtensions, NetworkTopology, PhysicalTransport, RouteStatus, ServicePayload,
+    TransmissionParameters, TransportProbe, TransportResponse, VariantDetectionSender,
+    communication_control::{
+        GatewayLifecycle, TransportControl, TransportState, error::CommControlError,
+    },
+    dlt_ctx, pending_nrc_from_raw, uds_response_from_raw,
     util::{self, tokio_ext},
 };
 use doip_definitions::{
@@ -31,26 +35,27 @@ use doip_definitions::{
     },
 };
 use futures::FutureExt;
-use thiserror::Error;
 use tokio::{
     sync::{Mutex, RwLock, broadcast, mpsc},
-    task::{JoinError, JoinSet},
+    task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    config::DoipConfig,
-    connections::{EcuError, GatewayState},
-    socket::DoIPUdpSocket,
-};
-
 pub mod config;
+pub mod error;
+pub use error::{ConnectionError, DoipGatewaySetupError};
 mod connection_receiver;
 mod connection_sender;
 mod connections;
 mod ecu_connection;
 pub mod socket;
 mod vir_vam;
+
+use crate::{
+    config::DoipConfig,
+    connections::{EcuError, GatewayState},
+    socket::DoIPUdpSocket,
+};
 
 /// Timeout when suppressPosRspMsgIndicationBit is set.
 /// ECUs that reject a request usually respond quickly with an NRC and
@@ -62,30 +67,32 @@ mod vir_vam;
 /// surrounding logic.
 const SUPPRESS_POSITIVE_RESPONSE_TIMEOUT: Duration = Duration::from_millis(500);
 
-const NRC_BUSY_REPEAT_REQUEST: u8 = 0x21;
-const NRC_RESPONSE_PENDING: u8 = 0x78;
-const NRC_TEMPORARILY_NOT_AVAILABLE: u8 = 0x94;
-
+/// Events received on a `DoIP` connection.
+///
+/// `Msg` carries the raw UDS payload and its `DoIP` logical addresses. All other
+/// variants are ISO 13400-2 protocol-level events that must be handled before
+/// any UDS data is forwarded to the caller.
 #[derive(Debug, Clone)]
 enum DiagnosticResponse {
-    Msg(DiagnosticMessage),
-    Pending {
+    /// A UDS payload received from an ECU, carried verbatim before classification.
+    Msg {
         source_address: u16,
-        request_sid: u8,
+        target_address: u16,
+        data: Vec<u8>,
     },
+    /// An acknowledgment of a previously sent UDS payload, carrying the original
+    /// request's logical address and data.
     Ack((u16, Vec<u8>)),
+    /// A negative acknowledgment of a previously sent UDS payload, including
+    /// the original Nack message struct.
     Nack(DiagnosticMessageNack),
+    /// A response to a `DoIP` alive-check request, indicating that the ECU is reachable.
     AliveCheckResponse,
+    /// `TesterPresent` NRC - intercepted at the decoding layer so the receiver
+    /// can log-and-drop without routing it to a per-ECU channel.
     TesterPresentNRC(u8),
+    /// Generic `DoIP` negative acknowledgment, carrying the `GenericNack` struct with the NACK code.
     GenericNack(GenericNack), // todo #22 -> we need the address of the ECU that sent the nack
-    BusyRepeatRequest {
-        source_address: u16,
-        request_sid: u8,
-    },
-    TemporarilyNotAvailable {
-        source_address: u16,
-        request_sid: u8,
-    },
 }
 
 impl DiagnosticResponse {
@@ -96,13 +103,11 @@ impl DiagnosticResponse {
 
         match self {
             Self::Ack((_, previous)) => request.starts_with(previous),
-            Self::Msg(msg) => msg
-                .message
-                .first()
-                .is_some_and(|response_sid| *response_sid == (*sid | UDS_ID_RESPONSE_BITMASK)),
-            Self::Pending { request_sid, .. }
-            | Self::BusyRepeatRequest { request_sid, .. }
-            | Self::TemporarilyNotAvailable { request_sid, .. } => *request_sid == *sid,
+            // Positive and negative echoes both belong to the request: a
+            // final NRC can overtake the ACK, and ignoring it here consumes
+            // it from the receiver - the later response read then times out
+            // although the ECU answered.
+            Self::Msg { data, .. } => util::uds_response_matches_request_sid(*sid, data),
             _ => false,
         }
     }
@@ -112,8 +117,48 @@ pub(crate) struct DoipGatewayState<T: EcuAddresses + DoipComParams> {
     pub(crate) doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>>,
     pub(crate) logical_address_to_connection: Arc<RwLock<HashMap<u16, usize>>>,
     pub(crate) ecus: Arc<HashMap<String, RwLock<T>>>,
-    pub(crate) socket: Arc<Mutex<DoIPUdpSocket>>,
-    pub(crate) connection_tasks: Arc<Mutex<JoinSet<Result<(), JoinError>>>>,
+    /// `None` until the first successful `start()` binds it. No UDP socket is
+    /// created at construction time, only when an authorized activation runs.
+    pub(crate) socket: Arc<Mutex<Option<DoIPUdpSocket>>>,
+    pub(crate) netmask: u32,
+}
+
+/// Owns all connection tasks for one enabled lifecycle so they stop together.
+pub(crate) struct ConnectionTasks(Mutex<Vec<JoinHandle<()>>>);
+
+impl ConnectionTasks {
+    fn new() -> Self {
+        Self(Mutex::new(Vec::new()))
+    }
+
+    pub(crate) async fn push(&self, task: JoinHandle<()>) {
+        self.0.lock().await.push(task);
+    }
+
+    async fn shutdown(&self) {
+        let mut tasks = std::mem::take(&mut *self.0.lock().await);
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks.drain(..) {
+            if let Err(error) = task.await
+                && error.is_panic()
+            {
+                tracing::error!(%error, "DoIP connection task panicked during shutdown");
+            }
+        }
+    }
+}
+
+impl Drop for ConnectionTasks {
+    fn drop(&mut self) {
+        // Best effort cleanup, we cannot await the tasks in
+        // here. A user should call 'shutdown' instead of relying on this.
+        for task in self.0.get_mut().drain(..) {
+            tracing::warn!("DoIP connection tasks dropped without `shutdown`, aborting tasks");
+            task.abort();
+        }
+    }
 }
 
 impl<T: EcuAddresses + DoipComParams> Clone for DoipGatewayState<T> {
@@ -123,15 +168,60 @@ impl<T: EcuAddresses + DoipComParams> Clone for DoipGatewayState<T> {
             logical_address_to_connection: Arc::clone(&self.logical_address_to_connection),
             ecus: Arc::clone(&self.ecus),
             socket: Arc::clone(&self.socket),
-            connection_tasks: Arc::clone(&self.connection_tasks),
+            netmask: self.netmask,
         }
     }
 }
 
 pub struct DoipDiagGateway<T: EcuAddresses + DoipComParams> {
     state: DoipGatewayState<T>,
-    cancel_token: CancellationToken,
-    vam_listener_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    config: DoipConfig,
+    variant_detection: VariantDetectionSender,
+    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
+    lifecycle: Arc<GatewayLifecycle<DoipGatewayOperation>>,
+}
+
+/// Background work owned by the currently enabled lifecycle.
+#[derive(Default)]
+struct DoipGatewayOperation {
+    cancel: Option<CancellationToken>,
+    vam_listener: Option<JoinHandle<()>>,
+    connection_tasks: Option<Arc<ConnectionTasks>>,
+}
+
+impl Drop for DoipGatewayOperation {
+    fn drop(&mut self) {
+        if self.cancel.is_some() || self.vam_listener.is_some() || self.connection_tasks.is_some() {
+            tracing::warn!("DoIP gateway operation dropped without `shutdown`, aborting tasks");
+        }
+        self.take_and_abort();
+    }
+}
+
+impl DoipGatewayOperation {
+    fn take_and_abort(&mut self) -> (Option<JoinHandle<()>>, Option<Arc<ConnectionTasks>>) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.cancel();
+        }
+        let listener = self.vam_listener.take();
+        if let Some(listener) = &listener {
+            listener.abort();
+        }
+        (listener, self.connection_tasks.take())
+    }
+
+    async fn shutdown(&mut self) {
+        let (listener, connection_tasks) = self.take_and_abort();
+        if let Some(listener) = listener
+            && let Err(error) = listener.await
+            && !error.is_cancelled()
+        {
+            tracing::error!(%error, "DoIP VAM listener failed during shutdown");
+        }
+        if let Some(connection_tasks) = connection_tasks {
+            connection_tasks.shutdown().await;
+        }
+    }
 }
 
 /// A gateway discovered on the network during `DoIP` vehicle discovery.
@@ -223,65 +313,17 @@ struct DoipConnection {
     ip: String,
 }
 
-#[derive(Error, Debug, Clone)]
-pub enum ConnectionError {
-    #[error("Connection closed.")]
-    Closed,
-    #[error("Decoding error: `{0}`")]
-    Decoding(String),
-    #[error("Invalid message: `{0}")]
-    InvalidMessage(String),
-    #[error("Connection timeout: `{0}`")]
-    Timeout(String),
-    #[error("Connection failed: `{0}`")]
-    ConnectionFailed(String),
-    #[error("Routing error: `{0}`")]
-    RoutingError(String),
-    #[error("Send failed: `{0}`")]
-    SendFailed(String),
-}
-
-impl TryFrom<DiagnosticResponse> for Option<UdsResponse> {
-    type Error = DiagServiceError;
-
-    fn try_from(value: DiagnosticResponse) -> Result<Self, Self::Error> {
-        match value {
-            DiagnosticResponse::Msg(msg) => Ok(Some(UdsResponse::Message(ServicePayload {
-                data: msg.message,
-                source_address: u16::from_be_bytes(msg.source_address),
-                target_address: u16::from_be_bytes(msg.target_address),
-                new_session: None,
-                new_security: None,
-            }))),
-            DiagnosticResponse::Pending {
-                source_address: addr,
-                request_sid: _,
-            } => Ok(Some(UdsResponse::ResponsePending(addr))),
-            DiagnosticResponse::BusyRepeatRequest {
-                source_address: addr,
-                request_sid: _,
-            } => Ok(Some(UdsResponse::BusyRepeatRequest(addr))),
-            DiagnosticResponse::TemporarilyNotAvailable {
-                source_address: addr,
-                request_sid: _,
-            } => Ok(Some(UdsResponse::TemporarilyNotAvailable(addr))),
-            DiagnosticResponse::TesterPresentNRC(code) => {
-                Ok(Some(UdsResponse::TesterPresentNRC(code)))
-            }
-            _ => Err(DiagServiceError::BadPayload(
-                "Unexpected response type for DiagnosticResponse to UdsResponse conversion"
-                    .to_owned(),
-            )),
-        }
-    }
-}
-
 impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     /// Create a new `DoipDiagGateway` instance.
+    ///
+    /// Purely in-memory. No UDP socket is created or bound, no packet is sent
+    /// and no task is started, so this is safe to call in any `init_mode`.
+    ///
     /// # Errors
-    /// Returns `String` if initialization fails, e.g. when socket creation fails.
+    /// Returns `String` if initialization fails, e.g. when the configured
+    /// tester address/subnet cannot be parsed into a netmask.
     #[tracing::instrument(
-        skip(doip_config, ecus, variant_detection, connectivity_handler, shutdown_signal, doip_socket),
+        skip(doip_config, ecus, variant_detection, connectivity_handler),
         fields(
             tester_ip = doip_config.tester_address,
             gateway_port = doip_config.gateway_port,
@@ -289,163 +331,135 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             dlt_context = dlt_ctx!("DOIP")
         )
     )]
-    pub async fn new<F>(
+    pub async fn new(
         doip_config: &DoipConfig,
         ecus: Arc<HashMap<String, RwLock<T>>>,
-        variant_detection: mpsc::Sender<Vec<String>>,
+        variant_detection: VariantDetectionSender,
         connectivity_handler: Arc<dyn EcuConnectivityHandler>,
-        shutdown_signal: F,
-        doip_socket: Arc<Mutex<DoIPUdpSocket>>,
-    ) -> Result<Self, DoipGatewaySetupError>
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        let DoipConfig {
-            tester_address: tester_ip,
-            tester_subnet,
-            gateway_port,
-            tls_port,
-            send_timeout_ms,
-            send_diagnostic_message_ack,
-            alive_check_interval_secs,
-            ..
-        } = doip_config;
-        let gateway_port = *gateway_port;
-        let transport_config = DoipTransportConfig {
-            tester_ip: tester_ip.to_owned(),
-            port: gateway_port,
-            tls_port: *tls_port,
-            send_diagnostic_message_ack: *send_diagnostic_message_ack,
-            send_timeout: Duration::from_millis(*send_timeout_ms),
-            alive_check_interval: Duration::from_secs(*alive_check_interval_secs),
-        };
-
-        tracing::info!("Initializing DoipDiagGateway");
-
-        let mask = create_netmask(tester_ip, tester_subnet)?;
-
-        let shared_shutdown_signal = shutdown_signal.shared();
-        let gateways = vir_vam::get_vehicle_identification::<T, F>(
-            &mut *doip_socket.lock().await,
-            mask,
-            gateway_port,
-            &ecus,
-            shared_shutdown_signal.clone(),
-        )
-        .await
-        .map_err(|err| {
-            DoipGatewaySetupError::ResourceError(format!(
-                "Could not get vehicle identification. {err}"
-            ))
-        })?;
-
-        let cancel_token = CancellationToken::new();
-
-        let connection_tasks = Arc::new(Mutex::new(JoinSet::new()));
-
-        let state = if gateways.is_empty() {
-            DoipGatewayState {
+    ) -> Result<Self, DoipGatewaySetupError> {
+        Ok(Self {
+            state: DoipGatewayState {
                 doip_connections: Arc::new(RwLock::new(Vec::new())),
                 logical_address_to_connection: Arc::new(RwLock::new(HashMap::new())),
                 ecus,
-                socket: Arc::clone(&doip_socket),
-                connection_tasks,
-            }
-        } else {
-            tracing::info!(gateway_count = gateways.len(), "Gateways found");
-
-            // create mapping gateway_logical_address -> Vec<ecu_logical_address>
-            let mut gateway_ecu_map: HashMap<u16, Vec<u16>> = HashMap::new();
-            let mut gateway_ecu_name_map: HashMap<u16, Vec<String>> = HashMap::new();
-            for ecu_lock in ecus.values() {
-                let ecu = ecu_lock.read().await;
-                let addr = ecu.logical_address();
-                let gateway = ecu.logical_gateway_address();
-                gateway_ecu_map.entry(gateway).or_default().push(addr);
-                gateway_ecu_name_map
-                    .entry(gateway)
-                    .or_default()
-                    .push(ecu.ecu_name().to_lowercase());
-            }
-
-            let doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>> =
-                Arc::new(RwLock::new(Vec::new()));
-            let mut logical_address_to_connection = HashMap::new();
-
-            for gateway in gateways {
-                if let Ok(logical_address) = connections::handle_gateway_connection::<T>(
-                    gateway,
-                    &transport_config,
-                    &GatewayState {
-                        doip_connections: Arc::clone(&doip_connections),
-                        ecus: Arc::clone(&ecus),
-                        gateway_ecu_map: gateway_ecu_map.clone(),
-                        connection_tasks: Arc::clone(&connection_tasks),
-                    },
-                    Arc::clone(&connectivity_handler),
-                )
-                .await
-                {
-                    logical_address_to_connection.insert(
-                        logical_address,
-                        doip_connections.read().await.len().saturating_sub(1),
-                    );
-                }
-            }
-
-            DoipGatewayState {
-                doip_connections,
-                logical_address_to_connection: Arc::new(RwLock::new(logical_address_to_connection)),
-                ecus,
-                socket: Arc::clone(&doip_socket),
-                connection_tasks,
-            }
-        };
-
-        let vam_listener_handle = vir_vam::listen_for_vams(
-            transport_config,
-            mask,
-            state.clone(),
+                socket: Arc::new(Mutex::new(None)),
+                netmask: create_netmask(&doip_config.tester_address, &doip_config.tester_subnet)?,
+            },
+            config: doip_config.clone(),
             variant_detection,
             connectivity_handler,
-            shared_shutdown_signal,
-            cancel_token.child_token(),
-        )
-        .await;
-
-        Ok(DoipDiagGateway {
-            state,
-            cancel_token,
-            vam_listener_handle: Arc::new(Mutex::new(Some(vam_listener_handle))),
+            lifecycle: Arc::new(GatewayLifecycle::new(TransportState::Disabled)),
         })
     }
 
-    pub async fn shutdown(&mut self) {
-        self.cancel_token.cancel();
-
-        if let Some(vam_listener_handle) = self.vam_listener_handle.lock().await.take() {
-            // Abort and await the VAM listener task so it stops reading from the
-            // shared UDP socket before a new gateway reuses it.
-            vam_listener_handle.abort();
-            let _ = vam_listener_handle.await;
+    async fn start(
+        &self,
+        operation: &mut DoipGatewayOperation,
+    ) -> Result<(), DoipGatewaySetupError> {
+        let mut socket_guard = self.state.socket.lock().await;
+        if operation.cancel.is_some()
+            || operation.vam_listener.is_some()
+            || operation.connection_tasks.is_some()
+            || socket_guard.is_some()
+        {
+            return Err(DoipGatewaySetupError::InvalidState(
+                "DoIP communication is already running".to_string(),
+            ));
         }
 
-        // Abort all background tasks (sender, receiver, connection-reset) for each
-        // gateway connection. This immediately drops their TCP socket halves.
-        let connections = self.state.doip_connections.write().await;
-        let mut tasks = self.state.connection_tasks.lock().await;
-        tasks.abort_all();
-        while tasks.join_next().await.is_some() {}
-        drop(tasks);
-        drop(connections);
-        self.state.doip_connections.write().await.clear();
+        let config = &self.config;
+        let transport_config = DoipTransportConfig {
+            tester_ip: config.tester_address.clone(),
+            port: config.gateway_port,
+            tls_port: config.tls_port,
+            send_diagnostic_message_ack: config.send_diagnostic_message_ack,
+            send_timeout: Duration::from_millis(config.send_timeout_ms),
+            alive_check_interval: Duration::from_secs(config.alive_check_interval_secs),
+        };
+        let mask = self.state.netmask;
+        let cancel = CancellationToken::new();
+        let shutdown = cancel.child_token().cancelled_owned().shared();
+        let connection_tasks = Arc::new(ConnectionTasks::new());
+        operation.cancel = Some(cancel.clone());
+        operation.connection_tasks = Some(Arc::clone(&connection_tasks));
+
+        // TODO(persistence-init-mode): Implement as described in req~dt-ecu-list-persistence
+        let socket = socket_guard.insert(create_udp_vir_socket(
+            &config.tester_address,
+            config.gateway_port,
+        )?);
+        let gateways = vir_vam::get_vehicle_identification::<T, _>(
+            socket,
+            mask,
+            config.gateway_port,
+            &self.state.ecus,
+            shutdown.clone(),
+        )
+        .await
+        .map_err(|error| DoipGatewaySetupError::ResourceError(error.to_string()))?;
+        drop(socket_guard);
+
+        let mut gateway_ecu_map: HashMap<u16, Vec<u16>> = HashMap::new();
+        for ecu_lock in self.state.ecus.values() {
+            let ecu = ecu_lock.read().await;
+            gateway_ecu_map
+                .entry(ecu.logical_gateway_address())
+                .or_default()
+                .push(ecu.logical_address());
+        }
+        for gateway in gateways {
+            if let Ok(logical_address) = connections::handle_gateway_connection::<T>(
+                gateway,
+                &transport_config,
+                &GatewayState {
+                    doip_connections: Arc::clone(&self.state.doip_connections),
+                    ecus: Arc::clone(&self.state.ecus),
+                    gateway_ecu_map: gateway_ecu_map.clone(),
+                    connection_tasks: Arc::clone(&connection_tasks),
+                },
+                Arc::clone(&self.connectivity_handler),
+            )
+            .await
+            {
+                self.state
+                    .logical_address_to_connection
+                    .write()
+                    .await
+                    .insert(
+                        logical_address,
+                        self.state
+                            .doip_connections
+                            .read()
+                            .await
+                            .len()
+                            .saturating_sub(1),
+                    );
+            }
+        }
+
+        let listener = vir_vam::listen_for_vams(
+            transport_config,
+            mask,
+            self.state.clone(),
+            Arc::clone(&connection_tasks),
+            self.variant_detection.clone(),
+            Arc::clone(&self.connectivity_handler),
+            shutdown,
+        )
+        .await;
+        operation.vam_listener = Some(listener);
+        Ok(())
     }
 
-    /// Returns a clone of the UDP socket Arc for reuse in a new gateway instance.
-    /// This avoids binding a second socket on the same port during reloads.
-    #[must_use]
-    pub fn udp_socket(&self) -> Arc<Mutex<DoIPUdpSocket>> {
-        Arc::clone(&self.state.socket)
+    async fn stop(&self, operation: &mut DoipGatewayOperation) {
+        operation.shutdown().await;
+        self.state.socket.lock().await.take();
+        self.state.doip_connections.write().await.clear();
+        self.state
+            .logical_address_to_connection
+            .write()
+            .await
+            .clear();
     }
 
     async fn get_doip_connection(
@@ -502,17 +516,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     }
 }
 
-impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
-    async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
-        self.state
-            .doip_connections
-            .read()
-            .await
-            .iter()
-            .find(|conn| conn.ecus.contains_key(&logical_address))
-            .map(|conn| conn.ip.clone())
-    }
-
+impl<T: EcuAddresses + DoipComParams> PhysicalTransport for DoipDiagGateway<T> {
     #[tracing::instrument(skip_all,
         fields(dlt_context = dlt_ctx!("DOIP"))
     )]
@@ -521,9 +525,9 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
         &self,
         transmission_params: TransmissionParameters,
         message: ServicePayload,
-        response_sender: mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
+        response_sender: mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
         expect_uds_reply: bool,
-    ) -> Result<(), DiagServiceError> {
+    ) -> Result<tokio::task::JoinHandle<()>, DiagServiceError> {
         let start = Instant::now();
 
         let doip_conn = self
@@ -539,7 +543,7 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
             message: message.data,
         };
 
-        cda_interfaces::spawn_named!(
+        let handle = cda_interfaces::spawn_named!(
             &format!("ecu-data-receive-{}", transmission_params.ecu_name),
             {
                 async move {
@@ -567,11 +571,11 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                     {
                         // failed to send the message after exhausting retries.
                         // informing receiver and giving up.
-                        try_send_uds_response(&response_sender, Err(e)).await;
+                        try_send_transport_response(&response_sender, Err(e)).await;
                         return;
                     }
 
-                    let received_message = match wait_for_ack_or_response_until_timeout(
+                    let received_event = match wait_for_ack_or_response_until_timeout(
                         &mut ecu.receiver,
                         &transmission_params.ecu_name,
                         &doip_message,
@@ -581,7 +585,7 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                     {
                         Ok(first) => first,
                         Err(e) => {
-                            try_send_uds_response(&response_sender, Err(e)).await;
+                            try_send_transport_response(&response_sender, Err(e)).await;
                             return;
                         }
                     };
@@ -592,7 +596,7 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                         .saturating_sub(receiver_flushed);
 
                     if !expect_uds_reply {
-                        try_send_uds_response(&response_sender, Ok(None)).await;
+                        try_send_transport_response(&response_sender, Ok(None)).await;
                     }
 
                     // Read ECU responses as long as the sender is open.
@@ -602,7 +606,7 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                         &mut ecu.receiver,
                         &transmission_params.ecu_name,
                         &response_sender,
-                        received_message,
+                        received_event,
                     )
                     .await;
 
@@ -624,7 +628,7 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
             }
         );
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn ecu_online<E: EcuAddresses>(
@@ -643,7 +647,9 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
             .ok_or_else(|| DiagServiceError::EcuOffline(ecu_name.to_owned()))?;
         Ok(())
     }
+}
 
+impl<T: EcuAddresses + DoipComParams> FunctionalTransport for DoipDiagGateway<T> {
     async fn send_functional(
         &self,
         transmission_params: TransmissionParameters,
@@ -651,7 +657,7 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
         expected_ecu_logical_addrs: HashMap<u16, String>,
         timeout: Duration,
         expect_positive_response: bool,
-    ) -> Result<HashMap<String, Result<UdsResponse, DiagServiceError>>, DiagServiceError> {
+    ) -> Result<HashMap<String, Result<ServicePayload, DiagServiceError>>, DiagServiceError> {
         let doip_conn = self
             .get_doip_connection(transmission_params.gateway_address)
             .await?;
@@ -743,13 +749,13 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                     Ok(msg) => {
                         let source_addr = u16::from_be_bytes(msg.source_address);
 
-                        let uds_response = UdsResponse::Message(ServicePayload {
+                        let uds_response = ServicePayload {
                             data: msg.message,
                             source_address: source_addr,
                             target_address: u16::from_be_bytes(msg.target_address),
                             new_session: None,
                             new_security: None,
-                        });
+                        };
 
                         result_map.insert(ecu_name.clone(), Ok(uds_response));
 
@@ -788,6 +794,40 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
     }
 }
 
+impl<T: EcuAddresses + DoipComParams> NetworkTopology for DoipDiagGateway<T> {
+    async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
+        self.state
+            .doip_connections
+            .read()
+            .await
+            .iter()
+            .find(|conn| conn.ecus.contains_key(&logical_address))
+            .map(|conn| conn.ip.clone())
+    }
+}
+
+impl<T: EcuAddresses + DoipComParams> TransportProbe for DoipDiagGateway<T> {
+    async fn route_status(&self, ecu_name: &str) -> RouteStatus {
+        let ecu_name = ecu_name.to_lowercase();
+        let Some(ecu_lock) = self.state.ecus.get(&ecu_name) else {
+            return RouteStatus::NotConfigured;
+        };
+        // Check if the gateway connection for this ECU is established
+        let gateway_addr = ecu_lock.read().await.logical_gateway_address();
+        if self.get_doip_connection(gateway_addr).await.is_ok() {
+            RouteStatus::Ready
+        } else {
+            // DoIP addressing is gateway-scoped, so there is
+            // no per-ECU probe to offer. Reconnecting is this transport's job
+            // (VAM listener, connection-reset task), not the router's.
+            RouteStatus::Unavailable
+        }
+    }
+
+    fn probe_ecu(&self, _ecu_name: &str) -> impl Future<Output = bool> {
+        std::future::ready(false)
+    }
+}
 /// Waits for the `DoIP` diagnostic-message acknowledgement from the gateway,
 /// with a deadline of `timeout`.
 #[allow(
@@ -872,20 +912,14 @@ async fn wait_for_ack_or_response_until_timeout(
 
             return match response {
                 DiagnosticResponse::Ack((_, _)) => {
-                    tracing::debug!(
-                        ecu_name = %ecu_name,
-                        "Received ACK"
-                    );
-
+                    tracing::debug!(ecu_name = %ecu_name, "Received ACK");
                     Ok(None)
                 }
-
                 response => {
                     tracing::debug!(
                         ecu_name = %ecu_name,
                         "Received diagnostic response before ACK, treating as implicit ACK"
                     );
-
                     Ok(Some(response))
                 }
             };
@@ -905,7 +939,6 @@ async fn wait_for_ack_or_response_until_timeout(
             timeout = ?timeout,
             "Timeout waiting for ACK/NACK from ECU"
         );
-
         Err(DiagServiceError::Timeout)
     }
 }
@@ -920,11 +953,12 @@ async fn wait_for_ack_or_response_until_timeout(
 async fn read_ecu_responses(
     receiver: &mut broadcast::Receiver<Result<DiagnosticResponse, EcuError>>,
     ecu_name: &str,
-    response_sender: &mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
-    received_message: Option<DiagnosticResponse>,
+    response_sender: &mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
+    received_event: Option<DiagnosticResponse>,
 ) {
-    if let Some(response) = received_message
-        && !try_send_uds_response(response_sender, response.try_into()).await
+    if let Some(event) = received_event
+        && !try_send_transport_response(response_sender, diagnostic_response_to_transport(event))
+            .await
     {
         return;
     }
@@ -938,8 +972,13 @@ async fn read_ecu_responses(
             res = receiver.recv() => {
                 if let Ok(res) = res {
                     match res {
-                        Ok(response) => {
-                            if !try_send_uds_response(response_sender, response.try_into()).await {
+                        Ok(event) => {
+                            if !try_send_transport_response(
+                                response_sender,
+                                diagnostic_response_to_transport(event),
+                            )
+                            .await
+                            {
                                 break;
                             }
                         }
@@ -949,7 +988,7 @@ async fn read_ecu_responses(
                                 error = %e,
                                 "Error while waiting for response message"
                             );
-                            if !try_send_uds_response(
+                            if !try_send_transport_response(
                                 response_sender,
                                 Err(DiagServiceError::NoResponse(format!(
                                     "Error while waiting for message, {e}"
@@ -966,7 +1005,7 @@ async fn read_ecu_responses(
                         ecu_name = %ecu_name,
                         "ECU receiver unexpectedly closed while waiting for response"
                     );
-                    try_send_uds_response(
+                    try_send_transport_response(
                         response_sender,
                         Err(DiagServiceError::NoResponse(
                             "ECU receiver unexpectedly closed".to_owned(),
@@ -987,6 +1026,41 @@ async fn read_ecu_responses(
     }
 }
 
+/// Converts a [`DiagnosticResponse::Msg`] to a [`TransportResponse`] result for the
+/// caller channel.
+///
+/// Pending NRCs are classified via [`pending_nrc_from_raw`]; all other frames
+/// are classified as final via [`uds_response_from_raw`].
+///
+/// `TesterPresentNRC` is absorbed by [`connection_receiver`] before it is
+/// broadcast to any per-ECU channel -- it never reaches this function.
+/// All other [`DiagnosticResponse`] variants (Ack, Nack, etc.) must be
+/// handled before calling this function.
+fn diagnostic_response_to_transport(
+    event: DiagnosticResponse,
+) -> Result<Option<TransportResponse>, DiagServiceError> {
+    match event {
+        DiagnosticResponse::Msg {
+            data,
+            source_address,
+            target_address,
+        } => {
+            if let Some(pending) = pending_nrc_from_raw(&data, source_address) {
+                Ok(Some(TransportResponse::Pending(pending)))
+            } else {
+                Ok(Some(TransportResponse::UdsResponse(uds_response_from_raw(
+                    data,
+                    source_address,
+                    target_address,
+                ))))
+            }
+        }
+        _ => Err(DiagServiceError::BadPayload(
+            "Unexpected DoIP event type in UDS response stream".to_owned(),
+        )),
+    }
+}
+
 #[allow(
     clippy::needless_continue,
     reason = "Explicit continue improves readability of complex loop logic"
@@ -998,11 +1072,19 @@ async fn wait_for_ecu_response(
     tokio::time::timeout(timeout, async {
         loop {
             match ecu.receiver.recv().await {
-                Ok(Ok(DiagnosticResponse::Msg(m))) => {
-                    return Some(Ok(m));
+                Ok(Ok(DiagnosticResponse::Msg {
+                    source_address,
+                    target_address,
+                    data,
+                })) => {
+                    return Some(Ok(DiagnosticMessage {
+                        source_address: source_address.to_be_bytes(),
+                        target_address: target_address.to_be_bytes(),
+                        message: data,
+                    }));
                 }
                 Ok(Ok(_ignore)) => {
-                    // Ignore other message types
+                    // Ignore other event types
                     continue;
                 }
                 Ok(Err(e)) => {
@@ -1118,9 +1200,71 @@ impl<T: EcuAddresses + DoipComParams> Clone for DoipDiagGateway<T> {
     fn clone(&self) -> Self {
         Self {
             state: self.state.clone(),
-            cancel_token: self.cancel_token.clone(),
-            vam_listener_handle: Arc::clone(&self.vam_listener_handle),
+            config: self.config.clone(),
+            variant_detection: self.variant_detection.clone(),
+            connectivity_handler: Arc::clone(&self.connectivity_handler),
+            lifecycle: Arc::clone(&self.lifecycle),
         }
+    }
+}
+
+#[async_trait]
+impl<T: EcuAddresses + DoipComParams> cda_interfaces::Shutdown for DoipDiagGateway<T> {
+    async fn shutdown(&self) {
+        if let Err(error) = self.disable().await {
+            tracing::error!(%error, "Failed to disable DoIP communication during shutdown");
+        }
+    }
+}
+
+#[async_trait]
+impl<T: EcuAddresses + DoipComParams> TransportControl for DoipDiagGateway<T> {
+    async fn enable(&self) -> Result<(), CommControlError> {
+        let mut operation = self.lifecycle.operation.lock().await;
+        if self.lifecycle.coordinator.active().await {
+            return Ok(());
+        }
+        // Clean up any residual resources, usually should be a no-op
+        self.stop(&mut operation).await;
+        self.lifecycle
+            .coordinator
+            .transition(TransportState::Enabling)
+            .await;
+        match self.start(&mut operation).await {
+            Ok(()) => {
+                self.lifecycle
+                    .coordinator
+                    .transition(TransportState::Enabled)
+                    .await;
+                Ok(())
+            }
+            Err(error) => {
+                self.stop(&mut operation).await;
+                self.lifecycle
+                    .coordinator
+                    .transition(TransportState::Failed)
+                    .await;
+                Err(CommControlError::InitFailed(error.to_string()))
+            }
+        }
+    }
+
+    async fn disable(&self) -> Result<(), CommControlError> {
+        let mut operation = self.lifecycle.operation.lock().await;
+        self.lifecycle
+            .coordinator
+            .transition(TransportState::Disabling)
+            .await;
+        self.stop(&mut operation).await;
+        self.lifecycle
+            .coordinator
+            .transition(TransportState::Disabled)
+            .await;
+        Ok(())
+    }
+
+    async fn state(&self) -> TransportState {
+        self.lifecycle.coordinator.state().await
     }
 }
 
@@ -1147,9 +1291,9 @@ async fn send_with_retries(
 #[tracing::instrument(skip_all,
     fields(dlt_context = dlt_ctx!("DOIP"))
 )]
-async fn try_send_uds_response(
-    response_sender: &mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
-    response: Result<Option<UdsResponse>, DiagServiceError>,
+async fn try_send_transport_response(
+    response_sender: &mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
+    response: Result<Option<TransportResponse>, DiagServiceError>,
 ) -> bool {
     if let Err(err) = response_sender.send(response).await {
         tracing::error!(error = %err, "Failed to send response");
@@ -1163,21 +1307,20 @@ mod tests {
     use std::{net::UdpSocket, sync::Arc, time::Duration};
 
     use cda_interfaces::{
-        DiagServiceError, DoipComParams, EcuAddresses, EcuGateway, HashMap, HashMapExtensions,
-        ServicePayload, TransmissionParameters, UDS_ID_RESPONSE_BITMASK, UdsResponse, service_ids,
+        DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, HashMap,
+        HashMapExtensions, PendingNrc, PhysicalTransport, ServicePayload, TransmissionParameters,
+        TransportResponse, UDS_ID_RESPONSE_BITMASK, VariantDetectionSender,
+        communication_control::{GatewayLifecycle, TransportState},
+        nrc, service_ids,
     };
     use doip_definitions::{
         header::ProtocolVersion,
         payload::{DiagnosticMessage, DoipPayload},
     };
-    use tokio::{
-        sync::{Mutex, RwLock, broadcast, mpsc},
-        task::JoinSet,
-    };
-    use tokio_util::sync::CancellationToken;
+    use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
     use crate::{
-        DiagnosticResponse, DoIPUdpSocket, DoipConnection, DoipDiagGateway, DoipEcu,
+        DiagnosticResponse, DoIPUdpSocket, DoipConfig, DoipConnection, DoipDiagGateway, DoipEcu,
         DoipGatewayState, read_ecu_responses, wait_for_ack_or_response_until_timeout,
     };
 
@@ -1198,6 +1341,15 @@ mod tests {
     /// the ECU mutex has been resolved, so every body is `unimplemented!()`.
     #[derive(Clone)]
     struct TestEcu;
+
+    struct TestConnectivityHandler;
+
+    #[async_trait::async_trait]
+    impl EcuConnectivityHandler for TestConnectivityHandler {
+        async fn on_gateway_connected(&self, _ecu_names: &[String]) {}
+
+        async fn on_gateway_disconnected(&self, _ecu_names: &[String]) {}
+    }
 
     impl EcuAddresses for TestEcu {
         fn tester_address(&self) -> u16 {
@@ -1284,15 +1436,42 @@ mod tests {
             doip_connections: Arc::new(RwLock::new(vec![conn])),
             logical_address_to_connection: Arc::new(RwLock::new(addr_map)),
             ecus: Arc::new(HashMap::new()),
-            socket: Arc::new(Mutex::new(udp_socket)),
-            connection_tasks: Arc::new(Mutex::new(JoinSet::new())),
+            socket: Arc::new(Mutex::new(Some(udp_socket))),
+            netmask: 0,
         };
 
         DoipDiagGateway {
             state,
-            cancel_token: CancellationToken::new(),
-            vam_listener_handle: Arc::new(Mutex::new(None)),
+            config: DoipConfig::default(),
+            variant_detection: VariantDetectionSender::new(mpsc::channel(1).0),
+            connectivity_handler: Arc::new(TestConnectivityHandler),
+            lifecycle: Arc::new(GatewayLifecycle::new(TransportState::Enabled)),
         }
+    }
+
+    /// Constructing a gateway must never create or bind a UDP socket,
+    /// even though construction succeeds.
+    /// The socket is created lazily inside `start()`, reached only through an
+    /// authorized [`DoipDiagGateway::enable`]
+    #[tokio::test]
+    async fn new_never_binds_the_doip_socket() {
+        let gateway = DoipDiagGateway::<TestEcu>::new(
+            &DoipConfig::default(),
+            Arc::new(HashMap::new()),
+            VariantDetectionSender::new(mpsc::channel(1).0),
+            Arc::new(TestConnectivityHandler),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            gateway.state.socket.lock().await.is_none(),
+            "DoipDiagGateway::new must not bind a socket"
+        );
+        assert_eq!(
+            cda_interfaces::communication_control::TransportControl::state(&gateway).await,
+            TransportState::Disabled
+        );
     }
 
     fn transmission_params() -> TransmissionParameters {
@@ -1315,11 +1494,11 @@ mod tests {
     }
 
     fn ecu_msg_response() -> DiagnosticResponse {
-        DiagnosticResponse::Msg(DiagnosticMessage {
-            source_address: ECU_ADDR.to_be_bytes(),
-            target_address: TESTER_ADDR.to_be_bytes(),
-            message: RESPONSE_DATA.to_vec(),
-        })
+        DiagnosticResponse::Msg {
+            source_address: ECU_ADDR,
+            target_address: TESTER_ADDR,
+            data: RESPONSE_DATA.to_vec(),
+        }
     }
 
     fn diag_msg() -> DiagnosticMessage {
@@ -1340,16 +1519,16 @@ mod tests {
     }
 
     type ResponseChannel = (
-        mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
-        mpsc::Receiver<Result<Option<UdsResponse>, DiagServiceError>>,
+        mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
+        mpsc::Receiver<Result<Option<TransportResponse>, DiagServiceError>>,
     );
 
     fn make_response_channel() -> ResponseChannel {
         mpsc::channel(1)
     }
 
-    type SendResult = Result<(), cda_interfaces::DiagServiceError>;
-    type ResponseItem = Result<Option<UdsResponse>, cda_interfaces::DiagServiceError>;
+    type SendResult = Result<tokio::task::JoinHandle<()>, cda_interfaces::DiagServiceError>;
+    type ResponseItem = Result<Option<TransportResponse>, cda_interfaces::DiagServiceError>;
 
     /// Shared test harness.
     ///
@@ -1433,17 +1612,30 @@ mod tests {
     async fn implicit_ack_busy_retry_then_final_response() {
         let mut harness = TestHarness::new().await;
 
-        // ECU sends BusyRepeatRequest - no ACK (implicit ACK path).
+        // ECU sends BusyRepeatRequest (NRC 0x21) via the implicit-ACK path:
+        // the DiagnosticMessage arrives before the ACK, so
+        // wait_for_ack_or_response_until_timeout returns it directly as the
+        // seed for read_ecu_responses instead of waiting for a separate ACK.
         harness
             .broadcast_tx
-            .send(Ok(DiagnosticResponse::BusyRepeatRequest {
+            .send(Ok(DiagnosticResponse::Msg {
                 source_address: ECU_ADDR,
-                request_sid: REQUEST_DATA[0],
+                target_address: TESTER_ADDR,
+                data: vec![
+                    service_ids::NEGATIVE_RESPONSE,
+                    REQUEST_DATA[0],
+                    nrc::BUSY_REPEAT_REQUEST,
+                ],
             }))
             .expect("Failed to sent busy repeat request");
         let first = harness.recv_response().await;
         assert!(
-            matches!(first, Ok(Some(UdsResponse::BusyRepeatRequest(_)))),
+            matches!(
+                first,
+                Ok(Some(TransportResponse::Pending(
+                    PendingNrc::BusyRepeatRequest { .. }
+                )))
+            ),
             "expected BusyRepeatRequest, got {first:?}"
         );
 
@@ -1454,7 +1646,7 @@ mod tests {
             .expect("Failed to sent final message");
         let second = harness.recv_response().await;
         assert!(
-            matches!(second, Ok(Some(UdsResponse::Message(_)))),
+            matches!(second, Ok(Some(TransportResponse::UdsResponse(_)))),
             "expected Message, got {second:?}"
         );
 
@@ -1478,7 +1670,7 @@ mod tests {
             .expect("Failed to sent message");
         let response = harness.recv_response().await;
         assert!(
-            matches!(response, Ok(Some(UdsResponse::Message(_)))),
+            matches!(response, Ok(Some(TransportResponse::UdsResponse(_)))),
             "expected Message, got {response:?}"
         );
 
@@ -1529,8 +1721,8 @@ mod tests {
         .await;
 
         assert!(
-            matches!(result, Ok(Some(DiagnosticResponse::Msg(_)))),
-            "expected Ok(Some(Msg)), got {result:?}"
+            matches!(result, Ok(Some(DiagnosticResponse::Msg { .. }))),
+            "expected Ok(Some(Diagnostic)), got {result:?}"
         );
     }
 
@@ -1540,9 +1732,14 @@ mod tests {
         let (tx, mut rx) = make_broadcast_pair();
         let msg = diag_msg();
 
-        tx.send(Ok(DiagnosticResponse::BusyRepeatRequest {
+        tx.send(Ok(DiagnosticResponse::Msg {
             source_address: ECU_ADDR,
-            request_sid: REQUEST_DATA[0],
+            target_address: TESTER_ADDR,
+            data: vec![
+                service_ids::NEGATIVE_RESPONSE,
+                REQUEST_DATA[0],
+                nrc::BUSY_REPEAT_REQUEST,
+            ],
         }))
         .expect("Failed to busy repeat request");
 
@@ -1555,14 +1752,8 @@ mod tests {
         .await;
 
         assert!(
-            matches!(
-                result,
-                Ok(Some(DiagnosticResponse::BusyRepeatRequest {
-                    source_address: _,
-                    request_sid: _
-                }))
-            ),
-            "expected Ok(Some(BusyRepeatRequest)), got {result:?}"
+            matches!(result, Ok(Some(DiagnosticResponse::Msg { .. }))),
+            "expected Ok(Some(Diagnostic(BusyRepeatRequest NRC))), got {result:?}"
         );
     }
 
@@ -1710,7 +1901,7 @@ mod tests {
             .expect("timeout")
             .expect("channel closed");
         assert!(
-            matches!(item, Ok(Some(UdsResponse::Message(_)))),
+            matches!(item, Ok(Some(TransportResponse::UdsResponse(_)))),
             "expected Message, got {item:?}"
         );
 
@@ -1726,9 +1917,14 @@ mod tests {
     async fn read_ecu_responses_forwards_multiple_responses() {
         let (tx, mut rx) = make_broadcast_pair();
         let (resp_tx, mut resp_rx) = make_response_channel();
-        tx.send(Ok(DiagnosticResponse::Pending {
+        tx.send(Ok(DiagnosticResponse::Msg {
             source_address: ECU_ADDR,
-            request_sid: REQUEST_DATA[0],
+            target_address: TESTER_ADDR,
+            data: vec![
+                service_ids::NEGATIVE_RESPONSE,
+                REQUEST_DATA[0],
+                nrc::RESPONSE_PENDING,
+            ],
         }))
         .expect("Failed to send pending response");
         tx.send(Ok(ecu_msg_response()))
@@ -1746,7 +1942,12 @@ mod tests {
             .expect("timeout")
             .expect("closed");
         assert!(
-            matches!(first, Ok(Some(UdsResponse::ResponsePending(_)))),
+            matches!(
+                first,
+                Ok(Some(TransportResponse::Pending(
+                    PendingNrc::ResponsePending { .. }
+                )))
+            ),
             "expected ResponsePending, got {first:?}"
         );
 
@@ -1755,7 +1956,7 @@ mod tests {
             .expect("timeout")
             .expect("closed");
         assert!(
-            matches!(second, Ok(Some(UdsResponse::Message(_)))),
+            matches!(second, Ok(Some(TransportResponse::UdsResponse(_)))),
             "expected Message, got {second:?}"
         );
 
@@ -1774,9 +1975,14 @@ mod tests {
         let (resp_tx, mut resp_rx) = make_response_channel();
 
         let first = ecu_msg_response();
-        tx.send(Ok(DiagnosticResponse::Pending {
+        tx.send(Ok(DiagnosticResponse::Msg {
             source_address: ECU_ADDR,
-            request_sid: REQUEST_DATA[0],
+            target_address: TESTER_ADDR,
+            data: vec![
+                service_ids::NEGATIVE_RESPONSE,
+                REQUEST_DATA[0],
+                nrc::RESPONSE_PENDING,
+            ],
         }))
         .expect("Failed to send pending response");
         let _tx = tx;
@@ -1790,7 +1996,7 @@ mod tests {
             .expect("timeout")
             .expect("closed");
         assert!(
-            matches!(first_item, Ok(Some(UdsResponse::Message(_)))),
+            matches!(first_item, Ok(Some(TransportResponse::UdsResponse(_)))),
             "expected Message from first, got {first_item:?}"
         );
 
@@ -1799,7 +2005,12 @@ mod tests {
             .expect("timeout")
             .expect("closed");
         assert!(
-            matches!(second_item, Ok(Some(UdsResponse::ResponsePending(_)))),
+            matches!(
+                second_item,
+                Ok(Some(TransportResponse::Pending(
+                    PendingNrc::ResponsePending { .. }
+                )))
+            ),
             "expected ResponsePending from receiver, got {second_item:?}"
         );
 
