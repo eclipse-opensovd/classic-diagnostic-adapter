@@ -50,8 +50,12 @@ pub(crate) mod test_utils {
 
     impl StubTransport {
         pub(crate) fn new() -> Arc<Self> {
+            Self::with_state(TransportState::Disabled)
+        }
+
+        pub(crate) fn with_state(state: TransportState) -> Arc<Self> {
             Arc::new(Self {
-                state: tokio::sync::Mutex::new(TransportState::Disabled),
+                state: tokio::sync::Mutex::new(state),
             })
         }
     }

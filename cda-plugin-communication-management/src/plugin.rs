@@ -186,39 +186,17 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use async_trait::async_trait;
-    use cda_interfaces::communication_control::{
-        CommControlError, TransportControl, TransportState,
-    };
-
     use super::*;
     use crate::{
-        lifecycle::controller::test_utils::communication_handle_new,
+        lifecycle::controller::test_utils::communication_handle_new_noop,
         plugin::default::DefaultCommunicationPlugin,
     };
-
-    struct NoopTransport;
-
-    #[async_trait]
-    impl TransportControl for NoopTransport {
-        async fn enable(&self) -> Result<(), CommControlError> {
-            Ok(())
-        }
-        async fn disable(&self) -> Result<(), CommControlError> {
-            Ok(())
-        }
-        async fn state(&self) -> TransportState {
-            TransportState::Disabled
-        }
-    }
 
     /// The closure adapter forwards handle and mode unchanged, and propagates
     /// the closure's result.
     #[tokio::test]
     async fn forwards_handle_mode_and_result_to_the_wrapped_closure() {
-        let handle = communication_handle_new(Arc::new(NoopTransport) as Arc<dyn TransportControl>);
+        let handle = communication_handle_new_noop();
 
         let builder = communication_plugin_fn(|handle, mode| async move {
             Ok::<_, std::convert::Infallible>(DefaultCommunicationPlugin::new(handle, mode))

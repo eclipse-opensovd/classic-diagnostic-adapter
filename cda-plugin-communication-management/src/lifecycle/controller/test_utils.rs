@@ -14,9 +14,26 @@
 use std::sync::Arc;
 
 use cda_interfaces::communication_control::{
-    CommunicationAccess, CommunicationError, CommunicationGuard, CommunicationState,
-    TransportControl, VariantDetectionMode,
+    CommControlError, CommunicationAccess, CommunicationError, CommunicationGuard,
+    CommunicationState, TransportControl, TransportState, VariantDetectionMode,
 };
+
+struct TestTransport(TransportState);
+
+#[async_trait::async_trait]
+impl TransportControl for TestTransport {
+    async fn enable(&self) -> Result<(), CommControlError> {
+        Ok(())
+    }
+
+    async fn disable(&self) -> Result<(), CommControlError> {
+        Ok(())
+    }
+
+    async fn state(&self) -> TransportState {
+        self.0
+    }
+}
 
 use crate::lifecycle::{
     CommunicationHandle,
@@ -33,6 +50,11 @@ pub(crate) fn communication_handle_new(
     transport_control: Arc<dyn TransportControl>,
 ) -> CommunicationHandle {
     communication_handle_with_detection_mode(transport_control, VariantDetectionMode::Always)
+}
+
+#[must_use]
+pub fn communication_handle_new_noop() -> CommunicationHandle {
+    communication_handle_new(Arc::new(TestTransport(TransportState::Disabled)))
 }
 
 /// As [`communication_handle_new`], but with an explicit detection policy,
@@ -70,27 +92,6 @@ fn communication_handle_from_resources(
 
 #[must_use]
 pub fn enabled_communication_access_for_test() -> Arc<dyn CommunicationAccess> {
-    struct TestTransport;
-
-    #[async_trait::async_trait]
-    impl TransportControl for TestTransport {
-        async fn enable(
-            &self,
-        ) -> Result<(), cda_interfaces::communication_control::CommControlError> {
-            Ok(())
-        }
-
-        async fn disable(
-            &self,
-        ) -> Result<(), cda_interfaces::communication_control::CommControlError> {
-            Ok(())
-        }
-
-        async fn state(&self) -> cda_interfaces::communication_control::TransportState {
-            cda_interfaces::communication_control::TransportState::Enabled
-        }
-    }
-
     struct Access(CommunicationHandle);
 
     impl CommunicationAccess for Access {
@@ -117,7 +118,7 @@ pub fn enabled_communication_access_for_test() -> Arc<dyn CommunicationAccess> {
         }
     }
 
-    let resources = worker::new_resources(Arc::new(TestTransport));
+    let resources = worker::new_resources(Arc::new(TestTransport(TransportState::Enabled)));
     Arc::new(Access(communication_handle_from_resources(
         CommunicationState::Enabled,
         resources,
