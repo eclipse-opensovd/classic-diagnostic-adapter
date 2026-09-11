@@ -503,6 +503,11 @@ where
         provider.update_status(cda_health::Status::Up).await;
     }
 
+    // signal readiness only once loading has finished, so a `Type=notify` unit
+    // doesn't consider the CDA started while it is still loading databases.
+    #[cfg(feature = "systemd-notify")]
+    cda_extra::notify_ready();
+
     // Wait for shutdown signal
     clonable_shutdown_signal.await;
     tracing::info!("Shutting down...");

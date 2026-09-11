@@ -89,6 +89,26 @@ where
     Some(sd_notify_future)
 }
 
+/// Notifies systemd that startup has finished, by sending `READY=1`.
+///
+/// Services declared as `Type=notify` are not considered started by systemd until
+/// this notification arrives, regardless of whether the watchdog is enabled. It is
+/// therefore sent independently of [`create_sd_notify_task`], once the CDA has
+/// finished loading and is able to serve requests.
+///
+/// Does nothing when the process was not booted via systemd.
+pub fn notify_ready() {
+    // map std_notify::booted Err(_) to false and treat as not systemd booted
+    if !sd_notify::booted().unwrap_or(false) {
+        tracing::debug!("Systemd not detected, skipping sd_notify ready notification");
+        return;
+    }
+    tracing::debug!("Notifying systemd that startup has finished");
+    if let Err(e) = sd_notify::notify(&[sd_notify::NotifyState::Ready]) {
+        tracing::warn!(error = %e, "Failed to send sd_notify ready notification");
+    }
+}
+
 /// Interval at which watchdog notifications should be sent: half of the
 /// systemd-configured watchdog timeout, per the systemd-recommended convention
 /// (see `sd_watchdog_enabled(3)`).
