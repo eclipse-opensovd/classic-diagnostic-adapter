@@ -278,7 +278,7 @@ mod test {
 Run unit tests with:
 
 ```shell
-cargo test --locked --lib
+cargo test
 ```
 
 #### integration tests
@@ -303,7 +303,7 @@ The integration test framework automatically manages the test environment by:
 Docker mode spins up the ECU simulator and CDA in isolated containers:
 
 ```shell
-cargo test --locked --features integration-tests
+cargo test --features integration-tests
 ```
 
 **Without Docker (For Development/Debugging):**
@@ -318,7 +318,7 @@ export CDA_INTEGRATION_TEST_USE_DOCKER=false
 # export CDA_INTEGRATION_TEST_TESTER_ADDRESS=
 
 # Run the tests
-cargo test --locked --features integration-tests
+cargo test --features integration-tests
 ```
 
 When running without Docker, the ECU simulator and CDA will run as local processes with default ports (20002 for CDA, 13400 for DoIP gateway, 8181 for ECU sim control).
@@ -357,7 +357,7 @@ The integration test framework supports the following environment variables:
 
   ```shell
   export CDA_INTEGRATION_TEST_COVERAGE=true
-  cargo llvm-cov --locked --features integration-tests --lcov --output-path lcov.info
+  cargo llvm-cov --features integration-tests --lcov --output-path lcov.info
   ```
 
 ##### test structure
