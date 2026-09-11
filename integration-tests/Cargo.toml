@@ -83,6 +83,15 @@ tempfile = { workspace = true }
 [build-dependencies]
 cda-build = { workspace = true }
 
+# unix-domain-socket-capable HTTP client, unix-only - see the root Cargo.toml
+# for why this is scoped to `cfg(unix)`.
+[target.'cfg(unix)'.dependencies]
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
+hyperlocal = { workspace = true, features = ["client"] }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+
 [features]
 # We need the health endpoint to check if the CDA is online
 default = ["opensovd_cda_lib/health"]

@@ -67,6 +67,10 @@ fn reference_config_instance() -> Configuration {
         ..config.functional_description
     };
 
+    // Example value so the optional `server.unix_socket` field appears
+    // (commented out) in the generated reference config.
+    config.server.unix_socket = Some("/run/cda.sock".to_owned());
+
     // We're defining a partial toml here, because we want the default config only to contain
     // a few examples. The full object is build during parsing with figment.
     // If we started off with `let mut ecu_params = ComParams::default();`
