@@ -35,7 +35,7 @@ As we do not want to require nightly rust for the entire repository, these setti
 Instead, run this command to apply the correct formatting:
 
 ```sh
-cargo +nightly format
+make fmt
 ```
 
 It is recommended to configure your IDE to use nightly rustfmt with these settings as well.
@@ -83,5 +83,3 @@ Additionally the import granularity is set to `crate` to group all imports from 
 - Document all public items with `///` doc comments.
 - Use clear, concise language and provide context for complex logic.
 - Inline comments should ues `//` and never `/* */`, they should explain why, not what.
-
----

@@ -150,9 +150,9 @@ sudo ip link set up vcan0
 The pure-CAN and mixed suites are then run with:
 
 ```sh
-CDA_INTEGRATION_TEST_USE_CAN=true cargo test --locked -p integration-tests \
+CDA_INTEGRATION_TEST_USE_CAN=true cargo test -p integration-tests \
   --features can-integration-tests --test integration_tests -- --test-threads=1
-CDA_INTEGRATION_TEST_USE_MIXED=true cargo test --locked -p integration-tests \
+CDA_INTEGRATION_TEST_USE_MIXED=true cargo test -p integration-tests \
   --features can-integration-tests --test integration_tests -- --test-threads=1
 ```
 
