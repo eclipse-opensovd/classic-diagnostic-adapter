@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 
 use aide::{
     axum::{ApiRouter as Router, routing},
@@ -25,18 +25,15 @@ use axum::{
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
-    communication_control::{CommunicationAccess, CommunicationGuard},
+    communication_control::CommunicationAccess,
     diagservices::{DiagServiceResponse, DiagServiceResponseType},
 };
 use http::StatusCode;
-use indexmap::IndexMap;
-use tokio::sync::{Mutex, RwLock};
-use uuid::Uuid;
 
 use crate::{
     create_schema,
     sovd::{
-        FgServiceExecution, WebserverState,
+        ExecutionLock, FgServiceExecution, WebserverState,
         error::{ApiError, ErrorWrapper, VendorErrorCode, nrc_to_api_error_response},
         field_parse_errors_to_json,
         locks::Locks,
@@ -53,8 +50,7 @@ pub(crate) struct WebserverFgState<T: UdsEcu + Clone> {
     uds: T,
     locks: Arc<Locks>,
     functional_group_name: String,
-    fg_executions: Arc<RwLock<HashMap<String, IndexMap<Uuid, FgServiceExecution>>>>,
-    communication_activities: Arc<tokio::sync::Mutex<HashMap<Uuid, CommunicationGuard>>>,
+    fg_executions: Arc<ExecutionLock<FgServiceExecution>>,
     communication_access: Arc<dyn CommunicationAccess>,
 }
 
@@ -144,8 +140,7 @@ pub(crate) async fn create_functional_group_routes<T: UdsEcu + SchemaProvider + 
             uds: state.uds.clone(),
             locks: Arc::clone(&state.locks),
             functional_group_name: group.clone(),
-            fg_executions: Arc::new(RwLock::new(HashMap::default())),
-            communication_activities: Arc::new(Mutex::new(HashMap::default())),
+            fg_executions: Arc::new(StdRwLock::new(HashMap::default())),
             communication_access: Arc::clone(&state.communication_access),
         };
         functional_groups_router = functional_groups_router.nest_api_service(
@@ -512,8 +507,7 @@ pub(crate) mod tests {
                 ))),
             }),
             functional_group_name,
-            fg_executions: Arc::new(RwLock::new(HashMap::default())),
-            communication_activities: Arc::new(tokio::sync::Mutex::new(HashMap::default())),
+            fg_executions: Arc::new(std::sync::RwLock::new(HashMap::default())),
             communication_access: enabled_communication_access_for_test(),
         }
     }
