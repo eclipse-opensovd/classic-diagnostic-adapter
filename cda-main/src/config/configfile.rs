@@ -455,6 +455,46 @@ priority_lifecycle_queue_capacity = 32
         Ok(())
     }
 
+    fn assert_invalid_lock_config(
+        configure: impl FnOnce(&mut Configuration),
+        expected_field: &str,
+    ) {
+        let mut config = Configuration::default();
+        configure(&mut config);
+
+        let error = config
+            .validate_sanity()
+            .expect_err("Invalid lock configuration must be rejected");
+        let ConfigSanityError::InvalidValue { field, .. } = error else {
+            panic!("Expected invalid-value error, got {error:?}");
+        };
+        assert_eq!(field, expected_field);
+    }
+
+    #[test]
+    fn zero_priority_policy_timeout_is_rejected() {
+        assert_invalid_lock_config(
+            |config| config.locks.priority_policy_timeout_ms = 0,
+            "locks.priority_policy_timeout_ms",
+        );
+    }
+
+    #[test]
+    fn zero_priority_lifecycle_timeout_is_rejected() {
+        assert_invalid_lock_config(
+            |config| config.locks.priority_lifecycle_timeout_ms = 0,
+            "locks.priority_lifecycle_timeout_ms",
+        );
+    }
+
+    #[test]
+    fn zero_priority_lifecycle_queue_capacity_is_rejected() {
+        assert_invalid_lock_config(
+            |config| config.locks.priority_lifecycle_queue_capacity = 0,
+            "locks.priority_lifecycle_queue_capacity",
+        );
+    }
+
     /// A `[can]` section must parse in every build (the config type is not
     /// feature-gated), but `validate_sanity` must reject it when the binary
     /// was built without CAN support.
