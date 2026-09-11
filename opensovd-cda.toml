@@ -491,7 +491,13 @@
 # - `long_name_affix_position`: Position of affixes in long names (prefix or suffix).
 # - `configuration_service_parameter_semantic_id`: Parameter semantic used to distinguish
 #   between different services in configurations
-# - `functional_class_varcoding`: Functional class name for filtering varcoding services.
+# - `configuration_functional_classes`: Functional class names for filtering services that
+#   are routed to `/configurations` instead of `/data`.
+# - `category_mapping`: Maps a functional class name to a `/data` category for 0x22/0x2E
+#   services that are *not* routed to `/configurations`. A functional class must not appear
+#   both here and in `configuration_functional_classes`.
+# - `default_category`: Fallback category used for 0x22/0x2E services whose functional class
+#   is not present in `category_mapping` (and not in `configuration_functional_classes`).
 # - `short_name_affixes`: List of lowercase affixes for short names.
 #   **Each affix must match the specified `short_name_affix_position`
 #   (i.e., be a prefix if `Prefix`, or a suffix if `Suffix`).**
@@ -531,10 +537,17 @@
 #     "CAN",
 #     "ISO_11898",
 # ]
+# Maps a functional class name to a `/data` category for 0x22/0x2E services that are not
+# routed to `/configurations`. A functional class must not appear both here and in
+# `configuration_functional_classes`.
+# category_mapping = []
+# Functional class names used to route 0x22/0x2E services to `/configurations`.
+# configuration_functional_classes = ["varcoding"]
 # Semantic ID used to identify the distinguishing parameter of a service.
 # configuration_service_parameter_semantic_id = "ID"
-# Functional class name used to filter varcoding services.
-# functional_class_varcoding = "varcoding"
+# Fallback category for 0x22/0x2E services whose functional class has no entry in
+# `category_mapping`.
+# default_category = "x-sovd2uds-unmapped"
 # Position of affixes in diagnostic service long names.
 # long_name_affix_position = "Suffix"
 # Ordered list of lowercase affixes to strip from long names during service lookup.

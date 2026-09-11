@@ -63,29 +63,23 @@ impl<S: SecurityPlugin> ComponentInfos for EcuManager<S> {
 
     /// Returns all services in /configuration,
     /// i.e. 0x22 (`ReadDataByIdentifier`) and 0x2E (`WriteDataByIdentifier`)
-    /// that are in the functional group varcoding.
+    /// that belong to one of the configured `configuration_functional_classes`.
     fn get_components_configurations_info(
         &self,
         security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError> {
         let diag_layers = self.get_diag_layers_from_variant_and_parent_refs();
-        let var_coding_func_class_short_name = diag_layers
+        let configuration_func_class_short_names: HashSet<&str> = diag_layers
             .iter()
             .filter_map(|dl| dl.funct_classes())
             .flat_map(|fc_vec| fc_vec.iter())
-            .find_map(|fc| {
+            .filter_map(|fc| {
                 fc.short_name().filter(|name| {
-                    name.eq_ignore_ascii_case(
-                        &self.database_naming_convention.functional_class_varcoding,
-                    )
+                    self.database_naming_convention
+                        .is_configuration_functional_class(name)
                 })
             })
-            .ok_or_else(|| {
-                DiagServiceError::NotFound(format!(
-                    "Functional class '{}' for varcoding not found in any diagnostic layer",
-                    self.database_naming_convention.functional_class_varcoding
-                ))
-            })?;
+            .collect();
 
         let configuration_sids = [
             service_ids::READ_DATA_BY_IDENTIFIER,
@@ -120,7 +114,7 @@ impl<S: SecurityPlugin> ComponentInfos for EcuManager<S> {
                 dc.funct_class().is_some_and(|fc| {
                     fc.iter().any(|fc| {
                         fc.short_name()
-                            .is_some_and(|n| n == var_coding_func_class_short_name)
+                            .is_some_and(|n| configuration_func_class_short_names.contains(n))
                     })
                 })
             })
@@ -551,12 +545,33 @@ impl<S: SecurityPlugin> ComponentInfos for EcuManager<S> {
 }
 
 impl<S: SecurityPlugin> EcuManager<S> {
+    /// Resolves the `/data` category for a 0x22/0x2E `DiagComm` by looking at its functional
+    /// classes and matching them against the configured `category_mapping`. Falls back to
+    /// `default_category` if none of the service's functional classes have a mapping entry.
+    fn category_for_diag_comm(&self, diag_comm: &datatypes::DiagComm<'_>) -> String {
+        diag_comm
+            .funct_class()
+            .and_then(|fc_vec| {
+                fc_vec
+                    .iter()
+                    .filter_map(|fc| fc.short_name())
+                    .find_map(|name| {
+                        self.database_naming_convention
+                            .category_mapping
+                            .iter()
+                            .find(|mapping| mapping.functional_class.eq_ignore_ascii_case(name))
+                            .map(|mapping| mapping.category.clone())
+                    })
+            })
+            .unwrap_or_else(|| self.database_naming_convention.default_category.clone())
+    }
+
     fn diag_comm_to_component_data_info(
         &self,
         diag_comm: &datatypes::DiagComm<'_>,
     ) -> ComponentDataInfo {
         ComponentDataInfo {
-            category: diag_comm.semantic().unwrap_or_default().to_owned(),
+            category: self.category_for_diag_comm(diag_comm),
             id: diag_comm.short_name().map_or(<_>::default(), |s| {
                 self.database_naming_convention.trim_short_name_affixes(s)
             }),
@@ -679,7 +694,8 @@ mod tests {
         database_builder::{DiagClassType, DiagCommParams, DiagLayerParams, EcuDataBuilder},
     };
     use cda_interfaces::{
-        Connectivity, DiagComm, DiagCommType, Protocol, VariantState, util::std_ext,
+        Connectivity, DiagComm, DiagCommType, Protocol, VariantState,
+        datatypes::DatabaseNamingConvention, util::std_ext,
     };
     use cda_plugin_security::DefaultSecurityPluginData;
 
@@ -1606,6 +1622,268 @@ mod tests {
         assert!(
             result.is_ok(),
             "Expected clean subfunction to still match with default mask, got: {result:?}"
+        );
+    }
+
+    /// Builds an [`EcuManager`] with a custom [`DatabaseNamingConvention`] and a single RDBI
+    /// (0x22) service named `service_name`, optionally associated with a functional class named
+    /// `funct_class_name`.
+    fn build_ecu_manager_with_rdbi_service_and_funct_class(
+        service_name: &str,
+        funct_class_name: Option<&str>,
+        naming_convention: DatabaseNamingConvention,
+    ) -> super::super::ecumanager::EcuManager<DefaultSecurityPluginData> {
+        let mut db_builder = EcuDataBuilder::new();
+        let protocol_name = Protocol::default().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
+
+        let request = create_sid_only_request!(db_builder, service_ids::READ_DATA_BY_IDENTIFIER);
+        let funct_class = funct_class_name.map(|name| vec![db_builder.create_funct_class(name)]);
+        let diag_comm = db_builder.create_diag_comm(DiagCommParams {
+            short_name: service_name,
+            diag_class_type: DiagClassType::START_COMM,
+            protocols: Some(vec![protocol]),
+            funct_class,
+            ..Default::default()
+        });
+        let service = new_diag_service!(db_builder, diag_comm, request, vec![], vec![]);
+        let db = finish_db!(db_builder, protocol, vec![service]);
+
+        let manager = super::super::ecumanager::EcuManager::new(
+            db,
+            Protocol::default(),
+            &cda_interfaces::datatypes::ComParams::default(),
+            naming_convention,
+            super::super::ecumanager::EcuManagerConfig {
+                type_: cda_interfaces::EcuManagerType::Ecu,
+                fallback_to_base_variant: true,
+                strict_parameter_validation: false,
+            },
+            &cda_interfaces::FunctionalDescriptionConfig {
+                description_database: "functional_groups".to_owned(),
+                enabled_functional_groups: None,
+                protocol_position: DiagnosticServiceAffixPosition::Suffix,
+            },
+        )
+        .expect("Failed to create EcuManager");
+
+        {
+            let mut ecu_state = std_ext::lock_write(&manager.runtime_state.ecu_state);
+            ecu_state.connectivity = Connectivity::Online;
+            ecu_state.variant_state = VariantState::Detected {
+                name: crate::diag_kernel::test_utils::ecu_manager_builder::TEST_DIAG_LAYER
+                    .to_owned(),
+                is_base_variant: true,
+                is_fallback: false,
+            };
+            ecu_state.variant_index = Some(0);
+        }
+
+        manager
+    }
+
+    #[test]
+    fn test_get_components_data_info_resolves_category_via_mapping() {
+        let naming_convention = DatabaseNamingConvention {
+            category_mapping: vec![cda_interfaces::datatypes::FunctionalClassCategoryMapping {
+                functional_class: "sensors".to_owned(),
+                category: "identData".to_owned(),
+            }],
+            default_category: "x-sovd2uds-unmapped".to_owned(),
+            ..Default::default()
+        };
+        let ecu_manager = build_ecu_manager_with_rdbi_service_and_funct_class(
+            "EngineTemp",
+            Some("sensors"),
+            naming_convention,
+        );
+
+        let result = ecu_manager.get_components_data_info(&skip_sec_plugin!());
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result.first().expect("Expected one data item").category,
+            "identData"
+        );
+    }
+
+    #[test]
+    fn test_get_components_data_info_falls_back_to_default_category() {
+        let naming_convention = DatabaseNamingConvention {
+            category_mapping: vec![cda_interfaces::datatypes::FunctionalClassCategoryMapping {
+                functional_class: "sensors".to_owned(),
+                category: "identData".to_owned(),
+            }],
+            default_category: "x-sovd2uds-unmapped".to_owned(),
+            ..Default::default()
+        };
+        let ecu_manager = build_ecu_manager_with_rdbi_service_and_funct_class(
+            "EngineTemp",
+            Some("unrelated_class"),
+            naming_convention,
+        );
+
+        let result = ecu_manager.get_components_data_info(&skip_sec_plugin!());
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result.first().expect("Expected one data item").category,
+            "x-sovd2uds-unmapped"
+        );
+    }
+
+    #[test]
+    fn test_get_components_data_info_no_funct_class_uses_default_category() {
+        let naming_convention = DatabaseNamingConvention {
+            category_mapping: vec![cda_interfaces::datatypes::FunctionalClassCategoryMapping {
+                functional_class: "sensors".to_owned(),
+                category: "identData".to_owned(),
+            }],
+            default_category: "x-sovd2uds-unmapped".to_owned(),
+            ..Default::default()
+        };
+        let ecu_manager = build_ecu_manager_with_rdbi_service_and_funct_class(
+            "EngineTemp",
+            None,
+            naming_convention,
+        );
+
+        let result = ecu_manager.get_components_data_info(&skip_sec_plugin!());
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result.first().expect("Expected one data item").category,
+            "x-sovd2uds-unmapped"
+        );
+    }
+
+    /// Builds an `EcuManager` whose diag layer defines a functional class named
+    /// `funct_class_name`, and which has one 0x22 (`ReadDataByIdentifier`) service named
+    /// `service_name` associated with that same functional class.
+    fn build_ecu_manager_with_configuration_service(
+        service_name: &str,
+        funct_class_name: &str,
+        naming_convention: DatabaseNamingConvention,
+    ) -> super::super::ecumanager::EcuManager<DefaultSecurityPluginData> {
+        use cda_database::datatypes::database_builder::EcuDataParams;
+
+        let mut db_builder = EcuDataBuilder::new();
+        let protocol_name = Protocol::default().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
+
+        let sid_param = db_builder.create_coded_const_param(
+            "SID_RQ",
+            &service_ids::READ_DATA_BY_IDENTIFIER.to_string(),
+            0,
+            0,
+            8,
+            DataType::UInt32,
+        );
+        let did_param = db_builder.create_coded_const_param("DID", "1", 1, 0, 16, DataType::UInt32);
+        let request = db_builder.create_request(Some(vec![sid_param, did_param]), None);
+        let funct_class = db_builder.create_funct_class(funct_class_name);
+        let diag_comm = db_builder.create_diag_comm(DiagCommParams {
+            short_name: service_name,
+            diag_class_type: DiagClassType::START_COMM,
+            protocols: Some(vec![protocol]),
+            funct_class: Some(vec![funct_class]),
+            ..Default::default()
+        });
+        let service = new_diag_service!(db_builder, diag_comm, request, vec![], vec![]);
+
+        let cp_ref = db_builder.create_com_param_ref(None, None, None, Some(protocol), None);
+        let diag_layer = db_builder.create_diag_layer(DiagLayerParams {
+            short_name: crate::diag_kernel::test_utils::ecu_manager_builder::TEST_DIAG_LAYER,
+            com_param_refs: Some(vec![cp_ref]),
+            diag_services: Some(vec![service]),
+            funct_classes: Some(vec![funct_class]),
+            ..Default::default()
+        });
+        let variant = db_builder.create_variant(diag_layer, true, None, None);
+        let db = db_builder.finish(EcuDataParams {
+            ecu_name: "TestEcu",
+            revision: "1",
+            version: "1.0.0",
+            variants: Some(vec![variant]),
+            ..Default::default()
+        });
+
+        let manager = super::super::ecumanager::EcuManager::new(
+            db,
+            Protocol::default(),
+            &cda_interfaces::datatypes::ComParams::default(),
+            naming_convention,
+            super::super::ecumanager::EcuManagerConfig {
+                type_: cda_interfaces::EcuManagerType::Ecu,
+                fallback_to_base_variant: true,
+                strict_parameter_validation: false,
+            },
+            &cda_interfaces::FunctionalDescriptionConfig {
+                description_database: "functional_groups".to_owned(),
+                enabled_functional_groups: None,
+                protocol_position: DiagnosticServiceAffixPosition::Suffix,
+            },
+        )
+        .expect("Failed to create EcuManager");
+
+        {
+            let mut ecu_state = std_ext::lock_write(&manager.runtime_state.ecu_state);
+            ecu_state.connectivity = Connectivity::Online;
+            ecu_state.variant_state = VariantState::Detected {
+                name: crate::diag_kernel::test_utils::ecu_manager_builder::TEST_DIAG_LAYER
+                    .to_owned(),
+                is_base_variant: true,
+                is_fallback: false,
+            };
+            ecu_state.variant_index = Some(0);
+        }
+
+        manager
+    }
+
+    #[test]
+    fn test_get_components_configurations_info_uses_configured_functional_classes_list() {
+        let naming_convention = DatabaseNamingConvention {
+            configuration_functional_classes: vec![
+                "varcoding".to_owned(),
+                "calibration".to_owned(),
+            ],
+            ..Default::default()
+        };
+        let ecu_manager = build_ecu_manager_with_configuration_service(
+            "Calibration1",
+            "calibration",
+            naming_convention,
+        );
+
+        let result = ecu_manager
+            .get_components_configurations_info(&skip_sec_plugin!())
+            .expect("should return Ok");
+        assert_eq!(
+            result.len(),
+            1,
+            "Service belonging to a functional class in the configured list should be routed to \
+             /configurations"
+        );
+        assert_eq!(
+            result.first().expect("Expected one item").id,
+            "Calibration1"
+        );
+    }
+
+    #[test]
+    fn test_get_components_configurations_info_ignores_unlisted_functional_class() {
+        let naming_convention = DatabaseNamingConvention {
+            configuration_functional_classes: vec!["varcoding".to_owned()],
+            ..Default::default()
+        };
+        let ecu_manager =
+            build_ecu_manager_with_configuration_service("Sensor1", "sensors", naming_convention);
+
+        let result = ecu_manager
+            .get_components_configurations_info(&skip_sec_plugin!())
+            .expect("should return Ok");
+        assert!(
+            result.is_empty(),
+            "Service whose functional class is not in configuration_functional_classes must not \
+             be routed to /configurations"
         );
     }
 }
