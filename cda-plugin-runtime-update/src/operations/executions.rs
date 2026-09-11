@@ -397,7 +397,7 @@ mod tests {
     struct GatedTransport {
         entered: tokio::sync::mpsc::UnboundedSender<()>,
         gate: Arc<tokio::sync::Semaphore>,
-        state: tokio::sync::Mutex<TransportState>,
+        transport: Arc<StubTransport>,
     }
 
     /// Test-side handle to [`GatedTransport`]'s resume.
@@ -413,7 +413,7 @@ mod tests {
             let transport = Arc::new(Self {
                 entered: entered_tx,
                 gate: Arc::clone(&gate),
-                state: tokio::sync::Mutex::new(TransportState::Enabled),
+                transport: StubTransport::with_state(TransportState::Enabled),
             });
             let resume = ResumeGate {
                 entered: entered_rx,
@@ -447,17 +447,15 @@ mod tests {
                 .acquire()
                 .await
                 .expect("gate must not be closed while a resume is parked on it");
-            *self.state.lock().await = TransportState::Enabled;
-            Ok(())
+            self.transport.enable().await
         }
 
         async fn disable(&self) -> Result<(), CommControlError> {
-            *self.state.lock().await = TransportState::Disabled;
-            Ok(())
+            self.transport.disable().await
         }
 
         async fn state(&self) -> TransportState {
-            *self.state.lock().await
+            self.transport.state().await
         }
     }
 
