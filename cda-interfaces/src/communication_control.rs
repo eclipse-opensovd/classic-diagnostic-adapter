@@ -13,7 +13,7 @@
 
 //! Shared contracts for managed diagnostic communication lifecycle control.
 //!
-//! [[ dimpl~communication-control-contracts, Communication lifecycle contracts, dimpl, req~dt-deferred-initialization; arch~dt-deferred-initialization ]]
+//! [[ dimpl~communication-control-contracts, Communication lifecycle contracts, dimpl ]]
 pub mod access;
 pub mod error;
 pub mod operation;

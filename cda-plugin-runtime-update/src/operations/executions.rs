@@ -236,6 +236,7 @@ async fn register_execution(
     clippy::too_many_arguments,
     reason = "Spawned task inputs must be owned"
 )]
+/// [[ dimpl~post-update-deferred-communication, Post-update deferred communication handling, dimpl ]]
 fn spawn_execution<S, R>(
     mode: ExecutionMode,
     execution_id: String,
@@ -390,20 +391,13 @@ mod tests {
         write_test_file,
     };
 
-    fn make_transport_and_disable() -> (HttpProtectionRegistry, Arc<dyn DisableCommunication>) {
-        let transport = StubTransport::new();
-        let restrictions = HttpProtectionRegistry::new();
-        let disable = communication_disable_for_test(Arc::<StubTransport>::clone(&transport), true);
-        (restrictions, disable)
-    }
-
     /// A transport whose resume (`enable`) parks until the test lets it through,
     /// making the window between "the guards are coming down" and "they are
     /// down" long enough to observe.
     struct GatedTransport {
         entered: tokio::sync::mpsc::UnboundedSender<()>,
         gate: Arc<tokio::sync::Semaphore>,
-        state: tokio::sync::Mutex<TransportState>,
+        transport: Arc<StubTransport>,
     }
 
     /// Test-side handle to [`GatedTransport`]'s resume.
@@ -419,7 +413,7 @@ mod tests {
             let transport = Arc::new(Self {
                 entered: entered_tx,
                 gate: Arc::clone(&gate),
-                state: tokio::sync::Mutex::new(TransportState::Enabled),
+                transport: StubTransport::with_state(TransportState::Enabled),
             });
             let resume = ResumeGate {
                 entered: entered_rx,
@@ -453,17 +447,15 @@ mod tests {
                 .acquire()
                 .await
                 .expect("gate must not be closed while a resume is parked on it");
-            *self.state.lock().await = TransportState::Enabled;
-            Ok(())
+            self.transport.enable().await
         }
 
         async fn disable(&self) -> Result<(), CommControlError> {
-            *self.state.lock().await = TransportState::Disabled;
-            Ok(())
+            self.transport.disable().await
         }
 
         async fn state(&self) -> TransportState {
-            *self.state.lock().await
+            self.transport.state().await
         }
     }
 
@@ -475,6 +467,7 @@ mod tests {
         executions: Arc<RwLock<HashMap<String, UpdateExecution>>>,
         communication_disable: Arc<dyn DisableCommunication>,
         communication_access: Arc<dyn CommunicationAccess>,
+        transport: Arc<StubTransport>,
         http_restriction_manager: HttpProtectionRegistry,
         _dir: tempfile::TempDir,
     }
@@ -503,11 +496,30 @@ mod tests {
                 lock_state_provider: &self.lock_provider,
             }
         }
+
+        fn params_with_post_update_mode(
+            &self,
+            post_update_mode: PostUpdateCommunicationMode,
+        ) -> super::ExecutionParams<
+            '_,
+            LocalStorage,
+            NoopReloadHandler,
+            MockSecurityHandler,
+            MockLockProvider,
+        > {
+            super::ExecutionParams {
+                post_update_mode,
+                ..self.params()
+            }
+        }
     }
 
     fn make_fixture() -> TestFixture {
         let (storage, dir) = make_storage();
-        let (mgr, communication_disable) = make_transport_and_disable();
+        let transport = StubTransport::new();
+        let mgr = HttpProtectionRegistry::new();
+        let communication_disable =
+            communication_disable_for_test(Arc::<StubTransport>::clone(&transport), true);
         TestFixture {
             storage: Arc::new(storage),
             security_handler: Arc::new(MockSecurityHandler::new()),
@@ -519,6 +531,7 @@ mod tests {
             executions: Arc::new(RwLock::new(HashMap::default())),
             communication_disable,
             communication_access: enabled_communication_access_for_test(),
+            transport,
             http_restriction_manager: mgr,
             _dir: dir,
         }
@@ -563,6 +576,60 @@ mod tests {
 
         let status = super::get_execution_status(&f.executions, &exec_id).await;
         assert!(status.is_some());
+    }
+
+    /// [[ test~deferred-post-update-apply, Successful apply leaves communication disabled in deferred post-update mode, test ]]
+    #[tokio::test]
+    async fn successful_apply_leaves_communication_disabled_in_deferred_mode() {
+        let f = make_fixture();
+        write_test_file(
+            &f.storage,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+            "ecu.mdd",
+            b"mdd_data",
+        )
+        .await;
+
+        let params = f.params_with_post_update_mode(PostUpdateCommunicationMode::Deferred);
+        let exec_id = super::start_execution(&params, ExecutionMode::Apply)
+            .await
+            .unwrap();
+        assert_eq!(
+            poll_until_terminal(&f.executions, &exec_id).await,
+            ExecutionStatus::Completed
+        );
+        assert_eq!(
+            TransportControl::state(&*f.transport).await,
+            TransportState::Disabled
+        );
+        assert!(!f.http_restriction_manager.is_active());
+    }
+
+    /// [[ test~deferred-post-update-rollback, Successful rollback leaves communication disabled in deferred post-update mode, test ]]
+    #[tokio::test]
+    async fn successful_rollback_leaves_communication_disabled_in_deferred_mode() {
+        let f = make_fixture();
+        write_test_file(
+            &f.storage,
+            &CollectionName::DiagnosticDatabaseBackup,
+            "ecu.mdd",
+            b"backup_data",
+        )
+        .await;
+
+        let params = f.params_with_post_update_mode(PostUpdateCommunicationMode::Deferred);
+        let exec_id = super::start_execution(&params, ExecutionMode::Rollback)
+            .await
+            .unwrap();
+        assert_eq!(
+            poll_until_terminal(&f.executions, &exec_id).await,
+            ExecutionStatus::Completed
+        );
+        assert_eq!(
+            TransportControl::state(&*f.transport).await,
+            TransportState::Disabled
+        );
+        assert!(!f.http_restriction_manager.is_active());
     }
 
     #[tokio::test]

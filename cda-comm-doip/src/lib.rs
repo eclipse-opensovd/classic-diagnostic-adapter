@@ -173,6 +173,7 @@ impl<T: EcuAddresses + DoipComParams> Clone for DoipGatewayState<T> {
     }
 }
 
+/// [[ dimpl~deferred-doip-transport, Deferred diagnostic transport activation, dimpl ]]
 pub struct DoipDiagGateway<T: EcuAddresses + DoipComParams> {
     state: DoipGatewayState<T>,
     config: DoipConfig,
@@ -1453,6 +1454,7 @@ mod tests {
     /// even though construction succeeds.
     /// The socket is created lazily inside `start()`, reached only through an
     /// authorized [`DoipDiagGateway::enable`]
+    /// [[ test~deferred-doip-passive-construction, Gateway construction does not bind its discovery socket, test ]]
     #[tokio::test]
     async fn new_never_binds_the_doip_socket() {
         let gateway = DoipDiagGateway::<TestEcu>::new(
