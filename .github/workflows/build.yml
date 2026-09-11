@@ -33,6 +33,7 @@ jobs:
     env:
       RUSTFLAGS: "--cfg tokio_unstable -L /usr/local/lib"
       PKG_CONFIG_PATH: "/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
+      CARGO_TERM_VERBOSE: "true"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -52,7 +53,7 @@ jobs:
       - name: Setup DLT tracing lib
         uses: eclipse-opensovd/dlt-tracing-lib/.github/actions/setup-dlt@main
       - name: Build all features
-        run: cargo build --verbose --all-features
+        run: cargo build --all-features
       - name: Verify generated files are up to date
         run: |
           if ! git diff --exit-code cda-database/src/flatbuf/diagnostic_description.rs cda-database/src/proto/fileformat.rs; then
@@ -91,14 +92,14 @@ jobs:
       # note: if openssl and mbedtls are enabled falls back to openssl
       # therefore we build mbedtls separately as well
       - name: Build mbedtls features
-        run: cargo build --verbose -p opensovd-cda --no-default-features --features mbedtls
+        run: cargo build -p opensovd-cda --no-default-features --features mbedtls
       - name: Build minimal features
-        run: cargo build --verbose --no-default-features
+        run: cargo build --no-default-features
       - name: Build minimal CDA only
         # Building CDA only makes sure that optional dependencies
         # from within the workspace are properly marked as optional and guarded
         # with cfg flags.
-        run: cargo build --verbose --no-default-features --package opensovd-cda
+        run: cargo build --no-default-features --package opensovd-cda
 
   build_and_test:
     runs-on: ubuntu-latest
@@ -120,7 +121,7 @@ jobs:
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov
       - name: Build
-        run: cargo build --verbose
+        run: cargo build
       - name: Check licenses
         run: cargo deny check licenses
       - name: Check allowed sources
@@ -490,6 +491,6 @@ jobs:
         env:
           OPENSSL_DIR: C:\Program Files\OpenSSL
       - name: Build
-        run: cargo build --verbose
+        run: cargo build
       - name: Test
         run: cargo test -- --show-output
