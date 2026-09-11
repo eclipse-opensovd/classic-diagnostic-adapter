@@ -87,7 +87,7 @@ async fn test_list_operations() {
 }
 
 #[tokio::test]
-async fn test_sync_operation_no_lock() {
+async fn test_sync_operation_requires_lock() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
@@ -95,7 +95,7 @@ async fn test_sync_operation_no_lock() {
     send_cda_request(
         &runtime.config,
         &format!("{ecu_endpoint}/operations/selftest/executions"),
-        StatusCode::FORBIDDEN,
+        StatusCode::CONFLICT,
         Method::POST,
         Some("{}"),
         Some(&auth),
@@ -106,7 +106,7 @@ async fn test_sync_operation_no_lock() {
 }
 
 #[tokio::test]
-async fn test_async_operation_delete_no_lock() {
+async fn test_async_operation_delete_after_lock_release() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
@@ -131,11 +131,11 @@ async fn test_async_operation_delete_no_lock() {
     // Release the lock before attempting DELETE
     release_ecu_lock(runtime, &auth, &lock_id).await;
 
-    // DELETE without a lock - should be 403
+    // DELETE is a write operation and requires a currently active lock.
     send_cda_request(
         &runtime.config,
         &format!("{ecu_endpoint}/operations/calibratesensors/executions/{execution_id}"),
-        StatusCode::FORBIDDEN,
+        StatusCode::CONFLICT,
         Method::DELETE,
         None,
         Some(&auth),
@@ -144,13 +144,7 @@ async fn test_async_operation_delete_no_lock() {
     .await
     .unwrap();
 
-    // Re-acquire lock for cleanup
-    let lock_id2 = acquire_ecu_lock(runtime, &auth).await;
-    let query_params = QueryParams(HashMap::from_iter([(
-        "x-sovd2uds-force".to_string(),
-        "true".to_string(),
-    )]));
-    // CalibrateSensors Stop echoes RoutineId (semantic="DATA") -> 200 with stopped body
+    let cleanup_lock_id = acquire_ecu_lock(runtime, &auth).await;
     send_cda_request(
         &runtime.config,
         &format!("{ecu_endpoint}/operations/calibratesensors/executions/{execution_id}"),
@@ -158,11 +152,11 @@ async fn test_async_operation_delete_no_lock() {
         Method::DELETE,
         None,
         Some(&auth),
-        Some(&query_params),
+        None,
     )
     .await
     .unwrap();
-    release_ecu_lock(runtime, &auth, &lock_id2).await;
+    release_ecu_lock(runtime, &auth, &cleanup_lock_id).await;
 }
 
 #[tokio::test]
@@ -1035,7 +1029,7 @@ async fn test_functional_operation_list() {
 }
 
 /// Verify that `POST`ing a functional-group operation without holding the FG lock
-/// is rejected with 403 Forbidden.
+/// is rejected with 409 Conflict.
 #[tokio::test]
 async fn test_functional_operation_post_no_lock() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
@@ -1044,7 +1038,7 @@ async fn test_functional_operation_post_no_lock() {
     send_cda_request(
         &runtime.config,
         &format!("{FG_ENDPOINT}/operations/engage_safety_squints/executions"),
-        StatusCode::FORBIDDEN,
+        StatusCode::CONFLICT,
         Method::POST,
         Some(r#"{"parameters":{"SquintSlitWidth":2.5}}"#),
         Some(&auth),

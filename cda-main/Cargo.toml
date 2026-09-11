@@ -39,6 +39,7 @@ cda-database = { workspace = true }
 cda-interfaces = { workspace = true }
 cda-sovd = { workspace = true }
 cda-tracing = { workspace = true }
+cda-plugin-lock-priority = { workspace = true }
 cda-plugin-security = { workspace = true }
 cda-health = { workspace = true }
 cda-extra = { workspace = true, optional = true }

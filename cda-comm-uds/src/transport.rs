@@ -24,22 +24,22 @@ use cda_interfaces::{
     diagservices::{DiagServiceResponse, UdsPayloadData},
     dlt_ctx, service_ids,
 };
-use tokio::sync::{RwLock, Semaphore, mpsc};
+use tokio::{
+    sync::{OwnedSemaphorePermit, RwLock, mpsc},
+    task::{AbortHandle, JoinHandle},
+};
 
 use crate::{UdsEcuDb, UdsManager, types::UdsParameters};
 
-/// Upper bound on how long `send_with_raw_payload` waits for a *previous*
-/// attempt's per-request gateway task to actually finish (per its returned
-/// `JoinHandle`) before issuing the next application-layer retry attempt.
+/// Grace period for a per-request gateway task to finish cooperatively.
 ///
 /// Dropping the previous attempt's response channel only *signals* that task
 /// to stop; it does not guarantee the task has released whatever per-ECU
 /// resource it holds (e.g. a `DoIP` connection mutex, or - critically for CAN,
 /// which has no equivalent per-connection lock - an ISO-TP socket bound to
 /// the same CAN ID pair the next attempt is about to open). Awaiting the
-/// handle closes that gap. This wait is bounded so a gateway task that never
-/// finishes cannot stall retries indefinitely; if the grace period elapses,
-/// the next attempt proceeds anyway and a warning is logged.
+/// handle closes that gap. After this grace period, the stale task is aborted
+/// and joined before another attempt may start.
 const RETRY_TEARDOWN_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug)]
@@ -48,6 +48,39 @@ pub(crate) enum CommunicationReadiness {
     Enforce,
     /// Send without checking communication readiness.
     AssumeReady,
+}
+
+struct SupervisedGatewayTask {
+    abort_handle: AbortHandle,
+    supervisor: JoinHandle<()>,
+}
+
+impl SupervisedGatewayTask {
+    fn new(gateway_task: JoinHandle<()>, ecu_permits: Arc<[OwnedSemaphorePermit]>) -> Self {
+        let abort_handle = gateway_task.abort_handle();
+        let supervisor = tokio::spawn(async move {
+            log_gateway_task_result(gateway_task.await);
+            drop(ecu_permits);
+        });
+        Self {
+            abort_handle,
+            supervisor,
+        }
+    }
+}
+
+impl Drop for SupervisedGatewayTask {
+    fn drop(&mut self) {
+        self.abort_handle.abort();
+    }
+}
+
+fn log_gateway_task_result(result: Result<(), tokio::task::JoinError>) {
+    if let Err(error) = result
+        && !error.is_cancelled()
+    {
+        tracing::debug!(%error, "Gateway task ended abnormally");
+    }
 }
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
@@ -248,27 +281,20 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
         ))?;
         let ecu_sem_key = ecu.read().await.request_lock_key();
 
-        let semaphore = {
-            Arc::clone(
-                self.ecu_semaphores
-                    .lock()
-                    .await
-                    .entry(ecu_sem_key.clone())
-                    .or_insert_with(|| Arc::new(Semaphore::new(1))),
-            )
-        };
-
-        // todo: what timeout should we use to wait till the ecu is 'free'?
-        let ecu_sem = tokio::time::timeout(Duration::from_secs(10), semaphore.acquire())
-            .await
-            .map_err(|_| {
-                tracing::error!(
-                    ecu = ecu_name,
-                    request_lock_key = %ecu_sem_key,
-                    "Timeout waiting for ecu to become available for requests."
-                );
-                DiagServiceError::Timeout
-            })?;
+        let ecu_permits = Arc::from(
+            self.request_ecu_permits(vec![ecu_sem_key.clone()])
+                .await
+                .map_err(|error| {
+                    tracing::error!(
+                        ecu = ecu_name,
+                        request_lock_key = %ecu_sem_key,
+                        %error,
+                        "Failed waiting for ECU request permit"
+                    );
+                    error
+                })?,
+        );
+        let mut gateway_task = None;
 
         let rx_timeout = timeout.unwrap_or(uds_params.timeout_default);
         let mut rx_timeout_next = None;
@@ -281,11 +307,6 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
         // 0x21/0x78/0x94 busy-repeat handling below, which has its own,
         // separate time-bounded retry policy).
         let mut app_retry_count: u32 = 0;
-
-        // Handle of the previous attempt's per-request gateway task, if any.
-        // Awaited (bounded by `RETRY_TEARDOWN_GRACE`) at the top of the next
-        // loop iteration before that attempt is sent, see below.
-        let mut previous_task_handle: Option<tokio::task::JoinHandle<()>> = None;
 
         // outer loop to retry sending frames, resend frames must deal with (N)ACK again
         let (response, sent_after) = 'send: loop {
@@ -308,12 +329,11 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
             // gateway task to stop; it does not guarantee that task has
             // actually finished releasing whatever per-ECU resource it holds
             // (e.g. a DoIP connection mutex, or an ISO-TP socket for CAN,
-            // which has no equivalent lock). Await its handle - bounded by
-            // `RETRY_TEARDOWN_GRACE` - before sending the next attempt, so
-            // the two per-request tasks don't run concurrently against the
-            // same resource.
-            if let Some(handle) = previous_task_handle.take() {
-                await_stale_gateway_task(handle, ecu_name).await;
+            // which has no equivalent lock). Await its handle before sending
+            // the next attempt. A task exceeding `RETRY_TEARDOWN_GRACE` is
+            // aborted and joined, so retries never overlap the stale task.
+            if let Some(task) = gateway_task.take() {
+                await_gateway_task(task, ecu_name).await;
             }
 
             match self
@@ -326,7 +346,10 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                 )
                 .await
             {
-                Ok(handle) => previous_task_handle = Some(handle),
+                Ok(handle) => {
+                    gateway_task =
+                        Some(SupervisedGatewayTask::new(handle, Arc::clone(&ecu_permits)));
+                }
                 Err(e) => {
                     if app_retry_count < uds_params.repeat_req_count_app {
                         app_retry_count = app_retry_count.saturating_add(1);
@@ -358,6 +381,10 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                         ecu_name,
                         "Timed out waiting for (n)ack on a request with no expected response"
                     );
+                }
+                drop(response_rx);
+                if let Some(task) = gateway_task.take() {
+                    await_gateway_task(task, ecu_name).await;
                 }
                 return Ok(None);
             }
@@ -539,7 +566,9 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
             // gateway's per-request task and the ECU lock it holds.
             break 'send (uds_result, sent_after);
         };
-        drop(ecu_sem);
+        if let Some(task) = gateway_task.take() {
+            await_gateway_task(task, ecu_name).await;
+        }
 
         // Post-send: if a service send (not tester present) timed out,
         // the ECU is unreachable - notify the coordinator.
@@ -718,33 +747,24 @@ pub(crate) fn needs_variant_detection(status: &EcuState) -> bool {
             ))
 }
 
-/// Waits, bounded by [`RETRY_TEARDOWN_GRACE`], for a previous attempt's
-/// per-request gateway task to finish before the caller proceeds with the
-/// next application-layer retry attempt.
+/// Waits for a per-request gateway task to terminate before releasing its resources.
 ///
 /// Dropping the previous attempt's response channel only signals that task to
 /// stop; this actually confirms it has finished (and released whatever
 /// per-ECU resource it was holding), closing the race between a stale task
-/// and the next attempt's fresh one. If the grace period elapses first, a
-/// warning is logged and the caller proceeds anyway, so a misbehaving gateway
-/// task cannot stall retries indefinitely.
-async fn await_stale_gateway_task(handle: tokio::task::JoinHandle<()>, ecu_name: &str) {
-    match tokio::time::timeout(RETRY_TEARDOWN_GRACE, handle).await {
-        Ok(Ok(())) => {}
-        Ok(Err(join_err)) => {
-            tracing::debug!(
-                ecu_name,
-                error = %join_err,
-                "Previous attempt's gateway task ended abnormally while tearing down"
-            );
-        }
+/// and the next attempt's fresh one. If the grace period elapses first, the
+/// task is aborted and joined.
+async fn await_gateway_task(mut task: SupervisedGatewayTask, ecu_name: &str) {
+    match tokio::time::timeout(RETRY_TEARDOWN_GRACE, &mut task.supervisor).await {
+        Ok(result) => log_gateway_task_result(result),
         Err(_elapsed) => {
             tracing::warn!(
                 ecu_name,
                 grace_period = ?RETRY_TEARDOWN_GRACE,
-                "Previous attempt's gateway task did not finish within the teardown grace \
-                 period before starting the next retry"
+                "Gateway task did not finish within the teardown grace period; aborting it"
             );
+            task.abort_handle.abort();
+            log_gateway_task_result((&mut task.supervisor).await);
         }
     }
 }
@@ -935,7 +955,10 @@ mod send_tests {
         service_ids,
     };
     use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
-    use tokio::sync::{Mutex, RwLock, mpsc};
+    use tokio::{
+        sync::{Mutex, RwLock, mpsc, oneshot},
+        task::JoinHandle,
+    };
 
     use super::{CommunicationReadiness, RETRY_TEARDOWN_GRACE};
     use crate::{
@@ -1161,6 +1184,85 @@ mod send_tests {
         send_times: Arc<std::sync::Mutex<Vec<Instant>>>,
     }
 
+    #[derive(Clone)]
+    struct CancellationGateway {
+        teardown_started: Arc<std::sync::Mutex<Option<oneshot::Sender<()>>>>,
+        drop_checked: Arc<std::sync::Mutex<Option<oneshot::Sender<bool>>>>,
+        request_gate: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>>,
+    }
+
+    struct GateCheckingDrop {
+        drop_checked: Option<oneshot::Sender<bool>>,
+        request_gate: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>>,
+    }
+
+    impl Drop for GateCheckingDrop {
+        fn drop(&mut self) {
+            let gate_was_held = self
+                .request_gate
+                .lock()
+                .expect("request-gate lock must remain available")
+                .as_ref()
+                .is_some_and(|gate| Arc::clone(gate).try_acquire_owned().is_err());
+            if let Some(drop_checked) = self.drop_checked.take() {
+                let _ = drop_checked.send(gate_was_held);
+            }
+        }
+    }
+
+    impl PhysicalTransport for CancellationGateway {
+        fn send(
+            &self,
+            _transmission_params: TransmissionParameters,
+            _message: ServicePayload,
+            response_sender: mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
+            _expect_uds_reply: bool,
+        ) -> impl Future<Output = Result<JoinHandle<()>, DiagServiceError>> + Send {
+            let teardown_started = self
+                .teardown_started
+                .lock()
+                .expect("teardown-started sender lock must remain available")
+                .take();
+            let drop_checked = self
+                .drop_checked
+                .lock()
+                .expect("drop-checked sender lock must remain available")
+                .take();
+            let request_gate = Arc::clone(&self.request_gate);
+            async move {
+                Ok(tokio::spawn(async move {
+                    let _gate_checking_drop = GateCheckingDrop {
+                        drop_checked,
+                        request_gate,
+                    };
+                    let response = ServicePayload {
+                        data: vec![service_ids::SESSION_CONTROL | UDS_ID_RESPONSE_BITMASK, 0x01],
+                        source_address: 0x0001,
+                        target_address: 0x0E00,
+                        new_session: None,
+                        new_security: None,
+                    };
+                    let _ = response_sender
+                        .send(Ok(Some(TransportResponse::UdsResponse(response))))
+                        .await;
+                    response_sender.closed().await;
+                    if let Some(teardown_started) = teardown_started {
+                        let _ = teardown_started.send(());
+                    }
+                    std::future::pending::<()>().await;
+                }))
+            }
+        }
+
+        fn ecu_online<T: EcuAddresses>(
+            &self,
+            _ecu_name: &str,
+            _ecu_db: &RwLock<T>,
+        ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
+            std::future::ready(Ok(()))
+        }
+    }
+
     impl PhysicalTransport for SlowTeardownGateway {
         fn send(
             &self,
@@ -1211,7 +1313,34 @@ mod send_tests {
         }
     }
 
+    impl FunctionalTransport for CancellationGateway {
+        fn send_functional(
+            &self,
+            _transmission_params: TransmissionParameters,
+            _message: ServicePayload,
+            _expected_ecu_logical_addrs: HashMap<u16, String>,
+            _timeout: Duration,
+            _expect_positive_response: bool,
+        ) -> impl Future<
+            Output = Result<
+                HashMap<String, Result<ServicePayload, DiagServiceError>>,
+                DiagServiceError,
+            >,
+        > + Send {
+            std::future::ready(Ok(HashMap::new()))
+        }
+    }
+
     impl NetworkTopology for SlowTeardownGateway {
+        fn get_gateway_network_address(
+            &self,
+            _logical_address: u16,
+        ) -> impl Future<Output = Option<String>> + Send {
+            std::future::ready(None)
+        }
+    }
+
+    impl NetworkTopology for CancellationGateway {
         fn get_gateway_network_address(
             &self,
             _logical_address: u16,
@@ -1222,6 +1351,11 @@ mod send_tests {
 
     #[async_trait::async_trait]
     impl cda_interfaces::Shutdown for SlowTeardownGateway {
+        async fn shutdown(&self) {}
+    }
+
+    #[async_trait::async_trait]
+    impl cda_interfaces::Shutdown for CancellationGateway {
         async fn shutdown(&self) {}
     }
 
@@ -2349,6 +2483,75 @@ mod send_tests {
         )
     }
 
+    fn make_manager_with_cancellation_gateway(
+        gateway: CancellationGateway,
+    ) -> Arc<UdsManager<CancellationGateway, TestEcuDb>> {
+        let ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_string(),
+            RwLock::new(TestEcuDb::new()),
+        )]));
+        Arc::new(UdsManager::new_for_raw_payload_tests(
+            gateway,
+            ecus,
+            FaultConfig::default(),
+            disabled_communication_access(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_teardown_holds_gate_until_gateway_task_terminates() {
+        let (teardown_started_tx, teardown_started_rx) = oneshot::channel();
+        let (drop_checked_tx, drop_checked_rx) = oneshot::channel();
+        let request_gate = Arc::new(std::sync::Mutex::new(None));
+        let gateway = CancellationGateway {
+            teardown_started: Arc::new(std::sync::Mutex::new(Some(teardown_started_tx))),
+            drop_checked: Arc::new(std::sync::Mutex::new(Some(drop_checked_tx))),
+            request_gate: Arc::clone(&request_gate),
+        };
+        let manager = make_manager_with_cancellation_gateway(gateway);
+        let first_manager = Arc::clone(&manager);
+        let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
+        let first_send = tokio::spawn(async move {
+            first_manager
+                .send_with_raw_payload(
+                    "TestECU",
+                    payload,
+                    None,
+                    true,
+                    CommunicationReadiness::AssumeReady,
+                )
+                .await
+        });
+
+        teardown_started_rx
+            .await
+            .expect("gateway task must start final teardown");
+        let gate = {
+            let registry = manager.ecu_semaphores.lock().await;
+            Arc::clone(registry.values().next().expect("request gate must exist"))
+        };
+        *request_gate
+            .lock()
+            .expect("request-gate lock must remain available") = Some(Arc::clone(&gate));
+        first_send.abort();
+
+        assert!(
+            drop_checked_rx
+                .await
+                .expect("aborted gateway task must check gate during destruction"),
+            "another send must not acquire request gate before stale task terminates"
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while gate.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("request gate must release after gateway task termination");
+        assert_eq!(gate.available_permits(), 1);
+        let _ = first_send.await;
+    }
+
     /// Regression test for the retry-teardown synchronization fix: the
     /// caller must await a previous attempt's gateway-task handle before
     /// issuing the next attempt, not just drop the response channel and hope
@@ -2404,15 +2607,13 @@ mod send_tests {
         }
     }
 
-    /// Regression test for the bounded-wait safety net: if a stale gateway
-    /// task never finishes at all, `send_with_raw_payload` must not stall
-    /// retries indefinitely - it should proceed once `RETRY_TEARDOWN_GRACE`
-    /// elapses.
+    /// A stale gateway task exceeding the grace period must be terminated
+    /// before the retry starts.
     #[tokio::test]
-    async fn test_send_with_raw_payload_proceeds_after_teardown_grace_when_task_never_finishes() {
+    async fn test_send_with_raw_payload_aborts_stale_task_before_retry() {
         // Far longer than RETRY_TEARDOWN_GRACE (500ms): the task handle will
         // never resolve within the scope of this test.
-        // Using 601 seconds, to triggering clippy with the smaller unit lint.
+        // Using 601 seconds to avoid triggering clippy's duration-subsec lint.
         let task_delay = Duration::from_secs(601);
         let gateway = SlowTeardownGateway {
             task_delay,
@@ -2449,11 +2650,10 @@ mod send_tests {
             "Expected the retry to wait at least the teardown grace period \
              ({RETRY_TEARDOWN_GRACE:?}), got {gap:?}"
         );
-        // Sanity bound: the whole call must finish quickly, well under
-        // task_delay, proving the never-finishing task did not stall it.
+        // Sanity bound: forced task termination keeps the call bounded.
         assert!(
             elapsed < Duration::from_secs(5),
-            "Expected the call to proceed despite the stale task never finishing, took {elapsed:?}"
+            "Expected stale task abortion to keep the call bounded, took {elapsed:?}"
         );
     }
 

@@ -27,6 +27,7 @@ use cda_interfaces::{
         ComParamConfig, ComParamPrecedence, ComParams, ComponentsConfig, DatabaseNamingConvention,
         DoipComParams, FaultConfig, FlatbBufConfig,
     },
+    lock_config::LockConfig,
 };
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 use cda_tracing::LoggingConfig;
@@ -382,6 +383,7 @@ fn base_test_config(
             ..RuntimeUpdateConfig::default()
         },
         communication: CommunicationSettings::default(),
+        locks: LockConfig::default(),
         strict: StrictConfig::default(),
     })
 }

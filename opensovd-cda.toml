@@ -743,6 +743,19 @@
 # Whether the health check endpoint is active.
 # enabled = true
 
+# Lock priority behavior and limits.
+[locks]
+# Default used when `x_sovd2uds_isexclusive` is omitted.
+# lock_exclusivity_policy = "exclusive_by_default"
+# Number of lifecycle events buffered for ordered best-effort delivery.
+# priority_lifecycle_queue_capacity = 256
+# Maximum duration of one best-effort lifecycle callback.
+# priority_lifecycle_timeout_ms = 5000
+# Number of fresh policy evaluations allowed after a stale state snapshot.
+# priority_policy_stale_retries = 1
+# Maximum duration of one vendor priority-policy evaluation.
+# priority_policy_timeout_ms = 5000
+
 # Logging, file output, and tracing backend settings.
 [logging]
 # strftime-compatible format string for log timestamps.
