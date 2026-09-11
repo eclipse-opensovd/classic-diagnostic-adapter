@@ -24,7 +24,7 @@ use cda_interfaces::{
 use tokio::sync::Mutex;
 
 use crate::{
-    UdsManager,
+    UdsEcuDb, UdsManager,
     types::{PerGatewayInfo, ResetType},
 };
 
@@ -33,7 +33,7 @@ struct PendingEcuInfo {
     request_lock_key: String,
 }
 
-impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
+impl<S: EcuGateway, T: UdsEcuDb + PayloadDecoder> UdsManager<S, T> {
     /// Send a functional request to a single gateway and collect responses from all expected ECUs
     #[allow(
         clippy::too_many_arguments,
@@ -471,5 +471,318 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
         }
 
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    use cda_interfaces::{
+        DiagCommType, DiagServiceError, EcuAddresses, EcuRuntimeState, FunctionalTransport,
+        HashMap, HashMapExtensions, NetworkTopology, PhysicalTransport, ServicePayload,
+        TransmissionParameters, TransportResponse, VariantDetectionSender,
+        communication_control::CommunicationAccess,
+        datatypes::{DtcField, DtcRecord, FaultConfig},
+        diagservices::{DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType},
+    };
+    use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
+    use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
+
+    use super::*;
+    use crate::{state_coordinator::EcuStateCoordinator, test_helpers::TestEcuDb};
+
+    const GATEWAY_KEY: &str = "a-gateway";
+    const CHILD_KEY: &str = "z-child";
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct TestResponse;
+
+    impl DiagServiceResponse for TestResponse {
+        fn empty_positive(_service: DiagComm) -> Self {
+            Self
+        }
+
+        fn is_empty(&self) -> bool {
+            true
+        }
+
+        fn service_name(&self) -> String {
+            String::new()
+        }
+
+        fn response_type(&self) -> DiagServiceResponseType {
+            DiagServiceResponseType::Positive
+        }
+
+        fn get_raw(&self) -> &[u8] {
+            &[]
+        }
+
+        fn into_json(self) -> Result<DiagServiceJsonResponse, DiagServiceError> {
+            unimplemented!()
+        }
+
+        fn as_nrc(&self) -> Result<cda_interfaces::diagservices::MappedNRC, DiagServiceError> {
+            unimplemented!()
+        }
+
+        fn get_dtcs(&self) -> Result<Vec<(DtcField, DtcRecord)>, DiagServiceError> {
+            unimplemented!()
+        }
+    }
+
+    impl PayloadDecoder for TestEcuDb {
+        type Response = TestResponse;
+
+        fn convert_from_uds(
+            &self,
+            _diag_service: &DiagComm,
+            _payload: &ServicePayload,
+            _map_to_json: bool,
+            _functional_group_name: Option<&str>,
+        ) -> impl Future<Output = Result<Self::Response, DiagServiceError>> + Send {
+            std::future::ready(Ok(TestResponse))
+        }
+
+        fn convert_request_from_uds(
+            &self,
+            _diag_service: &DiagComm,
+            _payload: &ServicePayload,
+            _map_to_json: bool,
+        ) -> impl Future<Output = Result<Self::Response, DiagServiceError>> + Send {
+            std::future::ready(Ok(TestResponse))
+        }
+
+        fn convert_service_14_response(
+            _diag_comm: DiagComm,
+            _response: ServicePayload,
+        ) -> Result<Self::Response, DiagServiceError> {
+            Ok(TestResponse)
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingGateway {
+        functional_sends: Arc<AtomicUsize>,
+    }
+
+    impl PhysicalTransport for RecordingGateway {
+        async fn send(
+            &self,
+            _transmission_params: TransmissionParameters,
+            _message: ServicePayload,
+            _response_sender: mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
+            _expect_uds_reply: bool,
+        ) -> Result<tokio::task::JoinHandle<()>, DiagServiceError> {
+            unimplemented!()
+        }
+
+        fn ecu_online<T: EcuAddresses>(
+            &self,
+            _ecu_name: &str,
+            _ecu_db: &RwLock<T>,
+        ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
+            std::future::ready(Ok(()))
+        }
+    }
+
+    impl FunctionalTransport for RecordingGateway {
+        fn send_functional(
+            &self,
+            _transmission_params: TransmissionParameters,
+            _message: ServicePayload,
+            _expected_ecu_logical_addrs: HashMap<u16, String>,
+            _timeout: Duration,
+            _expect_positive_response: bool,
+        ) -> impl Future<
+            Output = Result<
+                HashMap<String, Result<ServicePayload, DiagServiceError>>,
+                DiagServiceError,
+            >,
+        > + Send {
+            self.functional_sends.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok(HashMap::new()))
+        }
+    }
+
+    impl NetworkTopology for RecordingGateway {
+        fn get_gateway_network_address(
+            &self,
+            _logical_address: u16,
+        ) -> impl Future<Output = Option<String>> + Send {
+            std::future::ready(None)
+        }
+    }
+
+    #[async_trait]
+    impl cda_interfaces::Shutdown for RecordingGateway {
+        async fn shutdown(&self) {}
+    }
+
+    fn manager() -> UdsManager<RecordingGateway, TestEcuDb> {
+        let ecus = Arc::new(HashMap::from_iter([(
+            "functional".to_owned(),
+            RwLock::new(TestEcuDb::new()),
+        )]));
+        let (redetect_tx, _redetect_rx) = mpsc::channel(1);
+        UdsManager {
+            ecus,
+            gateway: RecordingGateway {
+                functional_sends: Arc::new(AtomicUsize::new(0)),
+            },
+            data_transfers: Arc::new(Mutex::new(HashMap::new())),
+            ecu_semaphores: Arc::new(Mutex::new(HashMap::new())),
+            tester_present_tasks: Arc::new(RwLock::new(HashMap::new())),
+            session_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
+            security_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
+            state_coordinator: EcuStateCoordinator::new(
+                HashMap::<String, EcuRuntimeState>::new(),
+                VariantDetectionSender::new(redetect_tx),
+            ),
+            functional_description_database: "functional".to_owned(),
+            fault_config: FaultConfig::default(),
+            communication_access: enabled_communication_access_for_test()
+                as Arc<dyn CommunicationAccess>,
+            communication_retry_after: Duration::from_secs(1),
+            variant_detection_receiver: Arc::new(Mutex::new(None)),
+            variant_detection_listener: Arc::new(Mutex::new(None)),
+            tester_present_snapshot: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn transmission_params() -> TransmissionParameters {
+        TransmissionParameters {
+            gateway_address: 1,
+            timeout_ack: Duration::from_millis(10),
+            ecu_name: "gateway".to_owned(),
+            repeat_request_count_transmission: 0,
+        }
+    }
+
+    fn payload() -> ServicePayload {
+        ServicePayload {
+            data: vec![0x22],
+            source_address: 0x0E00,
+            target_address: 0xE400,
+            new_session: None,
+            new_security: None,
+        }
+    }
+
+    async fn gate(manager: &UdsManager<RecordingGateway, TestEcuDb>, key: &str) -> Arc<Semaphore> {
+        Arc::clone(
+            manager
+                .ecu_semaphores
+                .lock()
+                .await
+                .entry(key.to_owned())
+                .or_insert_with(|| Arc::new(Semaphore::new(1))),
+        )
+    }
+
+    async fn send(manager: UdsManager<RecordingGateway, TestEcuDb>) {
+        manager
+            .send_functional_to_gateway(
+                transmission_params(),
+                HashMap::from_iter([(1, "gateway".to_owned()), (2, "child".to_owned())]),
+                DiagComm::new("read", DiagCommType::Data),
+                payload(),
+                false,
+                Duration::from_millis(10),
+                "group",
+                vec![GATEWAY_KEY.to_owned(), CHILD_KEY.to_owned()],
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn functional_send_waits_for_gateway_and_child_permits() {
+        for held_key in [GATEWAY_KEY, CHILD_KEY] {
+            let manager = manager();
+            let sends = Arc::clone(&manager.gateway.functional_sends);
+            let held = gate(&manager, held_key)
+                .await
+                .acquire_owned()
+                .await
+                .expect("gate must be open");
+            let mut task = tokio::spawn(send(manager));
+
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut task)
+                    .await
+                    .is_err(),
+                "functional send should wait for held key: {held_key}"
+            );
+            assert_eq!(sends.load(Ordering::SeqCst), 0, "held key: {held_key}");
+
+            drop(held);
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .expect("functional send should resume after permit release")
+                .expect("functional send task should complete");
+            assert_eq!(sends.load(Ordering::SeqCst), 1, "held key: {held_key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_functional_send_releases_acquired_permits() {
+        let manager = manager();
+        let gateway_gate = gate(&manager, GATEWAY_KEY).await;
+        let child_gate = gate(&manager, CHILD_KEY).await;
+        let held_child = Arc::clone(&child_gate)
+            .acquire_owned()
+            .await
+            .expect("child gate must be open");
+        let task = tokio::spawn(send(manager));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while gateway_gate.available_permits() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("functional send should acquire gateway permit before waiting on child");
+
+        task.abort();
+        let _ = task.await;
+        assert_eq!(gateway_gate.available_permits(), 1);
+        drop(held_child);
+    }
+
+    #[tokio::test]
+    async fn permit_acquisition_failure_is_returned_for_every_expected_ecu() {
+        let manager = manager();
+        gate(&manager, CHILD_KEY).await.close();
+
+        let results = manager
+            .send_functional_to_gateway(
+                transmission_params(),
+                HashMap::from_iter([(1, "gateway".to_owned()), (2, "child".to_owned())]),
+                DiagComm::new("read", DiagCommType::Data),
+                payload(),
+                false,
+                Duration::from_millis(10),
+                "group",
+                vec![GATEWAY_KEY.to_owned(), CHILD_KEY.to_owned()],
+            )
+            .await;
+
+        assert_eq!(manager.gateway.functional_sends.load(Ordering::SeqCst), 0);
+        assert_eq!(results.len(), 2);
+        for ecu_name in ["gateway", "child"] {
+            assert_eq!(
+                results.get(ecu_name),
+                Some(&Err(DiagServiceError::ResourceError(
+                    "Request gate was closed".to_owned()
+                )))
+            );
+        }
     }
 }

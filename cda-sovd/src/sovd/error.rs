@@ -604,4 +604,55 @@ mod tests {
             axum_response_into(response).await.expect("Valid body");
         assert_eq!(body.error_code, ErrorCode::PreconditionsNotFulfilled);
     }
+
+    #[test]
+    fn error_and_vendor_code_maps_lock_and_service_errors() {
+        let cases = [
+            (
+                ApiError::Locked("Locked".to_owned()),
+                ErrorCode::PreconditionsNotFulfilled,
+                None,
+            ),
+            (
+                ApiError::LockPriorityDenied {
+                    message: "Denied".to_owned(),
+                    parameters: HashMap::default(),
+                },
+                ErrorCode::PreconditionsNotFulfilled,
+                None,
+            ),
+            (
+                ApiError::LockBroken {
+                    message: "Broken".to_owned(),
+                    parameters: HashMap::default(),
+                },
+                ErrorCode::LockBroken,
+                None,
+            ),
+            (
+                ApiError::ServiceUnavailable {
+                    message: "Unavailable".to_owned(),
+                    retry_after: None,
+                    error_code: ErrorCode::VendorSpecific,
+                    vendor_code: Some(VendorErrorCode::CommunicationNotReady),
+                },
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::CommunicationNotReady),
+            ),
+            (
+                ApiError::InvalidParameter {
+                    possible_values: HashSet::default(),
+                },
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::InvalidParameter),
+            ),
+        ];
+
+        for (error, expected_error_code, expected_vendor_code) in cases {
+            assert_eq!(
+                error.error_and_vendor_code(),
+                (expected_error_code, expected_vendor_code)
+            );
+        }
+    }
 }

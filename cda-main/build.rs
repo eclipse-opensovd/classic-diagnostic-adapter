@@ -32,9 +32,9 @@ fn main() {
             0i64
         });
         #[cfg(not(feature = "integration-tests"))]
-        let epoch = source_date_epoch.parse::<i64>().expect(&format!(
-            "SOURCE_DATE_EPOCH is not a valid integer: {source_date_epoch}"
-        ));
+        let epoch = source_date_epoch.parse::<i64>().unwrap_or_else(|_| {
+            panic!("SOURCE_DATE_EPOCH is not a valid integer: {source_date_epoch}")
+        });
         chrono::DateTime::from_timestamp(epoch, 0)
             .expect("SOURCE_DATE_EPOCH not in range for timestamp")
             .format(DATE_FORMAT)

@@ -389,3 +389,192 @@ pub(crate) mod diag_service {
             .into_response()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use aide::UseApi;
+    use axum::{
+        body::Bytes,
+        extract::{Path, Query, State},
+        http::{HeaderMap, StatusCode, header},
+    };
+    use axum_extra::extract::WithRejection;
+    use cda_interfaces::{
+        diagservices::{
+            DiagServiceJsonResponse, DiagServiceResponseType, mock::MockDiagServiceResponse,
+        },
+        mock::MockUdsEcu,
+    };
+    use cda_plugin_security::{
+        Secured, SecurityPlugin,
+        mock::{MockAuthApi, MockClaims, MockSecurityPlugin, TestSecurityPlugin},
+    };
+
+    use super::diag_service;
+    use crate::sovd::{
+        components::ecu::DiagServicePathParam,
+        functions::functional_groups::tests::create_test_fg_state, locks::insert_test_fg_lock,
+    };
+
+    fn foreign_security_plugin() -> Box<dyn SecurityPlugin> {
+        let mut claims = MockClaims::new();
+        claims.expect_sub().return_const("foreign_user");
+        let claims: &'static dyn cda_plugin_security::Claims = Box::leak(Box::new(claims));
+        let mut auth = MockAuthApi::new();
+        auth.expect_claims().return_const(Box::new(claims));
+        let mut plugin = MockSecurityPlugin::new();
+        plugin
+            .expect_as_auth_plugin()
+            .return_const(Box::new(auth) as Box<dyn cda_plugin_security::AuthApi>);
+        Box::new(plugin)
+    }
+
+    fn headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+        headers.insert(header::ACCEPT, "application/json".parse().unwrap());
+        headers
+    }
+
+    fn query() -> WithRejection<
+        Query<sovd_interfaces::functions::functional_groups::data::service::Query>,
+        crate::sovd::error::ApiError,
+    > {
+        WithRejection(
+            Query(sovd_interfaces::IncludeSchemaQuery {
+                include_schema: false,
+            }),
+            std::marker::PhantomData,
+        )
+    }
+
+    fn response() -> MockDiagServiceResponse {
+        let mut response = MockDiagServiceResponse::new();
+        response
+            .expect_response_type()
+            .returning(|| DiagServiceResponseType::Positive);
+        response.expect_into_json().return_once(|| {
+            Ok(DiagServiceJsonResponse {
+                data: serde_json::json!({"value": 1}),
+                errors: vec![],
+            })
+        });
+        response
+    }
+
+    #[tokio::test]
+    async fn data_get_foreign_exclusive_lock_skips_uds() {
+        let mut uds = MockUdsEcu::new();
+        uds.expect_send_functional_group().times(0);
+        let state = create_test_fg_state(uds, "AllECUs".to_owned());
+        insert_test_fg_lock(&state.locks, "AllECUs").await;
+
+        let response = diag_service::get::<MockUdsEcu>(
+            headers(),
+            UseApi(Secured(foreign_security_plugin()), std::marker::PhantomData),
+            Path(DiagServicePathParam {
+                service: "VehicleSpeed".to_owned(),
+            }),
+            query(),
+            State(state),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::LOCKED);
+    }
+
+    #[tokio::test]
+    async fn data_put_without_owned_write_lock_skips_uds() {
+        let mut uds = MockUdsEcu::new();
+        uds.expect_send_functional_group().times(0);
+        let state = create_test_fg_state(uds, "AllECUs".to_owned());
+
+        let response = diag_service::put::<MockUdsEcu>(
+            headers(),
+            UseApi(
+                Secured(Box::new(TestSecurityPlugin)),
+                std::marker::PhantomData,
+            ),
+            Path(DiagServicePathParam {
+                service: "VehicleSpeed".to_owned(),
+            }),
+            query(),
+            State(state),
+            Bytes::from_static(b"{\"data\":{\"value\":1}}"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn data_get_with_owned_lock_calls_uds() {
+        let mut uds = MockUdsEcu::new();
+        uds.expect_send_functional_group()
+            .withf(|group, service, _, data, map_to_json| {
+                group == "AllECUs"
+                    && service.name == "VehicleSpeed"
+                    && service.type_ == cda_interfaces::DiagCommType::Data
+                    && data.is_none()
+                    && *map_to_json
+            })
+            .times(1)
+            .returning(|_, _, _, _, _| {
+                cda_interfaces::HashMap::from_iter([("test-ecu".to_owned(), Ok(response()))])
+            });
+        let state = create_test_fg_state(uds, "AllECUs".to_owned());
+        insert_test_fg_lock(&state.locks, "AllECUs").await;
+
+        let response = diag_service::get::<MockUdsEcu>(
+            headers(),
+            UseApi(
+                Secured(Box::new(TestSecurityPlugin)),
+                std::marker::PhantomData,
+            ),
+            Path(DiagServicePathParam {
+                service: "VehicleSpeed".to_owned(),
+            }),
+            query(),
+            State(state),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn data_put_with_owned_lock_calls_uds() {
+        let mut uds = MockUdsEcu::new();
+        uds.expect_send_functional_group()
+            .withf(|group, service, _, data, map_to_json| {
+                group == "AllECUs"
+                    && service.name == "VehicleSpeed"
+                    && service.type_ == cda_interfaces::DiagCommType::Configurations
+                    && data.is_some()
+                    && *map_to_json
+            })
+            .times(1)
+            .returning(|_, _, _, _, _| {
+                cda_interfaces::HashMap::from_iter([("test-ecu".to_owned(), Ok(response()))])
+            });
+        let state = create_test_fg_state(uds, "AllECUs".to_owned());
+        insert_test_fg_lock(&state.locks, "AllECUs").await;
+
+        let response = diag_service::put::<MockUdsEcu>(
+            headers(),
+            UseApi(
+                Secured(Box::new(TestSecurityPlugin)),
+                std::marker::PhantomData,
+            ),
+            Path(DiagServicePathParam {
+                service: "VehicleSpeed".to_owned(),
+            }),
+            query(),
+            State(state),
+            Bytes::from_static(b"{\"data\":{\"value\":1}}"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
