@@ -11,15 +11,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use cda_interfaces::{
     Connectivity, DiagServiceError, EcuGateway, EcuManager, SUPPRESS_POSITIVE_RESPONSE_BIT,
     ServicePayload, TesterPresentControlMessage, TesterPresentMode, TesterPresentType,
-    UdsFunctionalGroup, UdsTesterPresent, dlt_ctx, service_ids,
+    UdsFunctionalGroup, UdsTesterPresent, communication_control::CommunicationError, dlt_ctx,
+    service_ids,
 };
 use tokio::time::{MissedTickBehavior, interval as tokio_interval};
 
 use crate::{UdsManager, transport::CommunicationReadiness, types::TesterPresentTask};
+
+/// How often a deferred snapshot restart re-checks whether the activation it
+/// belongs to has published `Enabled`.
+///
+/// [`CommunicationAccess`](cda_interfaces::communication_control::CommunicationAccess)
+/// exposes no state-change subscription, so this has to poll. `Enabling` covers
+/// whole-vehicle variant detection and can therefore last seconds, which is
+/// what this interval is sized against: the added restart latency is far below
+/// any tester-present interval.
+const SNAPSHOT_RESTART_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     /// Start or stop a tester present task for a single ECU.
@@ -139,6 +152,45 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         }
     }
 
+    async fn start_tester_present_tasks(
+        &self,
+        type_: TesterPresentType,
+    ) -> Result<(), DiagServiceError> {
+        match type_ {
+            TesterPresentType::Ecu(ref ecu_name) => {
+                let ecu = ecu_name.to_owned();
+                self.control_tester_present(TesterPresentControlMessage {
+                    mode: TesterPresentMode::Start,
+                    type_,
+                    ecu,
+                    interval: None,
+                })
+                .await
+            }
+            TesterPresentType::Functional(ref functional_group) => {
+                for name in self.ecus_for_functional_group(functional_group, true).await {
+                    if let Err(e) = self
+                        .control_tester_present(TesterPresentControlMessage {
+                            mode: TesterPresentMode::Start,
+                            type_: type_.clone(),
+                            ecu: name.clone(),
+                            interval: None,
+                        })
+                        .await
+                    {
+                        tracing::warn!(
+                            functional_group = %functional_group,
+                            ecu_name = %name,
+                            error = %e,
+                            "Failed to start tester present for ECU in functional group"
+                        );
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Send a single tester present message to the ECU.
     async fn send_tester_present(
         &self,
@@ -181,39 +233,8 @@ impl<S: EcuGateway, T: EcuManager> UdsTesterPresent for UdsManager<S, T> {
         fields(dlt_context = dlt_ctx!("UDS"))
     )]
     async fn start_tester_present(&self, type_: TesterPresentType) -> Result<(), DiagServiceError> {
-        match type_ {
-            TesterPresentType::Ecu(ref ecu_name) => {
-                let ecu = ecu_name.to_owned();
-                self.control_tester_present(TesterPresentControlMessage {
-                    mode: TesterPresentMode::Start,
-                    type_,
-                    ecu,
-                    interval: None,
-                })
-                .await
-            }
-            TesterPresentType::Functional(ref functional_group) => {
-                for name in self.ecus_for_functional_group(functional_group, true).await {
-                    if let Err(e) = self
-                        .control_tester_present(TesterPresentControlMessage {
-                            mode: TesterPresentMode::Start,
-                            type_: type_.clone(),
-                            ecu: name.clone(),
-                            interval: None,
-                        })
-                        .await
-                    {
-                        tracing::warn!(
-                            functional_group = %functional_group,
-                            ecu_name = %name,
-                            error = %e,
-                            "Failed to start tester present for ECU in functional group"
-                        );
-                    }
-                }
-                Ok(())
-            }
-        }
+        let _guard = self.require_communication_ready()?;
+        self.start_tester_present_tasks(type_).await
     }
 
     #[tracing::instrument(skip_all,
@@ -273,48 +294,125 @@ impl<S: EcuGateway, T: EcuManager> UdsTesterPresent for UdsManager<S, T> {
 }
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
+    /// Aborts a deferred snapshot restart that has not run yet.
+    ///
+    /// The snapshot itself is deliberately left untouched: a restart that was
+    /// still waiting has restored nothing, so its types must stay available for
+    /// the next activation.
+    pub(crate) async fn abort_pending_snapshot_restart(&self) {
+        let pending = self.tester_present_restart_task.lock().await.take();
+        if let Some(task) = pending {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
     /// Aborts all running tester-present tasks and saves their types so the
     /// lifecycle initialization can restart them after communication is re-enabled.
     pub(crate) async fn snapshot_and_abort_tester_present(&self) {
+        self.abort_pending_snapshot_restart().await;
+
         let mut tasks = self.tester_present_tasks.write().await;
-        let snapshot: Vec<TesterPresentType> = tasks.values().map(|tp| tp.type_.clone()).collect();
-        if !snapshot.is_empty() {
-            tracing::debug!(
-                count = snapshot.len(),
-                "Communication disabling; aborting tester-present tasks and saving snapshot"
-            );
-        }
+        let running: Vec<TesterPresentType> = tasks.values().map(|tp| tp.type_.clone()).collect();
         let handles: Vec<_> = tasks.drain().map(|(_, tp)| tp.task).collect();
         drop(tasks);
         for handle in handles {
             handle.abort();
             let _ = handle.await;
         }
-        *self.tester_present_snapshot.lock().await = snapshot;
+
+        // Merge into the snapshot rather than replacing it. A restart that was
+        // still waiting for its activation to reach `Enabled` has started no
+        // tasks, so the types it was going to restore exist only in the
+        // snapshot. Replacing here would drop them for good and tester present
+        // would never come back.
+        let mut snapshot = self.tester_present_snapshot.lock().await;
+        for type_ in running {
+            if !snapshot.contains(&type_) {
+                snapshot.push(type_);
+            }
+        }
+        if !snapshot.is_empty() {
+            tracing::debug!(
+                count = snapshot.len(),
+                "Communication disabling; aborting tester-present tasks and saving snapshot"
+            );
+        }
     }
 
     /// Restarts the tester-present tasks captured by
-    /// [`UdsManager::snapshot_and_abort_tester_present`].
+    /// [`UdsManager::snapshot_and_abort_tester_present`], once the activation
+    /// that triggered this initialization has reached `Enabled`.
     ///
-    /// The snapshot holds one entry per ECU, so a functional-group tester
-    /// present appears once per member. The duplicates are collapsed here,
-    /// because [`UdsTesterPresent::start_tester_present`] re-enumerates the
-    /// whole group from a single `Functional` entry.
+    /// The restart cannot run inline, because `initialize` runs while the
+    /// lifecycle is still `Enabling`. A tester-present task sends on its first
+    /// interval tick, which fires immediately; that send would be refused as
+    /// not-ready and would request an activation on top of the one already in
+    /// flight.
+    ///
+    /// The snapshot may hold a functional-group entry per member ECU. The
+    /// duplicates are collapsed here, because
+    /// [`UdsTesterPresent::start_tester_present`] re-enumerates the whole group
+    /// from a single `Functional` entry.
     pub(crate) async fn restart_tester_present_snapshot(&self) {
-        let snapshot = std::mem::take(&mut *self.tester_present_snapshot.lock().await);
-        let mut started = Vec::with_capacity(snapshot.len());
-        for type_ in snapshot {
-            if started.contains(&type_) {
-                continue;
-            }
-            started.push(type_.clone());
-            if let Err(e) = self.start_tester_present(type_.clone()).await {
-                tracing::warn!(
-                    ?type_,
-                    error = %e,
-                    "Failed to restart tester present after communication re-enable"
-                );
-            }
+        // Read, do not take. The activation can still end without reaching
+        // `Enabled`, and the snapshot has to survive that for the next one.
+        let snapshot = self.tester_present_snapshot.lock().await.clone();
+        if snapshot.is_empty() {
+            return;
         }
+
+        self.abort_pending_snapshot_restart().await;
+
+        let uds = self.clone();
+        let task = cda_interfaces::spawn_named!("tester-present-snapshot-restart", async move {
+            // Deliberately not `require_communication_ready`: that requests an
+            // activation, and this restart belongs to one that is already in
+            // flight. Wait for that one to publish `Enabled` instead, then let
+            // the normal send path acquire its own guard for every message.
+            let guard = loop {
+                match uds.communication_access.acquire() {
+                    Ok(guard) => break guard,
+                    // The activation this restart belongs to is still running.
+                    Err(CommunicationError::Enabling) => {
+                        cda_interfaces::util::tokio_ext::sleep_for(SNAPSHOT_RESTART_POLL_INTERVAL)
+                            .await;
+                    }
+                    // Any other state means it ended without reaching
+                    // `Enabled`. Leave the snapshot in place so the next
+                    // `initialize` can restore it.
+                    Err(e) => {
+                        tracing::debug!(
+                            error = %e,
+                            "Communication did not reach enabled; keeping tester-present snapshot \
+                             for the next activation"
+                        );
+                        return;
+                    }
+                }
+            };
+
+            let mut started = Vec::with_capacity(snapshot.len());
+            for type_ in snapshot {
+                if started.contains(&type_) {
+                    continue;
+                }
+                started.push(type_.clone());
+                if let Err(e) = uds.start_tester_present_tasks(type_.clone()).await {
+                    tracing::warn!(
+                        ?type_,
+                        error = %e,
+                        "Failed to restart tester present after communication re-enable"
+                    );
+                }
+            }
+            drop(guard);
+
+            // Restored. The running tasks are the record of what is active from
+            // here on, and `snapshot_and_abort_tester_present` recaptures them
+            // from there.
+            uds.tester_present_snapshot.lock().await.clear();
+        });
+        *self.tester_present_restart_task.lock().await = Some(task);
     }
 }
