@@ -16,10 +16,16 @@ NIGHTLY := nightly-2026-07-21
 
 lint:
 	cargo +$(STABLE) clippy --all-targets -- --deny=warnings
+
+	# Add Clippy into Nightly toolchain for CI/CD
+	rustup component add --toolchain $(NIGHTLY) clippy
 	cargo +$(NIGHTLY) clippy --all-targets -- --deny=warnings
 
 lint-all-features:
 	cargo +$(STABLE) clippy --all-targets --all-features -- --deny=warnings
+
+	# Add Clippy into Nightly toolchain for CI/CD
+	rustup component add --toolchain $(NIGHTLY) clippy
 	cargo +$(NIGHTLY) clippy --all-targets --all-features -- --deny=warnings
 
 fmt:
