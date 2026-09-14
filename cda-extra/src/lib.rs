@@ -15,4 +15,4 @@
 mod systemd_notify;
 
 #[cfg(feature = "systemd-notify")]
-pub use systemd_notify::create_sd_notify_task;
+pub use systemd_notify::{create_sd_notify_task, notify_ready};
