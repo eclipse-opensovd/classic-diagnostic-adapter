@@ -144,3 +144,50 @@ async fn tester_present_start_failure_preserves_existing_state_without_stop() {
         })
         .await;
 }
+
+#[tokio::test]
+async fn functional_group_lock_waits_for_communication_to_settle() {
+    let locks = Arc::new(Locks::new());
+    let acquisition = locks.test_reservation().await;
+    let replacement = test_lock("still-enabling")
+        .owner("test_user")
+        .functional_group("group", ["ecu-a".to_owned()])
+        .build();
+    let tester_present = TesterPresentType::Functional("group".to_owned());
+    let target = Locks::expiration_target(&replacement).expect("Expiration should be valid");
+    let mut uds = MockUdsEcu::default();
+    uds.expect_check_tester_present_active()
+        .times(1)
+        .returning(|_| false);
+    uds.expect_start_tester_present().times(1).returning(|_| {
+        Err(cda_interfaces::DiagServiceError::CommunicationNotReady {
+            message: "Communication is still enabling".to_owned(),
+            retry_after: std::time::Duration::from_secs(3),
+        })
+    });
+    uds.expect_stop_tester_present().times(0);
+
+    let result = run_acquisition_transaction(
+        uds,
+        Arc::clone(&locks),
+        acquisition,
+        None,
+        replacement,
+        LockCleanupFnHelper::new(|| async {}),
+        Some(tester_present),
+        target,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(ApiError::ServiceUnavailable {
+            retry_after: Some(retry_after),
+            ..
+        }) if retry_after == std::time::Duration::from_secs(3)
+    ));
+    locks
+        .core
+        .read_store(|store| assert!(store.state.active_by_id("still-enabling").is_none()))
+        .await;
+}
