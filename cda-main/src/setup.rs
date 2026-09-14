@@ -555,8 +555,6 @@ where
     )
     .await?;
 
-    cda_sovd::add_openapi_routes(&ws.dynamic_router).await;
-
     Ok(communication_runtime)
 }
 
