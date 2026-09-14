@@ -585,6 +585,7 @@ mod tests {
             variant_detection_receiver: Arc::new(Mutex::new(None)),
             variant_detection_listener: Arc::new(Mutex::new(None)),
             tester_present_snapshot: Arc::new(Mutex::new(Vec::new())),
+            tester_present_restart_task: Arc::new(Mutex::new(None)),
         }
     }
 
