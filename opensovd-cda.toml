@@ -593,6 +593,21 @@
 # Affix applied for [`DiagCommAction::Write`].
 # write = "_Write"
 
+# Configures how diagnostic services are exposed through SOVD `/data`
+# and `/configurations`.
+[database.naming_convention.component_resource_mapping]
+# Determines whether mapping keys refer to diagnostic semantics
+# or functional-class short names.
+# key_type = "semantic"
+
+# Entries that should be exposed through `/configurations`.
+# The map value is the SOVD category associated with the entry.
+[database.naming_convention.component_resource_mapping.configurations]
+
+# Entries that should be exposed through `/data`.
+# The map value is the SOVD `/data` category.
+[database.naming_convention.component_resource_mapping.data]
+
 # Database semantics to identify the type of service
 [database.naming_convention.semantics]
 # Semantic to identify `data` parameter within a UDS response, by matching the
