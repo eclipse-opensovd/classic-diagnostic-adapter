@@ -40,7 +40,7 @@ pub enum StorageError {
 
     /// An I/O error occurred during a storage operation.
     #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[source] std::io::Error),
 
     /// The storage data is corrupted beyond automatic recovery.
     ///
@@ -60,7 +60,17 @@ impl StorageError {
         if err.kind() == std::io::ErrorKind::NotFound {
             StorageError::KeyNotFound(key.to_string())
         } else {
-            StorageError::Io(err)
+            StorageError::from(err)
+        }
+    }
+}
+
+impl From<std::io::Error> for StorageError {
+    fn from(err: std::io::Error) -> Self {
+        match err.kind() {
+            std::io::ErrorKind::PermissionDenied => StorageError::PermissionDenied(err.to_string()),
+            std::io::ErrorKind::StorageFull => StorageError::NoSpaceLeft(err.to_string()),
+            _ => StorageError::Io(err),
         }
     }
 }
