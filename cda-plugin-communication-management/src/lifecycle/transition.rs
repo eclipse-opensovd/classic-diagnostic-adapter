@@ -278,6 +278,20 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_guards_require_settled_enabled_state() {
+        assert!(guard_admission(&CommunicationState::Enabled).is_ok());
+        assert!(guard_admission(&CommunicationState::Disabled).is_err());
+        assert!(
+            guard_admission(&CommunicationState::Enabling(
+                CommunicationOperation::EnableAndDetect
+            ))
+            .is_err()
+        );
+        assert!(guard_admission(&CommunicationState::Disabling).is_err());
+        assert!(guard_admission(&CommunicationState::DisabledExclusive).is_err());
+    }
+
+    #[test]
     fn disable_conflicts_with_an_in_flight_activation() {
         let enabling = data(CommunicationState::Enabling(CommunicationOperation::Enable));
         assert_eq!(

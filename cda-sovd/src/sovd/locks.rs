@@ -1395,7 +1395,7 @@ pub(crate) async fn insert_test_fg_lock(locks: &Locks, functional_group_name: &s
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::mock::MockUdsEcu;
+    use cda_interfaces::{DiagServiceError, mock::MockUdsEcu};
     use cda_plugin_security::{AuthApi, mock::TestSecurityPlugin};
     use mockall::predicate::*;
 
@@ -1450,6 +1450,49 @@ mod tests {
         .await;
 
         assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn functional_group_lock_waits_for_communication_to_settle() {
+        let mut mock_uds = MockUdsEcu::default();
+        let functional_group = "func_group".to_owned();
+        mock_uds
+            .expect_start_tester_present()
+            .with(eq(TesterPresentType::Functional(functional_group.clone())))
+            .times(1)
+            .returning(|_| {
+                Err(DiagServiceError::CommunicationNotReady {
+                    message: "Communication is still enabling".to_owned(),
+                    retry_after: Duration::from_secs(3),
+                })
+            });
+        let locks = init_locks();
+
+        let response = post_handler(
+            &mock_uds,
+            LockContext {
+                lock: &locks.functional_group,
+                all_locks: &locks,
+                rw_lock: None,
+            },
+            Some(&functional_group),
+            sovd_interfaces::locking::Request {
+                lock_expiration: 60,
+            },
+            false,
+            Box::new(TestSecurityPlugin),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("3")
+        );
+        assert!(!locks.functional_group.lock_ro().await.is_any_locked());
     }
 
     #[tokio::test]

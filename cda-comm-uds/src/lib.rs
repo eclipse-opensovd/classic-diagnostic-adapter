@@ -86,6 +86,9 @@ pub struct UdsManager<S: EcuGateway, T: UdsEcuDb> {
     /// to be restarted in the next `initialize()` call when communication is
     /// re-enabled.
     tester_present_snapshot: Arc<Mutex<Vec<TesterPresentType>>>,
+    /// Deferred snapshot restart, which waits for the lifecycle to publish
+    /// `Enabled` after `initialize()` returns.
+    tester_present_restart_task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
@@ -170,6 +173,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             variant_detection_receiver: Arc::new(Mutex::new(Some(variant_detection_receiver))),
             variant_detection_listener: Arc::new(Mutex::new(None)),
             tester_present_snapshot: Arc::new(Mutex::new(Vec::new())),
+            tester_present_restart_task: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -333,6 +337,7 @@ impl<S: Clone + EcuGateway, T: UdsEcuDb> Clone for UdsManager<S, T> {
             variant_detection_receiver: Arc::clone(&self.variant_detection_receiver),
             variant_detection_listener: Arc::clone(&self.variant_detection_listener),
             tester_present_snapshot: Arc::clone(&self.tester_present_snapshot),
+            tester_present_restart_task: Arc::clone(&self.tester_present_restart_task),
         }
     }
 }
@@ -342,6 +347,7 @@ impl<S: EcuGateway, T: EcuManager> cda_interfaces::Shutdown for UdsManager<S, T>
     async fn shutdown(&self) {
         self.stop_variant_detection_listener(ReceiverRetention::Discard)
             .await;
+        self.abort_pending_snapshot_restart().await;
         let mut tester_present_tasks = self.tester_present_tasks.write().await;
         let mut session_reset_tasks = self.session_reset_tasks.write().await;
         let mut security_reset_tasks = self.security_reset_tasks.write().await;
