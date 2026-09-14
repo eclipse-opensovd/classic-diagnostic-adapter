@@ -317,6 +317,18 @@ where
     run_with_ext_from_config(config, setup).await
 }
 
+/// Waits until a stage during startup is done or shutdown is requested.
+/// This makes sure we can cancel the startup.
+async fn await_startup_stage<T>(
+    stage: impl Future<Output = Result<T, AppError>>,
+    shutdown_signal: cda_interfaces::ShutdownSignal,
+) -> Result<Option<T>, AppError> {
+    tokio::select! {
+        result = stage => result.map(Some),
+        () = shutdown_signal => Ok(None),
+    }
+}
+
 /// Start the CDA runtime from a prepared configuration with a custom [`Setup`].
 ///
 /// This is the setup-aware version of [`run_with_config`]. Supply a [`Setup`] to
@@ -376,22 +388,29 @@ where
 
     // After the webserver, so health is served while waiting for the storage.
     // Before loading, so nothing reads from storage that is not recovered yet.
-    let storage = initialize_storage(&config).await?;
-
-    let vehicle_data = match load_vehicle_data::<SP>(
-        &config,
-        webserver_state.health_state.as_ref(),
-        &storage,
-        setup.lock_priority_policy,
+    let Some(storage) = await_startup_stage(
+        initialize_storage(&config),
+        webserver_state.shutdown_signal.clone(),
     )
-    .await
-    {
-        Ok(data) => data,
-        Err(AppError::ShutdownRequested) => {
-            tracing::info!("Shutdown requested during database load, exiting cleanly");
-            return Ok(());
-        }
-        Err(e) => return Err(e),
+    .await?
+    else {
+        tracing::info!("Shutdown requested while waiting for storage, exiting cleanly");
+        return Ok(());
+    };
+
+    let Some(vehicle_data) = await_startup_stage(
+        load_vehicle_data::<SP>(
+            &config,
+            webserver_state.health_state.as_ref(),
+            &storage,
+            setup.lock_priority_policy,
+        ),
+        webserver_state.shutdown_signal.clone(),
+    )
+    .await?
+    else {
+        tracing::info!("Shutdown requested during database load, exiting cleanly");
+        return Ok(());
     };
 
     if vehicle_data.databases.is_empty() && config.database.exit_no_database_loaded {
@@ -402,15 +421,22 @@ where
 
     // Retained for the full server lifetime, so its event dispatcher keeps
     // running until explicit shutdown.
-    let communication_runtime = setup::setup_runtime_routes::<SP, SL, UPB, CPB>(
-        config,
-        vehicle_data,
-        &webserver_state,
-        setup.build_update_plugin,
-        setup.build_communication_plugin,
-        storage,
+    let Some(communication_runtime) = await_startup_stage(
+        setup::setup_runtime_routes::<SP, SL, UPB, CPB>(
+            config,
+            vehicle_data,
+            &webserver_state,
+            setup.build_update_plugin,
+            setup.build_communication_plugin,
+            storage,
+        ),
+        webserver_state.shutdown_signal.clone(),
     )
-    .await?;
+    .await?
+    else {
+        tracing::info!("Shutdown requested during runtime setup, exiting cleanly");
+        return Ok(());
+    };
 
     tracing::info!("CDA fully initialized and ready to serve requests");
     if let Some(provider) = &webserver_state.main_health_provider {
@@ -425,10 +451,8 @@ where
     // Wait for shutdown signal
     webserver_state.shutdown_signal.clone().await;
     tracing::info!("Shutting down...");
-    webserver_state.join().await?;
     cda_interfaces::Shutdown::shutdown(&*communication_runtime.plugin).await;
-
-    Ok(())
+    webserver_state.join().await
 }
 
 /// Run the CDA from parsed CLI arguments.
@@ -566,6 +590,7 @@ async fn init_webserver(
     );
 
     register_version_endpoints(&webserver_state.dynamic_router).await;
+    cda_sovd::add_openapi_routes(&webserver_state.dynamic_router).await;
 
     if let Some(hook) = pre_load {
         hook(webserver_state.dynamic_router.clone()).await?;
@@ -1179,6 +1204,36 @@ mod cli_args_tests {
 #[cfg(test)]
 mod webserver_lifecycle_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn startup_stage_is_cancelled_when_shutdown_arrives() {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let shutdown_signal = cda_interfaces::shutdown_signal(async move {
+            let _ = shutdown_rx.await;
+        });
+        shutdown_tx.send(()).unwrap();
+
+        let result = await_startup_stage(
+            std::future::pending::<Result<(), AppError>>(),
+            shutdown_signal,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_stage_completes_before_shutdown() {
+        let result = await_startup_stage(
+            std::future::ready(Ok(42)),
+            cda_interfaces::shutdown_signal(std::future::pending()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, Some(42));
+    }
 
     #[tokio::test]
     async fn drop_aborts_webserver_task() {
