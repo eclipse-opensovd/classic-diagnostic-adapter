@@ -14,127 +14,799 @@
 # Requires a binary built with the `can` cargo feature, e.g.
 #   CDA_CONFIG_FILE=opensovd-cda-can.toml cargo run -p opensovd-cda --features can
 
+# Path to the directory containing flash files.
 flash_files_path = "./flash"
 
-[server]
-address = "0.0.0.0"
-port = 20002
-
-[database]
-seed_dir = "./mdds"
-fallback_to_base_variant = true
-
-# DoIP is disabled. The block is still required (Configuration.doip is
-# non-Option), but CDA skips DoIP initialization when enabled = false.
-# Set enabled = true and fill in tester_address if you want DoIP as well.
-[doip]
-enabled = false
-tester_address = "127.0.0.1"
-tester_subnet = "255.255.0.0"
-gateway_port = 13400
-send_timeout_ms = 1000
-
-# CAN bus configuration
+# Optional CAN bus transport configuration.
+# When enabled, the adapter can communicate with ECUs over CAN bus.
 [can]
-# CAN interface name (e.g., "vxcan0", "can0", "vcan0")
-interface = "vxcan0"
-
-# Response timeout in milliseconds (default: 5000ms)
-response_timeout_ms = 2000
-
-# Functional-broadcast TesterPresent keep-alive interval in milliseconds.
-# The default (0) disables the broadcast for resident on-board operation.
-# This file is the external-tester example, so it enables the keep-alive:
-# it holds ECUs awake for the diagnostic session, making discovery work
-# even on a quiet bus.
-keepalive_interval_ms = 2000
-
-# Probe timeout in milliseconds for ECU discovery (default: 100ms)
-probe_timeout_ms = 100
-
-# Extra rounds through the probe sequence for ECUs that did not answer,
-# self-healing transiently lost exchanges inside the transport
-# (default: 0 = probe each ECU once per discovery)
-# probe_retries = 0
-
-# Delay between probe retry rounds in milliseconds (default: 100ms)
-# probe_retry_delay_ms = 100
-
-# Whether the built-in TesterPresent probe heads the discovery probe
-# sequence (default: true). Set to false for fleets whose ECUs never answer
-# TesterPresent; [[can.probe_fallbacks]] must then be non-empty and is used
-# as the complete probe sequence.
+# Whether the built-in `TesterPresent` probe heads the discovery
+# probe sequence; with `false`, `probe_fallbacks` must be non-empty
+# and is used verbatim.
+# See `response_timeout_ms` for why the serde default is needed.
 # default_probes = true
+# CAN interface name (e.g., "vxcan0", "can0")
+interface = "vxcan0"
+# Interval of the functional-broadcast `TesterPresent` keep-alive in
+# milliseconds; `0` (the default) disables it, keeping a resident
+# on-board CDA from interfering with network management - sleeping
+# ECUs are recovered by rediscovery on wake. External testers should
+# set an interval (e.g. 2000) to hold ECUs awake for the session.
+# See `response_timeout_ms` for why the serde default is needed.
+keepalive_interval_ms = 2000
+# Optional fallback probe payloads used after the default `TesterPresent` probe
+# (or, with `default_probes = false`, the complete probe sequence).
+#
+# This is useful for ECUs that do not answer `TesterPresent` during discovery,
+# but do respond to another lightweight diagnostic request.
+# probe_fallbacks = []
+# Extra rounds through the probe sequence when an ECU did not answer,
+# self-healing transiently lost exchanges (e.g. bus arbitration during
+# startup) inside the transport instead of surfacing a spurious offline
+# to the UDS layer. `0` probes each ECU exactly once per discovery.
+# See `response_timeout_ms` for why the serde default is needed.
+# probe_retries = 0
+# Delay between probe retry rounds in milliseconds.
+# See `response_timeout_ms` for why the serde default is needed.
+# probe_retry_delay_ms = 100
+# Timeout for probing ECUs during discovery in milliseconds.
+# See `response_timeout_ms` for why the serde default is needed.
+probe_timeout_ms = 100
+# Timeout for waiting for a response in milliseconds.
+#
+# The serde default is needed (unlike for other config types) because
+# `[can]` is an optional section: the figment defaults tree carries no
+# values below it, so omitted fields must default at deserialization
+# time. The canonical values live in the `Default` impl.
+response_timeout_ms = 2000
+# Per-ECU transport override.
+#
+# Keys are ECU names (case-insensitive), values are the transport to use.
+# ECUs not listed here default to `DoIP` when a `DoIP` gateway is available,
+# falling back to CAN otherwise.
+#
+# Example (TOML):
+# ```toml
+# [[can.transport_overrides]]
+# ecu_name = "MyCanOnlyEcu"
+# transport = "can"
+# ```
+# transport_overrides = []
 
-# CAN ID mappings. CDA extracts CAN addressing from the MDD com-params
-# (per-ECU CP_UniqueRespIdTable entries first, then top-level
-# CP_CanPhysReqId / CP_CanRespUSDTId scalars); an [[can.ecu_mappings]]
-# entry OVERRIDES whatever the MDD provides for that ECU. The example
-# MDDs in testcontainer/odx/ (e.g. FLXC1000) do not carry CAN addressing
-# com-params, so a fallback request/response ID pair is required here.
-# 0x7E0/0x7E8 are the OBD-II request/response IDs and work as a generic
-# default for the test/example MDDs.
+# Optional explicit ECU CAN ID mappings.
+# If not provided, CAN IDs will be read from the MDD COM parameters.
 [[can.ecu_mappings]]
-ecu_name = "FLXC1000"
-request_id = 0x7E0
-response_id = 0x7E8
-# Optional: ISO-TP addressing mode. Defaults to "standard" (no
-# address-extension byte). "extended" prefixes every ISO-TP payload with
-# the given address-extension byte.
 # addressing_mode = "standard"
-# addressing_mode = { extended = 0xF1 }
+ecu_name = "FLXC1000"
+request_id = 0x07E0
+response_id = 0x07E8
 
-# CAN ECUs need a protocol override: the global default protocol name
-# (doip.protocol_name, "UDS_Ethernet_DoIP_DOBT") is DoIP-specific and will
-# not match the diag layers in a CAN MDD, which makes the ECU fail to load.
-# Any name from database.naming_convention.can_protocol_aliases (default:
-# UDS_CAN, ISO_11898_2_DWCAN, ISO_11898_3_DWFTCAN, CAN, ISO_15765_2,
-# ISO_15765_3) engages the CAN alias chain in protocol resolution: on an
-# exact-match miss the other aliases are tried in order. Alternatively
-# "auto-can" picks the first protocol whose name matches the configured
-# CAN markers (database.naming_convention.can_protocol_markers).
+# Defines the Communication parameters which are used in CAN bus communication
+[com_params.can]
+# Name of the COMPLEX com-param table carrying the per-ECU CAN
+# addressing (ISO 22900/ODX `CP_UniqueRespIdTable`). Its sub-parameters
+# are matched against the `name`s of the ID parameters above and take
+# precedence over top-level scalar com-params of the same names.
+# OEM databases using a different table name configure it here (mirrors
+# `DoipComParams::logical_response_id_table_name`).
+# unique_resp_id_table_name = "CP_UniqueRespIdTable"
+
+# Functional CAN ID for broadcast requests
+[com_params.can.functional_id]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_CanFuncReqId"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+
+# Physical request CAN ID (tester -> ECU)
+[com_params.can.physical_request_id]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_CanPhysReqId"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+
+# Physical response CAN ID (ECU -> tester)
+[com_params.can.physical_response_id]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_CanRespUSDTId"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+
+# DoIP-specific communication parameters.
+[com_params.doip]
+# Only the ID of this com param is needed right now
+# logical_response_id_table_name = "CP_UniqueRespIdTable"
+
+# Attempts to retry connection before giving up
+[com_params.doip.connection_retry_attempts]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPConnectionRetryAttempts"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 100
+
+# Delay before attempting to reconnect
+[com_params.doip.connection_retry_delay]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPConnectionRetryDelay"
+# precedence = "Database"
+
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.doip.connection_retry_delay.value]
+# nanos = 0
+# secs = 5
+
+# Timeout after which a connection attempt should've been successful
+[com_params.doip.connection_timeout]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPConnectionTimeout"
+# precedence = "Database"
+
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.doip.connection_timeout.value]
+# nanos = 0
+# secs = 30
+
+# Maximum time the tester waits for an ACK or NACK of the `DoIP` entity
+[com_params.doip.diagnostic_ack_timeout]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPDiagnosticAckTimeout"
+# precedence = "Database"
+
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.doip.diagnostic_ack_timeout.value]
+# nanos = 0
+# secs = 1
+
+# Logical/Physical address of the ECU
+[com_params.doip.logical_ecu_address]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPLogicalEcuAddress"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 0x00
+
+# Functional address of the ECU
+[com_params.doip.logical_functional_address]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPLogicalFunctionalAddress"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 0x00
+
+# Logical address of a `DoIP` entity.
+# In case of directly reachable `DoIP` entity it's equal to the
+# `LogicalEcuAddress`, otherwise data will be sent via this address to the `LogicalEcuAddress`
+[com_params.doip.logical_gateway_address]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPLogicalGatewayAddress"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 0x00
+
+# Logical address of the tester
+[com_params.doip.logical_tester_address]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPLogicalTesterAddress"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 0x00
+
+# Number of retries for specific NACKs
+# The key must be a string, because parsing from toml requires keys to be strings,
+# no other types are supported.
+[com_params.doip.nack_number_of_retries]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPNumberOfRetries"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.doip.nack_number_of_retries.value]
+# 0x03 = 3
+
+# Number of retries in case a transmission error,
+# a reception error, or transport layer timeout is encountered
+[com_params.doip.repeat_request_count_transmission]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RepeatReqCountTrans"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 3
+
+# Period between retries, after specific NACK conditions are encountered
+[com_params.doip.retry_period]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPRetryPeriod"
+# precedence = "Database"
+
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.doip.retry_period.value]
+# nanos = 200000000
+# secs = 0
+
+# Maximum time allowed for the ECUs routing activation
+[com_params.doip.routing_activation_timeout]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPRoutingActivationTimeout"
+# precedence = "Database"
+
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.doip.routing_activation_timeout.value]
+# nanos = 0
+# secs = 30
+
+# Time period the tester accepts for repeated NRC 0x21 (busy repeat request) and retries,
+# while waiting for a positive response in uS
+[com_params.uds.rc_21_completion_timeout]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RC21CompletionTimeout"
+# precedence = "Database"
+
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.uds.rc_21_completion_timeout.value]
+# nanos = 0
+# secs = 25
+
+# Time between a NRC 0x21 (busy repeat request) and the retransmission of the same request
+[com_params.uds.rc_21_repeat_request_time]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RC21RequestTime"
+# precedence = "Database"
+
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.uds.rc_21_repeat_request_time.value]
+# nanos = 200000000
+# secs = 0
+
+# `RetryPolicy` in case of NRC 0x21 (busy repeat request)
+[com_params.uds.rc_21_retry_policy]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RC21Handling"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = "ContinueUntilTimeout"
+
+# Time period the tester accepts for repeated NRC 0x78 (response pending),
+# and waits for a positive response
+[com_params.uds.rc_78_completion_timeout]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RC78CompletionTimeout"
+# precedence = "Database"
+
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.uds.rc_78_completion_timeout.value]
+# nanos = 0
+# secs = 25
+
+# `RetryPolicy` in case of NRC 0x78 (response pending)
+[com_params.uds.rc_78_retry_policy]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RC78Handling"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = "ContinueUntilTimeout"
+
+# Enhanced timeout after receiving a NRC 0x78 (response pending) to wait for the
+# complete reception of the response message
+[com_params.uds.rc_78_timeout]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_P6Star"
+# precedence = "Database"
+
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.uds.rc_78_timeout.value]
+# nanos = 0
+# secs = 1
+
+# Time period the tester accepts for repeated NRC 0x94 (temporarily not available),
+# and waits for a positive response
+[com_params.uds.rc_94_completion_timeout]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RC94CompletionTimeout"
+# precedence = "Database"
+
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.uds.rc_94_completion_timeout.value]
+# nanos = 0
+# secs = 25
+
+# Time between a NRC 0x94 (temporarily not available)
+# and the retransmission of the same request
+[com_params.uds.rc_94_repeat_request_time]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RC94RequestTime"
+# precedence = "Database"
+
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.uds.rc_94_repeat_request_time.value]
+# nanos = 200000000
+# secs = 0
+
+# `RetryPolicy` in case of NRC 0x94 (temporarily not available)
+[com_params.uds.rc_94_retry_policy]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RC94Handling"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = "ContinueUntilTimeout"
+
+# Repetition of last request in case of timeout, transmission or receive error
+# Only applies to application layer messages
+[com_params.uds.repeat_req_count_app]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RepeatReqCountApp"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 2
+
+# Addressing mode for sending Tester Present
+# Only relevant in case no function messages are sent
+[com_params.uds.tester_present_addr_mode]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterPresentAddrMode"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = "Physical"
+
+# Expected negative response (if required)
+# A tester present error should be reported in the log, tester present s
+# ending should be continued
+[com_params.uds.tester_present_exp_neg_resp]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterPresentExpNegResp"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = [
+#     0x7F,
+#     0x3E,
+# ]
+
+# Expected positive response (if required)
+[com_params.uds.tester_present_exp_pos_resp]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterPresentExpPosResp"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = [
+#     0x7E,
+#     0x00,
+# ]
+
+# Message to be sent for tester present
+[com_params.uds.tester_present_message]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterPresentMessage"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = [
+#     0x3E,
+#     0x00,
+# ]
+
+# Define expectation for Tester Present responses
+[com_params.uds.tester_present_response_expected]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterPresentReqResp"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = "true"
+
+# Define Tester Present generation
+[com_params.uds.tester_present_retry_policy]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterPresentHandling"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = "true"
+
+# Define condition for sending tester present
+# When bus has been idle (Interval defined by `TesterPresentTime`)
+[com_params.uds.tester_present_send_type]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterPresentSendType"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = "OnIdle"
+
+# Timing interval for tester present messages in us
+[com_params.uds.tester_present_time]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterPresentTime"
+# precedence = "Database"
+
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.uds.tester_present_time.value]
+# nanos = 0
+# secs = 2
+
+# Timeout after sending a successful request, for
+# the complete reception of the response message
+[com_params.uds.timeout_default]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_P6Max"
+# precedence = "Database"
+
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.uds.timeout_default.value]
+# nanos = 0
+# secs = 1
+
+# Diagnostic communication initialization and post-update behavior.
+[communication]
+# The value (in seconds) for the HTTP `Retry-After` header returned when a
+# diagnostic request arrives while initialization is still pending.
+# deferred_retry_after_seconds = 30
+# Controls when diagnostic transport network activation begins:
+# - "Always": whole-vehicle communication initializes eagerly at startup (default).
+# - "OnDemand": HTTP/SOVD starts first. The first qualifying ECU diagnostic
+#   request, or an explicit `activate()` call, triggers initialization.
+# - "Disabled": HTTP/SOVD starts first. The default communication plugin
+#   provides no activation path, and `trigger_detection()` needs an
+#   already-enabled transport.
+# init_mode = "Always"
+# Controls transport behavior after a runtime database update:
+# - "Enabled": resume the transport the update displaced, requesting
+#   activation if it started from a deferred runtime, subject to `init_mode`
+#   (default).
+# - "Deferred": leave communication deferred even if the update displaced
+#   an enabled runtime. The transport stays down until triggered.
+# post_update_mode = "Enabled"
+# Controls whether enabling communication also runs whole-vehicle variant
+# detection:
+# - "Always": the registered detector runs as the last stage of every
+#   activation (default).
+# - "Never": activation brings the transport and its lifecycle hooks up
+#   only, so variant-dependent surfaces report not-ready until detection is
+#   triggered explicitly.
+# variant_detection = "Always"
+
+[components.additional_fields.x-sovd2uds-can-ecus.CAN]
+# ignore_case = true
+# values = ["yes"]
+
+[components.additional_fields.x-sovd2uds-lin-ecus.LIN]
+# ignore_case = true
+# values = ["yes"]
+
+# Diagnostic database loading and naming settings.
+[database]
+# If true, the application will exit if no database could be loaded.
+# exit_no_database_loaded = false
+# If true, when variant detection fails to find a matching variant,
+# the ECU will fall back to the base variant instead of reporting an error.
+fallback_to_base_variant = true
+# When `true` (the default), MDD files that fail to load are skipped and
+# the remaining databases continue loading. When `false`, any MDD load
+# failure aborts the entire load/reload operation.
+# ignore_invalid_mdd = true
+# When `true`, com-param and protocol lookups ignore the protocol filter
+# and match by parameter name alone.
+#
+# This is useful for databases that contain only a single protocol but
+# where the protocol short-name recorded in the database does not match
+# the one used at runtime. Enabling this flag allows the lookup to succeed
+# by falling back to a protocol-agnostic match.
+#
+# Only valid when the database contains exactly one distinct protocol;
+# attempting a lookup with this flag set against a multi-protocol database
+# returns `DiagServiceError::InvalidDatabase`.
+# ignore_protocol = false
+# Directory to load the databases from, if none have been loaded into storage before.
+seed_dir = "./mdds"
+
+# Holds configuration for diagnostic service naming conventions.
+#
+# # Fields
+# - `short_name_affix_position`: Position of affixes in short names (prefix or suffix).
+# - `long_name_affix_position`: Position of affixes in long names (prefix or suffix).
+# - `configuration_service_parameter_semantic_id`: Parameter semantic used to distinguish
+#   between different services in configurations
+# - `functional_class_varcoding`: Functional class name for filtering varcoding services.
+# - `short_name_affixes`: List of lowercase affixes for short names.
+#   **Each affix must match the specified `short_name_affix_position`
+#   (i.e., be a prefix if `Prefix`, or a suffix if `Suffix`).**
+#   Order matters: compound affixes (e.g. `_read_dump`) must come before general ones
+#   (e.g. `_dump`).
+# - `long_name_affixes`: List of lowercase affixes for long names.
+#   **Each affix must match the specified `long_name_affix_position`
+#   (i.e., be a prefix if `Prefix`, or a suffix if `Suffix`).**
+#   Order matters: compound affixes (e.g. ` read dump`) must come before general ones
+#   (e.g. `dump`).
+#  - `service_affixes`: List of affixes that apply only to the given service.
+#    This can be used to remove additional things from a service name during lookup.
+#    All affixes share the same position (prefix or suffix).
+#    Keys support both decimal (`"133"`) and hexadecimal (`"0x85"` / `"0X85"`) service IDs.
+#    Example: The service is named `DTC_Settings_Mode_Off`, but "off" is passed via SOVD.
+#    To match the service configure, `[0x85, (Prefix, ["Dtc_Settings_Mode_"])]`
+#
+# Common affixes (e.g. `read`, `write`) should be placed first for performance, but compound
+# affixes must precede their base forms for correct matching.
+[database.naming_convention]
+# Protocol short-names that identify diagnostics-over-CAN in the MDD,
+# matched case-insensitively. When the configured protocol name is one
+# of these but the database has no layer of exactly that name, protocol
+# resolution tries the other entries in order. OEM databases with
+# different protocol names configure their own list.
+# can_protocol_aliases = [
+#     "UDS_CAN",
+#     "ISO_11898_2_DWCAN",
+#     "ISO_11898_3_DWFTCAN",
+#     "CAN",
+#     "ISO_15765_2",
+#     "ISO_15765_3",
+# ]
+# Case-insensitive substrings that mark a protocol short-name as
+# diagnostics-over-CAN during `"auto-can"` protocol detection.
+# can_protocol_markers = [
+#     "CAN",
+#     "ISO_11898",
+# ]
+# Semantic ID used to identify the distinguishing parameter of a service.
+# configuration_service_parameter_semantic_id = "ID"
+# Functional class name used to filter varcoding services.
+# functional_class_varcoding = "varcoding"
+# Position of affixes in diagnostic service long names.
+# long_name_affix_position = "Suffix"
+# Ordered list of lowercase affixes to strip from long names during service lookup.
+#
+# Compound affixes (e.g. ` read dump`) must come before general ones (e.g. `dump`).
+# long_name_affixes = [
+#     " read",
+#     " write",
+#     " read dump",
+#     " write dump",
+#     " dump",
+#     " read func",
+#     " write func",
+#     " read dump func",
+#     " write dump func",
+#     " dump func",
+#     " control func",
+#     " control",
+# ]
+# Position of affixes in diagnostic service short names.
+# short_name_affix_position = "Suffix"
+# Ordered list of lowercase affixes to strip from short names during service lookup.
+#
+# Compound affixes (e.g. `_read_dump`) must come before general ones (e.g. `_dump`).
+# short_name_affixes = [
+#     "_read",
+#     "_write",
+#     "_read_dump",
+#     "_write_dump",
+#     "_dump",
+#     "_read_func",
+#     "_write_func",
+#     "_read_dump_func",
+#     "_write_dump_func",
+#     "_dump_func",
+#     "_control_func",
+#     "_control",
+# ]
+
+# Affixes used to derive a service lookup name from a [`DiagCommAction`].
+#
+# These are applied when a [`crate::DiagComm`] has no explicit `lookup_name`
+# and the lookup name must be derived from the diagnostic communication's
+# action (read, write, start, request results, stop).
+[database.naming_convention.action_affixes]
+# Position of the action affixes relative to the service name.
+# position = "Suffix"
+# Affix applied for [`DiagCommAction::Read`].
+# read = "_Read"
+# Affix applied for [`DiagCommAction::RequestResults`].
+# request_results = "_RequestResults"
+# Affix applied for [`DiagCommAction::Start`].
+# start = "_Start"
+# Affix applied for [`DiagCommAction::Stop`].
+# stop = "_Stop"
+# Affix applied for [`DiagCommAction::Write`].
+# write = "_Write"
+
+# Database semantics to identify the type of service
+[database.naming_convention.semantics]
+# Semantic to identify `data` parameter within a UDS response, by matching the
+#  parameter semantic against this value.
+# data = "DATA"
+# Semantic for `security` services. Used to lookup services and state charts that
+# control the `security` (level) of an ECU.
+# security = "SECURITY"
+# Semantic to identify the `request id` parameter within a UDS response,
+# by matching the parameter semantic against this value.
+# service_id_rq = "SERVICEIDRQ"
+# Semantic for `session` services. Used to lookup services and state charts that
+# control the `session` of an ECU.
+# session = "SESSION"
+
+# Per-service-ID affixes for additional name stripping during lookup.
+#
+# The key is the UDS service ID as a string and can be decimal (`"133"`) or hex
+# (`"0x85"` / `"0X85"`); keys are normalized internally to decimal strings.
+# Each entry specifies the affix position and a list of affixes.
+[database.naming_convention.service_affixes]
+# "0x85" = [
+#     "Prefix",
+#     ["DTC_Setting_Mode_"],
+# ]
+# "0x31" = [
+#     "Suffix",
+#     [
+#     "_start",
+#     "_stop",
+#     "_requestresults",
+#     "_start_func",
+#     "_stop_func",
+#     "_requestresults_func",
+# ],
+# ]
+
+# `DoIP` (Diagnostics over IP) transport layer settings.
+[doip]
+# Interval in seconds between `DoIP` alive check requests sent on idle connections.
+# The alive check is only sent when no diagnostic communication has occurred
+# for this duration. Set to 0 to disable the alive check.
+# alive_check_interval_secs = 1800
+# Whether the `DoIP` transport is enabled.
+# When `false`, CDA skips `DoIP` initialization entirely (useful for
+# CAN-only or DoIP-less test setups).
+# Defaults to `true` to preserve the historical DoIP-first behavior.
+enabled = false
+# UDP/TCP port for `DoIP` gateway discovery and communication.
+gateway_port = 13400
+# The name of the protocol to use.
+# Matched case-insensitive against the database.
+# The special value `"auto-can"` defers the choice to the MDD-driven
+# CAN protocol auto-detection (see `into_db_protocol`; the markers are
+# configurable via `database.naming_convention.can_protocol_markers`).
+# protocol_name = "UDS_Ethernet_DoIP_DOBT"
+# Whether to request a diagnostic message positive acknowledgement.
+# send_diagnostic_message_ack = true
+# Timeout in milliseconds for sending `DoIP` messages.
+send_timeout_ms = 1000
+# IP address of the diagnostic tester interface.
+tester_address = "127.0.0.1"
+# Subnet mask for the tester network.
+tester_subnet = "255.255.0.0"
+# TLS port for secure `DoIP` communication.
+# tls_port = 3496
+
 [ecu.FLXC1000]
 protocol = "UDS_CAN"
 
-# Optional: explicit CAN ID mappings
-# Use this to override CAN IDs from MDD files or when MDD doesn't contain them
-# [[can.ecu_mappings]]
-# ecu_name = "MyECU"
-# request_id = 0x7E0    # Physical request CAN ID
-# response_id = 0x7E8   # Physical response CAN ID
-# addressing_mode = { extended = 0x33 }  # Optional: ISO-TP mixed addressing
-#
-# [[can.ecu_mappings]]
-# ecu_name = "AnotherECU"
-# request_id = 0x700
-# response_id = 0x708
+# DTC (Diagnostic Trouble Code) fault memory settings.
+[faults]
+# Default scope name for standard fault memory operations.
+# default_scope = "FaultMem"
+# Name of the scope to pass to the DTC functions to read from the user defined DTC memory.
+# Matching will be case-insensitive.
+# user_memory_scope = "DevelopmentFaultMemory"
 
-# Optional: per-ECU transport selection overrides
-#
-# By default, DoIP is used when a DoIP gateway is available, falling back to CAN.
-# Use transport_overrides to force specific ECUs onto a particular transport.
-# This is useful when:
-#   - An ECU is CAN-only and has no DoIP logical address
-#   - The MDD contains DoIP COM params for a gateway device, but you want to
-#     talk to the ECU directly over CAN
-#   - You want to test CAN communication for an ECU that is also reachable via DoIP
-#
-# Supported transport spellings: "can" / "Can" / "CAN" and
-# "doip" / "DoIP" / "DOIP" (exact aliases, other casings are rejected).
-# ECU names are matched case-insensitively.
-#
-# [[can.transport_overrides]]
-# ecu_name = "CanOnlyEcu"
-# transport = "can"
-#
-# [[can.transport_overrides]]
-# ecu_name = "ForceDoipEcu"
-# transport = "doip"
+# `FlatBuffers` verification settings for MDD database parsing.
+[flat_buf]
+# Skip null terminator validation in `FlatBuffers` strings.
+# ignore_missing_null_terminator = false
+# Maximum apparent buffer size in bytes for `FlatBuffers` verification.
+# max_apparent_size = 9223372036854775807
+# Maximum nesting depth allowed during `FlatBuffers` verification.
+# max_depth = 64
+# Maximum number of tables allowed during `FlatBuffers` verification.
+# max_tables = 100000000
+# Enable decompression of MDD database files.
+# mdd_decompress = false
+# Enable `FlatBuffers` verification on loaded MDD data.
+# verify = false
 
-[logging.otel]
-enabled = false
+# Functional group description and lookup settings.
+[functional_description]
+# Name of the database containing functional group definitions.
+# description_database = "functional_groups"
+# Position of the protocol identifier in service names.
+# protocol_position = "Suffix"
 
-# Uncomment to enable OpenTelemetry tracing
-# [logging.otel]
+# Health check endpoint settings.
+[health]
+# Whether the health check endpoint is active.
 # enabled = true
+
+# Logging, file output, and tracing backend settings.
+[logging]
+# strftime-compatible format string for log timestamps.
+# timestamp_format = "%T%.3f"
+
+# File-based logging configuration.
+[logging.log_file_config]
+# Whether to append to existing log files instead of rotating.
+# append_enabled = false
+# strftime-compatible date format used in log file entries.
+# date_format = "%F %T%.3f"
+# Whether file logging is enabled.
+# enabled = false
+# Log file name.
+# name = "opensovd-cda.log"
+# Directory path for log files.
+# path = "/var/log/opensovd-cda"
+
+# OpenTelemetry tracing and metrics export configuration.
+[logging.otel]
+# Whether OpenTelemetry tracing and metrics export is enabled.
+enabled = false
+# OTLP collector endpoint URL (e.g. `http://localhost:4317`).
 # endpoint = "http://localhost:4317"
+
+# Configuration for update plugin, i.e. storage paths
+[runtime_update_config]
+# When `true` and the `DiagnosticDatabase` storage collection is empty,
+# seed it from `database.path` on first startup by copying all `.mdd` files.
+# Default: `false`.
+# init_storage_from_database_path = false
+# Value of the Retry-After header (in seconds) sent when the service is
+# temporarily unavailable due to a busy transaction.
+# retry_after_seconds = 1
+# Directory where the updatable database is stored.
+# storage_dir = "."
+# How many times to try loading the storage directory,
+# if it is unavailable.
+# storage_dir_load_retry_attempts = 100
+# How long to wait between trying to load the storage directory,
+# if it is unavailable, in milliseconds.
+# storage_dir_load_retry_delay_ms = 3000
+# Maximum upload body size in bytes for multipart file uploads.
+# Default: 50MB. Axum's built-in limit is 2MB which is too low for MDD files.
+# upload_body_limit_bytes = 52428800
+
+# SOVD HTTP server bind settings.
+[server]
+# IP address the server listens on.
+address = "0.0.0.0"
+# TCP port the server listens on.
+port = 20002
+
+# Strict-mode validation flags.
+[strict]
+# Exit with an error if any key under `[ecu.<name>]` does not match a
+# loaded MDD database.
+# ecu_config = false
+# Master switch - when `true`, all individual strict checks are enabled.
+# enabled = false
+# Reject requests containing parameters not defined in the diagnostic
+# service with a `BadPayload` error (HTTP 400).
+# parameter_validation = false
