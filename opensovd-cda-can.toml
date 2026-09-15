@@ -21,7 +21,7 @@ address = "0.0.0.0"
 port = 20002
 
 [database]
-path = "./mdds"
+seed_dir = "./mdds"
 fallback_to_base_variant = true
 
 # DoIP is disabled. The block is still required (Configuration.doip is

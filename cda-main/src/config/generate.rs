@@ -708,6 +708,58 @@ mod tests {
             .expect("CAN example config should pass sanity validation");
     }
 
+    /// The committed CAN example config must only use keys that the
+    /// `Configuration` schema actually has.
+    ///
+    /// This catches config drift like #544, where `database.path` was renamed
+    /// to `database.seed_dir` in the schema but the standalone example file
+    /// kept the old key: Figment silently ignores unknown keys during
+    /// deserialization, so `can_example_config_parses_as_valid_config` alone
+    /// cannot catch a stale/renamed key like this - the file "parses fine",
+    /// it just silently falls back to the field's default value. Reuses the
+    /// same round-trip-diff approach `com_params::find_unknown_keys` already
+    /// uses to validate per-ECU com-param overrides.
+    #[cfg(feature = "can")]
+    #[test]
+    fn can_example_config_has_no_unknown_keys() {
+        use figment::{
+            Figment,
+            providers::{Format, Serialized, Toml},
+        };
+
+        let example_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("opensovd-cda-can.toml");
+        let content = std::fs::read_to_string(&example_path)
+            .expect("opensovd-cda-can.toml should be readable");
+        let input_table: toml::Table =
+            toml::from_str(&content).expect("opensovd-cda-can.toml should be valid TOML");
+
+        // The reference is the *merged* config (defaults + file), round-tripped
+        // back through the typed `Configuration`. Any key present in the raw
+        // file but absent from this reference was silently ignored by Figment.
+        let config: crate::config::configfile::Configuration =
+            Figment::from(Serialized::defaults(crate::config::default_config()))
+                .merge(Toml::file(&example_path))
+                .extract()
+                .expect("opensovd-cda-can.toml should be parseable as a valid Configuration");
+        let reference_value =
+            toml::Value::try_from(&config).expect("Configuration should serialize to TOML");
+        let reference_table = reference_value
+            .as_table()
+            .expect("serialized Configuration should be a TOML table");
+
+        let unknown =
+            crate::config::com_params::find_unknown_keys(&input_table, reference_table, "");
+
+        assert!(
+            unknown.is_empty(),
+            "opensovd-cda-can.toml uses keys that don't exist in the Configuration schema (likely \
+             a stale/renamed key, see #544):\n  - {}",
+            unknown.join("\n  - ")
+        );
+    }
+
     /// Collect all leaf property paths from the JSON Schema.
     /// A "leaf" is a property that, after resolving `$ref`, has no nested `properties`.
     fn collect_schema_leaf_paths(
