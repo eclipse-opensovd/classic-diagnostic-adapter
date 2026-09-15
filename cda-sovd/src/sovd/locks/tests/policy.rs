@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -74,7 +74,7 @@ async fn priority_policy_receives_claims_metadata_and_active_locks() {
 }
 
 #[tokio::test]
-async fn ecu_and_fg_scope_acquisition_never_invokes_priority_policy() {
+async fn ecu_and_fg_scope_acquisition_never_invokes_priority_evaluation() {
     // req~sovd-api-lock-priority: the priority mechanism is applicable to
     // vehicle locks only; ECU and functional-group acquisitions must never
     // invoke the plugin, even when one is registered.
@@ -127,7 +127,7 @@ async fn ecu_and_fg_scope_acquisition_never_invokes_priority_policy() {
 }
 
 #[tokio::test]
-async fn uncontended_vehicle_acquisition_never_invokes_priority_policy() {
+async fn uncontended_vehicle_acquisition_does_not_invoke_priority_evaluation() {
     let policy = Arc::new(TestPolicy {
         decision: Some(LockPriorityDecision::Deny {
             reason: "Must not be evaluated".to_owned(),
@@ -157,6 +157,171 @@ async fn uncontended_vehicle_acquisition_never_invokes_priority_policy() {
             .expect("Policy mutex poisoned")
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn metadata_verification_runs_for_every_lock_scope() {
+    let policy = Arc::new(MetadataVerificationPolicy {
+        result: Ok(()),
+        requests: StdMutex::new(Vec::new()),
+    });
+    let locks = locks_with_policy(Arc::<MetadataVerificationPolicy>::clone(&policy));
+    let claims = TestClaims {
+        subject: "priority-client".to_owned(),
+        attributes: serde_json::Map::new(),
+    };
+
+    for scope in [
+        LockScope::Vehicle,
+        LockScope::Ecu {
+            name: "ecu-a".to_owned(),
+        },
+        LockScope::FunctionalGroup {
+            name: "fg-a".to_owned(),
+        },
+    ] {
+        let (acquisition, pending, _) = locks
+            .evaluate_acquisition(
+                scope,
+                LockCoverage::new(["ecu-a".to_owned()]),
+                &preemption_request(),
+                &claims,
+            )
+            .await
+            .expect("Valid metadata should be accepted");
+        assert!(pending.is_none());
+        acquisition.finish().await;
+    }
+
+    assert_eq!(
+        policy
+            .requests
+            .lock()
+            .expect("Metadata verification mutex poisoned")
+            .len(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn metadata_verification_runs_for_same_owner_post_renewal() {
+    let policy = Arc::new(MetadataVerificationPolicy {
+        result: Ok(()),
+        requests: StdMutex::new(Vec::new()),
+    });
+    let locks = locks_with_policy(Arc::<MetadataVerificationPolicy>::clone(&policy));
+    let mut existing = active_test_lock("priority-client", true);
+    existing.scope = ScopeKey::Vehicle;
+    existing.coverage = LockCoverage::vehicle();
+    locks.test_insert_active(existing).await;
+
+    let (acquisition, pending, _) = locks
+        .evaluate_acquisition(
+            LockScope::Vehicle,
+            LockCoverage::vehicle(),
+            &preemption_request(),
+            &TestClaims {
+                subject: "priority-client".to_owned(),
+                attributes: serde_json::Map::new(),
+            },
+        )
+        .await
+        .expect("Valid renewal metadata should be accepted");
+
+    assert!(pending.is_none());
+    acquisition.finish().await;
+    assert_eq!(
+        policy
+            .requests
+            .lock()
+            .expect("Metadata verification mutex poisoned")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn metadata_verification_rejection_preserves_lock_state() {
+    let policy = Arc::new(MetadataVerificationPolicy {
+        result: Err(LockPriorityError::InvalidContext(
+            "Invalid vendor metadata".to_owned(),
+        )),
+        requests: StdMutex::new(Vec::new()),
+    });
+    let locks = locks_with_policy(policy);
+    insert_policy_test_lock(&locks, Arc::new(AtomicUsize::new(0))).await;
+    let revision = locks.store.lock().await.state.revision();
+
+    let result = locks
+        .evaluate_acquisition(
+            LockScope::Vehicle,
+            LockCoverage::vehicle(),
+            &preemption_request(),
+            &TestClaims {
+                subject: "priority-client".to_owned(),
+                attributes: serde_json::Map::new(),
+            },
+        )
+        .await;
+
+    let Err(error) = result else {
+        panic!("Invalid metadata should be rejected");
+    };
+    assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(locks.store.lock().await.state.revision(), revision);
+    assert_eq!(locks.active_snapshots().await.len(), 1);
+}
+
+#[tokio::test]
+async fn metadata_verification_timeout_is_service_unavailable() {
+    let locks = Locks::new_with_config_and_policy(
+        LockConfig {
+            priority_policy_timeout_ms: 1,
+            ..LockConfig::default()
+        },
+        Arc::new(BlockingMetadataPolicy),
+    );
+
+    let result = locks
+        .evaluate_acquisition(
+            LockScope::Vehicle,
+            LockCoverage::vehicle(),
+            &preemption_request(),
+            &TestClaims {
+                subject: "priority-client".to_owned(),
+                attributes: serde_json::Map::new(),
+            },
+        )
+        .await;
+
+    assert!(matches!(result, Err(ApiError::ServiceUnavailable { .. })));
+    assert!(locks.active_snapshots().await.is_empty());
+}
+
+#[tokio::test]
+async fn metadata_verification_panic_is_internal_error() {
+    let locks = Locks::new_with_policy(Arc::new(PanickingMetadataPolicy));
+
+    let result = locks
+        .evaluate_acquisition(
+            LockScope::Vehicle,
+            LockCoverage::vehicle(),
+            &preemption_request(),
+            &TestClaims {
+                subject: "priority-client".to_owned(),
+                attributes: serde_json::Map::new(),
+            },
+        )
+        .await;
+
+    let Err(error) = result else {
+        panic!("Metadata verification panic should fail acquisition");
+    };
+    assert_eq!(
+        error.into_response().status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert!(locks.active_snapshots().await.is_empty());
 }
 
 #[tokio::test]
@@ -260,7 +425,7 @@ async fn vehicle_policy_receives_all_open_locks_as_candidates() {
 }
 
 #[tokio::test]
-async fn same_owner_post_renew_never_invokes_priority_policy() {
+async fn same_owner_post_renew_never_invokes_priority_evaluation() {
     let policy = Arc::new(TestPolicy {
         decision: Some(LockPriorityDecision::Allow),
         evaluations: StdMutex::new(Vec::new()),

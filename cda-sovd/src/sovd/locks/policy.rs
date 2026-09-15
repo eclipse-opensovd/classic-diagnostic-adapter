@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -115,6 +115,8 @@ impl Locks {
                 .resolve_exclusivity(validated.requested_exclusive),
             metadata: validated.metadata,
         };
+        self.verify_policy_metadata(&policy, &policy_request)
+            .await?;
         if !is_vehicle_scope {
             let reservation = self.reserve_transition().await;
             return Ok((
@@ -244,6 +246,32 @@ impl Locks {
             let (guard, pending) = result?;
             return Ok((guard, pending, policy_request));
         }
+    }
+
+    async fn verify_policy_metadata(
+        &self,
+        policy: &Arc<dyn LockPriorityPolicy>,
+        request: &LockRequest,
+    ) -> Result<(), ApiError> {
+        let timeout = std::time::Duration::from_millis(self.config.priority_policy_timeout_ms);
+        tokio::time::timeout(
+            timeout,
+            std::panic::AssertUnwindSafe(policy.verify_metadata(request)).catch_unwind(),
+        )
+        .await
+        .map_err(|_| ApiError::ServiceUnavailable {
+            message: "Lock priority metadata verification timed out".to_owned(),
+            retry_after: None,
+            error_code: sovd_interfaces::error::ErrorCode::SovdServerFailure,
+            vendor_code: None,
+        })?
+        .map_err(|_| {
+            tracing::error!("Lock priority metadata verification panicked");
+            ApiError::InternalServerError(Some(
+                "Lock priority metadata verification panicked".to_owned(),
+            ))
+        })?
+        .map_err(map_policy_error)
     }
 
     async fn apply_priority_decision(
