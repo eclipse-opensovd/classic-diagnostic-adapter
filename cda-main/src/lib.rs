@@ -66,9 +66,13 @@ const MAIN_HEALTH_COMPONENT_KEY: &str = "main";
 pub enum Command {
     /// Generate a reference TOML configuration file with all fields commented out
     GenerateConfig {
-        /// Output file path (defaults to opensovd-cda.toml). Use "-" for stdout.
+        /// Output file path (defaults to opensovd-cda.toml, or
+        /// opensovd-cda-can.toml with --can). Use "-" for stdout.
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Generate the CAN worked-example config instead of the main reference config.
+        #[arg(long)]
+        can: bool,
     },
 }
 
@@ -246,9 +250,9 @@ where
     UPB: UpdatePluginBuilder<SP>,
     CPB: CommunicationPluginBuilder,
 {
-    if let Some(Command::GenerateConfig { output }) = args.command.as_ref() {
+    if let Some(Command::GenerateConfig { output, can }) = args.command.as_ref() {
         // Exiting after generating config is on purpose.
-        return generate_config_cmd(output.as_ref());
+        return generate_config_cmd(output.as_ref(), *can);
     }
 
     let config_file = match &args.config {
