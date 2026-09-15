@@ -884,14 +884,14 @@ mod tests {
     }
 
     struct RecordingControl {
-        enables: AtomicUsize,
-        disables: AtomicUsize,
+        enable_count: AtomicUsize,
+        disable_count: AtomicUsize,
         fail_enable: AtomicBool,
     }
     #[async_trait]
     impl TransportControl for RecordingControl {
         async fn enable(&self) -> Result<(), CommControlError> {
-            self.enables.fetch_add(1, Ordering::Relaxed);
+            self.enable_count.fetch_add(1, Ordering::Relaxed);
             if self.fail_enable.load(Ordering::Relaxed) {
                 Err(CommControlError::InitFailed("failed".to_owned()))
             } else {
@@ -899,7 +899,7 @@ mod tests {
             }
         }
         async fn disable(&self) -> Result<(), CommControlError> {
-            self.disables.fetch_add(1, Ordering::Relaxed);
+            self.disable_count.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
         async fn state(&self) -> TransportState {
@@ -908,8 +908,8 @@ mod tests {
     }
     fn handle() -> (CommunicationHandle, Arc<RecordingControl>) {
         let control = Arc::new(RecordingControl {
-            enables: AtomicUsize::new(0),
-            disables: AtomicUsize::new(0),
+            enable_count: AtomicUsize::new(0),
+            disable_count: AtomicUsize::new(0),
             fail_enable: AtomicBool::new(false),
         });
         (
@@ -923,14 +923,14 @@ mod tests {
         entered: Notify,
         proceed: Notify,
         completed: Notify,
-        enables: AtomicUsize,
-        disables: AtomicUsize,
+        enable_count: AtomicUsize,
+        disable_count: AtomicUsize,
     }
 
     #[async_trait]
     impl TransportControl for BlockingEnableControl {
         async fn enable(&self) -> Result<(), CommControlError> {
-            self.enables.fetch_add(1, Ordering::Relaxed);
+            self.enable_count.fetch_add(1, Ordering::Relaxed);
             self.entered.notify_one();
             self.proceed.notified().await;
             self.completed.notify_one();
@@ -938,7 +938,7 @@ mod tests {
         }
 
         async fn disable(&self) -> Result<(), CommControlError> {
-            self.disables.fetch_add(1, Ordering::Relaxed);
+            self.disable_count.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
 
@@ -989,7 +989,7 @@ mod tests {
             "shutdown must have the last word, never leaving state Enabled after the transport \
              was torn down"
         );
-        assert_eq!(control.disables.load(Ordering::Relaxed), 1);
+        assert_eq!(control.disable_count.load(Ordering::Relaxed), 1);
         assert!(handle.acquire().is_err());
     }
 
@@ -1000,14 +1000,14 @@ mod tests {
         disable_completed: Notify,
         resume_entered: Notify,
         resume_proceed: Notify,
-        enables: AtomicUsize,
-        disables: AtomicUsize,
+        enable_count: AtomicUsize,
+        disable_count: AtomicUsize,
     }
 
     #[async_trait]
     impl TransportControl for BlockingDisableControl {
         async fn enable(&self) -> Result<(), CommControlError> {
-            if self.enables.fetch_add(1, Ordering::Relaxed) == 1 {
+            if self.enable_count.fetch_add(1, Ordering::Relaxed) == 1 {
                 self.resume_entered.notify_one();
                 self.resume_proceed.notified().await;
             }
@@ -1015,7 +1015,7 @@ mod tests {
         }
 
         async fn disable(&self) -> Result<(), CommControlError> {
-            self.disables.fetch_add(1, Ordering::Relaxed);
+            self.disable_count.fetch_add(1, Ordering::Relaxed);
             self.entered.notify_one();
             self.proceed.notified().await;
             self.disable_completed.notify_one();
@@ -1060,7 +1060,7 @@ mod tests {
 
         assert_eq!(release.await.unwrap(), Ok(CommunicationState::Enabled));
         assert_eq!(activation.await.unwrap(), Ok(CommunicationState::Enabled));
-        assert_eq!(control.enables.load(Ordering::Relaxed), 2);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 2);
     }
 
     /// A lease is granted from `Disabled` too, and releasing it returns to
@@ -1078,7 +1078,7 @@ mod tests {
             .expect("a lease must be granted from a deferred runtime");
         assert_eq!(handle.state(), CommunicationState::DisabledExclusive);
         assert_eq!(
-            control.disables.load(Ordering::Relaxed),
+            control.disable_count.load(Ordering::Relaxed),
             0,
             "nothing was up, so nothing may be taken down"
         );
@@ -1098,7 +1098,7 @@ mod tests {
         assert_eq!(lease.release().await, Ok(CommunicationState::Disabled));
         assert_eq!(handle.state(), CommunicationState::Disabled);
         assert_eq!(
-            control.enables.load(Ordering::Relaxed),
+            control.enable_count.load(Ordering::Relaxed),
             0,
             "releasing must never enable a runtime the releaser did not find enabled"
         );
@@ -1141,8 +1141,8 @@ mod tests {
         let lease = handle.disable(DisableReason::RuntimeUpdate).await.unwrap();
         drop(lease);
         assert_eq!(handle.state(), CommunicationState::Disabled);
-        assert_eq!(control.enables.load(Ordering::Relaxed), 0);
-        assert_eq!(control.disables.load(Ordering::Relaxed), 0);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 0);
+        assert_eq!(control.disable_count.load(Ordering::Relaxed), 0);
     }
 
     /// `Error(_)` has an unknown transport state, so no lease is granted from
@@ -1199,7 +1199,7 @@ mod tests {
 
         // Asserted without polling. Deferring must not need a later await.
         assert_eq!(handle.state(), CommunicationState::Disabled);
-        assert_eq!(control.enables.load(Ordering::Relaxed), 1);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
     }
 
     /// A release that reaches the worker after teardown has begun must refuse
@@ -1216,7 +1216,7 @@ mod tests {
         );
         let lease = handle.disable(DisableReason::RuntimeUpdate).await.unwrap();
         assert_eq!(handle.state(), CommunicationState::DisabledExclusive);
-        let enables_before = control.enables.load(Ordering::Relaxed);
+        let enables_before = control.enable_count.load(Ordering::Relaxed);
 
         handle.state.lock().shutting_down = true;
 
@@ -1230,7 +1230,7 @@ mod tests {
             "a release racing teardown must report shutdown, not a stale lease"
         );
         assert_eq!(
-            control.enables.load(Ordering::Relaxed),
+            control.enable_count.load(Ordering::Relaxed),
             enables_before,
             "the transport must not be re-enabled once teardown has begun"
         );
@@ -1388,7 +1388,7 @@ mod tests {
             assert_eq!(joiner.await.unwrap(), Ok(CommunicationState::Enabled));
         }
 
-        assert_eq!(control.enables.load(Ordering::Relaxed), 1);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
     }
 
     /// `request_activate` called while communication is `Error` must claim and
@@ -1415,7 +1415,7 @@ mod tests {
         })
         .await
         .expect("timed out waiting for Error state");
-        assert_eq!(control.enables.load(Ordering::Relaxed), 2);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 2);
 
         control.fail_enable.store(false, Ordering::Relaxed);
         assert_eq!(
@@ -1423,7 +1423,7 @@ mod tests {
             CommunicationState::Enabling(CommunicationOperation::EnableAndDetect)
         );
         poll_until_state(&handle, CommunicationState::Enabled).await;
-        assert_eq!(control.enables.load(Ordering::Relaxed), 3);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 3);
     }
 
     /// `disable` rejects active guards, grants exactly one exclusive lease and
@@ -1449,7 +1449,7 @@ mod tests {
             .await
             .expect("disable must succeed once no guard is active");
         assert_eq!(handle.state(), CommunicationState::DisabledExclusive);
-        assert_eq!(control.disables.load(Ordering::Relaxed), 1);
+        assert_eq!(control.disable_count.load(Ordering::Relaxed), 1);
 
         assert_eq!(
             handle.enable_and_detect().await,
@@ -1469,7 +1469,7 @@ mod tests {
 
         assert_eq!(lease.release().await, Ok(CommunicationState::Enabled));
         assert_eq!(handle.state(), CommunicationState::Enabled);
-        assert_eq!(control.enables.load(Ordering::Relaxed), 2);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 2);
     }
 
     #[derive(Default)]
@@ -1631,7 +1631,7 @@ mod tests {
 
         assert_eq!(handle.enable().await, Ok(CommunicationState::Enabled));
 
-        assert_eq!(control.enables.load(Ordering::Relaxed), 1);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
         assert_eq!(
             hook.init_calls.load(Ordering::Relaxed),
             1,
@@ -1659,7 +1659,7 @@ mod tests {
             handle.enable_and_detect().await,
             Ok(CommunicationState::Enabled)
         );
-        assert_eq!(control.enables.load(Ordering::Relaxed), 1);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
         assert_eq!(detector.calls.load(Ordering::Relaxed), 1);
         assert_eq!(handle.variant_detection(), VariantDetectionMode::Always);
     }
@@ -1699,11 +1699,11 @@ mod tests {
              between, and the trait promises the calls come in pairs"
         );
         assert_eq!(
-            control.enables.load(Ordering::Relaxed),
+            control.enable_count.load(Ordering::Relaxed),
             1,
             "re-detection must never call TransportControl::enable() again"
         );
-        assert_eq!(control.disables.load(Ordering::Relaxed), 0);
+        assert_eq!(control.disable_count.load(Ordering::Relaxed), 0);
     }
 
     /// Detection is refused while an activity guard is held. That guard is the
@@ -1728,7 +1728,7 @@ mod tests {
 
         // Once released, detection proceeds.
         assert_eq!(handle.redetect().await, Ok(CommunicationState::Enabled));
-        assert_eq!(control.enables.load(Ordering::Relaxed), 1);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
     }
 
     /// `redetect` is the detection stage alone, so from `Disabled` and `Error`
@@ -1745,7 +1745,7 @@ mod tests {
             })
         );
         assert_eq!(
-            control.enables.load(Ordering::Relaxed),
+            control.enable_count.load(Ordering::Relaxed),
             0,
             "a refused detection must not touch the transport"
         );
@@ -1772,8 +1772,8 @@ mod tests {
             entered: Notify::new(),
             proceed: Notify::new(),
             completed: Notify::new(),
-            enables: AtomicUsize::new(0),
-            disables: AtomicUsize::new(0),
+            enable_count: AtomicUsize::new(0),
+            disable_count: AtomicUsize::new(0),
         });
         let handle = communication_handle_new(Arc::clone(&control) as Arc<dyn TransportControl>);
         // Reach Enabled first, so the blocking below comes from the slow
@@ -1822,7 +1822,7 @@ mod tests {
         for joiner in joiners {
             assert_eq!(joiner.await.unwrap(), Ok(CommunicationState::Enabled));
         }
-        assert_eq!(control.enables.load(Ordering::Relaxed), 1);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
     }
 
     /// A detector failure during a `Detect` leaves the transport enabled. The
@@ -1860,11 +1860,11 @@ mod tests {
              say so instead of advertising a sweep that is never coming"
         );
         assert_eq!(
-            control.disables.load(Ordering::Relaxed),
+            control.disable_count.load(Ordering::Relaxed),
             0,
             "a failed re-detection must not disable the transport it did not enable itself"
         );
-        assert_eq!(control.enables.load(Ordering::Relaxed), 1);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
 
         assert!(handle.acquire().is_ok());
         assert!(handle.acquire().is_ok());
@@ -1920,7 +1920,7 @@ mod tests {
         );
         assert_eq!(hook.deinit_calls.load(Ordering::Relaxed), 0);
         assert_eq!(
-            control.enables.load(Ordering::Relaxed),
+            control.enable_count.load(Ordering::Relaxed),
             1,
             "nothing was claimed, so no stage ran at all"
         );
@@ -1963,7 +1963,7 @@ mod tests {
             "detection is a use of communication, so a lease must wait for it"
         );
         assert_eq!(
-            control.disables.load(Ordering::Relaxed),
+            control.disable_count.load(Ordering::Relaxed),
             0,
             "the transport must not be taken down underneath a running sweep"
         );
@@ -2014,7 +2014,7 @@ mod tests {
             1,
             "every successfully initialized hook must be unwound when detection fails"
         );
-        assert_eq!(control.disables.load(Ordering::Relaxed), 1);
+        assert_eq!(control.disable_count.load(Ordering::Relaxed), 1);
     }
 
     /// Releasing a disable lease repeats the shape of the enable it resumes, so
@@ -2047,7 +2047,7 @@ mod tests {
             2,
             "hooks follow the transport, so a resume re-initializes them"
         );
-        assert_eq!(control.enables.load(Ordering::Relaxed), 2);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 2);
         assert_eq!(handle.variant_detection(), VariantDetectionMode::Never);
     }
 
@@ -2118,8 +2118,8 @@ mod tests {
     #[tokio::test]
     async fn variant_detection_never_config_skips_detector_not_hooks() {
         let control = Arc::new(RecordingControl {
-            enables: AtomicUsize::new(0),
-            disables: AtomicUsize::new(0),
+            enable_count: AtomicUsize::new(0),
+            disable_count: AtomicUsize::new(0),
             fail_enable: AtomicBool::new(false),
         });
         let handle = communication_handle_with_detection_mode(
@@ -2141,7 +2141,7 @@ mod tests {
             handle.enable_and_detect().await,
             Ok(CommunicationState::Enabled)
         );
-        assert_eq!(control.enables.load(Ordering::Relaxed), 1);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
         assert_eq!(
             hook.init_calls.load(Ordering::Relaxed),
             1,
