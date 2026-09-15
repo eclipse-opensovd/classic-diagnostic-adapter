@@ -1592,11 +1592,15 @@ pub(crate) mod service {
                     parse_json_response_params::<T::Response>(response, "RequestResults")
                 };
 
+                // Copied before the lock is taken: the stored execution and the response body
+                // both need the parameters, so the deep copy happens outside the critical
+                // section rather than under the write lock.
+                let stored_parameters = parameters.clone();
                 if let Some(stored_mut) = lock_write(service_executions)
                     .get_mut(service)
                     .and_then(|m| m.get_mut(&exec_id))
                 {
-                    stored_mut.parameters.clone_from(&parameters);
+                    stored_mut.parameters = stored_parameters;
                     stored_mut.complete();
                 }
 

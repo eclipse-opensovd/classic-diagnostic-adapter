@@ -931,12 +931,16 @@ pub(crate) mod diag_service {
             } else {
                 ExecutionStatus::Running
             };
+            // Copied before the lock is taken: the stored execution and the response body both
+            // need the parameters, and deep-copying every ECU's map while holding the write lock
+            // would stall all other execution bookkeeping for the duration.
+            let stored_parameters = response_data.clone();
             {
                 let mut guard = lock_write(fg_executions);
                 if let Some(op_map) = guard.get_mut(operation)
                     && let Some(exec) = op_map.get_mut(&exec_id)
                 {
-                    exec.parameters.clone_from(&response_data);
+                    exec.parameters = stored_parameters;
                     if status == ExecutionStatus::Completed {
                         exec.complete();
                     }
