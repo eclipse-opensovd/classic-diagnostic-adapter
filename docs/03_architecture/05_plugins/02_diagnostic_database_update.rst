@@ -96,6 +96,9 @@ Diagnostic Database Update Plugin
     The runtime update plugin accepts MDD database files (``.mdd``). CDA configuration files cannot
     be updated through the runtime-files endpoints.
 
+    CDA can be started with MDD files provided in a directory. If any MDD files are uploaded via the Update plugin,
+    then the MDD files in the directory are ignored.
+
     **Limitations to bulk-data operations**
 
     For Security reasons, none of the endpoints should allow retrieval of the files by default - there may be an option
