@@ -460,6 +460,9 @@
 
 # Diagnostic database loading and naming settings.
 [database]
+# Directory to load diagnostic databases from, if none have
+# been loaded into storage before via the Update plugin.
+# dir = "."
 # If true, the application will exit if no database could be loaded.
 # exit_no_database_loaded = false
 # If true, when variant detection fails to find a matching variant,
@@ -481,8 +484,6 @@
 # attempting a lookup with this flag set against a multi-protocol database
 # returns `DiagServiceError::InvalidDatabase`.
 # ignore_protocol = false
-# Directory to load the databases from, if none have been loaded into storage before.
-# seed_dir = "."
 
 # Holds configuration for diagnostic service naming conventions.
 #
