@@ -27,7 +27,6 @@ workspace_rust_library(
     crate_name = "cda_health",
     crate_root = "src/lib.rs",
     proc_macro_crate_deps = ["async-trait"],
-    visibility = ["//cda-main:__pkg__"],
     deps = [
         "//cda-interfaces:cda_interfaces",
         "//cda-sovd:cda_sovd",

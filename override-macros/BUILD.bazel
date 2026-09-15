@@ -9,24 +9,16 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-load("//bazel:rust_crate.bzl", "workspace_rust_library")
+load("//bazel:rust_crate.bzl", "workspace_rust_proc_macro")
 
-workspace_rust_library(
-    name = "cda_comm_uds",
+workspace_rust_proc_macro(
+    name = "override_macros",
     srcs = glob(["src/**/*.rs"]),
     crate_deps = [
-        "futures",
-        "kameo",
-        "serde_json",
-        "strum",
-        "tokio",
-        "tokio-util",
-        "tracing",
+        "proc-macro2",
+        "quote",
+        "syn",
     ],
-    crate_name = "cda_comm_uds",
+    crate_name = "override_macros",
     crate_root = "src/lib.rs",
-    proc_macro_crate_deps = ["async-trait"],
-    deps = [
-        "//cda-interfaces:cda_interfaces",
-    ],
 )

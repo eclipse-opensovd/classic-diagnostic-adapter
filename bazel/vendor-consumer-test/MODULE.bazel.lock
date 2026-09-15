@@ -159,10 +159,10 @@
   },
   "selectedYankedVersions": {},
   "moduleExtensions": {
-    "//bazel:can_crate_extension.bzl%crate": {
+    "@@classic-diagnostic-adapter+//bazel:can_crate_extension.bzl%crate": {
       "general": {
         "bzlTransitiveDigest": "+UGlb8d+UUQxBSP1wyKHdc5o0woE2njfLEK9JhgnRkE=",
-        "usagesDigest": "iRjaqZPtnr1gtF+axoz9XXIRBp3bWCBsuh6cT/FP9qo=",
+        "usagesDigest": "/++8axtPVa977X/iNWY1P43NwDXq/0AYrLZ8cBgH8TQ=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
         "envVariables": {
@@ -619,11 +619,6 @@
         },
         "recordedRepoMappingEntries": [
           [
-            "",
-            "rules_rust",
-            "rules_rust+"
-          ],
-          [
             "bazel_features+",
             "bazel_features_globals",
             "bazel_features++version_extension+bazel_features_globals"
@@ -632,6 +627,11 @@
             "bazel_features+",
             "bazel_features_version",
             "bazel_features++version_extension+bazel_features_version"
+          ],
+          [
+            "classic-diagnostic-adapter+",
+            "rules_rust",
+            "rules_rust+"
           ],
           [
             "rules_cc+",
@@ -3593,31 +3593,10 @@
     "@@rules_rust+//crate_universe:extensions.bzl%crate": {
       "general": {
         "bzlTransitiveDigest": "3T1d8jSUHi00cmDzMdO2Lw20I3DAyzB3oWuRqL6PvzE=",
-        "usagesDigest": "HVjwoLAMkxIyzxvhZLYSYuPnGft3z5EaZQ2H+u3Gok4=",
+        "usagesDigest": "A8obqIf++MBr4jEyoapuHHYclipTwL+P1FoegLjltM8=",
         "recordedFileInputs": {
-          "@@//Cargo.lock": "1406d7aac2b013e0de73b8a4feacf2bcb5dd2a72425a8e3b560cb73d4da94414",
-          "@@//Cargo.toml": "c7c081918420351c6a92df1902b1ab8c718f94fec99812d512c3168974cc3d22",
-          "@@//cda-build/Cargo.toml": "e5934ef8da12f4f6ff52f361c3eab7d56cbe19c2a97fa0bcbed912558aa08939",
-          "@@//cda-comm-can/Cargo.toml": "a4d708adfca8e398d8dd8eeeb5f78b598e02f10a18572477f30f917d1b537718",
-          "@@//cda-comm-doip/Cargo.toml": "7235ffd9225b9ce6cf6ce1ea0d88cef1abe7d926409f62812fb4a971152cf4ae",
-          "@@//cda-comm-uds/Cargo.toml": "55cfbf2751901ea62c09a203540404233900496961fd3795a060f5e74170120e",
-          "@@//cda-core/Cargo.toml": "981a1226e5634cfdea121e81d601d55403c400ec7f91ee984ec9c61d4447fe03",
-          "@@//cda-database/Cargo.toml": "d2f6ce5f25d831ed64c283359b204966bbfabc33792fba2c7aa5631aa18a164f",
-          "@@//cda-extra/Cargo.toml": "b62d32eefd14f68f37b383f3c042393365dee23452a2f8990f7b343bdd8610de",
-          "@@//cda-health/Cargo.toml": "b453088788407bbf67cdede92d5efce45e10f7bcc6d306b79a6ea1afaf521f61",
-          "@@//cda-interfaces/Cargo.toml": "b8898f3a8e5c1948847877e831783875c42f915d7aede09bde3e410b5864ae63",
-          "@@//cda-main/Cargo.toml": "8d5ffd07896138ac59cc3b2298eb6d925b3eff50a62c7165d49f1a85485bfcfe",
-          "@@//cda-plugin-communication-management/Cargo.toml": "88526c5c6236e22c5d2823be455c27d98ad3f780c29f89b8dc81be56d879f712",
-          "@@//cda-plugin-runtime-update/Cargo.toml": "ba14a89461ab8a7125faaf94902d09c4708748d316ca10d8e710b5b74039c2ab",
-          "@@//cda-plugin-security/Cargo.toml": "e9271c0dd96a47d769dc5f67c0efdd1033afd2ede113050fcb8e951c4d20188b",
-          "@@//cda-sovd-interfaces/Cargo.toml": "243b720264df3ad7fde040d233a536100c744075d3c2fc8140a3f8a600bf0ab0",
-          "@@//cda-sovd/Cargo.toml": "134aa0e1f9794282e609f95d68d94bc8ee98137b6b2ed7e7b8156e32ce957b59",
-          "@@//cda-storage/Cargo.toml": "7d91d69894b2870b0fa5ee771f9bd971ba96b76cc00f07ac10d8c88fef585981",
-          "@@//cda-tracing/Cargo.toml": "e5aac747e1255d2e8605f459ff146d56bb30cdc1f0a63dca7f2623756884b41b",
-          "@@//cda-transport-router/Cargo.toml": "0373be9009bb489fe589ca453a0cf1cbf435d47e19a63543e69049679c622f84",
-          "@@//integration-tests/Cargo.toml": "c70f08063e4ed3c895681afde0aed97e6f5613b866d7de893188ca2609d51416",
-          "@@//opensovd-axum-extra/Cargo.toml": "d5bc04ae0d69fdc596115adbe04788a273d055fc3d0e86545d2e3f26349553f5",
-          "@@//override-macros/Cargo.toml": "010f1e4626fdb249d64778b7d996d64ead16bf965587703a0c1210be0a4cd1ab"
+          "@@classic-diagnostic-adapter+//Cargo.lock": "1406d7aac2b013e0de73b8a4feacf2bcb5dd2a72425a8e3b560cb73d4da94414",
+          "@@classic-diagnostic-adapter+//Cargo.toml": "c7c081918420351c6a92df1902b1ab8c718f94fec99812d512c3168974cc3d22"
         },
         "recordedDirentsInputs": {},
         "envVariables": {

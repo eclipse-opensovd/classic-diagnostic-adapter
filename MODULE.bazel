@@ -15,11 +15,16 @@ module(
     bazel_compatibility = [">=8.6.0"],
 )
 
-bazel_dep(name = "rules_rust", version = "0.68.1-score")
+bazel_dep(name = "rules_rust", version = "0.68.1")
+single_version_override(
+    module_name = "rules_rust",
+    version = "0.68.1",
+)
+
 bazel_dep(name = "mbedtls-rs", version = "0.1.0")
 git_override(
     module_name = "mbedtls-rs",
-    commit = "524e3b96ccad358b73e4e3ad706d15b8778845b9",
+    commit = "00247f4486fd4c627db714657af1a9c067720786",
     remote = "https://github.com/eclipse-opensovd/mbedtls-rs.git",
 )
 
@@ -42,7 +47,6 @@ register_toolchains(
 cda_crate_universe = use_extension(
     "@rules_rust//crate_universe:extensions.bzl",
     "crate",
-    isolate = True,
 )
 cda_crate_universe.from_cargo(
     name = "cda_crates",
@@ -50,16 +54,19 @@ cda_crate_universe.from_cargo(
     manifests = ["//:Cargo.toml"],
     skip_cargo_lockfile_overwrite = True,
 )
-use_repo(cda_crate_universe, "cda_crates")
+use_repo(
+    cda_crate_universe,
+    cda_crates = "cda_crates",
+    cda_ed25519_dalek = "cda_crates__ed25519-dalek-2.2.0",
+)
 
 can_crate_universe = use_extension(
-    "@rules_rust//crate_universe:extensions.bzl",
+    "//bazel:can_crate_extension.bzl",
     "crate",
-    isolate = True,
 )
 can_crate_universe.spec(
-    package = "tokio-socketcan-isotp",
     git = "https://github.com/MarkSchmitt/tokio-socketcan-isotp.git",
+    package = "tokio-socketcan-isotp",
     tag = "v0.6.0",
 )
 can_crate_universe.from_specs(

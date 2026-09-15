@@ -12,18 +12,16 @@
 load("//bazel:rust_crate.bzl", "workspace_rust_library")
 
 workspace_rust_library(
-    name = "cda_comm_uds",
+    name = "cda_plugin_communication_management",
     srcs = glob(["src/**/*.rs"]),
     crate_deps = [
-        "futures",
-        "kameo",
-        "serde_json",
-        "strum",
+        "http",
+        "thiserror",
         "tokio",
-        "tokio-util",
         "tracing",
+        "uuid",
     ],
-    crate_name = "cda_comm_uds",
+    crate_name = "cda_plugin_communication_management",
     crate_root = "src/lib.rs",
     proc_macro_crate_deps = ["async-trait"],
     deps = [

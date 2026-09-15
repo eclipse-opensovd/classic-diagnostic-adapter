@@ -11,6 +11,7 @@
 
 exports_files([
     "build_metadata.env",
+    "can_crate_extension.bzl",
     "check_mbedtls_revision.py",
     "rust_crate.bzl",
 ])

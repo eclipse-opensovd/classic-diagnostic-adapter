@@ -29,9 +29,9 @@ def cargo_revision() -> str:
     return dependency["rev"]
 
 
-def bazel_revision() -> str:
-    """Read the mbedtls-rs git override revision from MODULE.bazel."""
-    module = (ROOT / "MODULE.bazel").read_text(encoding="utf-8")
+def bazel_revision(module_path: Path) -> str:
+    """Read the mbedtls-rs git override revision from a Bazel module."""
+    module = module_path.read_text(encoding="utf-8")
     for override in re.findall(r"git_override\((.*?)\n\)", module, re.DOTALL):
         if re.search(r'module_name\s*=\s*"mbedtls-rs"', override):
             commit = re.search(r'commit\s*=\s*"([^"]+)"', override)
@@ -39,13 +39,14 @@ def bazel_revision() -> str:
                 return commit.group(1)
             break
 
-    raise ValueError("MODULE.bazel has no commit for the mbedtls-rs git_override")
+    raise ValueError(f"{module_path} has no commit for the mbedtls-rs git_override")
 
 
 def main() -> None:
     """Fail when Bazel does not use Cargo's mbedtls-rs revision."""
     cargo_rev = cargo_revision()
-    bazel_rev = bazel_revision()
+    bazel_rev = bazel_revision(ROOT / "MODULE.bazel")
+    vendor_test_rev = bazel_revision(ROOT / "bazel/vendor-consumer-test/MODULE.bazel")
 
     if not FULL_GIT_REVISION.fullmatch(cargo_rev):
         raise ValueError(f"Cargo.toml mbedtls-rs rev is not a full Git revision: {cargo_rev}")
@@ -55,6 +56,11 @@ def main() -> None:
         raise ValueError(
             "MODULE.bazel mbedtls-rs commit does not match Cargo.toml rev: "
             f"{bazel_rev} != {cargo_rev}"
+        )
+    if vendor_test_rev != cargo_rev:
+        raise ValueError(
+            "Vendor consumer mbedtls-rs commit does not match Cargo.toml rev: "
+            f"{vendor_test_rev} != {cargo_rev}"
         )
 
 

@@ -46,6 +46,12 @@ jobs:
         run: bazel build //:opensovd-cda
       - name: Build reference binary with CAN
         run: bazel build --config=can //:opensovd-cda
+      - name: Build external vendor application
+        working-directory: bazel/vendor-consumer-test
+        run: bazel build //:fancy-cda
+      - name: Build external vendor application with CAN
+        working-directory: bazel/vendor-consumer-test
+        run: bazel build --config=can //:fancy-cda
       - name: Query targets
         run: bazel query //...
       - name: Verify mbedTLS graph excludes OpenSSL

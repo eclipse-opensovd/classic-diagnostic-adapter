@@ -15,6 +15,7 @@ workspace_rust_library(
     name = "cda_core",
     srcs = glob(["src/**/*.rs"]),
     crate_deps = [
+        "linkme",
         "num-traits",
         "parking_lot",
         "schemars",
@@ -26,7 +27,7 @@ workspace_rust_library(
     crate_name = "cda_core",
     crate_root = "src/lib.rs",
     proc_macro_crate_deps = ["async-trait"],
-    visibility = ["//cda-main:__pkg__"],
+    proc_macro_deps = ["//override-macros:override_macros"],
     deps = [
         "//cda-database:cda_database",
         "//cda-interfaces:cda_interfaces",

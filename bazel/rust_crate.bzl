@@ -13,13 +13,14 @@
 
 load("@cda_crates//:defs.bzl", "aliases", _crate_deps = "crate_deps")
 load("@mbedtls-rs//:defs.bzl", _mbedtls_rs_library = "mbedtls_rs_library")
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro")
 
-def workspace_mbedtls_rs_library(name, visibility = None):
+def workspace_mbedtls_rs_library(name, visibility = ["//:workspace_crates"]):
     """Instantiates mbedtls-rs against CDA's Cargo dependency universe."""
     _mbedtls_rs_library(
         name = name,
         aliases = aliases(),
+        ed25519_dalek = "@cda_ed25519_dalek//:ed25519_dalek",
         tokio = "@cda_crates//:tokio",
         tracing = "@cda_crates//:tracing",
         visibility = visibility,
@@ -28,27 +29,47 @@ def workspace_mbedtls_rs_library(name, visibility = None):
 def workspace_rust_library(
         crate_deps = [],
         proc_macro_crate_deps = [],
+        proc_macro_deps = [],
         deps = [],
+        visibility = ["//:workspace_crates"],
         **kwargs):
     """Defines a Rust 2024 library with explicitly selected Cargo dependencies."""
     rust_library(
         aliases = aliases(),
         edition = "2024",
         deps = deps + _crate_deps(crate_deps),
-        proc_macro_deps = _crate_deps(proc_macro_crate_deps),
+        proc_macro_deps = proc_macro_deps + _crate_deps(proc_macro_crate_deps),
+        visibility = visibility,
         **kwargs
     )
 
 def workspace_rust_binary(
         crate_deps = [],
         proc_macro_crate_deps = [],
+        proc_macro_deps = [],
         deps = [],
+        visibility = ["//:workspace_crates"],
         **kwargs):
     """Defines a Rust 2024 binary with explicitly selected Cargo dependencies."""
     rust_binary(
         aliases = aliases(),
         edition = "2024",
         deps = deps + _crate_deps(crate_deps),
-        proc_macro_deps = _crate_deps(proc_macro_crate_deps),
+        proc_macro_deps = proc_macro_deps + _crate_deps(proc_macro_crate_deps),
+        visibility = visibility,
+        **kwargs
+    )
+
+def workspace_rust_proc_macro(
+        crate_deps = [],
+        deps = [],
+        visibility = ["//:workspace_crates"],
+        **kwargs):
+    """Defines a Rust 2024 proc macro with selected Cargo dependencies."""
+    rust_proc_macro(
+        aliases = aliases(),
+        edition = "2024",
+        deps = deps + _crate_deps(crate_deps),
+        visibility = visibility,
         **kwargs
     )

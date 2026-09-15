@@ -39,16 +39,11 @@ workspace_rust_library(
     crate_name = "cda_sovd",
     crate_root = "src/lib.rs",
     proc_macro_crate_deps = ["async-trait"],
-    visibility = [
-        "//cda-health:__pkg__",
-        "//cda-main:__pkg__",
-    ],
     deps = [
+        "//cda-comm-doip:cda_comm_doip",
         "//cda-interfaces:cda_interfaces",
-        "//cda-plugin-runtime-update:cda_plugin_runtime_update",
         "//cda-plugin-security:cda_plugin_security",
         "//cda-sovd-interfaces:sovd_interfaces",
-        "//cda-tracing:cda_tracing",
         "//opensovd-axum-extra:opensovd_axum_extra",
     ],
 )

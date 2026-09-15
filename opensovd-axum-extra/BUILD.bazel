@@ -27,5 +27,4 @@ workspace_rust_library(
         "--cfg=feature=\"uri-authority\"",
         "--cfg=feature=\"x-forwarded-host\"",
     ],
-    visibility = ["//cda-sovd:__pkg__"],
 )

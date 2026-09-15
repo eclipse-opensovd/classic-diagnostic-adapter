@@ -32,8 +32,8 @@ workspace_rust_library(
     ],
     crate_name = "cda_comm_doip",
     crate_root = "src/lib.rs",
+    proc_macro_crate_deps = ["async-trait"],
     rustc_flags = ["--cfg=feature=\"mbedtls\""],
-    visibility = ["//cda-main:__pkg__"],
     deps = [
         ":mbedtls_rs",
         "//cda-interfaces:cda_interfaces",

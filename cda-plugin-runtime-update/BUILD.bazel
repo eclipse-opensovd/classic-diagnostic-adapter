@@ -20,7 +20,6 @@ workspace_rust_library(
         "serde",
         "serde_json",
         "sha2",
-        "thiserror",
         "tokio",
         "tracing",
         "uuid",
@@ -28,14 +27,11 @@ workspace_rust_library(
     crate_name = "cda_plugin_runtime_update",
     crate_root = "src/lib.rs",
     proc_macro_crate_deps = ["async-trait"],
-    visibility = [
-        "//cda-comm-uds:__pkg__",
-        "//cda-main:__pkg__",
-        "//cda-sovd:__pkg__",
-    ],
     deps = [
         "//cda-database:cda_database",
         "//cda-interfaces:cda_interfaces",
-        "//cda-sovd-interfaces:sovd_interfaces",
+        "//cda-plugin-communication-management:cda_plugin_communication_management",
+        "//cda-plugin-security:cda_plugin_security",
+        "//cda-sovd:cda_sovd",
     ],
 )

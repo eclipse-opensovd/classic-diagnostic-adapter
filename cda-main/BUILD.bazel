@@ -38,8 +38,6 @@ workspace_rust_library(
         "tracing",
         "tracing-subscriber",
     ],
-    crate_name = "opensovd_cda_lib",
-    crate_root = "src/lib.rs",
     crate_features = [
         "config-optional",
         "health",
@@ -48,6 +46,8 @@ workspace_rust_library(
         "//:can_enabled": ["can"],
         "//conditions:default": [],
     }),
+    crate_name = "opensovd_cda_lib",
+    crate_root = "src/lib.rs",
     proc_macro_crate_deps = ["async-trait"],
     rustc_env = {
         "CARGO_MANIFEST_DIR": "cda-main",
@@ -57,7 +57,6 @@ workspace_rust_library(
         "//bazel:build_metadata.env",
     ],
     stamp = -1,
-    visibility = ["//visibility:public"],
     deps = [
         "//cda-comm-can:cda_comm_can",
         "//cda-comm-doip:cda_comm_doip",
@@ -66,11 +65,13 @@ workspace_rust_library(
         "//cda-database:cda_database",
         "//cda-health:cda_health",
         "//cda-interfaces:cda_interfaces",
+        "//cda-plugin-communication-management:cda_plugin_communication_management",
         "//cda-plugin-runtime-update:cda_plugin_runtime_update",
         "//cda-plugin-security:cda_plugin_security",
         "//cda-sovd:cda_sovd",
         "//cda-storage:cda_storage",
         "//cda-tracing:cda_tracing",
+        "//cda-transport-router:cda_transport_router",
     ],
 )
 
@@ -80,7 +81,6 @@ workspace_rust_binary(
     crate_deps = ["tokio"],
     crate_name = "opensovd_cda",
     crate_root = "src/main.rs",
-    visibility = ["//visibility:public"],
     deps = [
         ":opensovd_cda_lib",
     ],

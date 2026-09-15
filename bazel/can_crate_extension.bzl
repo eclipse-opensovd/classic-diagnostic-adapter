@@ -9,10 +9,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-common --registry=https://bcr.bazel.build
+"""Separate crate-universe extension identity for optional CAN dependencies."""
 
-build --incompatible_strict_action_env
-build --stamp
-build --workspace_status_command=./bazel/workspace_status.py
+load("@rules_rust//crate_universe:extensions.bzl", _crate = "crate")
 
-build:can --define=can=true
+crate = _crate

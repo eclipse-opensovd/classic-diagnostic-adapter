@@ -12,7 +12,5 @@
 common --registry=https://bcr.bazel.build
 
 build --incompatible_strict_action_env
-build --stamp
-build --workspace_status_command=./bazel/workspace_status.py
 
 build:can --define=can=true

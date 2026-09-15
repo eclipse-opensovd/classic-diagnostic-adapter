@@ -41,8 +41,4 @@ workspace_rust_library(
     crate_name = "cda_tracing",
     crate_root = "src/lib.rs",
     rustc_env_files = [":cargo_env"],
-    visibility = [
-        "//cda-main:__pkg__",
-        "//cda-sovd:__pkg__",
-    ],
 )

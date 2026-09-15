@@ -15,6 +15,7 @@ workspace_rust_library(
     name = "cda_comm_can",
     srcs = glob(["src/**/*.rs"]),
     crate_deps = [
+        "futures",
         "hex",
         "schemars",
         "serde",
@@ -23,13 +24,13 @@ workspace_rust_library(
         "tokio-util",
         "tracing",
     ],
-    crate_name = "cda_comm_can",
-    crate_root = "src/lib.rs",
     crate_features = select({
         "//:can_enabled": ["can"],
         "//conditions:default": [],
     }),
-    visibility = ["//cda-main:__pkg__"],
+    crate_name = "cda_comm_can",
+    crate_root = "src/lib.rs",
+    proc_macro_crate_deps = ["async-trait"],
     deps = [
         "//cda-interfaces:cda_interfaces",
     ] + select({

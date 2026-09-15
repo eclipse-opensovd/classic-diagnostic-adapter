@@ -23,11 +23,6 @@ workspace_rust_library(
     ],
     crate_name = "sovd_interfaces",
     crate_root = "src/lib.rs",
-    visibility = [
-        "//cda-plugin-runtime-update:__pkg__",
-        "//cda-plugin-security:__pkg__",
-        "//cda-sovd:__pkg__",
-    ],
     deps = [
         "//cda-interfaces:cda_interfaces",
     ],

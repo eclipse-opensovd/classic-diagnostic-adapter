@@ -31,12 +31,6 @@ workspace_rust_library(
     ],
     crate_name = "cda_database",
     crate_root = "src/lib.rs",
-    visibility = [
-        "//cda-core:__pkg__",
-        "//cda-main:__pkg__",
-        "//cda-plugin-runtime-update:__pkg__",
-        "//cda-plugin-security:__pkg__",
-    ],
     deps = [
         "//cda-interfaces:cda_interfaces",
     ],
