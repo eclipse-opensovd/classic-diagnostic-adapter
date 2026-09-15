@@ -878,6 +878,10 @@ three lock scopes.
     A lock POST request may include additional fields in the request body, these can be used
     by a vendor specific implementation to allow lock overrides.
 
+    The vendor mechanism shall verify its additional fields before every lock POST request is
+    processed, independently of lock scope and whether another lock is currently held. The CDA
+    shall keep these fields opaque apart from generic transport and resource limits.
+
     Note, the vendor specific implementation must be aware of the current lock holders additional fields,
     since they can impact the priority decision.
 

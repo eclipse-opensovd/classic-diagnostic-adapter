@@ -207,6 +207,19 @@ pub enum LockLifecycleEvent {
 /// Revision-aware vendor policy used for every lock acquisition.
 #[async_trait]
 pub trait LockPriorityPolicy: Send + Sync + 'static {
+    /// Verifies vendor-specific metadata before a lock request is processed.
+    ///
+    /// CDA invokes this hook for every lock `POST`, independently of lock scope or whether
+    /// another lock is present. Implementations own the schema and semantics of vendor metadata;
+    /// CDA only enforces generic transport limits. The default implementation accepts all
+    /// metadata.
+    ///
+    /// Implementations must offload blocking or CPU-intensive work, for example with
+    /// `tokio::task::spawn_blocking`; this future runs on CDA's asynchronous request runtime.
+    async fn verify_metadata(&self, _request: &LockRequest) -> Result<(), LockPriorityError> {
+        Ok(())
+    }
+
     /// Evaluates one request against a revisioned snapshot and candidate set.
     ///
     /// Implementations must offload blocking or CPU-intensive work, for example with

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -24,7 +24,8 @@ use cda_interfaces::{
     TesterPresentType,
     lock_priority_api::{
         LockLifecycleEvent, LockPrincipal, LockPriorityDecision, LockPriorityError,
-        LockPriorityEvaluation, LockPriorityOperation, LockPriorityPolicy, LockSnapshot,
+        LockPriorityEvaluation, LockPriorityOperation, LockPriorityPolicy, LockRequest,
+        LockSnapshot,
     },
     mock::MockUdsEcu,
 };
@@ -175,6 +176,61 @@ struct BlockingPolicy {
     evaluations: AtomicUsize,
     started: Notify,
     release: Notify,
+}
+
+struct MetadataVerificationPolicy {
+    result: Result<(), LockPriorityError>,
+    requests: StdMutex<Vec<LockRequest>>,
+}
+
+struct BlockingMetadataPolicy;
+
+#[async_trait::async_trait]
+impl LockPriorityPolicy for BlockingMetadataPolicy {
+    async fn verify_metadata(&self, _request: &LockRequest) -> Result<(), LockPriorityError> {
+        std::future::pending().await
+    }
+
+    async fn evaluate(
+        &self,
+        _evaluation: &LockPriorityEvaluation,
+    ) -> Result<LockPriorityDecision, LockPriorityError> {
+        Ok(LockPriorityDecision::Allow)
+    }
+}
+
+struct PanickingMetadataPolicy;
+
+#[async_trait::async_trait]
+impl LockPriorityPolicy for PanickingMetadataPolicy {
+    async fn verify_metadata(&self, _request: &LockRequest) -> Result<(), LockPriorityError> {
+        panic!("Metadata verification panic for test");
+    }
+
+    async fn evaluate(
+        &self,
+        _evaluation: &LockPriorityEvaluation,
+    ) -> Result<LockPriorityDecision, LockPriorityError> {
+        Ok(LockPriorityDecision::Allow)
+    }
+}
+
+#[async_trait::async_trait]
+impl LockPriorityPolicy for MetadataVerificationPolicy {
+    async fn verify_metadata(&self, request: &LockRequest) -> Result<(), LockPriorityError> {
+        self.requests
+            .lock()
+            .expect("Metadata verification mutex poisoned")
+            .push(request.clone());
+        self.result.clone()
+    }
+
+    async fn evaluate(
+        &self,
+        _evaluation: &LockPriorityEvaluation,
+    ) -> Result<LockPriorityDecision, LockPriorityError> {
+        panic!("Metadata verification failure must prevent priority evaluation");
+    }
 }
 
 #[async_trait::async_trait]

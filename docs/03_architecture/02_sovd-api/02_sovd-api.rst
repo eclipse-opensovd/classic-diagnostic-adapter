@@ -992,8 +992,14 @@ Locks
     :links: arch~sovd-api-lock-defunct
     :status: draft
 
-    When a lock POST request arrives and a lock is already held by a different client, the
-    priority mechanism -- if one is registered -- is invoked before returning HTTP 409.
+    The registered priority mechanism verifies vendor-specific metadata before every lock POST
+    request is processed. This verification applies to vehicle, ECU, and functional group locks,
+    including uncontended acquisitions and same-owner POST renewals. The CDA treats the metadata
+    as opaque and delegates its schema and semantic validation to the vendor mechanism.
+
+    When a vehicle lock POST request arrives and a lock is already held by a different client,
+    the priority mechanism is additionally invoked to evaluate preemption before returning HTTP
+    423.
 
     **Mechanism input**
 
