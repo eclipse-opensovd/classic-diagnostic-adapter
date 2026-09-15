@@ -29,8 +29,9 @@ use serde::{Deserialize, Serialize};
 )]
 #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct DatabaseConfig {
-    /// Directory to load the databases from, if none have been loaded into storage before.
-    pub seed_dir: String,
+    /// Directory to load diagnostic databases from, if none have
+    /// been loaded into storage before via the Update plugin.
+    pub dir: String,
     pub naming_convention: DatabaseNamingConvention,
     /// If true, the application will exit if no database could be loaded.
     pub exit_no_database_loaded: bool,
@@ -58,7 +59,7 @@ pub struct DatabaseConfig {
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
-            seed_dir: ".".to_owned(),
+            dir: ".".to_owned(),
             naming_convention: DatabaseNamingConvention::default(),
             exit_no_database_loaded: false,
             fallback_to_base_variant: true,
