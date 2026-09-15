@@ -220,7 +220,7 @@ pub async fn load_databases<S: SecurityPlugin>(
 }
 
 /// Returns paths to MDD files, preferring files found in the CDA `storage`.
-/// Falls back to the configured `database.seed_dir` directory if storage is unavailable or empty.
+/// Falls back to the configured `database.dir` directory if storage is unavailable or empty.
 pub async fn resolve_mdd_paths(storage: &LocalStorage, database_dir: &str) -> Vec<PathBuf> {
     let storage_paths = load_mdd_paths_from_storage(storage).await;
     if let Some(storage_paths) = storage_paths
@@ -233,7 +233,7 @@ pub async fn resolve_mdd_paths(storage: &LocalStorage, database_dir: &str) -> Ve
         storage_paths
     } else {
         tracing::info!(
-            seed_dir = %database_dir,
+            database_dir = %database_dir,
             "No MDD files found in storage, falling back to configured database dir."
         );
         match std::fs::read_dir(database_dir) {

@@ -98,9 +98,10 @@ pub struct AppArgs {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// Directory with diagnostic databases to load, if none have been loaded into storage before.
+    /// Directory with diagnostic databases to load, if none have
+    /// been loaded into storage before via the Update plugin.
     #[arg(short = 'd', long)]
-    pub seed_databases_dir: Option<String>,
+    pub databases_dir: Option<String>,
 
     #[arg(short, long)]
     pub tester_address: Option<String>,
@@ -174,8 +175,8 @@ impl AppArgs {
         )
     )]
     pub fn update_config(self, config: &mut Configuration) {
-        if let Some(seed_databases_dir) = self.seed_databases_dir {
-            config.database.seed_dir = seed_databases_dir;
+        if let Some(databases_dir) = self.databases_dir {
+            config.database.dir = databases_dir;
         }
         if let Some(exit_no_database_loaded) = self.exit_no_database_loaded {
             config.database.exit_no_database_loaded = exit_no_database_loaded;
@@ -567,7 +568,7 @@ pub async fn load_vehicle_data<S: SecurityPlugin>(
     storage: &LocalStorage,
 ) -> Result<VehicleData<S>, AppError> {
     let mdd_paths: Vec<PathBuf> = {
-        let paths = resolve_mdd_paths(storage, &config.database.seed_dir).await;
+        let paths = resolve_mdd_paths(storage, &config.database.dir).await;
         if paths.is_empty() && config.database.exit_no_database_loaded {
             return Err(AppError::InitializationFailed(
                 "No MDD files found".to_string(),
@@ -1142,7 +1143,7 @@ mod webserver_lifecycle_tests {
         config.server.port = available_port();
         config.doip.tester_address = "127.0.0.1".to_owned();
         config.doip.gateway_port = available_port();
-        config.database.seed_dir = database_dir.path().to_string_lossy().into_owned();
+        config.database.dir = database_dir.path().to_string_lossy().into_owned();
         config.database.exit_no_database_loaded = false;
         config.runtime_update_config.storage_dir =
             storage_dir.path().to_string_lossy().into_owned();
