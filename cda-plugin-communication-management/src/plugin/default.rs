@@ -177,8 +177,8 @@ mod tests {
     use crate::lifecycle::controller::test_utils::communication_handle_new;
 
     struct RecordingControl {
-        enables: AtomicUsize,
-        disables: AtomicUsize,
+        enable_count: AtomicUsize,
+        disable_count: AtomicUsize,
         fail_enable: AtomicBool,
     }
 
@@ -188,11 +188,11 @@ mod tests {
             if self.fail_enable.load(Ordering::Relaxed) {
                 return Err(CommControlError::InitFailed("simulated failure".to_owned()));
             }
-            self.enables.fetch_add(1, Ordering::Relaxed);
+            self.enable_count.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
         async fn disable(&self) -> Result<(), CommControlError> {
-            self.disables.fetch_add(1, Ordering::Relaxed);
+            self.disable_count.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
         async fn state(&self) -> TransportState {
@@ -214,8 +214,8 @@ mod tests {
         CommunicationHandle,
     ) {
         let control = Arc::new(RecordingControl {
-            enables: AtomicUsize::new(0),
-            disables: AtomicUsize::new(0),
+            enable_count: AtomicUsize::new(0),
+            disable_count: AtomicUsize::new(0),
             fail_enable: AtomicBool::new(false),
         });
         let handle = communication_handle_new(Arc::clone(&control) as Arc<dyn TransportControl>);
@@ -241,7 +241,7 @@ mod tests {
                 Ok(CommunicationState::Enabled),
                 "{mode:?}"
             );
-            assert_eq!(control.enables.load(Ordering::Relaxed), 1, "{mode:?}");
+            assert_eq!(control.enable_count.load(Ordering::Relaxed), 1, "{mode:?}");
         }
     }
 
@@ -258,7 +258,7 @@ mod tests {
             })
         );
         assert_eq!(
-            control.enables.load(Ordering::Relaxed),
+            control.enable_count.load(Ordering::Relaxed),
             0,
             "Disabled mode must not touch the transport on an ordinary activate()"
         );
@@ -285,7 +285,7 @@ mod tests {
             })
             .await
             .expect("activation did not complete");
-            assert_eq!(control.enables.load(Ordering::Relaxed), 1, "{mode:?}");
+            assert_eq!(control.enable_count.load(Ordering::Relaxed), 1, "{mode:?}");
         }
 
         let (plugin, control, _handle) = plugin_with_mode(CommunicationInitMode::Disabled);
@@ -294,7 +294,7 @@ mod tests {
             CommunicationState::Disabled
         );
         tokio::task::yield_now().await;
-        assert_eq!(control.enables.load(Ordering::Relaxed), 0);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 0);
     }
 
     /// `trigger_detection()` never brings a transport up, so `Disabled` mode is
@@ -307,7 +307,7 @@ mod tests {
 
         // Ordinary activation is inert.
         assert!(plugin.activate(ActivationCause::Explicit).await.is_err());
-        assert_eq!(control.enables.load(Ordering::Relaxed), 0);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 0);
         assert_eq!(plugin.state(), CommunicationState::Disabled);
 
         // So is detection: refused without touching the transport.
@@ -318,7 +318,7 @@ mod tests {
             })
         );
         assert_eq!(
-            control.enables.load(Ordering::Relaxed),
+            control.enable_count.load(Ordering::Relaxed),
             0,
             "a detection request must never enable the transport"
         );
@@ -330,7 +330,7 @@ mod tests {
             plugin.trigger_detection(DetectionCause::Explicit).await,
             Ok(CommunicationState::Enabled)
         );
-        assert_eq!(control.enables.load(Ordering::Relaxed), 1);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
     }
 
     /// From `Enabled`, `trigger_detection` detects without touching the
@@ -349,7 +349,7 @@ mod tests {
                 handle.enable_and_detect().await,
                 Ok(CommunicationState::Enabled)
             );
-            assert_eq!(control.enables.load(Ordering::Relaxed), 1, "{mode:?}");
+            assert_eq!(control.enable_count.load(Ordering::Relaxed), 1, "{mode:?}");
 
             assert_eq!(
                 plugin.trigger_detection(DetectionCause::Explicit).await,
@@ -357,11 +357,11 @@ mod tests {
                 "{mode:?}: detection must be allowed while already enabled"
             );
             assert_eq!(
-                control.enables.load(Ordering::Relaxed),
+                control.enable_count.load(Ordering::Relaxed),
                 1,
                 "{mode:?}: re-detection must not re-enable the transport"
             );
-            assert_eq!(control.disables.load(Ordering::Relaxed), 0, "{mode:?}");
+            assert_eq!(control.disable_count.load(Ordering::Relaxed), 0, "{mode:?}");
         }
     }
 
@@ -388,7 +388,7 @@ mod tests {
                 "{mode:?}: detection must not recover a broken transport"
             );
             assert_eq!(
-                control.enables.load(Ordering::Relaxed),
+                control.enable_count.load(Ordering::Relaxed),
                 0,
                 "{mode:?}: no successful enable may have happened"
             );
@@ -412,7 +412,7 @@ mod tests {
                 operation: CommunicationOperation::Detect
             })
         );
-        assert_eq!(control.enables.load(Ordering::Relaxed), 1);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
 
         assert_eq!(lease.release().await, Ok(CommunicationState::Enabled));
     }
@@ -438,6 +438,6 @@ mod tests {
         };
         assert_eq!(a.await.unwrap(), Ok(CommunicationState::Enabled));
         assert_eq!(b.await.unwrap(), Ok(CommunicationState::Enabled));
-        assert_eq!(control.enables.load(Ordering::Relaxed), 1);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
     }
 }
