@@ -30,7 +30,7 @@ Build the `release-with-debug` profile with the `heap-profiling` feature:
 
 ```shell
 RUSTFLAGS='-C force-frame-pointers=yes' \
-  cargo build --locked --profile release-with-debug --bin opensovd-cda \
+  cargo build --profile release-with-debug --bin opensovd-cda \
   --features heap-profiling
 ```
 

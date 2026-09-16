@@ -57,7 +57,7 @@ pub enum CanDiagGateway {}
 
 #[cfg(not(feature = "can"))]
 impl PhysicalTransport for CanDiagGateway {
-    async fn send(
+    fn send(
         &self,
         _transmission_params: TransmissionParameters,
         _message: ServicePayload,
@@ -65,48 +65,60 @@ impl PhysicalTransport for CanDiagGateway {
             Result<Option<TransportResponse>, DiagServiceError>,
         >,
         _expect_uds_reply: bool,
-    ) -> Result<tokio::task::JoinHandle<()>, DiagServiceError> {
-        Err(DiagServiceError::EcuOffline(
+    ) -> impl std::future::Future<Output = Result<tokio::task::JoinHandle<()>, DiagServiceError>> + Send
+    {
+        std::future::ready(Err(DiagServiceError::EcuOffline(
             "CAN support is not enabled. Compile with the `can` feature.".to_owned(),
-        ))
+        )))
     }
 
-    async fn ecu_online<E: EcuAddresses>(
+    fn ecu_online<E: EcuAddresses>(
         &self,
         _ecu_name: &str,
         _ecu_db: &tokio::sync::RwLock<E>,
-    ) -> Result<(), DiagServiceError> {
-        Err(DiagServiceError::EcuOffline(
+    ) -> impl std::future::Future<Output = Result<(), DiagServiceError>> + Send {
+        std::future::ready(Err(DiagServiceError::EcuOffline(
             "CAN support is not enabled. Compile with the `can` feature.".to_owned(),
-        ))
+        )))
     }
 }
 
 #[cfg(not(feature = "can"))]
 impl NetworkTopology for CanDiagGateway {
-    async fn get_gateway_network_address(&self, _logical_address: u16) -> Option<String> {
-        None
+    fn get_gateway_network_address(
+        &self,
+        _logical_address: u16,
+    ) -> impl std::future::Future<Output = Option<String>> + Send {
+        std::future::ready(None)
     }
 
-    async fn get_ecu_network_address(&self, _ecu_name: &str) -> Option<String> {
-        None
+    fn get_ecu_network_address(
+        &self,
+        _ecu_name: &str,
+    ) -> impl std::future::Future<Output = Option<String>> + Send {
+        std::future::ready(None)
     }
 }
 
 #[cfg(not(feature = "can"))]
 impl FunctionalTransport for CanDiagGateway {
-    async fn send_functional(
+    fn send_functional(
         &self,
         _transmission_params: TransmissionParameters,
         _message: ServicePayload,
         _expected_ecu_logical_addrs: HashMap<u16, String>,
         _timeout: std::time::Duration,
         _expect_positive_response: bool,
-    ) -> Result<HashMap<String, Result<ServicePayload, DiagServiceError>>, DiagServiceError> {
-        Err(DiagServiceError::RequestNotSupported(
+    ) -> impl std::future::Future<
+        Output = Result<
+            HashMap<String, Result<ServicePayload, DiagServiceError>>,
+            DiagServiceError,
+        >,
+    > + Send {
+        std::future::ready(Err(DiagServiceError::RequestNotSupported(
             "CAN functional addressing is not available because CAN support is disabled."
                 .to_owned(),
-        ))
+        )))
     }
 }
 
@@ -128,12 +140,15 @@ impl TransportControl for CanDiagGateway {
 
 #[cfg(not(feature = "can"))]
 impl TransportProbe for CanDiagGateway {
-    async fn route_status(&self, _ecu_name: &str) -> RouteStatus {
-        RouteStatus::NotConfigured
+    fn route_status(
+        &self,
+        _ecu_name: &str,
+    ) -> impl std::future::Future<Output = RouteStatus> + Send {
+        std::future::ready(RouteStatus::NotConfigured)
     }
 
-    async fn probe_ecu(&self, _ecu_name: &str) -> bool {
-        false
+    fn probe_ecu(&self, _ecu_name: &str) -> impl std::future::Future<Output = bool> + Send {
+        std::future::ready(false)
     }
 }
 

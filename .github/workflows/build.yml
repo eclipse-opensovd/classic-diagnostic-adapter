@@ -33,6 +33,7 @@ jobs:
     env:
       RUSTFLAGS: "--cfg tokio_unstable -L /usr/local/lib"
       PKG_CONFIG_PATH: "/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
+      CARGO_TERM_VERBOSE: "true"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -52,7 +53,7 @@ jobs:
       - name: Setup DLT tracing lib
         uses: eclipse-opensovd/dlt-tracing-lib/.github/actions/setup-dlt@main
       - name: Build all features
-        run: cargo build --locked --verbose --all-features
+        run: cargo build --all-features
       - name: Verify generated files are up to date
         run: |
           if ! git diff --exit-code cda-database/src/flatbuf/diagnostic_description.rs cda-database/src/proto/fileformat.rs; then
@@ -65,7 +66,7 @@ jobs:
           echo "Generated files are up to date."
       - name: Verify reference config matches generated config
         run: |
-          cargo run --locked --all-features -- generate-config --output /tmp/opensovd-cda.toml
+          cargo run --all-features -- generate-config --output /tmp/opensovd-cda.toml
           if ! diff -u opensovd-cda.toml /tmp/opensovd-cda.toml; then
             echo ""
             echo "::error::opensovd-cda.toml does not match configuration generated from code."
@@ -91,14 +92,14 @@ jobs:
       # note: if openssl and mbedtls are enabled falls back to openssl
       # therefore we build mbedtls separately as well
       - name: Build mbedtls features
-        run: cargo build --locked --verbose -p opensovd-cda --no-default-features --features mbedtls
+        run: cargo build -p opensovd-cda --no-default-features --features mbedtls
       - name: Build minimal features
-        run: cargo build --locked --verbose --no-default-features
+        run: cargo build --no-default-features
       - name: Build minimal CDA only
         # Building CDA only makes sure that optional dependencies
         # from within the workspace are properly marked as optional and guarded
         # with cfg flags.
-        run: cargo build --locked --verbose --no-default-features --package opensovd-cda
+        run: cargo build --no-default-features --package opensovd-cda
 
   build_and_test:
     runs-on: ubuntu-latest
@@ -116,11 +117,11 @@ jobs:
           toolchain: 1.88.0
           components: clippy, rustfmt, llvm-tools
       - name: Install cargo-deny
-        run: cargo install --locked --version 0.18.9 cargo-deny
+        run: cargo install --version 0.18.9 cargo-deny
       - name: Install cargo-llvm-cov
-        run: cargo install --locked cargo-llvm-cov
+        run: cargo install cargo-llvm-cov
       - name: Build
-        run: cargo build --locked --verbose
+        run: cargo build
       - name: Check licenses
         run: cargo deny check licenses
       - name: Check allowed sources
@@ -177,12 +178,12 @@ jobs:
           cache-to: |
             type=gha,mode=max,scope=ecu-sim-gradle-${{ github.ref_name }}
       - name: Run unit tests with coverage
-        run: cargo llvm-cov --locked --workspace --lcov --output-path lcov.info -- --show-output
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info -- --show-output
       - name: Run integration tests with Docker coverage
         env:
           CACHE_REGISTRY: ghcr.io/${{ github.repository }}
           CDA_INTEGRATION_TEST_COVERAGE: "true"
-        run: cargo test --locked -p integration-tests --features integration-tests -- --show-output
+        run: cargo test -p integration-tests --features integration-tests -- --show-output
       - name: Install lcov
         run: sudo apt-get update && sudo apt-get install -y lcov
       - name: Process Docker coverage
@@ -283,9 +284,9 @@ jobs:
       # under coverage so they count toward the merged report like the
       # default-features unit tests in build_and_test.
       - name: Install cargo-llvm-cov
-        run: cargo install --locked cargo-llvm-cov
+        run: cargo install cargo-llvm-cov
       - name: Run unit tests with coverage (CAN features)
-        run: cargo llvm-cov --locked -p opensovd-cda -p cda-comm-can --features opensovd-cda/can-socketcand,cda-comm-can/can-socketcand --lcov --output-path lcov-can-unit.info -- --show-output
+        run: cargo llvm-cov -p opensovd-cda -p cda-comm-can --features opensovd-cda/can-socketcand,cda-comm-can/can-socketcand --lcov --output-path lcov-can-unit.info -- --show-output
       - name: Run CAN integration tests
         env:
           CACHE_REGISTRY: ghcr.io/${{ github.repository }}
@@ -293,7 +294,7 @@ jobs:
           CDA_INTEGRATION_TEST_COVERAGE: "true"
         # Run serially: the CAN transport is timing-sensitive (per-transaction
         # TCP sockets + TesterPresent keepalive), so parallel tests can flake.
-        run: cargo test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
+        run: cargo test -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
       - name: Install lcov
         run: sudo apt-get update && sudo apt-get install -y lcov
       - name: Process Docker coverage
@@ -387,7 +388,7 @@ jobs:
           CACHE_REGISTRY: ghcr.io/${{ github.repository }}
           CDA_INTEGRATION_TEST_USE_MIXED: "true"
           CDA_INTEGRATION_TEST_COVERAGE: "true"
-        run: cargo test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
+        run: cargo test -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
       - name: Process Docker coverage
         uses: ./.github/actions/process-docker-coverage
         with:
@@ -490,6 +491,6 @@ jobs:
         env:
           OPENSSL_DIR: C:\Program Files\OpenSSL
       - name: Build
-        run: cargo build --locked --verbose
+        run: cargo build
       - name: Test
-        run: cargo test --locked -- --show-output
+        run: cargo test -- --show-output
