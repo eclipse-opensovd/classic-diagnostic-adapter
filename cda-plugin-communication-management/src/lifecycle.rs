@@ -30,6 +30,7 @@ mod worker;
 #[cfg(feature = "test-utils")]
 pub use controller::test_utils::{
     communication_disable_for_test, enabled_communication_access_for_test,
+    enabled_communication_for_test,
 };
 pub use controller::{
     BuildCommunicationRuntimeError, CommunicationHandle, CommunicationRuntime,

@@ -11,15 +11,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{sync::Arc, time::Duration};
+use std::{ops::Deref, sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, FunctionalDescriptionConfig,
-    HashMap, HashMapExtensions, SchemaDescription, SchemaProvider, TesterPresentType, UdsEcu,
-    UdsEcuDb, UdsTransport, VariantDetectionReceiver,
+    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, HashMapExtensions,
+    ReloadComponent, Reloadable, SchemaDescription, SchemaProvider, TesterPresentType, UdsEcu,
+    UdsEcuDb, VariantDetectionReceiver,
     communication_control::{ActivationCause, CommunicationAccess, CommunicationGuard},
-    datatypes::FaultConfig,
     diagservices::UdsPayloadData,
+    mdd_chunks::{EmbeddedFileAccess, EmbeddedFilesProvider},
 };
 use tokio::{
     sync::{Mutex, RwLock, Semaphore},
@@ -40,6 +40,8 @@ mod transport;
 mod types;
 mod util;
 mod variant;
+
+pub(crate) use variant::VariantReadyEcu;
 
 #[cfg(test)]
 mod test_helpers;
@@ -63,17 +65,62 @@ enum ReceiverRetention {
     Discard,
 }
 
+/// [`EcuData`](cda_interfaces::ecu_data::EcuData) as used by the UDS layer.
+pub type VehicleEcuData<T> = cda_interfaces::ecu_data::EcuData<T, EcuStateCoordinator>;
+
+pub(crate) struct ResolvedEcu<'a, T> {
+    data: &'a VehicleEcuData<T>,
+    name: &'a str,
+    ecu: &'a RwLock<T>,
+}
+
+impl<'a, T> ResolvedEcu<'a, T> {
+    #[must_use]
+    pub(crate) fn data(&self) -> &'a VehicleEcuData<T> {
+        self.data
+    }
+
+    #[must_use]
+    pub(crate) fn name(&self) -> &'a str {
+        self.name
+    }
+}
+
+impl<T> Deref for ResolvedEcu<'_, T> {
+    type Target = RwLock<T>;
+
+    fn deref(&self) -> &Self::Target {
+        self.ecu
+    }
+}
+
+/// Creates UDS state with installation authority exposed only as opaque traits.
+///
+/// Returns the read-only runtime view of the database-derived state and the
+/// opaque authority to replace it, retained by update wiring.
+#[must_use]
+pub fn prepare_ecu_data<T: UdsEcuDb>(
+    data: VehicleEcuData<T>,
+) -> (
+    Reloadable<VehicleEcuData<T>>,
+    Arc<dyn ReloadComponent<VehicleEcuData<T>>>,
+) {
+    let reloader = Arc::new(cda_interfaces::ReloadableOwner::new(data));
+    (
+        reloader.reader(),
+        reloader as Arc<dyn ReloadComponent<VehicleEcuData<T>>>,
+    )
+}
+
+/// Runtime UDS API with read-only reload state.
 pub struct UdsManager<S: EcuGateway, T: UdsEcuDb> {
-    ecus: Arc<HashMap<String, RwLock<T>>>,
-    gateway: S,
+    ecu_data: Reloadable<VehicleEcuData<T>>,
+    gateway: Arc<S>,
     data_transfers: Arc<Mutex<HashMap<EcuIdentifier, EcuDataTransfer>>>,
     ecu_semaphores: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     tester_present_tasks: Arc<RwLock<HashMap<EcuIdentifier, TesterPresentTask>>>,
     session_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, JoinHandle<()>>>>,
     security_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, JoinHandle<()>>>>,
-    state_coordinator: EcuStateCoordinator,
-    functional_description_database: String,
-    fault_config: FaultConfig,
     communication_access: Arc<dyn CommunicationAccess>,
     /// Configured retry hint surfaced on [`DiagServiceError::CommunicationNotReady`].
     communication_retry_after: Duration,
@@ -89,10 +136,37 @@ pub struct UdsManager<S: EcuGateway, T: UdsEcuDb> {
 }
 
 impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
-    fn uds_ecu_db(&self, ecu_name: &str) -> Result<&RwLock<T>, DiagServiceError> {
-        self.ecus
-            .get(ecu_name)
-            .ok_or_else(|| DiagServiceError::NotFound(format!("ECU {ecu_name} not found")))
+    /// The persistent gateway used by this manager.
+    fn gateway(&self) -> &S {
+        &self.gateway
+    }
+
+    /// Resolves an ECU out of vehicle data the caller already holds.
+    ///
+    /// Borrowed from `data`, so the caller's read guard covers this ECU for the
+    /// whole operation and a runtime update cannot replace it mid-request.
+    fn resolve_ecu<'a>(
+        data: &'a VehicleEcuData<T>,
+        ecu_name: &str,
+    ) -> Result<ResolvedEcu<'a, T>, DiagServiceError> {
+        let (name, ecu) = data
+            .ecus()
+            .get_key_value(ecu_name)
+            .ok_or_else(|| DiagServiceError::NotFound(format!("ECU {ecu_name} not found")))?;
+        Ok(ResolvedEcu { data, name, ecu })
+    }
+
+    fn db_lookup<'a>(
+        data: &'a VehicleEcuData<T>,
+        ecu_name: &str,
+    ) -> Result<&'a RwLock<T>, DiagServiceError> {
+        Ok(Self::resolve_ecu(data, ecu_name)?.ecu)
+    }
+
+    /// The functional-description database of vehicle data the caller already
+    /// holds, so both halves come from the same load.
+    fn functional_db_lookup(data: &VehicleEcuData<T>) -> Result<&RwLock<T>, DiagServiceError> {
+        Self::db_lookup(data, data.functional_description_database())
     }
 
     /// Requires diagnostic communication to be enabled before sending a UDS
@@ -103,15 +177,15 @@ impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
     ///
     /// # Constraints
     ///
-    /// Must not be called from [`UdsManager::detect_variant`] or anything it
-    /// invokes, including [`UdsManager::send_without_variant_guard`], because
-    /// variant detection runs before communication reaches the enabled state.
+    /// Internal variant-detection sends must not call this method because framework
+    /// detection runs before communication reaches the enabled state. The direct public
+    /// detection entry point calls it before entering the internal detection path.
     ///
     /// # Errors
     ///
     /// Returns [`DiagServiceError::CommunicationNotReady`] when communication
     /// is not currently enabled.
-    pub(crate) fn require_communication_ready(
+    pub(crate) fn acquire_communication_guard(
         &self,
     ) -> Result<CommunicationGuard, DiagServiceError> {
         if let Ok(guard) = self.communication_access.acquire() {
@@ -136,35 +210,22 @@ impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
 }
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
-    /// Create a new [`UdsManager`].
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "Combining parameters into a struct is not preferred here, to keep constructor \
-                  call semantics explicit"
-    )]
+    /// Creates the runtime manager from read-only ECU state.
     pub fn new(
-        gateway: S,
-        ecus: Arc<HashMap<String, RwLock<T>>>,
+        gateway: Arc<S>,
+        data: Reloadable<VehicleEcuData<T>>,
         variant_detection_receiver: VariantDetectionReceiver,
-        state_coordinator: EcuStateCoordinator,
-        functional_description_config: &FunctionalDescriptionConfig,
-        fault_config: FaultConfig,
         communication_access: Arc<dyn CommunicationAccess>,
         communication_retry_after: Duration,
     ) -> Self {
         Self {
-            ecus,
+            ecu_data: data,
             gateway,
             data_transfers: Arc::new(Mutex::new(HashMap::new())),
             ecu_semaphores: Arc::new(Mutex::new(HashMap::new())),
             tester_present_tasks: Arc::new(RwLock::new(HashMap::new())),
             session_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
             security_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
-            state_coordinator,
-            functional_description_database: functional_description_config
-                .description_database
-                .clone(),
-            fault_config,
             communication_access,
             communication_retry_after,
             variant_detection_receiver: Arc::new(Mutex::new(Some(variant_detection_receiver))),
@@ -194,10 +255,39 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         }
     }
 
-    /// Returns a clone of the state coordinator for use by the `DoIP` layer.
-    /// The coordinator implements `EcuStateEvents` and propagates disconnect events.
-    pub fn state_coordinator(&self) -> EcuStateCoordinator {
-        self.state_coordinator.clone()
+    /// Aborts the session- and security-reset tasks and waits for each to unwind.
+    ///
+    /// Shared by `deinitialize` and `shutdown` so a pause and a teardown leave
+    /// the same tasks in the same state.
+    async fn abort_reset_tasks(&self) {
+        let mut tasks: Vec<JoinHandle<()>> = self
+            .session_reset_tasks
+            .write()
+            .await
+            .drain()
+            .map(|(_, task)| task)
+            .collect();
+        tasks.extend(
+            self.security_reset_tasks
+                .write()
+                .await
+                .drain()
+                .map(|(_, task)| task),
+        );
+        Self::abort_and_await(tasks).await;
+    }
+
+    /// Aborts each task and waits for it to unwind, so the caller returns only
+    /// once nothing it owned is still running.
+    ///
+    /// Callers drain their task maps into `tasks` and release the map guards
+    /// before calling: awaiting a task while still holding a guard it needs on
+    /// the way out would deadlock.
+    async fn abort_and_await(tasks: Vec<JoinHandle<()>>) {
+        for task in tasks {
+            task.abort();
+            let _ = task.await;
+        }
     }
 
     /// Send a diagnostic service by its request prefix, looking up the service definition
@@ -238,10 +328,14 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         params: HashMap<String, serde_json::Value>,
         map_to_json: bool,
     ) -> Result<<T as cda_interfaces::PayloadDecoder>::Response, DiagServiceError> {
+        let communication_guard = self.acquire_communication_guard()?;
         // Look up the service definition in the MDD database using the same
         // approach as lookup_diagcomms_by_request_prefix - matches against
         // coded constant parameter values in the database.
-        let ecu = self.uds_ecu_db(ecu_name)?;
+        let data = self.ecu_data.read().await;
+        let ecu = self
+            .uds_ecu_variant_detection_concluded(&data, ecu_name)
+            .await?;
         let services = ecu
             .read()
             .await
@@ -253,8 +347,9 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             ))
         })?;
 
-        self.send(
-            ecu_name,
+        self.send_service(
+            &communication_guard,
+            &ecu,
             diag_comm,
             security_plugin,
             Some(UdsPayloadData::ParameterMap(params)),
@@ -298,14 +393,19 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         params: HashMap<String, serde_json::Value>,
         map_to_json: bool,
     ) -> Result<<T as cda_interfaces::PayloadDecoder>::Response, DiagServiceError> {
-        let ecu = self.uds_ecu_db(ecu_name)?;
+        let communication_guard = self.acquire_communication_guard()?;
+        let data = self.ecu_data.read().await;
+        let ecu = self
+            .uds_ecu_variant_detection_concluded(&data, ecu_name)
+            .await?;
         let diag_comm = ecu
             .read()
             .await
             .lookup_service_by_sid_and_name(service_id, name, None)?;
 
-        self.send(
-            ecu_name,
+        self.send_service(
+            &communication_guard,
+            &ecu,
             diag_comm,
             security_plugin,
             Some(UdsPayloadData::ParameterMap(params)),
@@ -315,19 +415,16 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     }
 }
 
-impl<S: Clone + EcuGateway, T: UdsEcuDb> Clone for UdsManager<S, T> {
+impl<S: EcuGateway, T: UdsEcuDb> Clone for UdsManager<S, T> {
     fn clone(&self) -> Self {
         Self {
-            ecus: Arc::clone(&self.ecus),
-            gateway: self.gateway.clone(),
+            ecu_data: self.ecu_data.clone(),
+            gateway: Arc::clone(&self.gateway),
             data_transfers: Arc::clone(&self.data_transfers),
             ecu_semaphores: Arc::clone(&self.ecu_semaphores),
             tester_present_tasks: Arc::clone(&self.tester_present_tasks),
             session_reset_tasks: Arc::clone(&self.session_reset_tasks),
             security_reset_tasks: Arc::clone(&self.security_reset_tasks),
-            state_coordinator: self.state_coordinator.clone(),
-            functional_description_database: self.functional_description_database.clone(),
-            fault_config: self.fault_config.clone(),
             communication_access: Arc::clone(&self.communication_access),
             communication_retry_after: self.communication_retry_after,
             variant_detection_receiver: Arc::clone(&self.variant_detection_receiver),
@@ -342,21 +439,42 @@ impl<S: EcuGateway, T: EcuManager> cda_interfaces::Shutdown for UdsManager<S, T>
     async fn shutdown(&self) {
         self.stop_variant_detection_listener(ReceiverRetention::Discard)
             .await;
-        let mut tester_present_tasks = self.tester_present_tasks.write().await;
-        let mut session_reset_tasks = self.session_reset_tasks.write().await;
-        let mut security_reset_tasks = self.security_reset_tasks.write().await;
-        let mut data_transfers = self.data_transfers.lock().await;
-        tester_present_tasks
+        self.abort_reset_tasks().await;
+        // Drained into a local, and the guards released, before awaiting:
+        // a task that touches one of these maps while unwinding would
+        // otherwise deadlock against the guard held here.
+        let mut tasks: Vec<JoinHandle<()>> = self
+            .tester_present_tasks
+            .write()
+            .await
             .drain()
             .map(|(_, tp)| tp.task)
-            .chain(session_reset_tasks.drain().map(|(_, h)| h))
-            .chain(security_reset_tasks.drain().map(|(_, h)| h))
-            .chain(data_transfers.drain().map(|(_, t)| t.task))
-            .for_each(|h| h.abort());
+            .collect();
+        tasks.extend(
+            self.data_transfers
+                .lock()
+                .await
+                .drain()
+                .map(|(_, t)| t.task),
+        );
+        Self::abort_and_await(tasks).await;
     }
 }
 
 impl<S: EcuGateway, T: EcuManager> UdsEcu for UdsManager<S, T> {}
+
+impl<S: EcuGateway, T: EcuManager + EmbeddedFileAccess> EmbeddedFilesProvider for UdsManager<S, T> {
+    type Files = T::Files;
+
+    async fn embedded_files(&self, ecu_name: &str) -> Result<Arc<T::Files>, DiagServiceError> {
+        let data = self.ecu_data.read().await;
+        let files = Self::db_lookup(&data, ecu_name)?
+            .read()
+            .await
+            .embedded_files();
+        Ok(files)
+    }
+}
 
 impl<S: EcuGateway, T: EcuManager> SchemaProvider for UdsManager<S, T> {
     async fn schema_for_request(
@@ -364,7 +482,8 @@ impl<S: EcuGateway, T: EcuManager> SchemaProvider for UdsManager<S, T> {
         ecu: &str,
         service: &DiagComm,
     ) -> Result<SchemaDescription, DiagServiceError> {
-        let ecu = self.uds_ecu_variant_detection_concluded(ecu).await?;
+        let data = self.ecu_data.read().await;
+        let ecu = self.uds_ecu_variant_detection_concluded(&data, ecu).await?;
         ecu.read().await.schema_for_request(service).await
     }
 
@@ -373,7 +492,8 @@ impl<S: EcuGateway, T: EcuManager> SchemaProvider for UdsManager<S, T> {
         ecu: &str,
         service: &DiagComm,
     ) -> Result<SchemaDescription, DiagServiceError> {
-        let ecu = self.uds_ecu_variant_detection_concluded(ecu).await?;
+        let data = self.ecu_data.read().await;
+        let ecu = self.uds_ecu_variant_detection_concluded(&data, ecu).await?;
         ecu.read().await.schema_for_responses(service).await
     }
 
@@ -382,7 +502,8 @@ impl<S: EcuGateway, T: EcuManager> SchemaProvider for UdsManager<S, T> {
         service: &DiagComm,
         functional_group_name: &str,
     ) -> Result<SchemaDescription, DiagServiceError> {
-        self.uds_ecu_db(&self.functional_description_database)?
+        let data = self.ecu_data.read().await;
+        Self::functional_db_lookup(&data)?
             .read()
             .await
             .schema_for_fg_request(service, functional_group_name)

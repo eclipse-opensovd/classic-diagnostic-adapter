@@ -39,8 +39,8 @@ use crate::{
     update::{UpdatePluginBuilder, create_default_update_plugin, update_plugin_fn},
 };
 
-pub mod cda_factory;
 pub mod config;
+pub mod database_reload;
 pub mod error;
 pub mod mdd;
 pub mod setup;
@@ -49,6 +49,7 @@ pub mod vehicle;
 
 pub use error::AppError;
 pub use setup::Setup;
+pub use vehicle::{TransportConfigs, VehicleData, create_diagnostic_gateway, load_vehicle_data};
 
 // Valgrind and other profing tools intercept the system allocator, whereas mimalloc
 // manages allocations internally. Keep mimalloc in normal builds but omit it
@@ -312,7 +313,7 @@ where
     let vehicle_data = match vehicle::load_vehicle_data::<SP>(
         &config,
         webserver_state.health_state.as_ref(),
-        &storage,
+        Arc::clone(&storage),
     )
     .await
     {
@@ -323,12 +324,6 @@ where
         }
         Err(e) => return Err(e),
     };
-
-    if vehicle_data.databases.is_empty() && config.database.exit_no_database_loaded {
-        return Err(AppError::ResourceError(
-            "No database loaded, exiting as configured".to_string(),
-        ));
-    }
 
     // Retained for the full server lifetime, so its event dispatcher keeps
     // running until explicit shutdown.
@@ -377,8 +372,7 @@ pub async fn run(args: AppArgs) -> Result<(), AppError> {
     >(
         args,
         Setup::new().with_update_plugin(update_plugin_fn(|infra| async move {
-            create_default_update_plugin::<DefaultSecurityPluginData, DefaultSecurityPlugin>(infra)
-                .await
+            create_default_update_plugin::<DefaultSecurityPluginData>(infra).await
         })),
     ))
     .await
@@ -401,10 +395,7 @@ pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
         config,
         Setup::new().with_update_plugin(update_plugin_fn(
             |infra: setup::CdaRuntime<DefaultSecurityPluginData>| async move {
-                create_default_update_plugin::<DefaultSecurityPluginData, DefaultSecurityPlugin>(
-                    infra,
-                )
-                .await
+                create_default_update_plugin::<DefaultSecurityPluginData>(infra).await
             },
         )),
     ))

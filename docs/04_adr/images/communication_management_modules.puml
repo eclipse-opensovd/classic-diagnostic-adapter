@@ -46,8 +46,7 @@ package "Request and Diagnostic Modules" {
   component "cda-sovd" as Sovd <<consumer>>
   component "cda-comm-uds" as Uds <<consumer>>
 
-  RuntimeUpdate ..> Sovd : replaces vehicle routes
-  RuntimeUpdate ..> Uds : replaces diagnostic runtime
+  RuntimeUpdate ..> Uds : stages reload data
   Sovd --> Uds : invokes diagnostics
 }
 
@@ -66,16 +65,10 @@ package "cda-plugin-communication-management" {
 }
 
 package "Transport Modules" {
-  component "ComponentSlot<Gateway>\n(cda-interfaces, owned by Setup)" as GatewaySlot <<transport>>
-  component "transport-control view\n(private, minted via\nComponentSlot::transport_control)" as Swappable <<transport>>
-  component "GatewayReplacer\n(ReplaceComponent<Gateway>,\nminted via ComponentSlot::replacer)" as GatewayReplacer <<transport>>
-  component "cda-transport-router" as Router <<transport>>
+  component "cda-transport-router\n(built once, owned by UdsManager)" as Router <<transport>>
   component "cda-comm-doip\n(lazy socket bind\ninside enable())" as Doip <<transport>>
   component "cda-comm-can" as Can <<transport>>
 
-  GatewaySlot --> Swappable : mints (read guard\nper call, no write access)
-  GatewaySlot --> GatewayReplacer : mints (write guard\nonly, no read access)
-  Swappable --> Router : delegates lifecycle and traffic
   Router --> Doip : routes and controls
   Router --> Can : routes and controls
 }
@@ -84,7 +77,7 @@ Setup ..> Sovd : installs request guard
 Setup --> Plugin : builds, retains, delivers\ninit_mode, registers initializers
 Setup ..> Access : derives access view
 Setup ..> Disable : derives disable view
-Setup ..> GatewaySlot : owns the slot
+Setup ..> Router : builds once, shares\nas transport control
 
 ' Hidden edges: not part of the model, only used to pin cda-main strictly
 ' above the Request/Diagnostic rank and Request/Diagnostic strictly above
@@ -96,13 +89,14 @@ Uds -[hidden]-> Disable
 Sovd --> HttpProtection : evaluates request protections
 Sovd --> Access : acquire guard for protected operations
 Uds --> Access : acquire guard for data transfers
-Uds --> Router : sends diagnostic traffic
-Worker --> Swappable : enable, disable, query state
+Uds --> Router : sends over transport
+Worker --> Router : enable, disable, query state
+Worker --> Uds : install staged data
 
 RuntimeUpdate --> HttpProtection : owns UpdateInProgress\nprotection
 RuntimeUpdate --> Disable : acquires sole disable lease
-RuntimeUpdate --> GatewayReplacer : replaces active gateway;\nno read access to it
-RuntimeUpdate --> Access : passes into rebuilt\ncomponents; never activates
+RuntimeUpdate --> Uds : stages reload data;\nno read access
+RuntimeUpdate --> Access : never activates directly
 
 note bottom of HttpProtection
   Registry is cloneable. Each owner token is opaque,
