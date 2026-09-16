@@ -21,7 +21,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-
+use std::error::Error;
 use backon::Retryable;
 use cda_comm_can::{CanDiagGateway, config::CanConfig};
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
@@ -1077,6 +1077,7 @@ async fn initialize_storage_with_retries(
         }
     })
     .notify(|error, delay: Duration| {
+        //TODO can we add backtrace into storage error and print it here?
         tracing::warn!(
             "Failed to initialize storage. Retrying in {delay:?}. Error was: {error}"
         );
