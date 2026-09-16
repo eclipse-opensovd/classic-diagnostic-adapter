@@ -135,12 +135,20 @@ pub struct ServerConfig {
     pub address: String,
     /// TCP port the server listens on.
     pub port: u16,
+    /// Path to a Unix domain socket to bind the server to, e.g. `/run/cda.sock`.
+    ///
+    /// When set, the server binds only to this Unix socket and `address`/`port`
+    /// are silently ignored - the two transports are mutually exclusive, with
+    /// the Unix socket taking priority.
+    #[serde(default)]
+    pub unix_socket: Option<String>,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             address: "0.0.0.0".to_owned(),
             port: 20002,
+            unix_socket: None,
         }
     }
 }
@@ -413,6 +421,41 @@ description_database = "teapot"
                 vec!["Control_".to_string()]
             ))
         );
+        Ok(())
+    }
+
+    /// `server.unix_socket` defaults to `None`, keeping today's TCP-only
+    /// behavior unchanged when the field is absent from the TOML file.
+    #[tokio::test]
+    async fn load_config_toml_server_unix_socket_defaults_to_none()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config_str = r#"
+[server]
+address = "127.0.0.1"
+port = 12345
+"#;
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract()?;
+        assert_eq!(config.server.address, "127.0.0.1");
+        assert_eq!(config.server.port, 12345);
+        assert_eq!(config.server.unix_socket, None);
+        Ok(())
+    }
+
+    /// `server.unix_socket` can be set via TOML, alongside `address`/`port`
+    /// (the two are not mutually exclusive at the parsing level - the Unix
+    /// socket simply takes priority at bind time in `cda-sovd`).
+    #[tokio::test]
+    async fn load_config_toml_server_unix_socket() -> Result<(), Box<dyn std::error::Error>> {
+        let config_str = r#"
+[server]
+unix_socket = "/run/cda.sock"
+"#;
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract()?;
+        assert_eq!(config.server.unix_socket, Some("/run/cda.sock".to_owned()));
         Ok(())
     }
 

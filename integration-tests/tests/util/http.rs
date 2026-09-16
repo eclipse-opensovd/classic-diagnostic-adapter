@@ -274,3 +274,81 @@ impl Response {
         self.header_map.get(name)
     }
 }
+
+/// Sends a request over a Unix domain socket connection using a real HTTP
+/// client (`hyperlocal` on top of `hyper-util`), so the tests exercise a
+/// spec-compliant client the same way a real consumer of the Unix socket
+/// transport (e.g. `opensovd-gateway`) would.
+///
+/// # Errors
+/// Returns [`TestingError`] if the socket can't be reached, the response
+/// can't be read, or the status doesn't match `expected_status`.
+#[cfg(unix)]
+pub(crate) async fn send_unix_socket_request(
+    socket_path: &str,
+    endpoint: &str,
+    expected_status: StatusCode,
+    method: Method,
+    data: Option<&str>,
+) -> Result<Response, TestingError> {
+    use http_body_util::{BodyExt, Full};
+    use hyper_util::{client::legacy::Client, rt::TokioExecutor};
+    use hyperlocal::UnixConnector;
+
+    let client: Client<UnixConnector, Full<bytes::Bytes>> =
+        Client::builder(TokioExecutor::new()).build(UnixConnector);
+    let uri: http::Uri = hyperlocal::Uri::new(socket_path, endpoint).into();
+
+    let body = data.unwrap_or_default().to_owned();
+    let mut request_builder = http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(http::header::HOST, "localhost");
+    if !body.is_empty() {
+        request_builder = request_builder
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                mime::APPLICATION_JSON.essence_str(),
+            )
+            .header(http::header::CONTENT_LENGTH, body.len());
+    }
+    let request = request_builder
+        .body(Full::new(bytes::Bytes::from(body)))
+        .map_err(|e| TestingError::ProcessFailed(format!("Failed to build request: {e}")))?;
+
+    let response = client.request(request).await.map_err(|e| {
+        TestingError::ProcessFailed(format!(
+            "Failed to send request over unix socket {socket_path}: {e}"
+        ))
+    })?;
+
+    let status = response.status();
+    let header_map = response.headers().clone();
+    let body_bytes = response
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| TestingError::ProcessFailed(format!("Failed to read response body: {e}")))?
+        .to_bytes();
+    let body = if body_bytes.is_empty() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&body_bytes).into_owned())
+    };
+
+    if status != expected_status {
+        return Err(TestingError::UnexpectedResponse {
+            expected: expected_status,
+            actual: status,
+            body,
+            message: "Expected status does not match".to_owned(),
+            url: format!("unix://{socket_path}{endpoint}"),
+        });
+    }
+
+    Ok(Response {
+        status,
+        body,
+        header_map,
+    })
+}
