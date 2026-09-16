@@ -360,6 +360,18 @@ pub trait UdsQuery: UdsTransport {
         service_name: &str,
         security_plugin: &DynamicPlugin,
     ) -> Result<RoutineSubfunctions, DiagServiceError>;
+    /// Returns whether an `InputOutputControlByIdentifier` (SID 0x2F) service resolving to
+    /// `service_name` is defined for the given ECU's current variant, following the same
+    /// naming-convention affix resolution as `get_routine_subfunctions` (falling back to an
+    /// exact short-name match).
+    /// # Errors
+    /// Will return `Err` if the ECU does not exist.
+    async fn is_io_control_service(
+        &self,
+        ecu_name: &str,
+        service_name: &str,
+        security_plugin: &DynamicPlugin,
+    ) -> Result<bool, DiagServiceError>;
     /// Retrieve all single ecu jobs for the given ECU on the detected variant.
     /// # Errors
     /// Will return `Err` if the ECU does not exist.
@@ -874,6 +886,12 @@ pub mod mock {
                 service_name: &str,
                 security_plugin: &DynamicPlugin,
             ) -> Result<RoutineSubfunctions, DiagServiceError>;
+            async fn is_io_control_service(
+                &self,
+                ecu_name: &str,
+                service_name: &str,
+                security_plugin: &DynamicPlugin,
+            ) -> Result<bool, DiagServiceError>;
             async fn get_components_single_ecu_jobs_info(
                 &self,
                 ecu: &str,

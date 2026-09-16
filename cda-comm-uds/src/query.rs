@@ -269,6 +269,20 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
             .get_routine_subfunctions(service_name, security_plugin)
     }
 
+    async fn is_io_control_service(
+        &self,
+        ecu_name: &str,
+        service_name: &str,
+        security_plugin: &DynamicPlugin,
+    ) -> Result<bool, DiagServiceError> {
+        Ok(self
+            .uds_ecu_variant_detection_concluded(ecu_name)
+            .await?
+            .read()
+            .await
+            .is_io_control_service(service_name, security_plugin))
+    }
+
     async fn get_components_single_ecu_jobs_info(
         &self,
         ecu: &str,
