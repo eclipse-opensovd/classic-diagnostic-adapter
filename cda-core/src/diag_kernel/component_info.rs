@@ -244,6 +244,37 @@ impl<S: SecurityPlugin> ComponentInfos for EcuManager<S> {
         Ok(subfunction_flags_from_services(&all_rc_services))
     }
 
+    /// Returns whether an `InputOutputControlByIdentifier` (SID 0x2F) service resolving to
+    /// `service_name` is defined for the current ECU variant.
+    ///
+    /// A candidate matches when its short name, after trimming the naming-convention affixes
+    /// configured for SID 0x2F (mirroring how [`Self::get_routine_subfunctions`] resolves
+    /// routine names via `trim_routine_name`), equals `service_name`. This is tried first,
+    /// falling back to an exact short-name match for ECUs with no IO Control affix configured.
+    fn is_io_control_service(&self, service_name: &str, security_plugin: &DynamicPlugin) -> bool {
+        !self
+            .get_services_from_variant_and_parent_refs(|service| {
+                service
+                    .request_id()
+                    .is_some_and(|id| id == service_ids::INPUT_OUTPUT_CONTROL_BY_IDENTIFIER)
+                    && is_service_visible::<S>(security_plugin, service)
+                    && service.diag_comm().is_some_and(|dc| {
+                        dc.short_name().is_some_and(|name| {
+                            let convention_name =
+                                self.database_naming_convention.trim_short_name_affixes(
+                                    &self.database_naming_convention.trim_service_name_affixes(
+                                        service_ids::INPUT_OUTPUT_CONTROL_BY_IDENTIFIER,
+                                        name.to_owned(),
+                                    ),
+                                );
+                            convention_name.eq_ignore_ascii_case(service_name)
+                                || name.eq_ignore_ascii_case(service_name)
+                        })
+                    })
+            })
+            .is_empty()
+    }
+
     /// Returns all `RoutineControl` (SID 0x31) services for the functional group,
     /// with flags indicating whether Stop (0x02) and `RequestResults` (0x03)
     /// subfunctions are also defined.

@@ -544,6 +544,10 @@ impl ComponentInfos for TestEcuDb {
         unimplemented!()
     }
 
+    fn is_io_control_service(&self, _service_name: &str, _security_plugin: &DynamicPlugin) -> bool {
+        unimplemented!()
+    }
+
     fn get_functional_group_operations_info(
         &self,
         _security_plugin: &DynamicPlugin,

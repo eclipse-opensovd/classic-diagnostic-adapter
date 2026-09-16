@@ -772,7 +772,7 @@ pub(crate) mod service {
         };
         use axum_extra::extract::{Host, WithRejection};
         use cda_interfaces::{
-            DiagComm, DiagCommType, DynamicPlugin, SchemaProvider, UdsEcu,
+            DiagComm, DiagCommType, DiagServiceError, DynamicPlugin, SchemaProvider, UdsEcu,
             communication_control::CommunicationAccess,
             diagservices::{DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType},
             file_manager::FileManager,
@@ -1044,10 +1044,18 @@ pub(crate) mod service {
             };
 
             let security_plugin: DynamicPlugin = security_plugin;
-            let is_async = if suppress_service {
-                true
+            let (is_async, diag_service) = if suppress_service {
+                (
+                    true,
+                    DiagComm {
+                        name: service.clone(),
+                        type_: DiagCommType::Operations,
+                        lookup_name: None,
+                        subfunction_id: Some(subfunction_ids::routine::START),
+                    },
+                )
             } else {
-                match check_if_async(uds, ecu_name, &service, &security_plugin).await {
+                match resolve_operation(uds, ecu_name, &service, &security_plugin).await {
                     Ok(v) => v,
                     Err(e) => {
                         return err_response(e);
@@ -1062,12 +1070,6 @@ pub(crate) mod service {
                 }
             };
 
-            let diag_service = DiagComm {
-                name: service.clone(),
-                type_: DiagCommType::Operations,
-                lookup_name: None,
-                subfunction_id: Some(subfunction_ids::routine::START),
-            };
             let response = if suppress_service {
                 None
             } else {
@@ -1111,19 +1113,57 @@ pub(crate) mod service {
             }
         }
 
-        /// Returns whether the operation is async (has Stop or `RequestResults`
-        /// subfunctions).
-        async fn check_if_async<T: UdsEcu>(
+        /// Resolves an operation-id to its underlying UDS service type and addressing scheme:
+        /// a `RoutineControl` group addressed through its Start subfunction, or an IO Control
+        /// (and any other non-routine operation) addressed by its exact diagnostic service name.
+        ///
+        /// Each type is checked directly rather than inferring IO Control from the absence of a
+        /// `RoutineControl` service, so an operation-id that matches neither fails immediately
+        /// with `NotFound` instead of falling through into a doomed `send()` attempt.
+        async fn resolve_operation<T: UdsEcu>(
             uds: &T,
             ecu_name: &str,
             service: &str,
             security_plugin: &DynamicPlugin,
-        ) -> Result<bool, ApiError> {
-            let sf = uds
+        ) -> Result<(bool, DiagComm), ApiError> {
+            match uds
                 .get_routine_subfunctions(ecu_name, service, security_plugin)
                 .await
-                .map_err(ApiError::from)?;
-            Ok(sf.has_stop || sf.has_request_results)
+            {
+                Ok(sf) => {
+                    return Ok((
+                        sf.has_stop || sf.has_request_results,
+                        DiagComm {
+                            name: service.to_owned(),
+                            type_: DiagCommType::Operations,
+                            lookup_name: None,
+                            subfunction_id: Some(subfunction_ids::routine::START),
+                        },
+                    ));
+                }
+                Err(DiagServiceError::NotFound(_)) => {}
+                Err(error) => return Err(ApiError::from(error)),
+            }
+
+            if uds
+                .is_io_control_service(ecu_name, service, security_plugin)
+                .await
+                .map_err(ApiError::from)?
+            {
+                return Ok((
+                    false,
+                    DiagComm {
+                        name: service.to_owned(),
+                        type_: DiagCommType::Operations,
+                        lookup_name: Some(service.to_owned()),
+                        subfunction_id: None,
+                    },
+                ));
+            }
+
+            Err(ApiError::from(DiagServiceError::NotFound(format!(
+                "Operation '{service}' not found"
+            ))))
         }
 
         /// Sends the Start subfunction request and returns the positive response, or
@@ -3596,6 +3636,11 @@ mod tests {
                         "Routine 'CalibrateSensor' not found in ECU description".to_string(),
                     ))
                 });
+            mock_uds
+                .expect_is_io_control_service()
+                .withf(|ecu, svc, _p| ecu == "TestECU" && svc == "CalibrateSensor")
+                .times(1)
+                .returning(|_, _, _| Ok(false));
 
             let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
                 ecu_name.clone(),
@@ -3664,6 +3709,69 @@ mod tests {
                     include_schema: false,
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
+                },
+            )
+            .await;
+
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        #[tokio::test]
+        async fn test_post_named_io_control_uses_exact_operation_service() {
+            let ecu_name = "TestECU".to_string();
+            let mut mock_uds = MockUdsEcu::new();
+            let mock_file_manager = MockFileManager::new();
+
+            mock_uds
+                .expect_get_routine_subfunctions()
+                .times(1)
+                .returning(|_, _, _| {
+                    Err(DiagServiceError::NotFound(
+                        "Not a RoutineControl service".to_owned(),
+                    ))
+                });
+            mock_uds
+                .expect_is_io_control_service()
+                .withf(|ecu, svc, _p| ecu == "TestECU" && svc == "TestOutput_Control")
+                .times(1)
+                .returning(|_, _, _| Ok(true));
+            mock_uds
+                .expect_send()
+                .withf(|ecu, service, _, payload, map_to_json| {
+                    ecu == "TestECU"
+                        && service.type_ == DiagCommType::Operations
+                        && service.name == "TestOutput_Control"
+                        && service.lookup_name.as_deref() == Some("TestOutput_Control")
+                        && service.subfunction_id.is_none()
+                        && payload.is_some()
+                        && *map_to_json
+                })
+                .times(1)
+                .returning(|_, _, _, _, _| Ok(make_empty_positive_response()));
+
+            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
+                ecu_name.clone(),
+                mock_uds,
+                mock_file_manager,
+            );
+
+            let response = ecu_operation_write_handler::<MockUdsEcu>(
+                handlers::WriteHandlerRequest {
+                    service: "TestOutput_Control".to_owned(),
+                    headers: make_post_headers(),
+                    body: axum::body::Bytes::from_static(
+                        br#"{"parameters":{"OutputValue":"ACTIVE"}}"#,
+                    ),
+                },
+                &ecu_name,
+                &state.uds,
+                Arc::clone(&state.service_executions),
+                Box::new(TestSecurityPlugin),
+                handlers::WriteHandlerOptions {
+                    include_schema: false,
+                    suppress_service: false,
+                    base_path: "http://localhost/operations/TestOutput_Control/executions"
+                        .to_owned(),
                 },
             )
             .await;
