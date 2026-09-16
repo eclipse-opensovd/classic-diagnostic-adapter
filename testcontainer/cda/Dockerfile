@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install cargo-chef and sccache
-RUN cargo install cargo-chef sccache --locked
+RUN cargo install cargo-chef@0.1.78 sccache@0.17.0 --locked
 
 # --- Stage 2: Prepare the recipe (dependencies only) ---
 FROM chef AS planner
