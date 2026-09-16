@@ -39,6 +39,7 @@ mod faults;
 mod flash_download;
 mod locks;
 mod operations;
+mod read_only_partition;
 mod runtimefiles;
 mod tester_present;
 mod version_endpoint;
