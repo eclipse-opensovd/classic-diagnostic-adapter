@@ -253,7 +253,7 @@ pub async fn resolve_mdd_paths(storage: &LocalStorage, database_dir: &str) -> Ve
 /// Falls back to an empty list if the storage collection cannot be accessed.
 async fn load_mdd_paths_from_storage(storage: &LocalStorage) -> Option<Vec<PathBuf>> {
     let collection = match storage
-        .get_or_create_collection(&CollectionName::DiagnosticDatabase)
+        .get_or_create_collection(&CollectionName::DiagnosticDatabase) //FIXME this always creates storage collection; the empty check afterwards never works  //FIXME this should generally not create the collection, since it won't work on read-only partitions
         .await
     {
         Ok(c) => c,
