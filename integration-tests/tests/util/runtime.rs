@@ -377,10 +377,7 @@ fn base_test_config(
             ..Default::default()
         },
         ecu,
-        runtime_update_config: RuntimeUpdateConfig {
-            init_storage_from_database_path: true,
-            ..RuntimeUpdateConfig::default()
-        },
+        runtime_update_config: RuntimeUpdateConfig::default(),
         communication: CommunicationSettings::default(),
         strict: StrictConfig::default(),
     })

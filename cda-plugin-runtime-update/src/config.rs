@@ -29,10 +29,6 @@ pub struct RuntimeUpdateConfig {
     /// Value of the Retry-After header (in seconds) sent when the service is
     /// temporarily unavailable due to a busy transaction.
     pub retry_after_seconds: u64,
-    /// When `true` and the `DiagnosticDatabase` storage collection is empty,
-    /// seed it from `database.path` on first startup by copying all `.mdd` files.
-    /// Default: `false`.
-    pub init_storage_from_database_path: bool,
 }
 
 impl Default for RuntimeUpdateConfig {
@@ -43,7 +39,6 @@ impl Default for RuntimeUpdateConfig {
             storage_dir_load_retry_delay_ms: 3000,
             storage_dir_load_retry_attempts: 100,
             retry_after_seconds: 1,
-            init_storage_from_database_path: false,
         }
     }
 }
