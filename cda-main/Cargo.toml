@@ -37,6 +37,7 @@ cda-transport-router = { workspace = true }
 cda-comm-uds = { workspace = true }
 cda-database = { workspace = true }
 cda-interfaces = { workspace = true }
+cda-lifecycle = { workspace = true }
 cda-sovd = { workspace = true }
 cda-tracing = { workspace = true }
 cda-plugin-security = { workspace = true }

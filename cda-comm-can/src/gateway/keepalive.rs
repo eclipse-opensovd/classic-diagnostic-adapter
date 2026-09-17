@@ -33,7 +33,7 @@ use super::{background::BackgroundTask, can_id::CanIdExt, error::CanError};
 
 /// Default functional broadcast CAN ID (ISO 15765-4), used when the MDD
 /// com-params do not define `CP_CanFuncReqId`.
-pub(crate) const DEFAULT_FUNCTIONAL_BROADCAST_ID: u32 = 0x7DF;
+pub(crate) const DEFAULT_FUNCTIONAL_BROADCAST_ID: CanId = CanId::Standard(0x7DF);
 
 /// RX side of the TX-only broadcast socket; no response ever arrives
 /// (suppressPositiveResponse) but the socket API requires an `rx_id`.
