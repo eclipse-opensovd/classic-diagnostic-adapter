@@ -1384,15 +1384,9 @@ pub(crate) mod tests {
     }
 
     struct CountingCommunicationAccess {
-        active: Arc<AtomicUsize>,
-    }
-
-    struct CountingGuard(Arc<AtomicUsize>);
-
-    impl Drop for CountingGuard {
-        fn drop(&mut self) {
-            self.0.fetch_sub(1, Ordering::SeqCst);
-        }
+        /// Used as counter for active instances.
+        /// As tests hold this too active 'access' instances are `Arc::strong_count` - 1
+        active: Arc<()>,
     }
 
     impl CommunicationAccess for CountingCommunicationAccess {
@@ -1401,10 +1395,7 @@ pub(crate) mod tests {
         }
 
         fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
-            self.active.fetch_add(1, Ordering::SeqCst);
-            Ok(CommunicationGuard::new(CountingGuard(Arc::clone(
-                &self.active,
-            ))))
+            Ok(CommunicationGuard::new(Arc::clone(&self.active)))
         }
 
         fn request_activate(&self, _cause: ActivationCause) -> CommunicationState {
@@ -1511,9 +1502,8 @@ pub(crate) mod tests {
     #[test]
     fn reservation_drop_releases_execution_and_lease() {
         let executions = Arc::new(StdRwLock::new(HashMap::default()));
-        let active = Arc::new(AtomicUsize::new(0));
         let access = CountingCommunicationAccess {
-            active: Arc::clone(&active),
+            active: Arc::new(()),
         };
 
         let Ok(reservation) = acquire_and_reserve_execution::<ServiceExecution>(
@@ -1527,7 +1517,7 @@ pub(crate) mod tests {
         };
         let id = reservation.exec_id;
 
-        assert_eq!(active.load(Ordering::SeqCst), 1);
+        assert_eq!(Arc::strong_count(&access.active), 2);
         assert!(
             lock_read(&executions)
                 .get("routine")
@@ -1536,15 +1526,14 @@ pub(crate) mod tests {
 
         drop(reservation);
 
-        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(Arc::strong_count(&access.active), 1);
         assert!(lock_read(&executions).get("routine").is_none());
     }
 
     #[test]
     fn comparam_execution_removal_releases_lease() {
-        let active = Arc::new(AtomicUsize::new(0));
         let access = CountingCommunicationAccess {
-            active: Arc::clone(&active),
+            active: Arc::new(()),
         };
         let Ok(communication_guard) = access.acquire() else {
             panic!("enabled communication must provide a guard");
@@ -1563,17 +1552,16 @@ pub(crate) mod tests {
             ),
         );
 
-        assert_eq!(active.load(Ordering::SeqCst), 1);
+        assert_eq!(Arc::strong_count(&access.active), 2);
         executions.shift_remove(&id);
-        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(Arc::strong_count(&access.active), 1);
     }
 
     #[test]
     fn async_handoff_preserves_execution_and_releases_lease_on_completion() {
         let executions = Arc::new(StdRwLock::new(HashMap::default()));
-        let active = Arc::new(AtomicUsize::new(0));
         let access = CountingCommunicationAccess {
-            active: Arc::clone(&active),
+            active: Arc::new(()),
         };
         let Ok(reservation) = acquire_and_reserve_execution::<ServiceExecution>(
             &access,
@@ -1591,7 +1579,7 @@ pub(crate) mod tests {
                 .insert("result".to_owned(), serde_json::json!("ok"));
         });
 
-        assert_eq!(active.load(Ordering::SeqCst), 1);
+        assert_eq!(Arc::strong_count(&access.active), 2);
         let mut executions_guard = lock_write(&executions);
         let execution = executions_guard
             .get_mut("routine")
@@ -1601,7 +1589,7 @@ pub(crate) mod tests {
         execution.complete();
         drop(executions_guard);
 
-        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(Arc::strong_count(&access.active), 1);
         assert!(
             lock_read(&executions)
                 .get("routine")
@@ -1625,9 +1613,8 @@ pub(crate) mod tests {
         let mut execution_map = HashMap::default();
         execution_map.insert("routine".to_owned(), entries);
         let executions = Arc::new(StdRwLock::new(execution_map));
-        let active = Arc::new(AtomicUsize::new(0));
         let access = CountingCommunicationAccess {
-            active: Arc::clone(&active),
+            active: Arc::new(()),
         };
 
         let result = acquire_and_reserve_execution::<ServiceExecution>(
@@ -1638,7 +1625,7 @@ pub(crate) mod tests {
         };
 
         assert!(matches!(error.error, ApiError::Conflict(_)));
-        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(Arc::strong_count(&access.active), 1);
     }
 
     pub fn create_test_webserver_state<T: UdsEcu + Clone, U: FileManager>(
