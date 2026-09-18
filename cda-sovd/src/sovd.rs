@@ -276,8 +276,6 @@ impl std::ops::DerefMut for ComparamExecution {
 pub(crate) struct ServiceExecution {
     pub parameters: serde_json::Map<String, serde_json::Value>,
     pub status: sovd_ecu::operations::ExecutionStatus,
-    /// Whether an HTTP handler currently has exclusive processing access to this execution.
-    /// This is independent of the diagnostic execution status.
     pub in_flight: bool,
     pub is_created: bool,
     communication_lease: Option<ExecutionLease>,
@@ -338,8 +336,6 @@ impl ExecutionStatus for ServiceExecution {
 pub(crate) struct FgServiceExecution {
     pub parameters: HashMap<String, serde_json::Map<String, serde_json::Value>>,
     pub status: sovd_ecu::operations::ExecutionStatus,
-    /// Whether an HTTP handler currently has exclusive processing access to this execution.
-    /// This is independent of the diagnostic execution status.
     pub in_flight: bool,
     pub is_created: bool,
     communication_lease: Option<ExecutionLease>,
