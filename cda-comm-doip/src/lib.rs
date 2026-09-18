@@ -12,6 +12,7 @@
  */
 
 use std::{
+    future::Future,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -20,7 +21,8 @@ use async_trait::async_trait;
 use cda_interfaces::{
     DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, FunctionalTransport,
     HashMap, HashMapExtensions, NetworkTopology, PhysicalTransport, RouteStatus, ServicePayload,
-    TransmissionParameters, TransportProbe, TransportResponse, VariantDetectionSender,
+    TransmissionParameters, TransportProbe, TransportResponse, VariantDetectionRequest,
+    VariantDetectionSender,
     communication_control::{
         GatewayLifecycle, TransportControl, TransportState, error::CommControlError,
     },
@@ -148,6 +150,15 @@ impl ConnectionTasks {
             }
         }
     }
+}
+
+async fn spawn_connection_task(
+    connection_tasks: &Arc<ConnectionTasks>,
+    name: &str,
+    task: impl Future<Output = ()> + Send + 'static,
+) {
+    let task = cda_interfaces::spawn_named!(name, task);
+    connection_tasks.push(task).await;
 }
 
 impl Drop for ConnectionTasks {
@@ -401,41 +412,81 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         drop(socket_guard);
 
         let mut gateway_ecu_map: HashMap<u16, Vec<u16>> = HashMap::new();
-        for ecu_lock in self.state.ecus.values() {
+        let mut gateway_ecu_name_map: HashMap<u16, Vec<String>> = HashMap::new();
+        for (ecu_name, ecu_lock) in self.state.ecus.iter() {
             let ecu = ecu_lock.read().await;
             gateway_ecu_map
                 .entry(ecu.logical_gateway_address())
                 .or_default()
                 .push(ecu.logical_address());
+            gateway_ecu_name_map
+                .entry(ecu.logical_gateway_address())
+                .or_default()
+                .push(ecu_name.clone());
         }
         for gateway in gateways {
-            if let Ok(logical_address) = connections::handle_gateway_connection::<T>(
-                gateway,
-                &transport_config,
-                &GatewayState {
-                    doip_connections: Arc::clone(&self.state.doip_connections),
-                    ecus: Arc::clone(&self.state.ecus),
-                    gateway_ecu_map: gateway_ecu_map.clone(),
-                    connection_tasks: Arc::clone(&connection_tasks),
-                },
-                Arc::clone(&self.connectivity_handler),
-            )
-            .await
-            {
-                self.state
-                    .logical_address_to_connection
-                    .write()
+            let gateway_name = gateway.ecu_name.clone();
+            let gateway_ecu_names = gateway_ecu_name_map
+                .get(&gateway.logical_address)
+                .cloned()
+                .unwrap_or_default();
+            let variant_detection = self.variant_detection.clone();
+            let transport_config = transport_config.clone();
+            let doip_connections = Arc::clone(&self.state.doip_connections);
+            let logical_address_to_connection =
+                Arc::clone(&self.state.logical_address_to_connection);
+            let gateway_state = GatewayState {
+                doip_connections: Arc::clone(&doip_connections),
+                ecus: Arc::clone(&self.state.ecus),
+                gateway_ecu_map: gateway_ecu_map.clone(),
+                connection_tasks: Arc::clone(&connection_tasks),
+            };
+            let connectivity_handler = Arc::clone(&self.connectivity_handler);
+            spawn_connection_task(
+                &connection_tasks,
+                &format!("doip-gateway-connect-{gateway_name}"),
+                async move {
+                    match connections::handle_gateway_connection::<T>(
+                        gateway,
+                        &transport_config,
+                        &gateway_state,
+                        connectivity_handler,
+                    )
                     .await
-                    .insert(
-                        logical_address,
-                        self.state
-                            .doip_connections
-                            .read()
-                            .await
-                            .len()
-                            .saturating_sub(1),
-                    );
-            }
+                    {
+                        Ok(logical_address) => {
+                            let connection_index =
+                                doip_connections.read().await.iter().position(|connection| {
+                                    connection.ecus.contains_key(&logical_address)
+                                });
+                            if let Some(connection_index) = connection_index {
+                                logical_address_to_connection
+                                    .write()
+                                    .await
+                                    .insert(logical_address, connection_index);
+                            }
+                            if let Err(error) = variant_detection
+                                .send(VariantDetectionRequest::new(gateway_ecu_names))
+                                .await
+                            {
+                                tracing::warn!(
+                                    gateway = %gateway_name,
+                                    error = ?error,
+                                    "Failed to trigger variant detection after gateway connection"
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                gateway = %gateway_name,
+                                error = %error,
+                                "Failed to establish initial gateway connection"
+                            );
+                        }
+                    }
+                },
+            )
+            .await;
         }
 
         let listener = vir_vam::listen_for_vams(
@@ -1321,8 +1372,9 @@ mod tests {
     use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
     use crate::{
-        DiagnosticResponse, DoIPUdpSocket, DoipConfig, DoipConnection, DoipDiagGateway, DoipEcu,
-        DoipGatewayState, read_ecu_responses, wait_for_ack_or_response_until_timeout,
+        ConnectionTasks, DiagnosticResponse, DoIPUdpSocket, DoipConfig, DoipConnection,
+        DoipDiagGateway, DoipEcu, DoipGatewayState, read_ecu_responses, spawn_connection_task,
+        wait_for_ack_or_response_until_timeout,
     };
 
     const ECU_ADDR: u16 = 0x0E80;
@@ -1448,6 +1500,21 @@ mod tests {
             connectivity_handler: Arc::new(TestConnectivityHandler),
             lifecycle: Arc::new(GatewayLifecycle::new(TransportState::Enabled)),
         }
+    }
+
+    #[tokio::test]
+    async fn registering_connection_task_does_not_wait_for_connection() {
+        let tasks = Arc::new(ConnectionTasks::new());
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            spawn_connection_task(&tasks, "pending-connection", std::future::pending()),
+        )
+        .await
+        .expect("task registration must not await connection completion");
+
+        assert_eq!(tasks.0.lock().await.len(), 1);
+        tasks.shutdown().await;
     }
 
     /// Constructing a gateway must never create or bind a UDP socket,

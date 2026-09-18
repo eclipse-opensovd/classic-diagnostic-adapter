@@ -925,11 +925,11 @@ pub(crate) mod send_tests {
     use cda_interfaces::{
         DiagServiceError, EcuAddresses, EcuGateway, EcuRuntimeState, EcuStateManager,
         FunctionalTransport, HashMap, HashMapExtensions, NetworkTopology, PendingNrc,
-        PhysicalTransport, ServicePayload, TransmissionParameters, TransportResponse,
-        UDS_ID_RESPONSE_BITMASK, VariantDetection,
+        PhysicalTransport, ServicePayload, TesterPresentType, TransmissionParameters,
+        TransportResponse, UDS_ID_RESPONSE_BITMASK, UdsTesterPresent, VariantDetection,
         communication_control::{
             ActivationCause, CommunicationAccess, CommunicationError, CommunicationGuard,
-            CommunicationState, VariantDetectionMode,
+            CommunicationOperation, CommunicationState, VariantDetectionMode,
         },
         datatypes::FaultConfig,
         service_ids,
@@ -981,6 +981,7 @@ pub(crate) mod send_tests {
                 variant_detection_receiver: Arc::new(Mutex::new(None)),
                 variant_detection_listener: Arc::new(Mutex::new(None)),
                 tester_present_snapshot: Arc::new(Mutex::new(Vec::new())),
+                tester_present_restart_task: Arc::new(Mutex::new(None)),
             }
         }
     }
@@ -1013,6 +1014,7 @@ pub(crate) mod send_tests {
     /// `CommunicationGuard` themselves.
     struct FakeCommunicationAccess {
         enabled: std::sync::atomic::AtomicBool,
+        enabling: std::sync::atomic::AtomicBool,
         activate_calls: std::sync::atomic::AtomicUsize,
         activate_succeeds: bool,
         real: Arc<dyn CommunicationAccess>,
@@ -1022,6 +1024,7 @@ pub(crate) mod send_tests {
         fn new(initially_enabled: bool, activate_succeeds: bool) -> Arc<Self> {
             Arc::new(Self {
                 enabled: std::sync::atomic::AtomicBool::new(initially_enabled),
+                enabling: std::sync::atomic::AtomicBool::new(false),
                 activate_calls: std::sync::atomic::AtomicUsize::new(0),
                 activate_succeeds,
                 real: enabled_communication_access_for_test(),
@@ -1032,12 +1035,40 @@ pub(crate) mod send_tests {
             self.activate_calls
                 .load(std::sync::atomic::Ordering::SeqCst)
         }
+
+        /// Models the window in which `initialize` runs: the transport is up,
+        /// but the activation has not published `Enabled` yet.
+        fn begin_enabling(&self) {
+            self.enabled
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            self.enabling
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        /// Models the activation reaching `Enabled`.
+        fn finish_enabling(&self) {
+            self.enabling
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            self.enabled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        /// Models the activation ending without ever reaching `Enabled`, as
+        /// happens when a later lifecycle hook or variant detection fails.
+        fn abort_enabling(&self) {
+            self.enabling
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            self.enabled
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     impl CommunicationAccess for FakeCommunicationAccess {
         fn state(&self) -> CommunicationState {
             if self.enabled.load(std::sync::atomic::Ordering::SeqCst) {
                 CommunicationState::Enabled
+            } else if self.enabling.load(std::sync::atomic::Ordering::SeqCst) {
+                CommunicationState::Enabling(CommunicationOperation::EnableAndDetect)
             } else {
                 CommunicationState::Disabled
             }
@@ -1046,6 +1077,8 @@ pub(crate) mod send_tests {
         fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
             if self.enabled.load(std::sync::atomic::Ordering::SeqCst) {
                 self.real.acquire()
+            } else if self.enabling.load(std::sync::atomic::Ordering::SeqCst) {
+                Err(CommunicationError::Enabling)
             } else {
                 Err(CommunicationError::Disabled)
             }
@@ -1058,6 +1091,8 @@ pub(crate) mod send_tests {
             // instant activation by flipping `enabled` synchronously, so a
             // retrying caller observes the effect.
             if self.activate_succeeds {
+                self.enabling
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
                 self.enabled
                     .store(true, std::sync::atomic::Ordering::SeqCst);
                 CommunicationState::Enabled
@@ -1251,6 +1286,22 @@ pub(crate) mod send_tests {
         communication_access: Arc<dyn CommunicationAccess>,
     ) -> UdsManager<TestGateway, TestEcuDb> {
         let ecus = Arc::new(HashMap::new());
+        UdsManager::new_for_raw_payload_tests(
+            gateway,
+            ecus,
+            FaultConfig::default(),
+            communication_access,
+        )
+    }
+
+    fn make_manager_with_ecu_and_access(
+        gateway: TestGateway,
+        communication_access: Arc<dyn CommunicationAccess>,
+    ) -> UdsManager<TestGateway, TestEcuDb> {
+        let ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_string(),
+            RwLock::new(TestEcuDb::new()),
+        )]));
         UdsManager::new_for_raw_payload_tests(
             gateway,
             ecus,
@@ -2427,5 +2478,115 @@ pub(crate) mod send_tests {
         ));
         assert_eq!(access.activate_call_count(), 1);
         assert_eq!(access.state(), CommunicationState::Disabled);
+    }
+
+    #[tokio::test]
+    async fn tester_present_starts_only_after_communication_is_ready() {
+        let access = FakeCommunicationAccess::new(false, true);
+        let manager = make_manager_with_ecu_and_access(make_gateway(), Arc::clone(&access) as _);
+        let type_ = TesterPresentType::Ecu("TestECU".to_owned());
+
+        let first = manager.start_tester_present(type_.clone()).await;
+
+        assert!(matches!(
+            first,
+            Err(DiagServiceError::CommunicationNotReady {
+                retry_after: TEST_COMMUNICATION_RETRY_AFTER,
+                ..
+            })
+        ));
+        assert!(!manager.check_tester_present_active(&type_).await);
+        assert_eq!(access.activate_call_count(), 1);
+
+        manager.start_tester_present(type_.clone()).await.unwrap();
+        assert!(manager.check_tester_present_active(&type_).await);
+        manager.stop_tester_present(type_).await.unwrap();
+    }
+
+    /// Waits for `type_` to become active, or panics.
+    async fn await_tester_present_active(
+        manager: &UdsManager<TestGateway, TestEcuDb>,
+        type_: &TesterPresentType,
+        context: &str,
+    ) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !manager.check_tester_present_active(type_).await {
+                cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{context}"));
+    }
+
+    /// A snapshot restart must not start tester-present tasks while the
+    /// activation that triggered it is still `Enabling`. Their first interval
+    /// tick fires immediately, so the send would be refused as not-ready and
+    /// would request an activation on top of the one already in flight.
+    #[tokio::test]
+    async fn snapshot_tester_present_restart_waits_until_communication_is_enabled() {
+        let access = FakeCommunicationAccess::new(true, true);
+        let manager = make_manager_with_ecu_and_access(make_gateway(), Arc::clone(&access) as _);
+        let type_ = TesterPresentType::Ecu("TestECU".to_owned());
+
+        manager.start_tester_present(type_.clone()).await.unwrap();
+        manager.snapshot_and_abort_tester_present().await;
+
+        // `initialize` runs here, while the activation is still in flight.
+        access.begin_enabling();
+        manager.restart_tester_present_snapshot().await;
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(30)).await;
+
+        assert!(!manager.check_tester_present_active(&type_).await);
+        assert_eq!(
+            access.activate_call_count(),
+            0,
+            "the restart must not request a second activation"
+        );
+
+        access.finish_enabling();
+        await_tester_present_active(
+            &manager,
+            &type_,
+            "snapshot restart should start after communication is enabled",
+        )
+        .await;
+
+        manager.stop_tester_present(type_).await.unwrap();
+    }
+
+    /// An activation can end after `initialize` ran but before it publishes
+    /// `Enabled`, when a later lifecycle hook or whole-vehicle detection fails
+    /// and the worker deinitializes every hook that already ran. That cancels
+    /// the pending restart, but the snapshot it was waiting to restore must
+    /// survive for the next activation.
+    #[tokio::test]
+    async fn snapshot_survives_an_activation_that_never_reaches_enabled() {
+        let access = FakeCommunicationAccess::new(true, true);
+        let manager = make_manager_with_ecu_and_access(make_gateway(), Arc::clone(&access) as _);
+        let type_ = TesterPresentType::Ecu("TestECU".to_owned());
+
+        manager.start_tester_present(type_.clone()).await.unwrap();
+        manager.snapshot_and_abort_tester_present().await;
+
+        // First activation: `initialize` defers the restart, then the
+        // activation fails and every hook that already ran is deinitialized.
+        access.begin_enabling();
+        manager.restart_tester_present_snapshot().await;
+        access.abort_enabling();
+        manager.snapshot_and_abort_tester_present().await;
+
+        // Second activation, this one reaches `Enabled`.
+        access.begin_enabling();
+        manager.restart_tester_present_snapshot().await;
+        access.finish_enabling();
+
+        await_tester_present_active(
+            &manager,
+            &type_,
+            "tester present must be restored by the next successful activation",
+        )
+        .await;
+
+        manager.stop_tester_present(type_).await.unwrap();
     }
 }

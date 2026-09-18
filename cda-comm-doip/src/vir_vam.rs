@@ -29,6 +29,26 @@ use crate::{
     connections::{GatewayState, handle_gateway_connection},
     socket::DoIPUdpSocket,
 };
+
+fn is_gateway(ecu: &impl EcuAddresses) -> bool {
+    ecu.logical_gateway_address() == ecu.logical_address()
+}
+
+fn add_discovered_gateway(gateways: &mut Vec<DiscoveredGateway>, gateway: DiscoveredGateway) {
+    if gateways
+        .iter()
+        .any(|known| known.logical_address == gateway.logical_address)
+    {
+        tracing::debug!(
+            ecu_name = %gateway.ecu_name,
+            logical_address = %format!("{:#06x}", gateway.logical_address),
+            "Ignoring duplicate VAM"
+        );
+        return;
+    }
+    gateways.push(gateway);
+}
+
 pub(crate) async fn get_vehicle_identification<T, F>(
     socket: &mut DoIPUdpSocket,
     netmask: u32,
@@ -80,7 +100,7 @@ where
                                 continue;
                             }
                             match handle_vam::<T>(ecus, doip_msg, source_addr, netmask).await {
-                                Ok(Some(gateway)) => gateways.push(gateway),
+                                Ok(Some(gateway)) => add_discovered_gateway(&mut gateways, gateway),
                                 Ok(None) => { /* ignore non-matching VAMs */ }
                                 Err(e) => tracing::error!(error = ?e, "Failed to handle VAM"),
                             }
@@ -372,7 +392,17 @@ where
             tracing::debug!("VAM received, parsing ...");
             let mut matched_ecu = None;
             for (name, ecu) in ecus.iter() {
-                if ecu.read().await.logical_address().to_be_bytes() == vam.logical_address {
+                let ecu = ecu.read().await;
+                if ecu.logical_address().to_be_bytes() == vam.logical_address {
+                    if !is_gateway(&*ecu) {
+                        tracing::warn!(
+                            ecu_name = %name,
+                            logical_address = %format!("{:#06x}", ecu.logical_address()),
+                            gateway_address = %format!("{:#06x}", ecu.logical_gateway_address()),
+                            "Ignoring VAM from non-gateway ECU"
+                        );
+                        return Ok(None);
+                    }
                     matched_ecu = Some(name.to_owned());
                     break;
                 }
@@ -403,5 +433,89 @@ where
         _ => Err(DoipGatewaySetupError::ResourceError(format!(
             "Expected VAM, got: {doip_msg:?}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cda_interfaces::EcuAddresses;
+    use doip_definitions::header::ProtocolVersion;
+
+    use super::{add_discovered_gateway, is_gateway};
+    use crate::DiscoveredGateway;
+
+    struct TestEcu {
+        logical_address: u16,
+        gateway_address: u16,
+    }
+
+    impl EcuAddresses for TestEcu {
+        fn tester_address(&self) -> u16 {
+            0x0E80
+        }
+
+        fn logical_address(&self) -> u16 {
+            self.logical_address
+        }
+
+        fn logical_gateway_address(&self) -> u16 {
+            self.gateway_address
+        }
+
+        fn logical_functional_address(&self) -> u16 {
+            0xE400
+        }
+
+        fn ecu_name(&self) -> String {
+            "test".to_owned()
+        }
+
+        fn logical_address_eq<T: EcuAddresses>(&self, other: &T) -> bool {
+            self.logical_address == other.logical_address()
+        }
+    }
+
+    fn gateway(ecu_name: &str, logical_address: u16) -> DiscoveredGateway {
+        DiscoveredGateway {
+            ip: "127.0.0.1".to_owned(),
+            ecu_name: ecu_name.to_owned(),
+            logical_address,
+            doip_protocol_version: ProtocolVersion::Iso13400_2012,
+        }
+    }
+
+    #[test]
+    fn duplicate_vams_create_only_one_gateway() {
+        let mut gateways = Vec::new();
+
+        add_discovered_gateway(&mut gateways, gateway("first", 0x110A));
+        add_discovered_gateway(&mut gateways, gateway("duplicate", 0x110A));
+        add_discovered_gateway(&mut gateways, gateway("other", 0x1163));
+
+        assert_eq!(gateways.len(), 2);
+        assert_eq!(
+            gateways.first().map(|gateway| gateway.ecu_name.as_str()),
+            Some("first")
+        );
+        assert_eq!(
+            gateways.get(1).map(|gateway| gateway.ecu_name.as_str()),
+            Some("other")
+        );
+    }
+
+    #[test]
+    fn ecu_with_own_gateway_address_is_a_gateway() {
+        assert!(is_gateway(&TestEcu {
+            logical_address: 0x110A,
+            gateway_address: 0x110A,
+        }));
+    }
+
+    #[test]
+    fn ecu_behind_another_gateway_is_not_a_gateway() {
+        assert!(!is_gateway(&TestEcu {
+            logical_address: 0x1163,
+            gateway_address: 0x110A,
+        }));
     }
 }

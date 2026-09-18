@@ -329,6 +329,35 @@ where
 }
 
 #[cfg(test)]
+mod tests {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    use super::{OPENAPI_JSON_ROUTE, add_openapi_routes, dynamic_router::DynamicRouter};
+
+    #[tokio::test]
+    async fn openapi_route_is_available_without_vehicle_routes() {
+        let dynamic_router = DynamicRouter::new();
+        add_openapi_routes(&dynamic_router).await;
+
+        let response = dynamic_router
+            .get_router()
+            .await
+            .oneshot(
+                Request::builder()
+                    .uri(OPENAPI_JSON_ROUTE)
+                    .header("host", "127.0.0.1:20002")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+}
+
+#[cfg(test)]
 pub(crate) mod test_utils {
     use serde::de::DeserializeOwned;
 
