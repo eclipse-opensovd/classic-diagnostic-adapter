@@ -9,15 +9,21 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-[styles]
-c = ["*.rs", "*.kt", "*.kts", "*.fbs"]
-python = [
-  ".env.example",
-  ".gitkeep",
-  ".markdownlintignore",
-  ".yamlfmt",
-  "*.bazel",
-  "*.bzl",
-  "*.env",
-]
-html = ["*.odx-*"]
+load("//bazel:rust_crate.bzl", "workspace_rust_library")
+
+workspace_rust_library(
+    name = "sovd_interfaces",
+    srcs = glob(["src/**/*.rs"]),
+    crate_deps = [
+        "chrono",
+        "schemars",
+        "serde",
+        "serde_json",
+        "strum",
+    ],
+    crate_name = "sovd_interfaces",
+    crate_root = "src/lib.rs",
+    deps = [
+        "//cda-interfaces:cda_interfaces",
+    ],
+)

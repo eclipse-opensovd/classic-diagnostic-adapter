@@ -52,8 +52,6 @@ COPY cda-extra/Cargo.toml ./cda-extra/Cargo.toml
 COPY cda-storage/Cargo.toml ./cda-storage/Cargo.toml
 COPY integration-tests/Cargo.toml ./integration-tests/Cargo.toml
 COPY cda-build/Cargo.toml ./cda-build/Cargo.toml
-COPY comm-mbedtls/mbedtls-rs/Cargo.toml ./comm-mbedtls/mbedtls-rs/Cargo.toml
-COPY comm-mbedtls/mbedtls-sys/Cargo.toml ./comm-mbedtls/mbedtls-sys/Cargo.toml
 COPY opensovd-axum-extra/Cargo.toml ./opensovd-axum-extra/Cargo.toml
 COPY override-macros/Cargo.toml ./override-macros/Cargo.toml
 
@@ -118,7 +116,6 @@ COPY cda-extra ./cda-extra
 COPY cda-storage ./cda-storage
 COPY integration-tests ./integration-tests
 COPY cda-build ./cda-build
-COPY comm-mbedtls ./comm-mbedtls
 COPY opensovd-axum-extra ./opensovd-axum-extra
 COPY override-macros ./override-macros
 
