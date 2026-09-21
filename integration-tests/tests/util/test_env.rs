@@ -28,6 +28,7 @@
 use std::{
     future::{Future, IntoFuture},
     ops::{Deref, DerefMut},
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{
         Arc, LazyLock, Mutex, Once, PoisonError,
@@ -47,7 +48,8 @@ use http::{HeaderMap, Method, StatusCode};
 use opensovd_cda_lib::config::configfile::{Configuration, ServerTransport};
 use sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response as NetworkStructureResponse;
 use testcontainers::{
-    ContainerAsync, ContainerRequest, GenericImage, ImageExt, TestcontainersError, core::Mount,
+    ContainerAsync, ContainerRequest, GenericImage, ImageExt, TestcontainersError,
+    core::{CmdWaitFor, ExecCommand, Mount},
     runners::AsyncRunner,
 };
 use tokio::sync::{Semaphore, SemaphorePermit};
@@ -251,8 +253,60 @@ impl TestEnv {
             ));
         }
         let toml = self.spec.cda_config_toml(config)?;
-        self.start_cda(CdaSetup::Configured { toml }, config.clone())
-            .await
+        self.start_cda(
+            CdaSetup::Configured {
+                toml,
+                storage: None,
+            },
+            config.clone(),
+        )
+        .await
+    }
+
+    /// Replaces the CDA like [`Self::replace_cda`], but the new CDA starts
+    /// with a copy of the storage of the current one, e.g. to restart a CDA
+    /// that applied runtime updates with another configuration.
+    ///
+    /// # Errors
+    /// See [`Self::replace_cda`], or the storage cannot be copied, e.g.
+    /// because no CDA is running.
+    pub(crate) async fn replace_cda_keeping_storage(
+        &mut self,
+        config: &Configuration,
+    ) -> Result<(), TestingError> {
+        if self.read_only_rootfs {
+            return Err(TestingError::SetupError(
+                "a CDA on a read-only root filesystem runs without a configuration".to_owned(),
+            ));
+        }
+        let cda = self.cda_container()?;
+        let storage = tempfile::tempdir().map_err(|e| {
+            TestingError::SetupError(format!("Failed to create a directory for the storage: {e}"))
+        })?;
+        let host_dir = storage.path().to_path_buf();
+        on_shared_runtime(async move { copy_storage_out(&cda, &host_dir).await }).await?;
+        let toml = self.spec.cda_config_toml(config)?;
+        // `storage` is removed when it goes out of scope, after the new CDA
+        // was created with its copy.
+        self.start_cda(
+            CdaSetup::Configured {
+                toml,
+                storage: Some(storage.path().to_path_buf()),
+            },
+            config.clone(),
+        )
+        .await
+    }
+
+    /// The content of `path`, relative to the storage directory of the CDA.
+    ///
+    /// # Errors
+    /// Returns [`TestingError::ProcessFailed`] if no CDA is running or the
+    /// file cannot be read.
+    pub(crate) async fn read_cda_storage_file(&self, path: &str) -> Result<Vec<u8>, TestingError> {
+        let cda = self.cda_container()?;
+        let path = format!("{CDA_STORAGE_DIR}/{path}");
+        on_shared_runtime(async move { exec_stdout(&cda, &["cat", &path]).await }).await
     }
 
     /// Replaces the CDA with a new one, set up as `setup`. `config` becomes
@@ -440,6 +494,13 @@ impl TestEnv {
             spec,
             auth: Mutex::new(None),
         })
+    }
+
+    fn cda_container(&self) -> Result<Container, TestingError> {
+        self.containers
+            .cda
+            .clone()
+            .ok_or_else(|| TestingError::ProcessFailed("No CDA is running".to_owned()))
     }
 
     fn ecu_sim_container(&self) -> Result<Container, TestingError> {
@@ -1037,12 +1098,87 @@ fn ecu_sim_start_error(spec: &EnvSpec, error: &TestcontainersError) -> TestingEr
 /// How a CDA container is set up.
 #[derive(Clone)]
 enum CdaSetup {
-    /// A writable root filesystem, `toml` as the configuration file, and an
-    /// empty tmpfs as the storage at [`CDA_STORAGE_DIR`].
-    Configured { toml: String },
+    /// A writable root filesystem, `toml` as the configuration file, and as
+    /// the storage at [`CDA_STORAGE_DIR`] an empty tmpfs, or with `storage`
+    /// a copy of that host directory on the root filesystem.
+    Configured {
+        toml: String,
+        storage: Option<PathBuf>,
+    },
     /// A read-only root filesystem, which also holds the storage, and no
     /// configuration, see [`TestEnvBuilder::with_read_only_rootfs`].
     ReadOnly,
+}
+
+/// Copies the storage of the CDA container `cda`, directories included, into
+/// the host directory `host_dir`.
+async fn copy_storage_out(
+    cda: &ContainerAsync<GenericImage>,
+    host_dir: &Path,
+) -> Result<(), TestingError> {
+    let write_error =
+        |e: std::io::Error| TestingError::SetupError(format!("Failed to copy the storage: {e}"));
+
+    for dir in storage_entries(cda, "d").await? {
+        std::fs::create_dir_all(host_dir.join(dir)).map_err(write_error)?;
+    }
+    for file in storage_entries(cda, "f").await? {
+        let content = exec_stdout(cda, &["cat", &format!("{CDA_STORAGE_DIR}/{file}")]).await?;
+        let target = host_dir.join(file);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(write_error)?;
+        }
+        std::fs::write(target, content).map_err(write_error)?;
+    }
+    Ok(())
+}
+
+/// The paths of the entries of the `find -type` `kind` in the storage of the
+/// CDA container `cda`, relative to [`CDA_STORAGE_DIR`].
+async fn storage_entries(
+    cda: &ContainerAsync<GenericImage>,
+    kind: &str,
+) -> Result<Vec<String>, TestingError> {
+    let output = exec_stdout(
+        cda,
+        &[
+            "find",
+            CDA_STORAGE_DIR,
+            "-mindepth",
+            "1",
+            "-type",
+            kind,
+            "-printf",
+            "%P\\n",
+        ],
+    )
+    .await?;
+    Ok(String::from_utf8_lossy(&output)
+        .lines()
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Runs `cmd` in `container` and returns its standard output.
+///
+/// # Errors
+/// Returns [`TestingError::ProcessFailed`] if it cannot be run or does not
+/// exit with 0.
+async fn exec_stdout(
+    container: &ContainerAsync<GenericImage>,
+    cmd: &[&str],
+) -> Result<Vec<u8>, TestingError> {
+    let error = |e: TestcontainersError| {
+        TestingError::ProcessFailed(format!("`{}` failed: {e}", cmd.join(" ")))
+    };
+    let mut result = container
+        .exec(
+            ExecCommand::new(cmd.iter().copied())
+                .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
+        )
+        .await
+        .map_err(error)?;
+    result.stdout_to_vec().await.map_err(error)
 }
 
 /// Starts a CDA container set up as `setup`, with the flash files mounted
@@ -1066,12 +1202,19 @@ async fn start_cda(
             // uploads into `/`, which Docker rejects for a read-only one, even when
             // the file would end up in a volume. A read-only CDA runs without one.
             Ok(match setup {
-                CdaSetup::Configured { toml } => cda
-                    .with_copy_to(CDA_CONFIG_FILE, toml.into_bytes())
-                    .with_env_var("CDA_CONFIG_FILE", CDA_CONFIG_FILE)
-                    .with_mount(
-                        Mount::tmpfs_mount(CDA_STORAGE_DIR).with_size_bytes(CDA_STORAGE_SIZE_BYTES),
-                    ),
+                CdaSetup::Configured { toml, storage } => {
+                    let cda = cda
+                        .with_copy_to(CDA_CONFIG_FILE, toml.into_bytes())
+                        .with_env_var("CDA_CONFIG_FILE", CDA_CONFIG_FILE);
+                    match storage {
+                        // Not on a tmpfs, which would hide the copy.
+                        Some(storage) => cda.with_copy_to(CDA_STORAGE_DIR, storage),
+                        None => cda.with_mount(
+                            Mount::tmpfs_mount(CDA_STORAGE_DIR)
+                                .with_size_bytes(CDA_STORAGE_SIZE_BYTES),
+                        ),
+                    }
+                }
                 CdaSetup::ReadOnly => cda.with_readonly_rootfs(true),
             })
         }

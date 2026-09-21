@@ -45,11 +45,13 @@ pub enum RuntimeUpdateError {
     #[error("Another transaction is already active")]
     TransactionBusy,
     #[error("Reload failed: {0}")]
-    ReloadFailed(String),
+    ReloadFailed(#[from] ReloadFailure),
     #[error("An execution is already in progress")]
     ExecutionConflict,
     #[error("File not found: {0}")]
     FileNotFound(String),
+    #[error("Internal error, the update was not started: {0}")]
+    UpdateStartError(String),
     #[error("Fatal Error: {0}")]
     FatalError(String),
     #[error("Severe Error: {0}")]
@@ -76,7 +78,7 @@ impl From<CdaStorageError> for RuntimeUpdateError {
 #[error("Verification failed: {0}")]
 pub struct VerificationError(pub String);
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ReloadError {
     #[error("Reload error: {0}")]
     General(String),
@@ -84,14 +86,42 @@ pub enum ReloadError {
     CommunicationFailure(String),
     #[error("Component replacement failed: {0}")]
     ReplacementFailure(String),
+    #[error(
+        "MDD files were provided, yet none of them loaded. On a reload this means a total loss of \
+         diagnostic function and grants a rollback: {0}"
+    )]
+    NoDatabasesLoaded(String),
 }
 
-impl From<ReloadError> for RuntimeUpdateError {
-    fn from(error: ReloadError) -> Self {
-        match error {
-            ReloadError::CommunicationFailure(message) => Self::CommunicationFailure(message),
-            ReloadError::ReplacementFailure(message) => Self::ReplacementFailure(message),
-            ReloadError::General(message) => Self::ReloadFailed(message),
-        }
-    }
+/// Where recovery gave up, and why.
+///
+/// Names the step at which a runtime update stopped being able to guarantee that
+/// the databases on disk and the runtime built from them still agree. Persistent
+/// state is the MDD files in storage; live state is what the running process
+/// serves from them. Nothing branches on this value: it reaches an operator
+/// through the log and through the failure reason of the execution, so that
+/// whoever investigates knows which step to look at.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum RecoveryError {
+    /// The candidate was rejected, and restoring the previous MDD files from the
+    /// backup failed as well, so what is on disk matches neither the candidate nor
+    /// the previous database. Storage is the first thing to inspect.
+    #[error("Restoring the previous databases failed: {0}")]
+    PersistentRestore(ReloadError),
+    /// The previous files were restored, but building runtime state from them
+    /// failed too, so what is live is whatever the rejected candidate left behind.
+    /// Both the candidate and the database that worked until now are unusable.
+    #[error("The restored databases could not be prepared: {0}")]
+    RestoredPreparation(ReloadError),
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ReloadFailure {
+    #[error("Requested reload failed but the previous state was restored: {original}")]
+    RejectedAndRestored { original: ReloadError },
+    #[error("Requested reload failed and coherence could not be restored: {original}; {recovery}")]
+    RecoveryFailed {
+        original: ReloadError,
+        recovery: RecoveryError,
+    },
 }

@@ -56,6 +56,8 @@ pub(crate) const COMPONENTS_FLXC1000_DATA: &str = formatcp!("{}/data", COMPONENT
 /// The VIN of FLXC1000.
 pub(crate) const COMPONENTS_FLXC1000_DATA_VINDATAIDENTIFIER: &str =
     formatcp!("{}/vindataidentifier", COMPONENTS_FLXC1000_DATA);
+/// The data resources of FSNR2000.
+pub(crate) const COMPONENTS_FSNR2000_DATA: &str = formatcp!("{}/data", COMPONENTS_FSNR2000_BASE);
 
 /// The functional group of the `DoIP` ECUs.
 pub(crate) const FUNCTIONS_FUNCTIONALGROUPS_DOIP_BASE: &str =

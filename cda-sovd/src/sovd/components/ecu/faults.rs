@@ -14,7 +14,6 @@
 use aide::{UseApi, transform::TransformOperation};
 use axum::{
     Json,
-    extract::State,
     http::StatusCode,
     response::{IntoResponse as _, Response},
 };
@@ -23,7 +22,6 @@ use cda_interfaces::{
     DynamicPlugin, UdsEcu,
     datatypes::DtcRecordAndStatus,
     diagservices::{DiagServiceResponse, DiagServiceResponseType},
-    file_manager::FileManager,
 };
 use cda_plugin_security::Secured;
 use serde_qs::axum::QsQuery;
@@ -35,7 +33,7 @@ use sovd_interfaces::components::ecu::{
 use crate::{
     openapi,
     sovd::{
-        IntoSovd, WebserverEcuState, create_schema,
+        EcuContext, IntoSovd, WebserverEcuState, create_schema,
         error::{ApiError, ErrorWrapper, api_error_from_diag_response},
         faults::faults::FaultStatus,
         locks::require_ecu_access,
@@ -74,14 +72,14 @@ impl IntoSovd for DtcRecordAndStatus {
     }
 }
 
-pub(crate) async fn get<T: UdsEcu + Send + Sync + Clone, U: FileManager + Send + Sync + Clone>(
+pub(crate) async fn get<T: UdsEcu + Send + Sync + Clone>(
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-    State(WebserverEcuState {
+    EcuContext(WebserverEcuState {
         ecu_name,
         uds,
         locks,
         ..
-    }): State<WebserverEcuState<T, U>>,
+    }): EcuContext<T>,
     WithRejection(QsQuery(query), _): WithRejection<QsQuery<GetFaultQuery>, ApiError>,
 ) -> Response {
     require_ecu_access!(
@@ -143,17 +141,14 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
         .id("ecu_faults_get")
 }
 
-pub(crate) async fn delete<
-    T: UdsEcu + Send + Sync + Clone,
-    U: FileManager + Send + Sync + Clone,
->(
+pub(crate) async fn delete<T: UdsEcu + Send + Sync + Clone>(
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-    State(WebserverEcuState {
+    EcuContext(WebserverEcuState {
         ecu_name,
         uds,
         locks,
         ..
-    }): State<WebserverEcuState<T, U>>,
+    }): EcuContext<T>,
     WithRejection(QsQuery(query), _): WithRejection<QsQuery<DeleteFaultQuery>, ApiError>,
 ) -> Response {
     require_ecu_access!(write, security_plugin, &ecu_name, &locks, false);
@@ -326,19 +321,16 @@ pub(crate) mod id {
         }
     }
 
-    pub(crate) async fn get<
-        T: UdsEcu + Send + Sync + Clone,
-        U: FileManager + Send + Sync + Clone,
-    >(
+    pub(crate) async fn get<T: UdsEcu + Send + Sync + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         Path(id): Path<IdPathParam>,
         Query(query): Query<DtcIdQuery>,
-        State(WebserverEcuState {
+        EcuContext(WebserverEcuState {
             ecu_name,
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): EcuContext<T>,
     ) -> Response {
         require_ecu_access!(
             read,
@@ -384,18 +376,15 @@ pub(crate) mod id {
             .id("ecu_faults_get")
     }
 
-    pub(crate) async fn delete<
-        T: UdsEcu + Send + Sync + Clone,
-        U: FileManager + Send + Sync + Clone,
-    >(
+    pub(crate) async fn delete<T: UdsEcu + Send + Sync + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         Path(IdPathParam { id }): Path<IdPathParam>,
-        State(WebserverEcuState {
+        EcuContext(WebserverEcuState {
             ecu_name,
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): EcuContext<T>,
         WithRejection(QsQuery(query), _): WithRejection<QsQuery<DeleteFaultQuery>, ApiError>,
     ) -> Response {
         require_ecu_access!(write, security_plugin, &ecu_name, &locks, false);
@@ -442,7 +431,6 @@ mod tests {
     use cda_interfaces::{
         HashMap,
         datatypes::{DtcReadInformationFunction, DtcRecord, DtcStatus},
-        file_manager::mock::MockFileManager,
         mock::MockUdsEcu,
     };
     use cda_plugin_security::mock::TestSecurityPlugin;
@@ -455,7 +443,6 @@ mod tests {
         // Arrange
         let ecu_name = "TestECU".to_string();
         let mut mock_uds = MockUdsEcu::new();
-        let mock_file_manager = MockFileManager::new();
 
         // Create test DTC data
         let test_dtc = DtcRecordAndStatus {
@@ -498,11 +485,7 @@ mod tests {
             });
 
         // Create state using test utility
-        let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-            ecu_name,
-            mock_uds,
-            mock_file_manager,
-        );
+        let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds).await;
 
         let query = GetFaultQuery {
             status: None,
@@ -514,9 +497,9 @@ mod tests {
 
         // Create security plugin using test utility
         let security_plugin = Box::new(TestSecurityPlugin);
-        let response = get::<MockUdsEcu, MockFileManager>(
+        let response = get::<MockUdsEcu>(
             UseApi(Secured(security_plugin), std::marker::PhantomData),
-            State(state),
+            EcuContext(state),
             WithRejection(QsQuery(query), std::marker::PhantomData),
         )
         .await;

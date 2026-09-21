@@ -17,8 +17,6 @@
 pub mod access;
 pub mod error;
 pub mod operation;
-// Private: `SwappableGateway` is minted only via `ComponentSlot::transport_control`.
-mod swappable_gateway;
 
 use std::time::Duration;
 
@@ -53,15 +51,12 @@ pub enum TransportState {
 ///
 /// # Ownership model
 ///
-/// Each layer owns its own, unshared tracker: the diagnostic transport router
-/// one, and each gateway (`DoipDiagGateway`, `CanDiagGateway`) one. When the
-/// router calls `gateway.enable()`, both transition their own tracker. External
-/// consumers only ever observe the router's, via the transport-control view
-/// minted from `ComponentSlot::transport_control`.
+/// Each composed transport layer owns an unshared tracker. When a parent calls a
+/// child's `enable`, both transition their own tracker. External consumers
+/// observe only the outermost [`TransportControl`] implementation.
 ///
-/// A gateway's own tracker serves its `enable()` idempotency short-circuit, and
-/// is the only source of truth when the gateway is used without a router (tests,
-/// shutdown).
+/// A child transport's tracker serves its `enable` idempotency short-circuit and
+/// remains its source of truth when it is used independently.
 ///
 /// This type only tracks state. Serializing a complete lifecycle operation is
 /// the job of the operation mutex each layer already owns.
@@ -236,7 +231,7 @@ impl Default for CommunicationSettings {
 /// The intended call chain is:
 ///
 /// ```text
-/// CommunicationHandle -> SwappableGateway -> DiagnosticTransportRouter -> Gateways
+/// lifecycle coordinator -> outer TransportControl -> child transports
 /// ```
 ///
 /// The coordinator calls `state()` on the outermost implementor to populate
