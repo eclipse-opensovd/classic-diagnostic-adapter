@@ -82,6 +82,12 @@ pub(crate) enum LifecycleCommand {
         id: DisableLeaseId,
         reply: ActivationReply,
     },
+    /// Finishes an exclusive disable lease without activating: consumes the
+    /// lease and stays disabled.
+    FinishDisableLease {
+        id: DisableLeaseId,
+        reply: oneshot::Sender<Result<(), CommunicationOperationFailure>>,
+    },
     /// Registers a lifecycle hook.
     RegisterLifecycleHook {
         initializer: Arc<dyn CommunicationLifecycle>,
@@ -329,6 +335,10 @@ impl LifecycleWorker {
                 let result = self.execute_release(id).await;
                 let _ = reply.send(result);
             }
+            LifecycleCommand::FinishDisableLease { id, reply } => {
+                let result = self.execute_finish(id);
+                let _ = reply.send(result);
+            }
             LifecycleCommand::RegisterLifecycleHook { initializer, reply } => {
                 self.resources.initializers.push(initializer);
                 let _ = reply.send(Ok(()));
@@ -466,8 +476,32 @@ impl LifecycleWorker {
         let result =
             run_activation(&self.resources, CommunicationOperation::Resume, detector).await;
         let result = self.finish_enabling(result, CommunicationOperation::Resume);
+        // A resume that fails leaves the transport in an unknown state; the next
+        // operation must not simply retry over it.
+        if let Err(failure) = &result {
+            self.state.lock().state = CommunicationState::RecoveryRequired(failure.clone());
+        }
         let _ = result_tx.send(Some(result.clone()));
         result
+    }
+
+    /// Finishes a disable lease without activating, staying disabled regardless
+    /// of what the lease displaced.
+    ///
+    /// Unlike [`execute_release`](Self::execute_release), never claims
+    /// [`CommunicationOperation::Resume`]: only the lease holder can call this
+    /// and it consumes the lease, so no concurrent caller can join.
+    fn execute_finish(&self, id: DisableLeaseId) -> Result<(), CommunicationOperationFailure> {
+        // One lock hold: checking ownership and consuming the lease must be
+        // atomic, or a concurrent caller could take the lease in between.
+        let mut state = self.state.lock();
+        if !DisableOwner::owns(state.disable_owner, id) {
+            tracing::debug!("Finish rejected: unknown or conflicting lease");
+            return Err(super::disable::stale_finish_failure());
+        }
+        state.disable_owner = None;
+        state.state = CommunicationState::Disabled;
+        Ok(())
     }
 
     /// Fails queued commands and disables the transport.
@@ -527,6 +561,11 @@ impl LifecycleWorker {
             LifecycleCommand::ReleaseDisableLease { reply, .. } => {
                 let _ = reply.send(Err(CommunicationOperationFailure::ShuttingDown {
                     operation: CommunicationOperation::Resume,
+                }));
+            }
+            LifecycleCommand::FinishDisableLease { reply, .. } => {
+                let _ = reply.send(Err(CommunicationOperationFailure::ShuttingDown {
+                    operation: CommunicationOperation::FinishDisableLease,
                 }));
             }
             LifecycleCommand::RegisterLifecycleHook { reply, .. } => {
