@@ -29,7 +29,7 @@ use cda_interfaces::{
     DiagServiceError, HashMap, HashMapExtensions, HashSet,
     communication_control::CommunicationError,
     diagservices::{DiagServiceResponse, MappedNRC},
-    file_manager::MddError,
+    mdd_chunks::MddError,
 };
 use serde::{Deserialize, Serialize};
 use serde_qs::axum::QsQueryRejection;
@@ -575,7 +575,10 @@ pub(crate) async fn sovd_method_not_allowed_handler(
     }
 }
 
-pub(crate) async fn sovd_not_found_handler(uri: Uri) -> impl IntoResponse {
+/// Shared "resource not found" body, also used by the `EcuContext` and
+/// `FgContext` extractor rejections so a removed ECU or functional group
+/// stays indistinguishable from a route that never existed.
+pub(crate) fn not_found_response(uri: &Uri) -> Response {
     (
         StatusCode::NOT_FOUND,
         Json(
@@ -589,6 +592,11 @@ pub(crate) async fn sovd_not_found_handler(uri: Uri) -> impl IntoResponse {
             },
         ),
     )
+        .into_response()
+}
+
+pub(crate) async fn sovd_not_found_handler(uri: Uri) -> impl IntoResponse {
+    not_found_response(&uri)
 }
 
 #[cfg(test)]

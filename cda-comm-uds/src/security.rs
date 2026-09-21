@@ -16,11 +16,80 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, ResetOutcome, SecurityAccess,
-    UdsSecurity, UdsTransport,
+    UdsSecurity,
+    communication_control::CommunicationGuard,
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
 };
 
-use crate::{UdsManager, types::ResetType};
+use crate::{UdsManager, VariantReadyEcu, types::ResetType};
+
+impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Mirrors the trait method's parameters, with the resolved ECU handle and the \
+                  caller's communication guard in place of the ECU name"
+    )]
+    async fn set_ecu_security_access_resolved(
+        &self,
+        // Not used here beyond forwarding: holding the borrow for the whole
+        // call keeps the caller's `CommunicationGuard` alive, so communication
+        // cannot be disabled mid-request.
+        communication: &CommunicationGuard,
+        ecu: &VariantReadyEcu<'_, T>,
+        level: &str,
+        authentication_data: Option<UdsPayloadData>,
+        request_seed_data: Option<UdsPayloadData>,
+        security_plugin: &DynamicPlugin,
+        expiration: Option<Duration>,
+    ) -> Result<
+        (
+            SecurityAccess,
+            <T as cda_interfaces::PayloadDecoder>::Response,
+        ),
+        DiagServiceError,
+    > {
+        let security_access = ecu
+            .read()
+            .await
+            .lookup_security_access_change(level, authentication_data.is_some())
+            .await?;
+        match &security_access {
+            SecurityAccess::RequestSeed(dc) => Ok((
+                security_access.clone(),
+                self.send_service(
+                    communication,
+                    ecu,
+                    dc.clone(),
+                    security_plugin,
+                    request_seed_data,
+                    false,
+                )
+                .await?,
+            )),
+            SecurityAccess::SendKey(dc) => {
+                let result = self
+                    .send_service(
+                        communication,
+                        ecu,
+                        dc.clone(),
+                        security_plugin,
+                        authentication_data,
+                        true,
+                    )
+                    .await?;
+                match result.response_type() {
+                    DiagServiceResponseType::Positive => {
+                        self.start_reset_task(ecu.name(), expiration, ResetType::SecurityAccess)
+                            .await;
+
+                        Ok((security_access, result))
+                    }
+                    DiagServiceResponseType::Negative => Ok((security_access, result)),
+                }
+            }
+        }
+    }
+}
 
 #[async_trait]
 impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
@@ -31,28 +100,36 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
         // Cancel any existing security access reset task to prevent double resetting
         self.cancel_reset(ecu_name, ResetType::SecurityAccess).await;
 
-        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
-        let default_security_access = ecu_diag_service.read().await.default_security_access()?;
-        let current_security_access = ecu_diag_service.read().await.security_access().await?;
+        // Checked directly rather than through the send path, which would
+        // request an activation: a reset must not switch communication on.
+        // Holding the guard also prevents an update writer from being queued
+        // while this operation uses one resolved vehicle-data snapshot.
+        let Ok(communication_guard) = self.communication_access.acquire() else {
+            self.defer_reset(ecu_name, ResetType::SecurityAccess).await;
+            return Ok(ResetOutcome::Deferred);
+        };
+        let data = self.ecu_data.read().await;
+        let ecu = self
+            .uds_ecu_variant_detection_concluded(&data, ecu_name)
+            .await?;
+        let ecu_read = ecu.read().await;
+        let default_security_access = ecu_read.default_security_access()?;
+        let current_security_access = ecu_read.security_access().await?;
+        // The reset send below re-locks this ECU; a queued writer would deadlock it.
+        drop(ecu_read);
 
         if current_security_access == default_security_access {
             tracing::debug!("Already at default security access, nothing to do");
             return Ok(ResetOutcome::Completed);
         }
 
-        // Checked directly rather than through the send path, which would
-        // request an activation: a reset must not switch communication on.
-        let Ok(_guard) = self.communication_access.acquire() else {
-            self.defer_reset(ecu_name, ResetType::SecurityAccess).await;
-            return Ok(ResetOutcome::Deferred);
-        };
-
         // A reset is housekeeping and must never be blocked by service validation or the
         // pre-send authorization.
         let void_plugin: DynamicPlugin = Box::new(());
         let (_, response) = self
-            .set_ecu_security_access(
-                ecu_name,
+            .set_ecu_security_access_resolved(
+                &communication_guard,
+                &ecu,
                 &default_security_access,
                 None,
                 None,
@@ -85,45 +162,21 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         expiration: Option<Duration>,
     ) -> Result<(SecurityAccess, Self::Response), DiagServiceError> {
-        let ecu_diag_service = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
-        let security_access = ecu_diag_service
-            .read()
-            .await
-            .lookup_security_access_change(level, authentication_data.is_some())
+        let communication_guard = self.acquire_communication_guard()?;
+        let data = self.ecu_data.read().await;
+        let ecu = self
+            .uds_ecu_variant_detection_concluded(&data, ecu_name)
             .await?;
-        match &security_access {
-            SecurityAccess::RequestSeed(dc) => Ok((
-                security_access.clone(),
-                self.send(
-                    ecu_name,
-                    dc.clone(),
-                    security_plugin,
-                    request_seed_data,
-                    false,
-                )
-                .await?,
-            )),
-            SecurityAccess::SendKey(dc) => {
-                let result = self
-                    .send(
-                        ecu_name,
-                        dc.clone(),
-                        security_plugin,
-                        authentication_data,
-                        true,
-                    )
-                    .await?;
-                match result.response_type() {
-                    DiagServiceResponseType::Positive => {
-                        self.start_reset_task(ecu_name, expiration, ResetType::SecurityAccess)
-                            .await;
-
-                        Ok((security_access, result))
-                    }
-                    DiagServiceResponseType::Negative => Ok((security_access, result)),
-                }
-            }
-        }
+        self.set_ecu_security_access_resolved(
+            &communication_guard,
+            &ecu,
+            level,
+            authentication_data,
+            request_seed_data,
+            security_plugin,
+            expiration,
+        )
+        .await
     }
 
     async fn get_send_key_param_name(
@@ -131,8 +184,11 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
         ecu_name: &str,
         level: &str,
     ) -> Result<String, DiagServiceError> {
-        let ecu_diag_service = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
-        let security_access = ecu_diag_service
+        let data = self.ecu_data.read().await;
+        let ecu = self
+            .uds_ecu_variant_detection_concluded(&data, ecu_name)
+            .await?;
+        let security_access = ecu
             .read()
             .await
             .lookup_security_access_change(level, true)
@@ -142,7 +198,7 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
                 unreachable!("Not reached, because has key is set to true above")
             }
             SecurityAccess::SendKey(dc) => {
-                let ecu = ecu_diag_service.read().await;
+                let ecu = ecu.read().await;
                 ecu.get_send_key_param_name(dc).await
             }
         }

@@ -1715,6 +1715,10 @@ mod tests {
                 enabled_functional_groups: None,
                 protocol_position: DiagnosticServiceAffixPosition::Suffix,
             },
+            std::sync::Arc::new(cda_database::EmbeddedFileStore::new(
+                String::new(),
+                Vec::new(),
+            )),
         )
         .expect("Failed to create EcuManager");
 
@@ -1871,6 +1875,10 @@ mod tests {
                 enabled_functional_groups: None,
                 protocol_position: DiagnosticServiceAffixPosition::Suffix,
             },
+            std::sync::Arc::new(cda_database::EmbeddedFileStore::new(
+                String::new(),
+                Vec::new(),
+            )),
         )
         .expect("Failed to create EcuManager");
 

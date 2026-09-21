@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::Arc;
 
 use aide::{
     axum::{ApiRouter as Router, routing},
@@ -19,22 +19,26 @@ use aide::{
 };
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{FromRequestParts, Path, Query},
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
+    HashMap, SchemaProvider, UdsEcu,
     communication_control::CommunicationAccess,
     diagservices::{DiagServiceResponse, DiagServiceResponseType},
+    util::std_ext::lock_read,
 };
-use http::StatusCode;
+use http::{StatusCode, Uri};
+use indexmap::IndexMap;
 
 use crate::{
     create_schema,
     sovd::{
         ExecutionLock, FgServiceExecution, WebserverState,
-        error::{ApiError, ErrorWrapper, VendorErrorCode, nrc_to_api_error_response},
+        error::{
+            ApiError, ErrorWrapper, VendorErrorCode, not_found_response, nrc_to_api_error_response,
+        },
         field_parse_errors_to_json,
         locks::Locks,
     },
@@ -54,105 +58,126 @@ pub(crate) struct WebserverFgState<T: UdsEcu + Clone> {
     communication_access: Arc<dyn CommunicationAccess>,
 }
 
-pub(crate) async fn create_functional_group_routes<T: UdsEcu + SchemaProvider + Clone>(
+/// Per-group execution state retained while the same database stays live.
+#[derive(Default)]
+pub(crate) struct FgRegistryEntry {
+    fg_executions: Arc<ExecutionLock<FgServiceExecution>>,
+}
+
+impl FgRegistryEntry {
+    /// Counts the communication leases the executions of this entry still hold.
+    /// Read by the registry when an update replaces this entry.
+    pub(crate) fn held_communication_leases(&self) -> usize {
+        lock_read(&self.fg_executions)
+            .values()
+            .flat_map(IndexMap::values)
+            .filter(|execution| execution.holds_communication_lease())
+            .count()
+    }
+}
+
+/// Extracts live per-functional-group state for the templated group route.
+pub(crate) struct FgContext<T: UdsEcu + Clone>(pub(crate) WebserverFgState<T>);
+
+#[derive(serde::Deserialize)]
+struct FunctionalGroupIdParam {
+    functional_group_id: String,
+}
+
+/// Rejection returned when `functional_group_id` names no currently
+/// effective group. Mirrors [`crate::sovd::error::sovd_not_found_handler`].
+pub(crate) enum FgContextRejection {
+    NotFound(Uri),
+}
+
+impl IntoResponse for FgContextRejection {
+    fn into_response(self) -> Response {
+        match self {
+            Self::NotFound(uri) => not_found_response(&uri),
+        }
+    }
+}
+
+// No-op body: `functional_group_id` is an artifact of routing, not part of the
+// documented operation, which emits one concrete path per group.
+impl<T: UdsEcu + Clone> aide::OperationInput for FgContext<T> {}
+
+impl<T: UdsEcu + Clone> FromRequestParts<WebserverState<T>> for FgContext<T> {
+    type Rejection = FgContextRejection;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &WebserverState<T>,
+    ) -> Result<Self, Self::Rejection> {
+        let request_uri = parts
+            .extensions
+            .get::<axum::extract::OriginalUri>()
+            .map_or_else(|| parts.uri.clone(), |uri| uri.0.clone());
+        // A named field, not `Path<String>`: nesting composes path params from every
+        // nest boundary a request crosses, so more than one may be in scope.
+        let Path(FunctionalGroupIdParam {
+            functional_group_id,
+        }) = Path::<FunctionalGroupIdParam>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| FgContextRejection::NotFound(request_uri.clone()))?;
+        let route_name = functional_group_id.to_lowercase();
+        let Some((functional_group_name, entry)) =
+            state.registry.resolve_functional_group(&route_name)
+        else {
+            return Err(FgContextRejection::NotFound(request_uri));
+        };
+        Ok(FgContext(WebserverFgState {
+            uds: state.uds.clone(),
+            locks: Arc::clone(&state.locks),
+            functional_group_name,
+            fg_executions: Arc::clone(&entry.fg_executions),
+            communication_access: Arc::clone(&state.communication_access),
+        }))
+    }
+}
+
+/// The templated route is nested unconditionally; [`FgContext`] validates an ID
+/// against the live normalized index. An empty index therefore makes every
+/// instance ID unavailable while retaining the collection endpoint.
+pub(crate) fn create_functional_group_routes<T: UdsEcu + SchemaProvider + Clone>(
     state: WebserverState<T>,
-    functional_group_config: FunctionalDescriptionConfig,
 ) -> Router {
     let functions_router = Router::new().api_route(
         "/",
         routing::get_with(functions_description, docs_functions),
     );
 
-    if !state
-        .uds
-        .get_ecus()
-        .await
-        .iter()
-        .any(|ecu| ecu.eq_ignore_ascii_case(&functional_group_config.description_database))
-    {
-        return create_error_fallback_route(
-            functions_router,
-            format!(
-                "Functional Description Database '{}' is missing from loaded databases.",
-                functional_group_config.description_database
-            ),
-        );
-    }
-
-    let groups = match state
-        .uds
-        .ecu_functional_groups(&functional_group_config.description_database)
-        .await
-    {
-        Ok(groups) => groups,
-        Err(e) => {
-            return create_error_fallback_route(
-                functions_router,
-                format!(
-                    "Failed to get functional groups from functional description database: {e}"
-                ),
-            );
-        }
-    };
-
-    // Filter groups based on config if enabled_functional_groups is set
-    let filtered_groups =
-        if let Some(enabled_groups) = &functional_group_config.enabled_functional_groups {
-            groups
-                .into_iter()
-                .filter(|group| enabled_groups.contains(group))
-                .collect::<Vec<_>>()
-        } else {
-            groups
-        };
-
-    if filtered_groups.is_empty() {
-        if let Some(filter) = functional_group_config.enabled_functional_groups {
-            return create_error_fallback_route(
-                functions_router,
-                format!(
-                    "No functional groups found in functional description database with given \
-                     filter: [{filter:?}]",
-                ),
-            );
-        }
-        return create_error_fallback_route(
-            functions_router,
-            "No functional groups found in the functional description database".to_owned(),
-        );
-    }
-
-    let groups_resource = filtered_groups.clone();
-    let mut functional_groups_router: Router = functions_router.api_route(
+    let registry = state.registry.clone();
+    // Registered unconditionally: an empty effective list yields an empty listing
+    // rather than an absent route.
+    let functional_groups_router: Router = functions_router.api_route(
         "/functionalgroups",
         routing::get_with(
-            |WithRejection(Query(query), _): WithRejection<
+            move |WithRejection(Query(query), _): WithRejection<
                 Query<sovd_interfaces::IncludeSchemaQuery>,
                 ApiError,
-            >| async move {
-                functional_groups_description(query.include_schema, groups_resource)
+            >| {
+                let registry = registry.clone();
+                async move {
+                    let live = registry.live();
+                    let groups = live.functional_groups.iter().cloned().collect();
+                    functional_groups_description(query.include_schema, groups)
+                }
             },
             docs_functionalgroups,
         ),
     );
-    for group in filtered_groups {
-        let fg_state = WebserverFgState {
-            uds: state.uds.clone(),
-            locks: Arc::clone(&state.locks),
-            functional_group_name: group.clone(),
-            fg_executions: Arc::new(StdRwLock::new(HashMap::default())),
-            communication_access: Arc::clone(&state.communication_access),
-        };
-        functional_groups_router = functional_groups_router.nest_api_service(
-            &format!("/functionalgroups/{group}"),
-            create_functional_group_route(fg_state),
-        );
-    }
-    functional_groups_router
+    functional_groups_router.nest_api_service(
+        "/functionalgroups/{functional_group_id}",
+        create_functional_group_route::<T>(state),
+    )
 }
 
+/// [`FgContext`] resolves `{functional_group_id}` per request, so this route
+/// table is identical for every group and is built once. `nest_api_service`
+/// requires a fully resolved router, so `state` is applied here.
 fn create_functional_group_route<T: UdsEcu + SchemaProvider + Clone>(
-    fg_state: WebserverFgState<T>,
+    state: WebserverState<T>,
 ) -> Router {
     Router::new()
         .api_route(
@@ -224,22 +249,8 @@ fn create_functional_group_route<T: UdsEcu + SchemaProvider + Clone>(
             routing::get_with(modes::session::get, modes::session::docs_get)
                 .put_with(modes::session::put, modes::session::docs_put),
         )
-        .with_state(fg_state)
+        .with_state(state)
         .with_path_items(crate::openapi::defunct_lock_path)
-}
-
-fn create_error_fallback_route(router: Router, reason: String) -> Router {
-    router.api_route(
-        "/functionalgroups/{*subpath}",
-        routing::get(|| async move {
-            let error = ApiError::InternalServerError(Some(reason));
-            ErrorWrapper {
-                error,
-                include_schema: false,
-            }
-            .into_response()
-        }),
-    )
 }
 
 async fn functions_description(
@@ -316,10 +327,10 @@ fn docs_functionalgroups(op: TransformOperation) -> TransformOperation {
 }
 
 async fn functional_group_description<T: UdsEcu + Clone>(
-    State(WebserverFgState {
+    FgContext(WebserverFgState {
         functional_group_name,
         ..
-    }): State<WebserverFgState<T>>,
+    }): FgContext<T>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::IncludeSchemaQuery>,
         ApiError,
@@ -486,11 +497,50 @@ fn map_to_json(include_schema: bool, accept: &mime::Mime) -> Result<bool, ErrorW
 pub(crate) mod tests {
     use std::sync::Arc;
 
-    use cda_interfaces::mock::MockUdsEcu;
+    use cda_interfaces::{ReloadComponent, mock::MockUdsEcu, util::std_ext::lock_write};
     use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
+    use uuid::Uuid;
 
     use super::WebserverFgState;
-    use crate::sovd::{HashMap, locks::Locks};
+    use crate::sovd::{
+        FgServiceExecution, HashMap, HashSet, SovdIdentities, SovdRegistry, locks::Locks,
+    };
+
+    /// An update replaces the entry even when it still names the group, so a
+    /// record taken before it is gone afterwards.
+    #[tokio::test]
+    async fn functional_group_execution_does_not_survive_an_update() {
+        let group_names = || ["group".to_owned()].into_iter().collect();
+        let registry = SovdRegistry::new(SovdIdentities::new(HashSet::default(), group_names()));
+        let state = registry.functional_group("group").unwrap();
+        let execution_id = Uuid::new_v4();
+        lock_write(&state.fg_executions).insert(
+            "routine".to_owned(),
+            [(
+                execution_id,
+                FgServiceExecution {
+                    parameters: HashMap::default(),
+                    status:
+                        sovd_interfaces::components::ecu::operations::ExecutionStatus::Completed,
+                    in_flight: false,
+                    is_created: true,
+                    communication_lease: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        registry
+            .apply(SovdIdentities::new(HashSet::default(), group_names()))
+            .await;
+        let updated = registry.functional_group("group").unwrap();
+        assert!(!Arc::ptr_eq(&state, &updated));
+        assert!(super::lock_read(&updated.fg_executions).is_empty());
+
+        registry.apply(SovdIdentities::default()).await;
+        assert!(registry.functional_group("group").is_none());
+    }
 
     pub fn create_test_fg_state(
         mut uds: MockUdsEcu,

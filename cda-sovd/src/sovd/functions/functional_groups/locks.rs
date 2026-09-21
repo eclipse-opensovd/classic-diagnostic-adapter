@@ -17,8 +17,7 @@ use cda_interfaces::{UdsEcu, lock_priority_api::LockScope};
 use cda_plugin_security::Secured;
 
 use super::{
-    ApiError, ErrorWrapper, IntoResponse, Json, Path, Query, Response, State, WebserverFgState,
-    WithRejection,
+    ApiError, ErrorWrapper, FgContext, IntoResponse, Json, Path, Query, Response, WithRejection,
 };
 use crate::{
     openapi,
@@ -35,14 +34,14 @@ pub(crate) mod lock {
     use cda_interfaces::UdsEcu;
 
     use super::{
-        ApiError, Json, LockPathParam, LockScope, LockUpdateContext, Path, Query, Response,
-        Secured, State, TransformOperation, UseApi, WebserverFgState, WithRejection,
-        delete_handler, get_id_handler, openapi, put_handler,
+        ApiError, FgContext, Json, LockPathParam, LockScope, LockUpdateContext, Path, Query,
+        Response, Secured, TransformOperation, UseApi, WithRejection, delete_handler,
+        get_id_handler, openapi, put_handler,
     };
 
     pub(crate) async fn delete<T: UdsEcu + Clone>(
         Path(LockPathParam { lock }): Path<LockPathParam>,
-        State(state): State<WebserverFgState<T>>,
+        FgContext(state): FgContext<T>,
         UseApi(sec_plugin, _): UseApi<Secured, ()>,
         Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
     ) -> Response {
@@ -68,7 +67,7 @@ pub(crate) mod lock {
 
     pub(crate) async fn put<T: UdsEcu + Clone>(
         Path(LockPathParam { lock }): Path<LockPathParam>,
-        State(state): State<WebserverFgState<T>>,
+        FgContext(state): FgContext<T>,
         UseApi(sec_plugin, _): UseApi<Secured, ()>,
         Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
         WithRejection(Json(body), _): WithRejection<
@@ -102,7 +101,7 @@ pub(crate) mod lock {
     pub(crate) async fn get<T: UdsEcu + Clone>(
         Path(LockPathParam { lock }): Path<LockPathParam>,
         UseApi(sec_plugin, _): UseApi<Secured, ()>,
-        State(state): State<WebserverFgState<T>>,
+        FgContext(state): FgContext<T>,
         Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
     ) -> Response {
         let claims = sec_plugin.as_auth_plugin().claims();
@@ -131,7 +130,7 @@ pub(crate) mod lock {
 
 pub(crate) async fn post<T: UdsEcu + Clone>(
     UseApi(Secured(sec_plugin), _): UseApi<Secured, ()>,
-    State(state): State<WebserverFgState<T>>,
+    FgContext(state): FgContext<T>,
     Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
     OriginalUri(uri): OriginalUri,
     WithRejection(Json(body), _): WithRejection<Json<sovd_interfaces::locking::Request>, ApiError>,
@@ -218,7 +217,7 @@ pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
 
 pub(crate) async fn get<T: UdsEcu + Clone>(
     UseApi(sec_plugin, _): UseApi<Secured, ()>,
-    State(state): State<WebserverFgState<T>>,
+    FgContext(state): FgContext<T>,
     Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
 ) -> Response {
     let claims = sec_plugin.as_auth_plugin().claims();

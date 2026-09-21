@@ -24,8 +24,8 @@ use sovd_interfaces::{
 
 use crate::{
     sovd::{
-        COMPONENTS_FLXC1000_BASE, COMPONENTS_FLXC1000_DATA, ECU_FLXC1000, ecu_status,
-        force_variant_detection, runtimefiles,
+        COMPONENTS_FLXC1000_BASE, COMPONENTS_FLXC1000_DATA, COMPONENTS_FSNR2000_DATA, ECU_FLXC1000,
+        ecu_status, force_variant_detection, runtimefiles,
     },
     util::{
         endpoints::APPS_SOVD2UDS_DATA_VERSION,
@@ -175,8 +175,8 @@ async fn on_demand_trigger_produces_no_doip_traffic_before_authorized_request() 
 /// diagnostic endpoints return 503 again until re-triggered.
 ///
 /// The update takes the transport down through an exclusive disable lease. Under
-/// `Deferred` that lease is dropped rather than released, so communication
-/// returns to the state it was in before the first trigger.
+/// `Deferred` that lease is finished without activation, so staged data installs
+/// while communication stays down.
 ///
 /// The sequence is:
 ///   a. Start a CDA in deferred mode with `PostUpdateCommunicationMode::Deferred`.
@@ -232,8 +232,8 @@ async fn post_update_deferred_mode_returns_503_until_triggered() {
         .await
         .expect("Apply execution failed");
 
-    // Step d: the update dropped the disable lease instead of releasing
-    // it, so the diagnostic path answers 503 again. A non-deferred
+    // Step d: the update finished the disable lease without activating,
+    // so the diagnostic path answers 503 again. A non-deferred
     // post-update mode would have served 200 here.
     let response = poll_while(
         &test_env,
@@ -436,5 +436,119 @@ async fn variant_detection_never_requires_explicit_trigger() {
         state,
         sovd_interfaces::components::ecu::State::Online,
         "a manual per-ECU trigger must still settle the variant under variant_detection = Never"
+    );
+}
+
+/// A lease finished without activating must still reach the applied data, so
+/// the new ECU set is live while the transport is still down.
+#[tokio::test]
+async fn post_update_deferred_mode_serves_the_new_ecu_set_while_disabled() {
+    const REMOVED_MDD: &str = "FSNR2000.mdd";
+
+    let test_env = TestEnv::builder()
+        .with_cda_communication_settings(CommunicationSettings {
+            post_update_mode: PostUpdateCommunicationMode::Deferred,
+            ..on_demand_communication()
+        })
+        .await
+        .expect("Failed to set up the test environment");
+
+    // Start from an activated runtime, so the update really does take the
+    // transport down rather than finding it already down.
+    let response = poll_while(
+        &test_env,
+        COMPONENTS_FLXC1000_DATA,
+        StatusCode::SERVICE_UNAVAILABLE,
+        Duration::from_secs(30),
+    )
+    .await
+    .expect("endpoint stayed pending");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "endpoint must return 200 once the background activation completes"
+    );
+
+    // The update and the lock go with the CDA container when the lease ends.
+    runtimefiles::setup_with_lock(&test_env).await;
+
+    // Apply a data set that drops one ECU from the vehicle.
+    runtimefiles::stage_database_without(&test_env, REMOVED_MDD)
+        .await
+        .expect("Failed to stage the reduced database");
+    runtimefiles::execute_mode(&test_env, ExecutionMode::Apply)
+        .await
+        .expect("Apply execution failed");
+
+    // The dropped ECU is checked first: its route is resolved before any
+    // communication is acquired, so a 404 here neither needs nor fires the
+    // on-demand activation trigger.
+    let removed = poll_while(
+        &test_env,
+        COMPONENTS_FSNR2000_DATA,
+        StatusCode::CONFLICT,
+        Duration::from_secs(30),
+    )
+    .await
+    .expect("update protection was not lifted");
+    assert_eq!(
+        removed.status(),
+        StatusCode::NOT_FOUND,
+        "an ECU dropped by the update must 404 even though the transport never came back up: \
+         {removed:?}"
+    );
+
+    // The surviving ECU still resolves, so the 404 above is the new ECU set
+    // and not a route table that lost everything.
+    send_authenticated_cda_request(
+        &test_env,
+        COMPONENTS_FLXC1000_DATA,
+        StatusCode::SERVICE_UNAVAILABLE,
+        Method::GET,
+        None,
+        None,
+    )
+    .await
+    .expect(
+        "a surviving ECU must still resolve, and answer 503 while the deferred transport is down",
+    );
+
+    // The 503 above fired the on-demand trigger. The next update needs the
+    // exclusive disable lease, which a mid-flight activation refuses, so
+    // let that activation settle first.
+    let reactivated = poll_while(
+        &test_env,
+        COMPONENTS_FLXC1000_DATA,
+        StatusCode::SERVICE_UNAVAILABLE,
+        Duration::from_secs(30),
+    )
+    .await
+    .expect("endpoint stayed pending");
+    assert_eq!(
+        reactivated.status(),
+        StatusCode::OK,
+        "the surviving ECU must serve again once the triggered activation completes"
+    );
+
+    // Put the vehicle back, and the restored ECU must resolve again.
+    runtimefiles::stage_full_database(&test_env)
+        .await
+        .expect("Failed to stage the full database");
+    runtimefiles::execute_mode(&test_env, ExecutionMode::Apply)
+        .await
+        .expect("Second apply execution failed");
+
+    let restored = poll_while(
+        &test_env,
+        COMPONENTS_FSNR2000_DATA,
+        StatusCode::CONFLICT,
+        Duration::from_secs(30),
+    )
+    .await
+    .expect("update protection was not lifted");
+    assert_ne!(
+        restored.status(),
+        StatusCode::NOT_FOUND,
+        "an ECU restored by the update must resolve again"
     );
 }

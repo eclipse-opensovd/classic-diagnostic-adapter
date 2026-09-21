@@ -118,9 +118,9 @@ async fn provider_reads_the_current_locks_through_the_trait() {
     locks
         .test_insert_active(ecu_lock("ecu-a", Duration::from_secs(300), false))
         .await;
-    let provider = SovdLockStateProvider::new(locks);
+    let provider = SovdLockStateProvider::new(locks, vec!["ecu-a".to_owned()]);
 
-    let snapshot = provider.current_lock(&target("ecu-a")).await;
+    let snapshot = provider.view().current_lock(&target("ecu-a")).await;
 
     assert_eq!(
         snapshot.map(|lock| lock.holder),
