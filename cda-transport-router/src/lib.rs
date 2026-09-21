@@ -69,7 +69,8 @@ pub struct DiagnosticTransportRouter<D: EcuGateway + TransportProbe, C: EcuGatew
     /// ECUs not in this map are bound at first detection.
     transport_overrides: Arc<HashMap<String, TransportType>>,
     /// Transport each un-pinned ECU was first detected on (lowercase name ->
-    /// transport). Entries are written once and never change at runtime, so
+    /// transport). Entries are written once per transport cycle and cleared by
+    /// [`TransportControl::disable`], so
     /// a diagnostic session can never silently switch transports.
     ecu_bindings: Arc<RwLock<HashMap<String, TransportType>>>,
     /// Authoritative router lifecycle state.
@@ -108,16 +109,6 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe>
     pub fn with_can(mut self, gateway: C) -> Self {
         self.can_gateway = Some(gateway);
         self
-    }
-
-    /// Returns the wrapped `DoIP` gateway, if one is configured.
-    ///
-    /// Used by the runtime-update reload path to hand the existing `DoIP` UDP
-    /// socket over to the replacement gateway (avoiding a second socket bound
-    /// to the same `DoIP` port). `None` in CAN-only operation.
-    #[must_use]
-    pub fn doip(&self) -> Option<&D> {
-        self.doip_gateway.as_ref()
     }
 
     /// Binds the ECU to a transport, sticky: if another task bound it first,
@@ -530,7 +521,14 @@ impl<
             |g| Box::pin(g.disable()),
             TransportState::Disabled,
         )
-        .await
+        .await?;
+        // Bindings are observed, not derived: only re-detection can rebuild
+        // them, so clearing is their counterpart to swapping derived data on an update.
+        // The router outlives every update to keep
+        // the transports stable, and an update always disables first, so this
+        // is what stops a stale binding from routing a re-added ECU.
+        self.ecu_bindings.write().await.clear();
+        Ok(())
     }
 
     async fn state(&self) -> TransportState {
@@ -560,8 +558,10 @@ mod tests {
     #[derive(Clone)]
     struct FakeGateway {
         enable_fails: bool,
+        disable_fails: bool,
         enable_calls: Arc<AtomicUsize>,
         disable_calls: Arc<AtomicUsize>,
+        shutdown_calls: Arc<AtomicUsize>,
         state: Arc<RwLock<TransportState>>,
     }
 
@@ -569,16 +569,26 @@ mod tests {
         fn new(enable_fails: bool) -> Self {
             Self {
                 enable_fails,
+                disable_fails: false,
                 enable_calls: Arc::new(AtomicUsize::new(0)),
                 disable_calls: Arc::new(AtomicUsize::new(0)),
+                shutdown_calls: Arc::new(AtomicUsize::new(0)),
                 state: Arc::new(RwLock::new(TransportState::Disabled)),
             }
+        }
+
+        fn with_failing_disable(mut self) -> Self {
+            self.disable_fails = true;
+            self
         }
     }
 
     #[async_trait]
     impl Shutdown for FakeGateway {
-        async fn shutdown(&self) {}
+        async fn shutdown(&self) {
+            self.shutdown_calls.fetch_add(1, Ordering::Relaxed);
+            *self.state.write().await = TransportState::Disabled;
+        }
     }
 
     impl cda_interfaces::PhysicalTransport for FakeGateway {
@@ -655,6 +665,11 @@ mod tests {
 
         async fn disable(&self) -> Result<(), CommControlError> {
             self.disable_calls.fetch_add(1, Ordering::Relaxed);
+            if self.disable_fails {
+                return Err(CommControlError::InitFailed(
+                    "fake disable failure".to_owned(),
+                ));
+            }
             *self.state.write().await = TransportState::Disabled;
             Ok(())
         }
@@ -662,6 +677,31 @@ mod tests {
         async fn state(&self) -> TransportState {
             *self.state.read().await
         }
+    }
+
+    /// A runtime update disables the transport before replacing the ECU data.
+    /// This router is never rebuilt, so a binding left over from the previous
+    /// ECU set would decide the transport for a re-added ECU without ever
+    /// re-detecting it.
+    #[tokio::test]
+    async fn disable_clears_transport_bindings_so_the_next_cycle_re_detects() {
+        let router = DiagnosticTransportRouter::new(HashMap::default())
+            .with_doip(FakeGateway::new(false))
+            .with_can(FakeGateway::new(false));
+        router.enable().await.unwrap();
+        router.bind("ecu_a", TransportType::Can).await;
+        assert_eq!(
+            router.ecu_bindings.read().await.get("ecu_a"),
+            Some(&TransportType::Can),
+            "precondition: the ECU is bound to CAN"
+        );
+
+        router.disable().await.unwrap();
+
+        assert!(
+            router.ecu_bindings.read().await.is_empty(),
+            "a disabled transport must not carry bindings into the next ECU set"
+        );
     }
 
     /// When one gateway's `enable()` fails partway through the fan-out, the
@@ -702,6 +742,38 @@ mod tests {
             TransportState::Failed,
             "the router itself must report the overall operation as failed"
         );
+    }
+
+    /// Rolling back the gateway that already enabled can itself fail. The
+    /// router must then fall back to the shutdown path, so no background work
+    /// outlives a router that reports the enable as failed.
+    #[tokio::test]
+    async fn failed_rollback_falls_back_to_the_gateway_shutdown_path() {
+        let doip = FakeGateway::new(false).with_failing_disable();
+        let can = FakeGateway::new(true);
+        let router = DiagnosticTransportRouter::new(HashMap::default())
+            .with_doip(doip.clone())
+            .with_can(can.clone());
+
+        assert!(router.enable().await.is_err());
+
+        assert_eq!(
+            doip.disable_calls.load(Ordering::Relaxed),
+            1,
+            "the DoIP gateway succeeded, so the rollback must have tried to disable it"
+        );
+        assert_eq!(
+            doip.shutdown_calls.load(Ordering::Relaxed),
+            1,
+            "a rollback that fails must still terminate the gateway's background work"
+        );
+        assert_eq!(
+            can.shutdown_calls.load(Ordering::Relaxed),
+            0,
+            "CAN never enabled, so there is nothing on it to shut down"
+        );
+        assert_eq!(doip.state().await, TransportState::Disabled);
+        assert_eq!(router.state().await, TransportState::Failed);
     }
 
     /// A gateway that never succeeded must not be rolled back, and a fully
