@@ -483,6 +483,36 @@ impl TestEnv {
         .await
     }
 
+    /// The content of `path`, relative to the storage directory of the
+    /// running CDA.
+    ///
+    /// # Errors
+    /// Returns [`TestingError::ProcessFailed`] if no CDA is running or the
+    /// file cannot be read.
+    pub(crate) async fn read_cda_storage_file(&self, path: &str) -> Result<Vec<u8>, TestingError> {
+        let cda = self
+            .containers
+            .cda
+            .clone()
+            .filter(|_| self.cda_running)
+            .ok_or_else(|| TestingError::ProcessFailed("No CDA is running".to_owned()))?;
+        let path = format!("{CDA_STORAGE_DIR}/{path}");
+        on_shared_runtime(async move {
+            let mut result = cda
+                .exec(
+                    ExecCommand::new(["cat", &path])
+                        .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
+                )
+                .await
+                .map_err(|e| TestingError::ProcessFailed(format!("Failed to read {path}: {e}")))?;
+            result
+                .stdout_to_vec()
+                .await
+                .map_err(|e| TestingError::ProcessFailed(format!("Failed to read {path}: {e}")))
+        })
+        .await
+    }
+
     /// How many log frames of the containers of this environment have been
     /// printed so far.
     pub(crate) fn log_frames(&self) -> u64 {

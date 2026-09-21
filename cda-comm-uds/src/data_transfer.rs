@@ -191,8 +191,11 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         parameters: FlashTransferStartParams<'_>,
     ) -> Result<(), DiagServiceError> {
-        let communication_guard = self.require_communication_ready()?;
-        let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
+        let communication_guard = self.acquire_communication_guard()?;
+        let data = self.ecu_data.read().await;
+        let ecu = self
+            .uds_ecu_variant_detection_concluded(&data, ecu_name)
+            .await?;
 
         let FlashTransferStartParams {
             file_path,

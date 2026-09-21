@@ -19,7 +19,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use cda_interfaces::runtime_update_api::{
-    LockStateProvider, RuntimeFilesUpdatePlugin, RuntimeUpdateError,
+    LockStateProvider, RuntimeFileCatalog, RuntimeFileStore, RuntimeUpdateError,
 };
 use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
 
@@ -113,6 +113,7 @@ impl IntoResponse for DbUpdateErrorResponse {
                 None,
             ),
             RuntimeUpdateError::StorageError(_)
+            | RuntimeUpdateError::UpdateStartError(_)
             | RuntimeUpdateError::ReloadFailed(_)
             | RuntimeUpdateError::CommunicationFailure(_)
             | RuntimeUpdateError::ReplacementFailure(_) => build_api_error_response(
@@ -180,7 +181,7 @@ pub(crate) async fn require_vehicle_lock(
     claims: &dyn cda_plugin_security::Claims,
     retry_after: Duration,
 ) -> Result<(), Box<Response>> {
-    match lock_state.vehicle_lock_owner_sub().await {
+    match lock_state.vehicle_lock_owner_id().await {
         None => Err(Box::new(
             DbUpdateErrorResponse::new(
                 RuntimeUpdateError::NoLock("Vehicle lock is missing".to_owned()),
@@ -204,12 +205,12 @@ pub(crate) mod current {
         extract::{Query, State},
         response::{IntoResponse, Response},
     };
-    use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
+    use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFileCatalog};
     use cda_plugin_security::Secured;
 
     use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState};
 
-    pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+    pub(crate) async fn get<P: RuntimeFileCatalog, L: LockStateProvider>(
         State(route_state): State<RuntimeUpdateRouteState<P, L>>,
         Secured(_sec_plugin): Secured,
         Query(query): Query<
@@ -232,14 +233,14 @@ pub(crate) mod nextupdate {
         response::{IntoResponse, Response},
     };
     use cda_interfaces::runtime_update_api::{
-        LockStateProvider, RuntimeFilesUpdatePlugin, RuntimeUpdateError, UploadFile,
+        LockStateProvider, RuntimeFileCatalog, RuntimeFileStore, RuntimeUpdateError, UploadFile,
     };
     use cda_plugin_security::Secured;
     use opensovd_axum_extra::ExtractHost;
 
     use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
 
-    pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+    pub(crate) async fn get<P: RuntimeFileCatalog, L: LockStateProvider>(
         State(route_state): State<RuntimeUpdateRouteState<P, L>>,
         Secured(_sec_plugin): Secured,
         Query(query): Query<
@@ -392,7 +393,7 @@ pub(crate) mod nextupdate {
     /// filenames taken from each field's `filename` parameter), or a single
     /// `application/octet-stream` upload, where the filename must be provided via
     /// the `Content-Disposition` header (e.g. `attachment; filename="foo.mdd"`).
-    pub(crate) async fn post<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+    pub(crate) async fn post<P: RuntimeFileStore, L: LockStateProvider>(
         State(route_state): State<RuntimeUpdateRouteState<P, L>>,
         UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
         Secured(sec_plugin): Secured,
@@ -423,7 +424,7 @@ pub(crate) mod nextupdate {
         }
     }
 
-    async fn handle_multipart_upload<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+    async fn handle_multipart_upload<P: RuntimeFileStore, L: LockStateProvider>(
         route_state: RuntimeUpdateRouteState<P, L>,
         sec_plugin: cda_plugin_security::SecurityPluginData,
         host: String,
@@ -483,7 +484,7 @@ pub(crate) mod nextupdate {
         )
     }
 
-    async fn handle_octet_stream_upload<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+    async fn handle_octet_stream_upload<P: RuntimeFileStore, L: LockStateProvider>(
         route_state: RuntimeUpdateRouteState<P, L>,
         sec_plugin: cda_plugin_security::SecurityPluginData,
         host: String,
@@ -540,7 +541,7 @@ pub(crate) mod nextupdate {
             )
     }
 
-    pub(crate) async fn delete<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+    pub(crate) async fn delete<P: RuntimeFileStore, L: LockStateProvider>(
         State(route_state): State<RuntimeUpdateRouteState<P, L>>,
         Secured(sec_plugin): Secured,
     ) -> impl IntoResponse {
@@ -575,12 +576,12 @@ pub(crate) mod nextupdate {
             http::StatusCode,
             response::IntoResponse,
         };
-        use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
+        use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFileStore};
         use cda_plugin_security::Secured;
 
         use super::super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
 
-        pub(crate) async fn delete<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+        pub(crate) async fn delete<P: RuntimeFileStore, L: LockStateProvider>(
             State(route_state): State<RuntimeUpdateRouteState<P, L>>,
             Secured(sec_plugin): Secured,
             Path(id): Path<String>,
@@ -614,12 +615,14 @@ pub(crate) mod backup {
         http::StatusCode,
         response::{IntoResponse, Response},
     };
-    use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
+    use cda_interfaces::runtime_update_api::{
+        LockStateProvider, RuntimeFileCatalog, RuntimeFileStore,
+    };
     use cda_plugin_security::Secured;
 
     use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
 
-    pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+    pub(crate) async fn get<P: RuntimeFileCatalog, L: LockStateProvider>(
         State(route_state): State<RuntimeUpdateRouteState<P, L>>,
         Secured(_sec_plugin): Secured,
         Query(query): Query<
@@ -632,7 +635,7 @@ pub(crate) mod backup {
         )
     }
 
-    pub(crate) async fn delete<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+    pub(crate) async fn delete<P: RuntimeFileStore, L: LockStateProvider>(
         State(route_state): State<RuntimeUpdateRouteState<P, L>>,
         Secured(sec_plugin): Secured,
     ) -> impl IntoResponse {
@@ -670,7 +673,7 @@ const RUNTIMEFILES_BACKUP_ROUTE: &str = "/vehicle/v15/apps/sovd2uds/bulk-data/ru
 
 pub fn routes<
     S: cda_plugin_security::SecurityPluginLoader,
-    P: RuntimeFilesUpdatePlugin,
+    P: RuntimeFileCatalog + RuntimeFileStore,
     L: LockStateProvider,
 >(
     state: RuntimeUpdateRouteState<P, L>,
