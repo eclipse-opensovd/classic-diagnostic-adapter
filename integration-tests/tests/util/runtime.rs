@@ -331,10 +331,7 @@ fn base_test_config(
             ..Default::default()
         },
         ecu,
-        runtime_update_config: RuntimeUpdateConfig {
-            init_storage_from_database_path: true,
-            ..RuntimeUpdateConfig::default()
-        },
+        runtime_update_config: RuntimeUpdateConfig::default(),
         communication: CommunicationSettings::default(),
         strict: StrictConfig::default(),
     })
@@ -769,11 +766,12 @@ pub(crate) async fn stop_ecu_sim() -> Result<(), TestingError> {
 pub(crate) async fn restart_cda(config: &Configuration) -> Result<(), TestingError> {
     mark_cda_stopped().await;
     write_config_toml(&test_container_dir()?, config.clone())?;
-    // Restart atomically so the container restart policy cannot race a
-    // separate stop/up sequence and leave CDA unavailable.
+    // Recreate in one command so the container restart policy cannot race a
+    // separate stop/up sequence and leave CDA unavailable. Unlike `restart`,
+    // this also creates a CDA that does not exist yet, as when the stack was
+    // set up without one.
     // `--no-deps` prevents restarting an ECU sim a test stopped on purpose.
-    // The restarted process reloads the bind-mounted configuration.
-    docker_compose_restart("cda")?;
+    docker_compose_recreate("cda")?;
     wait_for_cda_online(&config.server).await?;
     mark_cda_started(config).await;
     Ok(())
@@ -863,7 +861,7 @@ async fn mark_cda_stopped() {
     *RUNNING_CDA_COMMUNICATION.lock().await = None;
 }
 
-fn docker_compose_restart(container: &str) -> Result<(), TestingError> {
+fn docker_compose_recreate(container: &str) -> Result<(), TestingError> {
     let test_container_dir = test_container_dir()?;
     let mut cmd = std::process::Command::new("docker");
     cmd.arg("compose");
@@ -871,15 +869,15 @@ fn docker_compose_restart(container: &str) -> Result<(), TestingError> {
         append_coverage_compose_files(&mut cmd);
     }
     let status = cmd
-        .arg("restart")
-        .arg("--no-deps")
+        .args(["up", "-d", "--no-deps", "--force-recreate"])
         .arg(container)
+        .env("COMPOSE_PROFILES", compose_profiles())
         .current_dir(&test_container_dir)
         .status()
         .map_err(|e| {
-            TestingError::ProcessFailed(format!("Failed to restart docker compose: {e}"))
+            TestingError::ProcessFailed(format!("Failed to recreate docker compose service: {e}"))
         })?;
-    check_command_success(status, "docker compose restart failed")
+    check_command_success(status, "docker compose up --force-recreate failed")
 }
 
 fn docker_compose_stop(container: &str) -> Result<(), TestingError> {
@@ -1045,7 +1043,7 @@ pub(crate) async fn wait_for_ecus_online(config: &Configuration) -> Result<(), T
     }
 }
 
-fn mdd_file_path() -> Result<String, TestingError> {
+pub(crate) fn mdd_file_path() -> Result<String, TestingError> {
     fn mdd_files_exist(path: &std::path::Path) -> bool {
         std::fs::read_dir(path)
             .ok()

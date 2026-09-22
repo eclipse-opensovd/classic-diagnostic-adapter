@@ -25,7 +25,7 @@ use cda_interfaces::{
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     file_manager::{Chunk, ChunkType},
     health::HealthProvider,
-    storage_api::{Collection, CollectionName, DirectFileAccess, Storage},
+    storage_api::{Collection, CollectionName, DirectFileAccess, Storage, StorageError},
 };
 use cda_plugin_security::SecurityPlugin;
 use cda_storage::LocalStorage;
@@ -220,45 +220,49 @@ pub async fn load_databases<S: SecurityPlugin>(
 }
 
 /// Returns paths to MDD files, preferring files found in the CDA `storage`.
-/// Falls back to the configured `database.dir` directory if storage is unavailable or empty.
+/// Falls back to the configured `database.dir` when storage holds no databases.
 pub async fn resolve_mdd_paths(storage: &LocalStorage, database_dir: &str) -> Vec<PathBuf> {
-    let storage_paths = load_mdd_paths_from_storage(storage).await;
-    if let Some(storage_paths) = storage_paths
+    if let Some(storage_paths) = load_mdd_paths_from_storage(storage).await
         && !storage_paths.is_empty()
     {
         tracing::info!(
             count = storage_paths.len(),
             "Using MDD files from CDA storage (overrides configured database dir)."
         );
-        storage_paths
-    } else {
-        tracing::info!(
-            database_dir = %database_dir,
-            "No MDD files found in storage, falling back to configured database dir."
-        );
-        match std::fs::read_dir(database_dir) {
-            Ok(files) => get_mdd_files_and_size(files)
-                .into_iter()
-                .map(|(p, _)| p)
-                .collect(),
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to read database directory.");
-                vec![]
-            }
+        return storage_paths;
+    }
+
+    tracing::info!(
+        database_dir = %database_dir,
+        "No MDD files found in storage, falling back to configured database dir."
+    );
+
+    match std::fs::read_dir(database_dir) {
+        Ok(files) => get_mdd_files_and_size(files)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to read database directory.");
+            vec![]
         }
     }
 }
 
-/// Returns paths to all MDD files found in the CDA `storage`.
-/// Falls back to an empty list if the storage collection cannot be accessed.
+/// Returns paths to all MDD files found in the CDA `storage`, or `None` when the
+/// collection does not exist or cannot be read.
 async fn load_mdd_paths_from_storage(storage: &LocalStorage) -> Option<Vec<PathBuf>> {
     let collection = match storage
-        .get_or_create_collection(&CollectionName::DiagnosticDatabase) //FIXME this always creates storage collection; the empty check afterwards never works  //FIXME this should generally not create the collection, since it won't work on read-only partitions
+        .get_collection(&CollectionName::DiagnosticDatabase)
         .await
     {
         Ok(c) => c,
+        Err(StorageError::CollectionNotFound(_)) => {
+            tracing::debug!("Storage has no DiagnosticDatabase collection yet");
+            return None;
+        }
         Err(e) => {
-            tracing::debug!(error = %e, "Cannot access DiagnosticDatabase collection");
+            tracing::error!(error = %e, "Cannot access DiagnosticDatabase collection");
             return None;
         }
     };
@@ -266,7 +270,7 @@ async fn load_mdd_paths_from_storage(storage: &LocalStorage) -> Option<Vec<PathB
     let keys = match collection.list().await {
         Ok(k) => k,
         Err(e) => {
-            tracing::warn!(error = %e, "Failed to list DiagnosticDatabase collection");
+            tracing::error!(error = %e, "Failed to list DiagnosticDatabase collection");
             return None;
         }
     };
@@ -683,7 +687,7 @@ mod tests {
                 std::fs::write(path, data).expect("write MDD file");
             }
 
-            let storage = LocalStorage::new(storage_dir.path()).unwrap();
+            let storage = LocalStorage::new(storage_dir.path()).expect("LocalStorage");
 
             Self {
                 _storage_dir: storage_dir,
