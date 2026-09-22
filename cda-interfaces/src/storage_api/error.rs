@@ -49,6 +49,10 @@ pub enum StorageError {
     #[error("Storage corruption: {0}")]
     Corruption(String),
 
+    /// The storage is read-only. Not transient: retrying cannot change it.
+    #[error("Storage is read-only: {0}")]
+    ReadOnly(String),
+
     /// Any other error not covered by the variants above.
     #[error("Unknown error: {0}")]
     Other(String),
@@ -70,6 +74,7 @@ impl From<std::io::Error> for StorageError {
         match err.kind() {
             std::io::ErrorKind::PermissionDenied => StorageError::PermissionDenied(err.to_string()),
             std::io::ErrorKind::StorageFull => StorageError::NoSpaceLeft(err.to_string()),
+            std::io::ErrorKind::ReadOnlyFilesystem => StorageError::ReadOnly(err.to_string()),
             _ => StorageError::Io(err),
         }
     }

@@ -196,6 +196,46 @@ async fn can_begin_transaction_after_previous_rollback() {
 }
 
 #[tokio::test]
+async fn opening_missing_root_fails_without_creating_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("not_mounted");
+
+    let result = LocalStorage::new(&root);
+
+    assert!(
+        matches!(result, Err(StorageError::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound)
+    );
+    assert!(!root.exists());
+}
+
+#[tokio::test]
+async fn writes_never_recreate_a_vanished_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("mounted");
+    std::fs::create_dir(&root).unwrap();
+    let storage = LocalStorage::new(&root).unwrap();
+
+    // E.g. the storage is unmounted while the CDA runs.
+    std::fs::remove_dir(&root).unwrap();
+
+    assert!(matches!(
+        storage.begin_transaction(),
+        Err(StorageError::Io(_))
+    ));
+    assert!(matches!(
+        storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
+            .await,
+        Err(StorageError::Io(_))
+    ));
+    assert!(!root.exists());
+
+    // A failed start must not leave the storage busy.
+    std::fs::create_dir(&root).unwrap();
+    storage.begin_transaction().unwrap();
+}
+
+#[tokio::test]
 async fn case_insensitive_keys() {
     let (storage, _dir) = create_test_storage();
     let name = CollectionName::DiagnosticDatabase;
