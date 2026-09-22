@@ -29,11 +29,23 @@ use crate::{
 
 /// Generate a reference CDA configuration and write it to the requested output.
 ///
+/// When `can` is `true`, generates the CAN worked-example config
+/// (`opensovd-cda-can.toml`) instead of the main reference config.
+///
 /// # Errors
 /// Returns [`AppError`] if generating the reference configuration or writing it fails.
-pub fn generate_config_cmd(output: Option<&PathBuf>) -> Result<(), AppError> {
-    let content = generate_reference_config()
-        .map_err(|e| AppError::RuntimeError(format!("Failed to generate config: {e}")))?;
+pub fn generate_config_cmd(output: Option<&PathBuf>, can: bool) -> Result<(), AppError> {
+    let content = if can {
+        generate_can_reference_config()
+    } else {
+        generate_reference_config()
+    }
+    .map_err(|e| AppError::RuntimeError(format!("Failed to generate config: {e}")))?;
+    let default_path = if can {
+        "opensovd-cda-can.toml"
+    } else {
+        "opensovd-cda.toml"
+    };
 
     match output.map(|p| p.as_os_str()) {
         Some(p) if p == "-" => {
@@ -45,7 +57,7 @@ pub fn generate_config_cmd(output: Option<&PathBuf>) -> Result<(), AppError> {
         }
         Some(path) => std::fs::write(path, &content)
             .map_err(|e| AppError::RuntimeError(format!("Failed to write config: {e}"))),
-        None => std::fs::write("opensovd-cda.toml", &content)
+        None => std::fs::write(default_path, &content)
             .map_err(|e| AppError::RuntimeError(format!("Failed to write config: {e}"))),
     }
 }
@@ -176,6 +188,15 @@ const SPDX_HEADER: &str = "\
 
 ";
 
+#[rustfmt::skip]
+const CAN_INTRO: &str = "\
+# Example configuration for CAN bus transport
+# This enables CAN communication while keeping DoIP disabled.
+# Requires a binary built with the `can` cargo feature, e.g.
+#   CDA_CONFIG_FILE=opensovd-cda-can.toml cargo run -p opensovd-cda --features can
+
+";
+
 /// Errors that can occur during reference config generation.
 #[derive(thiserror::Error, Debug)]
 pub enum GenerateConfigError {
@@ -195,24 +216,13 @@ pub enum GenerateConfigError {
 ///
 /// Returns an error if the configuration schema cannot be serialized to JSON or TOML.
 pub fn generate_reference_config() -> Result<String, GenerateConfigError> {
-    let schema = schemars::schema_for!(Configuration);
-    let schema_json = serde_json::to_value(&schema).map_err(GenerateConfigError::SchemaJson)?;
-
-    let toml_value = toml::Value::try_from(reference_config_instance())
-        .map_err(GenerateConfigError::TomlValue)?;
-    let sorted_value = sort_toml_value(toml_value);
-    let default_toml =
-        toml::to_string_pretty(&sorted_value).map_err(GenerateConfigError::TomlFormat)?;
-    let formatted_toml = format_selected_hex_literals(&default_toml);
-
-    let desc_map = build_description_map(&schema_json);
     // Section paths that exist in the *default* configuration. Sections the
     // reference instance adds on top (optional sections like `[can]`, or
     // example entries like `[ecu.FLXC1000]`) get their headers commented out:
     // a bare header of a typed optional section would otherwise deserialize
     // as `Some(<empty table>)` and fail on missing required fields when a
     // user loads the reference file verbatim.
-    let default_sections = {
+    let live_sections = {
         let default_value = toml::Value::try_from(crate::config::default_config())
             .map_err(GenerateConfigError::TomlValue)?;
         let mut sections = BTreeSet::new();
@@ -222,8 +232,145 @@ pub fn generate_reference_config() -> Result<String, GenerateConfigError> {
 
     Ok(format!(
         "{SPDX_HEADER}{}",
-        process_toml(&formatted_toml, &desc_map, &default_sections)
+        render_reference_config(
+            reference_config_instance(),
+            &live_sections,
+            &BTreeSet::new()
+        )?
     ))
+}
+
+/// Generate a runnable worked-example TOML configuration for CAN bus transport
+/// (`DoIP` disabled). The specific values in [`can_reference_config_instance`]
+/// are left live (uncommented); everything else follows the same
+/// fully-commented, doc-annotated style as [`generate_reference_config`].
+///
+/// Sharing this rendering pipeline - rather than hand-maintaining
+/// `opensovd-cda-can.toml` - is what lets
+/// `can_reference_config_matches_committed_file` catch the same classes of
+/// drift (stale keys, new schema fields, changed doc-strings) that already
+/// protect `opensovd-cda.toml`. See #548.
+///
+/// # Errors
+///
+/// Returns an error if the configuration schema cannot be serialized to JSON or TOML.
+pub fn generate_can_reference_config() -> Result<String, GenerateConfigError> {
+    let instance = can_reference_config_instance();
+
+    // Every section this specific worked example populates is meant to be
+    // live, unlike the main reference's minimal default-only live set.
+    let live_sections = {
+        let value = toml::Value::try_from(&instance).map_err(GenerateConfigError::TomlValue)?;
+        let mut sections = BTreeSet::new();
+        collect_table_paths(&value, "", &mut sections);
+        sections
+    };
+
+    let live_paths: BTreeSet<String> = [
+        "flash_files_path",
+        "server.address",
+        "server.port",
+        "database.seed_dir",
+        "database.fallback_to_base_variant",
+        "doip.enabled",
+        "doip.tester_address",
+        "doip.tester_subnet",
+        "doip.gateway_port",
+        "doip.send_timeout_ms",
+        "can.interface",
+        "can.response_timeout_ms",
+        "can.keepalive_interval_ms",
+        "can.probe_timeout_ms",
+        "can.ecu_mappings.ecu_name",
+        "can.ecu_mappings.request_id",
+        "can.ecu_mappings.response_id",
+        "ecu.FLXC1000.protocol",
+        "logging.otel.enabled",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+
+    Ok(format!(
+        "{SPDX_HEADER}{CAN_INTRO}{}",
+        render_reference_config(instance, &live_sections, &live_paths)?
+    ))
+}
+
+/// Shared rendering pipeline for both [`generate_reference_config`] and
+/// [`generate_can_reference_config`]: serialize `instance` to TOML, sort it
+/// deterministically, then comment out every value/section not present in
+/// `live_sections` / `live_paths`, prefixing each with its schema doc comment.
+fn render_reference_config(
+    instance: Configuration,
+    live_sections: &BTreeSet<String>,
+    live_paths: &BTreeSet<String>,
+) -> Result<String, GenerateConfigError> {
+    let schema = schemars::schema_for!(Configuration);
+    let schema_json = serde_json::to_value(&schema).map_err(GenerateConfigError::SchemaJson)?;
+
+    let toml_value = toml::Value::try_from(instance).map_err(GenerateConfigError::TomlValue)?;
+    let sorted_value = sort_toml_value(toml_value);
+    let default_toml =
+        toml::to_string_pretty(&sorted_value).map_err(GenerateConfigError::TomlFormat)?;
+    let formatted_toml = format_selected_hex_literals(&default_toml);
+
+    let desc_map = build_description_map(&schema_json);
+
+    Ok(process_toml(
+        &formatted_toml,
+        &desc_map,
+        live_sections,
+        live_paths,
+    ))
+}
+
+/// Create the [`Configuration`] instance rendered as `opensovd-cda-can.toml`:
+/// a runnable worked example for CAN bus transport with `DoIP` disabled.
+fn can_reference_config_instance() -> Configuration {
+    let mut config = Configuration::default();
+
+    "./flash".clone_into(&mut config.flash_files_path);
+
+    config.server = crate::config::configfile::ServerConfig {
+        address: "0.0.0.0".to_owned(),
+        port: 20002,
+    };
+
+    "./mdds".clone_into(&mut config.database.seed_dir);
+    config.database.fallback_to_base_variant = true;
+
+    config.doip = cda_comm_doip::config::DoipConfig {
+        enabled: false,
+        tester_address: "127.0.0.1".to_owned(),
+        tester_subnet: "255.255.0.0".to_owned(),
+        gateway_port: 13400,
+        send_timeout_ms: 1000,
+        ..config.doip
+    };
+
+    config.can = Some(cda_comm_can::config::CanConfig {
+        interface: "vxcan0".to_owned(),
+        response_timeout_ms: 2000,
+        keepalive_interval_ms: 2000,
+        ecu_mappings: vec![cda_comm_can::config::CanEcuMapping {
+            ecu_name: "FLXC1000".to_owned(),
+            request_id: 0x7E0,
+            response_id: 0x7E8,
+            addressing_mode: cda_comm_can::config::CanAddressingMode::default(),
+        }],
+        ..Default::default()
+    });
+
+    config.ecu.insert(
+        "FLXC1000".to_owned(),
+        EcuConfig {
+            protocol: Some("UDS_CAN".to_owned()),
+            ..Default::default()
+        },
+    );
+
+    config
 }
 
 /// Collect the dotted paths of all tables (and tables inside arrays) in a
@@ -402,7 +549,8 @@ fn format_array_item_as_hex(line: &str) -> String {
 fn format_address_value_as_hex(line: &str, current_section: &str) -> Option<String> {
     let eq_pos = line.find('=')?;
     let key = line.get(..eq_pos)?.trim();
-    if !key.contains("address") && !current_section.contains("address") {
+    let is_can_id = matches!(key, "request_id" | "response_id");
+    if !is_can_id && !key.contains("address") && !current_section.contains("address") {
         return None;
     }
 
@@ -436,7 +584,22 @@ fn resolve_ref<'a>(
     schema_node: &'a serde_json::Value,
     defs: &'a serde_json::Value,
 ) -> &'a serde_json::Value {
-    schema_node
+    // `Option<T>` renders as `{"anyOf": [{"$ref": "..."}, {"type": "null"}],
+    // "description": "..."}` rather than a bare `$ref`: look inside `anyOf`
+    // for the first ref when there's none at this level, so optional struct
+    // fields (e.g. `can: Option<CanConfig>`) still resolve to their
+    // properties instead of being treated as an opaque leaf.
+    let ref_node = if schema_node.get("$ref").is_some() {
+        schema_node
+    } else {
+        schema_node
+            .get("anyOf")
+            .and_then(|v| v.as_array())
+            .and_then(|variants| variants.iter().find(|v| v.get("$ref").is_some()))
+            .unwrap_or(schema_node)
+    };
+
+    ref_node
         .get("$ref")
         .and_then(|v| v.as_str())
         .and_then(|r| {
@@ -493,13 +656,13 @@ fn is_toml_section_header(trimmed: &str) -> bool {
     }
 }
 
-/// Post-process the raw TOML string: comment out value lines (and section
-/// headers that do not exist in the default configuration), inject
-/// descriptions.
+/// Post-process the raw TOML string: comment out value lines and section
+/// headers not in `live_sections` / `live_paths`, and inject descriptions.
 fn process_toml(
     raw_toml: &str,
     desc_map: &BTreeMap<String, String>,
-    default_sections: &BTreeSet<String>,
+    live_sections: &BTreeSet<String>,
+    live_paths: &BTreeSet<String>,
 ) -> String {
     raw_toml
         .lines()
@@ -508,7 +671,8 @@ fn process_toml(
                 line,
                 section_stack,
                 desc_map,
-                default_sections,
+                live_sections,
+                live_paths,
             ))
         })
         .collect()
@@ -518,7 +682,8 @@ fn format_toml_line(
     line: &str,
     section_stack: &mut Vec<String>,
     desc_map: &BTreeMap<String, String>,
-    default_sections: &BTreeSet<String>,
+    live_sections: &BTreeSet<String>,
+    live_paths: &BTreeSet<String>,
 ) -> String {
     let trimmed = line.trim();
 
@@ -530,11 +695,11 @@ fn format_toml_line(
         let section_name = trimmed.trim_start_matches('[').trim_end_matches(']');
         *section_stack = section_name.split('.').map(String::from).collect();
 
-        // Headers of sections absent from the default configuration are
-        // commented out like the values: an uncommented header of a typed
-        // optional section (e.g. `[can]`) would deserialize as an empty
-        // table and fail on missing required fields.
-        let header_line = if default_sections.contains(section_name) {
+        // Headers of sections outside the live set are commented out like
+        // the values: an uncommented header of a typed optional section
+        // (e.g. `[can]`) would deserialize as an empty table and fail on
+        // missing required fields.
+        let header_line = if live_sections.contains(section_name) {
             line.to_owned()
         } else {
             format!("# {}", line.trim_start())
@@ -558,15 +723,22 @@ fn format_toml_line(
             });
     }
 
-    let description = trimmed.find('=').and_then(|eq_pos| {
-        let key = trimmed.get(..eq_pos).map(str::trim)?;
-        let full_path = if section_stack.is_empty() {
+    let full_path = trimmed.find('=').map(|eq_pos| {
+        let key = trimmed.get(..eq_pos).map_or("", str::trim);
+        if section_stack.is_empty() {
             key.to_string()
         } else {
             format!("{}.{key}", section_stack.join("."))
-        };
-        desc_map.get(&full_path)
+        }
     });
+
+    let description = full_path.as_deref().and_then(|p| desc_map.get(p));
+    let is_live = full_path.as_deref().is_some_and(|p| live_paths.contains(p));
+    let value_line = if is_live {
+        line.to_owned()
+    } else {
+        format!("# {line}")
+    };
 
     description
         .into_iter()
@@ -578,7 +750,7 @@ fn format_toml_line(
                 format!("# {l}")
             }
         })
-        .chain(std::iter::once(format!("# {line}")))
+        .chain(std::iter::once(value_line))
         .fold(String::new(), |mut acc, l| {
             let _ = writeln!(acc, "{l}");
             acc
@@ -706,6 +878,58 @@ mod tests {
         config
             .validate_sanity()
             .expect("CAN example config should pass sanity validation");
+    }
+
+    /// The committed CAN example config must only use keys that the
+    /// `Configuration` schema actually has.
+    ///
+    /// This catches config drift like #544, where `database.path` was renamed
+    /// to `database.seed_dir` in the schema but the standalone example file
+    /// kept the old key: Figment silently ignores unknown keys during
+    /// deserialization, so `can_example_config_parses_as_valid_config` alone
+    /// cannot catch a stale/renamed key like this - the file "parses fine",
+    /// it just silently falls back to the field's default value. Reuses the
+    /// same round-trip-diff approach `com_params::find_unknown_keys` already
+    /// uses to validate per-ECU com-param overrides.
+    #[cfg(feature = "can")]
+    #[test]
+    fn can_example_config_has_no_unknown_keys() {
+        use figment::{
+            Figment,
+            providers::{Format, Serialized, Toml},
+        };
+
+        let example_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("opensovd-cda-can.toml");
+        let content = std::fs::read_to_string(&example_path)
+            .expect("opensovd-cda-can.toml should be readable");
+        let input_table: toml::Table =
+            toml::from_str(&content).expect("opensovd-cda-can.toml should be valid TOML");
+
+        // The reference is the *merged* config (defaults + file), round-tripped
+        // back through the typed `Configuration`. Any key present in the raw
+        // file but absent from this reference was silently ignored by Figment.
+        let config: crate::config::configfile::Configuration =
+            Figment::from(Serialized::defaults(crate::config::default_config()))
+                .merge(Toml::file(&example_path))
+                .extract()
+                .expect("opensovd-cda-can.toml should be parseable as a valid Configuration");
+        let reference_value =
+            toml::Value::try_from(&config).expect("Configuration should serialize to TOML");
+        let reference_table = reference_value
+            .as_table()
+            .expect("serialized Configuration should be a TOML table");
+
+        let unknown =
+            crate::config::com_params::find_unknown_keys(&input_table, reference_table, "");
+
+        assert!(
+            unknown.is_empty(),
+            "opensovd-cda-can.toml uses keys that don't exist in the Configuration schema (likely \
+             a stale/renamed key, see #544):\n  - {}",
+            unknown.join("\n  - ")
+        );
     }
 
     /// Collect all leaf property paths from the JSON Schema.
@@ -883,6 +1107,98 @@ mod tests {
                     bracket_depth.saturating_add(uncommented.chars().filter(|&c| c == '[').count());
                 bracket_depth =
                     bracket_depth.saturating_sub(uncommented.chars().filter(|&c| c == ']').count());
+            }
+        }
+        sections
+    }
+
+    /// Verify generated CAN config matches committed `opensovd-cda-can.toml`.
+    ///
+    /// This is what closes the gap @alexmohr flagged on #548:
+    /// `can_example_config_has_no_unknown_keys` only catches keys the schema
+    /// no longer has; it cannot catch a *new* schema field the example never
+    /// picked up, or a doc-string that drifted out of sync. Regenerating from
+    /// the same schema-driven pipeline as `opensovd-cda.toml` and diffing
+    /// against the committed file catches both, the same way
+    /// `generate_reference_config_matches_committed_file` already does for
+    /// the main reference config.
+    ///
+    /// Fix with: `cargo run --all-features -- generate-config --can --output opensovd-cda-can.toml`
+    #[test]
+    fn can_reference_config_matches_committed_file() {
+        let generated = generate_can_reference_config().unwrap();
+
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|p| p.join("Cargo.lock").exists())
+            .expect("could not find workspace root (Cargo.lock)");
+        let committed =
+            std::fs::read_to_string(workspace_root.join("opensovd-cda-can.toml")).unwrap();
+
+        if generated == committed {
+            return;
+        }
+
+        // The pass/fail check is the exact string comparison above - this
+        // must also catch drift confined to comment/doc-string text, not
+        // just key=value lines. `extract_all_value_lines_by_section` only
+        // grades key=value lines, so it is used here purely to build a
+        // readable "which section changed" message, never as the actual
+        // comparison criterion.
+        let gen_sections = extract_all_value_lines_by_section(&generated);
+        let com_sections = extract_all_value_lines_by_section(&committed);
+        let value_diff = if gen_sections == com_sections {
+            "(no key=value differences - the drift is in comment/doc-string text only)".to_owned()
+        } else {
+            format!(
+                "value lines differ:\n  generated: {gen_sections:?}\n  committed: {com_sections:?}"
+            )
+        };
+
+        panic!(
+            "opensovd-cda-can.toml is out of date. Regenerate with: cargo run --all-features -- \
+             generate-config --can --output opensovd-cda-can.toml\n{value_diff}"
+        );
+    }
+
+    /// Like `extract_value_lines_by_section`, but keeps both live
+    /// (uncommented) and commented-out key=value lines - needed because the
+    /// CAN example is a worked config with some values live, unlike the
+    /// fully-commented main reference.
+    fn extract_all_value_lines_by_section(text: &str) -> BTreeMap<String, Vec<String>> {
+        let mut sections: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut current_section = String::new();
+        let mut bracket_depth: usize = 0;
+
+        for line in text.lines() {
+            let trimmed = line.trim();
+
+            if bracket_depth == 0 && is_toml_section_header(trimmed) {
+                current_section = trimmed.trim_start_matches("# ").to_owned();
+                sections.entry(current_section.clone()).or_default();
+                continue;
+            }
+
+            let value_line = trimmed.strip_prefix("# ").unwrap_or(trimmed);
+
+            if bracket_depth > 0 {
+                sections
+                    .entry(current_section.clone())
+                    .or_default()
+                    .push(value_line.to_owned());
+                bracket_depth =
+                    bracket_depth.saturating_add(value_line.chars().filter(|&c| c == '[').count());
+                bracket_depth =
+                    bracket_depth.saturating_sub(value_line.chars().filter(|&c| c == ']').count());
+            } else if value_line.contains(" = ") {
+                sections
+                    .entry(current_section.clone())
+                    .or_default()
+                    .push(value_line.to_owned());
+                bracket_depth =
+                    bracket_depth.saturating_add(value_line.chars().filter(|&c| c == '[').count());
+                bracket_depth =
+                    bracket_depth.saturating_sub(value_line.chars().filter(|&c| c == ']').count());
             }
         }
         sections
