@@ -65,7 +65,7 @@ impl LocalStorage {
         let staging_dir = journal_dir.join(wal::STAGING_DIR_NAME);
 
         // Ensure directories exist.
-        std::fs::create_dir_all(&collections_dir)?;
+        std::fs::create_dir_all(&collections_dir)?; //FIXME requires write permissions
         std::fs::create_dir_all(&staging_dir)?;
 
         // Run startup recovery before accepting any operations.
