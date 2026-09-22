@@ -20,7 +20,8 @@ use testcontainers::{
 
 #[tokio::test]
 async fn cda_should_work_on_a_read_only_partition() {
-    let cda = run_cda_container().await.with_readonly_rootfs(true);
+    let cda = prepare_cda_container().await
+        .with_readonly_rootfs(true);
 
     let cda = {
         let databases_dir_on_host = PathBuf::from("../testcontainer/odx")
@@ -37,21 +38,18 @@ async fn cda_should_work_on_a_read_only_partition() {
 
     let container = cda.start().await.unwrap();
 
-    eprintln!("Started!");
+    eprintln!("CDA container started!");
 
     tokio::time::sleep(Duration::from_secs(5)).await; //TODO trigger some requests on CDA to ensure nothing writes to disk (except the Update plugin)
 
-    eprintln!("Terminating and removing!");
-
-    container.rm().await.unwrap();
-
-    eprintln!("Container removed!");
+    eprintln!("Terminating and removing CDA container!");
 }
 
 pub type CdaContainer = ContainerRequest<GenericImage>;
 
-pub async fn run_cda_container() -> CdaContainer {
-    eprintln!("Building CDA container image...");
+//TODO move into util module
+pub async fn prepare_cda_container() -> CdaContainer {
+    eprintln!("Building CDA container image. This may take a few minutes...");
 
     let metadata = cargo_metadata::MetadataCommand::new()
         .no_deps()
@@ -87,7 +85,7 @@ pub async fn run_cda_container() -> CdaContainer {
         // use default BUILD_PROFILE=release here; setting BUILD_PROFILE=dev made the build significantly slower
         .build_image()
         .await
-        .unwrap();
+        .expect("Failed to build CDA container image");
 
     eprintln!("Completed building CDA container image. Preparing run...");
 
@@ -102,13 +100,18 @@ pub async fn run_cda_container() -> CdaContainer {
             }
         });
 
-    let thread_name = thread::current().name().unwrap().replace("::", ".");
+    let thread_name = thread::current().name()
+        .expect("Cannot determine name of test thread for naming CDA container")
+        .replace("::", ".");
     image = image.with_container_name(format!("cda-integration-test-{thread_name}"));
 
-    // passthrough `RUST_LOG` for controlling log levels
-    if let Some(rust_log) = option_env!("RUST_LOG") {
-        image = image.with_env_var("RUST_LOG", rust_log)
-    };
+    // passthrough envs into container
+    if let Some(env) = option_env!("RUST_LOG") {
+        image = image.with_env_var("RUST_LOG", env)
+    }
+    if let Some(env) = option_env!("RUST_BACKTRACE") {
+        image = image.with_env_var("RUST_BACKTRACE", env)
+    }
 
     image
 }
