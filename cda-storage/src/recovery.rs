@@ -39,6 +39,24 @@ pub(crate) const BACKUP_EXTENSION: &str = "bak";
 /// File extension used for staging (temporary) files created during write operations.
 pub(crate) const STAGING_EXTENSION: &str = "tmp";
 
+/// Whether a previous run left work for [`recover`] to do.
+///
+/// Read-only, so a clean storage needs no write access at startup.
+pub(crate) fn has_pending_work(journal_dir: &Path, collections_dir: &Path) -> bool {
+    let wal_path = journal_dir.join(wal::WAL_FILE_NAME);
+    if wal_path.exists() {
+        return true;
+    }
+
+    if has_backup_files(collections_dir) {
+        return true;
+    }
+
+    // Leftover staging files from an interrupted transaction.
+    std::fs::read_dir(journal_dir.join(wal::STAGING_DIR_NAME))
+        .is_ok_and(|mut entries| entries.any(|entry| entry.is_ok_and(|e| e.path().is_file())))
+}
+
 /// Perform startup recovery on the given journal and collections directories.
 ///
 /// This function is idempotent. Calling it multiple times on a clean state is a no-op.

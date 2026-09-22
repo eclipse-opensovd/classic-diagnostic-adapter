@@ -42,6 +42,7 @@ Storage Access
                 NoSpaceLeft(String)
                 Io(String)
                 Corruption(String)
+                ReadOnly(String)
                 Other(String)
             }
 
