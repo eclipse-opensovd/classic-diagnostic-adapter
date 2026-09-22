@@ -9,15 +9,11 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-[styles]
-c = ["*.rs", "*.kt", "*.kts", "*.fbs"]
-python = [
-  ".env.example",
-  ".gitkeep",
-  ".markdownlintignore",
-  ".yamlfmt",
-  "*.bazel",
-  "*.bzl",
-  "*.env",
-]
-html = ["*.odx-*"]
+load("//bazel:rust_crate.bzl", "workspace_rust_library")
+
+workspace_rust_library(
+    name = "cda_extra",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "cda_extra",
+    crate_root = "src/lib.rs",
+)

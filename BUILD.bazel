@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+exports_files([
+    "Cargo.lock",
+    "Cargo.toml",
+])
+
+package_group(
+    name = "workspace_crates",
+    packages = ["//..."],
+)
+
+config_setting(
+    name = "can_enabled",
+    define_values = {"can": "true"},
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "cda_mbedtls",
+    actual = "//cda-main:opensovd_cda_lib",
+    visibility = ["//visibility:public"],
+)
+
+# Stable Bazel API for applications embedding CDA and supplying custom plugins.
+alias(
+    name = "cda_lib",
+    actual = "//cda-main:opensovd_cda_lib",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "interfaces",
+    actual = "//cda-interfaces:cda_interfaces",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "core",
+    actual = "//cda-core:cda_core",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "database",
+    actual = "//cda-database:cda_database",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "sovd",
+    actual = "//cda-sovd:cda_sovd",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "sovd_interfaces",
+    actual = "//cda-sovd-interfaces:sovd_interfaces",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "storage",
+    actual = "//cda-storage:cda_storage",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "plugin_security",
+    actual = "//cda-plugin-security:cda_plugin_security",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "plugin_communication_management",
+    actual = "//cda-plugin-communication-management:cda_plugin_communication_management",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "plugin_runtime_update",
+    actual = "//cda-plugin-runtime-update:cda_plugin_runtime_update",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "vendor_override_macros",
+    actual = "//override-macros:override_macros",
+    visibility = ["//visibility:public"],
+)
+
+[
+    alias(
+        name = "dep_{}".format(name.replace("-", "_")),
+        actual = "@cda_crates//:{}".format(name),
+        visibility = ["//visibility:public"],
+    )
+    for name in [
+        "aide",
+        "async-trait",
+        "axum",
+        "axum-extra",
+        "bytes",
+        "futures",
+        "http",
+        "linkme",
+        "schemars",
+        "serde",
+        "serde_json",
+        "tokio",
+        "tracing",
+    ]
+]
+
+alias(
+    name = "opensovd-cda",
+    actual = "//cda-main:opensovd-cda",
+    visibility = ["//visibility:public"],
+)

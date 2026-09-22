@@ -9,15 +9,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-[styles]
-c = ["*.rs", "*.kt", "*.kts", "*.fbs"]
-python = [
-  ".env.example",
-  ".gitkeep",
-  ".markdownlintignore",
-  ".yamlfmt",
-  "*.bazel",
-  "*.bzl",
-  "*.env",
-]
-html = ["*.odx-*"]
+exports_files([
+    "build_metadata.env",
+    "can_crate_extension.bzl",
+    "check_mbedtls_revision.py",
+    "rust_crate.bzl",
+])

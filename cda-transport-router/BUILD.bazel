@@ -9,15 +9,19 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-[styles]
-c = ["*.rs", "*.kt", "*.kts", "*.fbs"]
-python = [
-  ".env.example",
-  ".gitkeep",
-  ".markdownlintignore",
-  ".yamlfmt",
-  "*.bazel",
-  "*.bzl",
-  "*.env",
-]
-html = ["*.odx-*"]
+load("//bazel:rust_crate.bzl", "workspace_rust_library")
+
+workspace_rust_library(
+    name = "cda_transport_router",
+    srcs = glob(["src/**/*.rs"]),
+    crate_deps = [
+        "tokio",
+        "tracing",
+    ],
+    crate_name = "cda_transport_router",
+    crate_root = "src/lib.rs",
+    proc_macro_crate_deps = ["async-trait"],
+    deps = [
+        "//cda-interfaces:cda_interfaces",
+    ],
+)
