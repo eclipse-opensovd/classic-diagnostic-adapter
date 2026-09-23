@@ -27,7 +27,7 @@ use crate::{
             Response, auth_header, extract_field_from_json, response_to_json,
             response_to_json_to_field, send_cda_json_request, send_cda_request,
         },
-        runtime::{TestRuntime, setup_integration_test},
+        test_env::{TestEnv, setup_integration_test},
     },
 };
 
@@ -50,7 +50,7 @@ pub(crate) fn bearer_token_header(token: &str) -> HeaderMap {
 
 #[tokio::test]
 async fn lock_unlock() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
 
     for endpoint in ENDPOINTS {
@@ -153,7 +153,7 @@ async fn lock_unlock() -> Result<(), TestingError> {
 
 #[tokio::test]
 async fn cannot_lock_ecu_with_existing_functional_log() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
 
     let func_lock_response = create_lock(
@@ -201,7 +201,7 @@ async fn ownership() -> Result<(), TestingError> {
         items: Vec<LockElement>,
     }
 
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth_owner = auth_header(&runtime.config, None).await?;
     let auth_other = auth_header(&runtime.config, Some("ownership-test")).await?;
 
@@ -298,7 +298,7 @@ async fn ownership() -> Result<(), TestingError> {
 
 #[tokio::test]
 async fn test_vehicle_locking_blocked_by_other() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth_user1 = auth_header(&runtime.config, None).await?;
     let auth_user2 = auth_header(&runtime.config, Some("user2")).await?;
 
@@ -343,7 +343,7 @@ async fn test_vehicle_locking_blocked_by_other() -> Result<(), TestingError> {
 async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
     async fn create_ecu_and_func_lock(
         user: &HeaderMap,
-        runtime: &TestRuntime,
+        runtime: &TestEnv,
     ) -> Result<(String, String), TestingError> {
         // Create locks in correct hierarchy: ECU (lowest) -> Functional -> Vehicle (highest)
         let ecu_lock_id: String = response_to_json_to_field(
@@ -377,7 +377,7 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
         ecu_lock_id: &str,
         func_lock_id: &str,
         user: &HeaderMap,
-        runtime: &TestRuntime,
+        runtime: &TestEnv,
     ) {
         lock_operation(
             ECU_ENDPOINT,
@@ -401,7 +401,7 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
     }
 
     async fn create_vehicle_lock(
-        runtime: &TestRuntime,
+        runtime: &TestEnv,
         user: &HeaderMap,
     ) -> Result<String, TestingError> {
         response_to_json_to_field(
@@ -417,7 +417,7 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
         )
     }
 
-    async fn delete_lock(runtime: &TestRuntime, user: &HeaderMap, lock_id: &str) {
+    async fn delete_lock(runtime: &TestEnv, user: &HeaderMap, lock_id: &str) {
         lock_operation(
             VEHICLE_ENDPOINT,
             Some(lock_id),
@@ -429,7 +429,7 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
         .await;
     }
 
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth_user1 = auth_header(&runtime.config, None).await?;
     let auth_user2 = auth_header(&runtime.config, Some("user2")).await?;
 
@@ -437,20 +437,20 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
     // test with locks created before vehicle lock
     {
         for user in [&auth_user1, &auth_user2] {
-            let (ecu_lock_id, func_lock_id) = create_ecu_and_func_lock(user, runtime).await?;
-            let vehicle_lock = create_vehicle_lock(runtime, user).await?;
-            delete_lock(runtime, user, &vehicle_lock).await;
-            assert_ecu_and_func_locks_deleted(&ecu_lock_id, &func_lock_id, user, runtime).await;
+            let (ecu_lock_id, func_lock_id) = create_ecu_and_func_lock(user, &runtime).await?;
+            let vehicle_lock = create_vehicle_lock(&runtime, user).await?;
+            delete_lock(&runtime, user, &vehicle_lock).await;
+            assert_ecu_and_func_locks_deleted(&ecu_lock_id, &func_lock_id, user, &runtime).await;
         }
     }
 
     // test with locks created after vehicle lock
     {
         for user in [&auth_user1, &auth_user2] {
-            let vehicle_lock = create_vehicle_lock(runtime, user).await?;
-            let (ecu_lock_id, func_lock_id) = create_ecu_and_func_lock(user, runtime).await?;
-            delete_lock(runtime, user, &vehicle_lock).await;
-            assert_ecu_and_func_locks_deleted(&ecu_lock_id, &func_lock_id, user, runtime).await;
+            let vehicle_lock = create_vehicle_lock(&runtime, user).await?;
+            let (ecu_lock_id, func_lock_id) = create_ecu_and_func_lock(user, &runtime).await?;
+            delete_lock(&runtime, user, &vehicle_lock).await;
+            assert_ecu_and_func_locks_deleted(&ecu_lock_id, &func_lock_id, user, &runtime).await;
         }
     }
     Ok(())
@@ -458,7 +458,7 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
 
 #[tokio::test]
 async fn test_vehicle_lock_cannot_be_deleted_by_non_owner() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth_owner = auth_header(&runtime.config, None).await?;
     let auth_other = auth_header(&runtime.config, Some("other-user")).await?;
 
@@ -513,7 +513,7 @@ async fn test_vehicle_lock_cannot_be_deleted_by_non_owner() -> Result<(), Testin
 
 #[tokio::test]
 async fn test_component_ownership_protection_with_vehicle_lock_only() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth_owner = auth_header(&runtime.config, None).await?;
 
     // Lock the vehicle as 'owner'

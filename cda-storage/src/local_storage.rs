@@ -39,6 +39,8 @@ use crate::{
 /// files live under `{root}/journal/`.
 /// [[ dimpl~storage-local-filesystem-implementation, Local filesystem implementation of the Storage Access API, dimpl ]]
 pub struct LocalStorage {
+    /// The storage directory. Must exist; everything below it is created on demand.
+    root: PathBuf,
     /// Base directory for collection data.
     collections_dir: PathBuf,
     /// Directory containing the WAL file and staging subdirectory.
@@ -50,35 +52,51 @@ pub struct LocalStorage {
 }
 
 impl LocalStorage {
-    /// Create a new `LocalStorage` rooted at the given directory.
+    /// Opens the storage rooted at the given directory.
     ///
-    /// On construction, performs startup recovery to handle any incomplete transactions from a
-    /// previous run.
+    /// Recovers a transaction that a previous run was interrupted in, if there
+    /// is one. Otherwise never writes: the root itself is never created, and
+    /// the layout below it is created by the first write, which a read-only
+    /// storage fails with [`StorageError::ReadOnly`].
     ///
     /// # Errors
     ///
-    /// Returns a [`StorageError`] if directory creation fails or recovery fails.
+    /// Returns [`StorageError::Io`] with [`std::io::ErrorKind::NotFound`] if
+    /// the root does not exist (yet), e.g. because the storage is not mounted.
+    /// Returns a [`StorageError`] if recovery is pending but fails; the on-disk
+    /// state is then indeterminate and must not be used.
     pub fn new(root: impl Into<PathBuf>) -> Result<Self, StorageError> {
         let root = root.into();
-        let collections_dir = root.join("collections");
-        let journal_dir = root.join("journal");
-        let staging_dir = journal_dir.join(wal::STAGING_DIR_NAME);
-
-        // Ensure directories exist.
-        std::fs::create_dir_all(&collections_dir)?;
-        std::fs::create_dir_all(&staging_dir)?;
-
-        // Run startup recovery before accepting any operations.
-        recovery::recover(&journal_dir, &collections_dir)?;
-
-        tracing::info!(root = %root.display(), "Local storage initialized");
-
-        Ok(Self {
-            collections_dir,
-            journal_dir,
+        let storage = Self {
+            collections_dir: root.join("collections"),
+            journal_dir: root.join("journal"),
+            root,
             data_lock: Arc::new(tokio::sync::RwLock::new(())),
             tx_active: Arc::new(AtomicBool::new(false)),
-        })
+        };
+        storage.require_root()?;
+
+        // Checked first, so a clean storage is opened without writing.
+        if recovery::has_pending_work(&storage.journal_dir, &storage.collections_dir) {
+            tracing::info!("Interrupted transaction found in storage; recovering");
+            recovery::recover(&storage.journal_dir, &storage.collections_dir)?;
+        }
+
+        tracing::info!(root = %storage.root.display(), "Local storage initialized");
+        Ok(storage)
+    }
+
+    /// Fails unless the root exists, so writes never create it, e.g. in the
+    /// mount point of storage that is not mounted.
+    fn require_root(&self) -> Result<(), StorageError> {
+        if self.root.is_dir() {
+            return Ok(());
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("storage directory {} does not exist", self.root.display()),
+        )
+        .into())
     }
 
     /// Return the path to a collection's directory.
@@ -136,6 +154,7 @@ impl Storage for LocalStorage {
         let write_guard = self.data_lock.write().await;
         // Re-check after acquiring write lock
         if !dir.exists() {
+            self.require_root()?;
             std::fs::create_dir_all(&dir)?;
             tracing::debug!(collection = %name, "Created collection directory");
         }
@@ -158,17 +177,17 @@ impl Storage for LocalStorage {
         let wal_path = self.journal_dir.join(wal::WAL_FILE_NAME);
         let staging_dir = self.journal_dir.join(wal::STAGING_DIR_NAME);
 
-        // Create a fresh WAL file.
-        wal::create_wal(&wal_path).inspect_err(|_| {
-            // Reset flag if WAL creation fails.
+        // Nothing is created at construction time, so a transaction sets up the
+        // layout it and its commit need. Any failure has to clear the flag.
+        let prepared = self.require_root().and_then(|()| {
+            std::fs::create_dir_all(&staging_dir)?;
+            std::fs::create_dir_all(&self.collections_dir)?;
+            wal::create_wal(&wal_path)
+        });
+        if let Err(e) = prepared {
             self.tx_active.store(false, Ordering::Release);
-        })?;
-
-        // Ensure staging directory exists.
-        std::fs::create_dir_all(&staging_dir).map_err(|e| {
-            self.tx_active.store(false, Ordering::Release);
-            StorageError::Io(e)
-        })?;
+            return Err(e);
+        }
 
         tracing::debug!("Transaction started");
 

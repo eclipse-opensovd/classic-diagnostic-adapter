@@ -31,6 +31,7 @@ use crate::util::{
     },
 };
 
+mod container_smoke;
 mod custom_routes;
 mod data;
 mod deferred_init;
@@ -39,7 +40,9 @@ mod faults;
 mod flash_download;
 mod locks;
 mod operations;
+mod read_only_partition;
 mod runtimefiles;
+mod test_env;
 mod tester_present;
 mod version_endpoint;
 
@@ -377,33 +380,4 @@ pub(crate) async fn get_ecu_component(
     // Returns the json instead of Ecu, because the deserialization for SdSdg deserializes
     // everything as Sd, we also fail on silent changes in the interface, which is desirable
     response_to_json(&response)
-}
-
-pub(crate) fn hook_cleanup<F, Fut>(cleanup_fn: F)
-where
-    F: Fn() -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = ()> + 'static,
-{
-    let previous_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |panic_info| {
-        // Run cleanup inside catch_unwind so a failure here never triggers
-        // a double-panic (which the runtime turns into SIGABRT).
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Drive the cleanup future on a dedicated thread: a nested
-            // runtime on a tokio worker thread panics (see
-            // https://docs.rs/tokio/latest/tokio/runtime/struct.Runtime.html#method.block_on),
-            // and a second panic while unwinding aborts the process.
-            std::thread::scope(|s| {
-                s.spawn(|| {
-                    if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                    {
-                        rt.block_on(cleanup_fn());
-                    }
-                });
-            });
-        }));
-        previous_hook(panic_info);
-    }));
 }

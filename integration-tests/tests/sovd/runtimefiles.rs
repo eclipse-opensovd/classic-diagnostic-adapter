@@ -37,8 +37,9 @@ use crate::{
     },
     util::{
         TestingError,
+        config::test_container_dir,
         http::{QueryParams, auth_header, response_to_json, response_to_t, send_cda_request},
-        runtime::{setup_integration_test, test_container_dir, wait_for_ecus_online},
+        test_env::{setup_integration_test, wait_for_ecus_online},
     },
 };
 
@@ -99,7 +100,7 @@ async fn wait_for_execution_terminal(
 /// Tests that mutating endpoints return 403 Forbidden without a vehicle lock.
 #[tokio::test]
 async fn runtimefiles_requires_lock() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
 
     let auth_value = auth
@@ -181,7 +182,7 @@ async fn runtimefiles_requires_lock() -> Result<(), TestingError> {
 /// Checks the runtime file update execution resources follow ISO 17978-3 section 7.14.
 #[tokio::test]
 async fn runtimefiles_execution_responses_follow_operation_standard() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
@@ -275,7 +276,7 @@ async fn runtimefiles_execution_responses_follow_operation_standard() -> Result<
 /// Checks ISO bulk-data response conventions used by the runtime file categories.
 #[tokio::test]
 async fn runtimefiles_bulk_data_responses_follow_standard() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
@@ -388,7 +389,7 @@ async fn runtimefiles_bulk_data_responses_follow_standard() -> Result<(), Testin
 #[tokio::test]
 async fn runtimefiles_lifecycle() -> Result<(), TestingError> {
     // Acquire an exclusive vehicle lock (spec: all modifying actions require one).
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
 
     let lock_response = create_lock(
@@ -400,6 +401,10 @@ async fn runtimefiles_lifecycle() -> Result<(), TestingError> {
     )
     .await;
     let lock_id = response_to_t::<LockResponse>(&lock_response)?.id;
+
+    // A new CDA has no current files; start from the whole vehicle, so that
+    // Apply takes a non-empty backup, which Rollback needs.
+    apply_full_database(&runtime.config, &auth).await?;
 
     // Snapshot the current database item count so we can verify rollback restores it.
     let initial_count = get_file_list(&runtime.config, &auth, RUNTIMEFILES_CURRENT)
@@ -422,12 +427,8 @@ async fn runtimefiles_lifecycle() -> Result<(), TestingError> {
     execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
     assert_state_after_apply(&runtime.config, &auth, initial_count).await?;
 
-    // Rollback requires a non-empty backup. A fresh test environment has no current files, so
-    // applying the upload creates an empty backup and rollback is correctly unavailable.
-    if initial_count > 0 {
-        execute_mode(&runtime.config, &auth, ExecutionMode::Rollback).await?;
-        assert_state_after_rollback(&runtime.config, &auth, initial_count).await?;
-    }
+    execute_mode(&runtime.config, &auth, ExecutionMode::Rollback).await?;
+    assert_state_after_rollback(&runtime.config, &auth, initial_count).await?;
 
     // Trigger "Cleanup" - spec: "reset all pending updates, as well as deleting the backup".
     execute_mode(&runtime.config, &auth, ExecutionMode::Cleanup).await?;
@@ -451,7 +452,7 @@ async fn runtimefiles_lifecycle() -> Result<(), TestingError> {
 /// and not for the runtimefiles-backup or runtimefiles-current category."
 #[tokio::test]
 async fn runtimefiles_post_delete_forbidden_on_current_and_backup() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
@@ -528,14 +529,22 @@ async fn runtimefiles_post_delete_forbidden_on_current_and_backup() -> Result<()
 /// This specifically tests that a non-lock-holder cannot DELETE the backup.
 #[tokio::test]
 async fn runtimefiles_non_owner_cannot_delete_backup() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
+    // Apply over the whole vehicle, so that there is a backup to delete.
+    apply_full_database(&runtime.config, &auth).await?;
     let upload_response = upload_mdd(&runtime.config, &auth).await;
     assert_eq!(upload_response.status(), StatusCode::CREATED);
 
     execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
+    let backup = ids_of(
+        &get_file_list(&runtime.config, &auth, RUNTIMEFILES_BACKUP)
+            .await?
+            .items,
+    );
+    assert!(!backup.is_empty(), "Precondition: backup must not be empty");
 
     let non_owner_auth = bearer_token_header(NON_OWNER_BEARER_TOKEN);
     send_cda_request(
@@ -549,7 +558,15 @@ async fn runtimefiles_non_owner_cannot_delete_backup() -> Result<(), TestingErro
     )
     .await?;
 
-    execute_mode(&runtime.config, &auth, ExecutionMode::Rollback).await?;
+    assert_eq!(
+        ids_of(
+            &get_file_list(&runtime.config, &auth, RUNTIMEFILES_BACKUP)
+                .await?
+                .items
+        ),
+        backup,
+        "the backup changed although its deletion was forbidden"
+    );
 
     teardown_lock(&runtime.config, &auth, &lock_id).await;
     Ok(())
@@ -558,7 +575,7 @@ async fn runtimefiles_non_owner_cannot_delete_backup() -> Result<(), TestingErro
 /// Spec: "none of the endpoints should allow retrieval of the files by default"
 #[tokio::test]
 async fn runtimefiles_file_retrieval_not_allowed() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(false).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
 
     send_cda_request(
@@ -600,7 +617,7 @@ async fn runtimefiles_file_retrieval_not_allowed() -> Result<(), TestingError> {
 /// Spec: "Deletes the file from the pending update" - file must exist to be deleted.
 #[tokio::test]
 async fn runtimefiles_delete_nonexistent_file_returns_not_found() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
@@ -623,7 +640,7 @@ async fn runtimefiles_delete_nonexistent_file_returns_not_found() -> Result<(), 
 /// Tests idempotency: deleting an already-empty backup.
 #[tokio::test]
 async fn runtimefiles_delete_backup_when_empty() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
@@ -657,7 +674,7 @@ async fn runtimefiles_delete_backup_when_empty() -> Result<(), TestingError> {
 /// (e.g. "apply", "APPLY", "Apply").
 #[tokio::test]
 async fn runtimefiles_execution_mode_case_insensitive() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
@@ -713,9 +730,12 @@ async fn runtimefiles_execution_mode_case_insensitive() -> Result<(), TestingErr
 /// x-sovd2uds-include-hash, x-sovd2uds-include-file-size, x-sovd2uds-include-revision.
 #[tokio::test]
 async fn runtimefiles_query_parameters_all_endpoints() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
+
+    // Apply over the whole vehicle, so that the Apply below populates the backup.
+    apply_full_database(&runtime.config, &auth).await?;
 
     // Upload a file so nextupdate is non-empty
     let upload_response = upload_mdd(&runtime.config, &auth).await;
@@ -742,12 +762,14 @@ async fn runtimefiles_query_parameters_all_endpoints() -> Result<(), TestingErro
     )
     .await?;
     let nextupdate_hash_list = response_to_t::<BulkDataList>(&nextupdate_hash_response)?;
-    if let Some(first_item) = nextupdate_hash_list.items.first() {
-        assert!(
-            first_item.hash.is_some(),
-            "Expected 'hash' field in nextupdate when x-sovd2uds-include-hash=sha256 is set"
-        );
-    }
+    let first_item = nextupdate_hash_list
+        .items
+        .first()
+        .expect("Precondition: nextupdate must not be empty");
+    assert!(
+        first_item.hash.is_some(),
+        "Expected 'hash' field in nextupdate when x-sovd2uds-include-hash=sha256 is set"
+    );
 
     // Apply to populate backup
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
@@ -768,19 +790,21 @@ async fn runtimefiles_query_parameters_all_endpoints() -> Result<(), TestingErro
     )
     .await?;
     let backup_size_list = response_to_t::<BulkDataList>(&backup_size_response)?;
-    if let Some(first_item) = backup_size_list.items.first() {
-        assert!(
-            first_item.size.is_some(),
-            "Expected file size field in backup when x-sovd2uds-include-file-size=true is set"
-        );
-    }
+    let first_item = backup_size_list
+        .items
+        .first()
+        .expect("Precondition: backup must not be empty");
+    assert!(
+        first_item.size.is_some(),
+        "Expected file size field in backup when x-sovd2uds-include-file-size=true is set"
+    );
     Ok(())
 }
 
 /// Spec: Uploading multiple files in a single multipart request must be supported.
 #[tokio::test]
 async fn runtimefiles_upload_multiple_files() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
@@ -862,7 +886,7 @@ async fn runtimefiles_upload_multiple_files() -> Result<(), TestingError> {
 /// header (quoted form: `attachment; filename="foo.mdd"`).
 #[tokio::test]
 async fn runtimefiles_upload_octet_stream() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
@@ -906,7 +930,7 @@ async fn runtimefiles_upload_octet_stream() -> Result<(), TestingError> {
 /// unquoted form (`filename=foo.mdd`).
 #[tokio::test]
 async fn runtimefiles_upload_octet_stream_unquoted_filename() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
@@ -933,7 +957,7 @@ async fn runtimefiles_upload_octet_stream_unquoted_filename() -> Result<(), Test
 #[tokio::test]
 async fn runtimefiles_upload_octet_stream_missing_content_disposition() -> Result<(), TestingError>
 {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
@@ -954,7 +978,7 @@ async fn runtimefiles_upload_octet_stream_missing_content_disposition() -> Resul
 /// has no `filename` parameter must be rejected with 400 Bad Request.
 #[tokio::test]
 async fn runtimefiles_upload_octet_stream_missing_filename_param() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
@@ -975,7 +999,7 @@ async fn runtimefiles_upload_octet_stream_missing_filename_param() -> Result<(),
 /// nor `application/octet-stream`) must be rejected with 400 Bad Request.
 #[tokio::test]
 async fn runtimefiles_upload_unsupported_content_type() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
@@ -1002,7 +1026,7 @@ async fn runtimefiles_upload_unsupported_content_type() -> Result<(), TestingErr
 /// must not return 202 Accepted (primary expectation: 404).
 #[tokio::test]
 async fn runtimefiles_apply_with_no_pending_changes() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
@@ -1043,7 +1067,7 @@ async fn runtimefiles_apply_with_no_pending_changes() -> Result<(), TestingError
 /// Spec: Rollback when backup is empty must return 404 Not Found.
 #[tokio::test]
 async fn runtimefiles_rollback_with_no_backup() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
@@ -1097,11 +1121,12 @@ async fn runtimefiles_rollback_with_no_backup() -> Result<(), TestingError> {
 /// Spec: Rollback must clear any newly uploaded pending files from nextupdate.
 #[tokio::test]
 async fn runtimefiles_rollback_clears_nextupdate_with_new_pending() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
-    // Step 1: Upload and Apply to establish a backup
+    // Step 1: Upload and Apply over the whole vehicle to establish a backup
+    apply_full_database(&runtime.config, &auth).await?;
     let upload_response = upload_mdd(&runtime.config, &auth).await;
     assert!(
         upload_response.status().is_success(),
@@ -1152,7 +1177,7 @@ async fn runtimefiles_rollback_clears_nextupdate_with_new_pending() -> Result<()
 /// another operation.
 #[tokio::test]
 async fn runtimefiles_apply_blocked_by_active_operations() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
 
     // Create vehicle lock (required for runtimefiles mutations)
@@ -1418,8 +1443,9 @@ pub(crate) async fn teardown_lock(config: &Configuration, auth: &http::HeaderMap
 /// Apply is a snapshot swap. The staged collection replaces the active one and
 /// anything missing from it is dropped. Uploading a single MDD and letting
 /// `init_collection_from_copy_if_missing` seed the rest needs a populated
-/// `runtimefiles-current`, which a fresh test container does not have, so it
-/// would apply a one-ECU snapshot to the whole shared suite.
+/// `runtimefiles-current`, which a new CDA container does not have: its
+/// storage starts empty, and it serves the databases of its database
+/// directory. It would apply a one-ECU snapshot.
 ///
 /// Requires the caller to hold the vehicle lock.
 pub(crate) async fn stage_full_database(
@@ -1447,6 +1473,21 @@ pub(crate) async fn stage_full_database(
             "Precondition: staging {name} must succeed"
         );
     }
+    Ok(())
+}
+
+/// Applies the complete MDD fixture set, see [`stage_full_database`], so that
+/// `runtimefiles-current` holds the whole vehicle, as it does after the first
+/// runtime update. Tests that need current files, or a non-empty backup after
+/// their own Apply, start with this.
+///
+/// Requires the caller to hold the vehicle lock.
+async fn apply_full_database(
+    config: &Configuration,
+    auth: &http::HeaderMap,
+) -> Result<(), TestingError> {
+    stage_full_database(config, auth).await?;
+    execute_mode(config, auth, ExecutionMode::Apply).await?;
     Ok(())
 }
 
@@ -1531,14 +1572,6 @@ async fn wait_for_execution_completion(
     auth: &http::HeaderMap,
     execution_id: &str,
 ) -> Result<(), TestingError> {
-    #[cfg_attr(
-        nightly,
-        allow(
-            unknown_lints,
-            clippy::duration_suboptimal_units,
-            reason = "from_mins is not available in Rust 1.88, our MSRV"
-        )
-    )]
     const TIMEOUT: Duration = Duration::from_secs(60);
 
     let deadline = Instant::now()
@@ -1801,7 +1834,7 @@ async fn assert_ecu_routes_after_apply(
 /// mirrors runtimefiles-current because there are no pending files anymore.
 #[tokio::test]
 async fn runtimefiles_delete_nextupdate_clears_pending() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
@@ -1846,7 +1879,7 @@ async fn runtimefiles_delete_nextupdate_clears_pending() -> Result<(), TestingEr
 /// Spec: DELETE on /runtimefiles-nextupdate/{id} "deletes the file from the pending update".
 #[tokio::test]
 async fn runtimefiles_delete_nextupdate_by_id() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
@@ -1902,10 +1935,12 @@ async fn runtimefiles_delete_nextupdate_by_id() -> Result<(), TestingError> {
 /// database, to free up storage space."
 #[tokio::test]
 async fn runtimefiles_delete_backup() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
+    // Apply over the whole vehicle, so that the Apply below takes a backup.
+    apply_full_database(&runtime.config, &auth).await?;
     let upload_response = upload_mdd(&runtime.config, &auth).await;
     assert_eq!(upload_response.status(), StatusCode::CREATED);
 
@@ -1946,10 +1981,6 @@ async fn runtimefiles_delete_backup() -> Result<(), TestingError> {
         "Expected empty backup after DELETE"
     );
 
-    // The backup was deleted above, so Rollback is not possible (no backup to restore from).
-    // Use Cleanup instead to clear any pending state and leave the server in a clean state.
-    execute_mode(&runtime.config, &auth, ExecutionMode::Cleanup).await?;
-
     teardown_lock(&runtime.config, &auth, &lock_id).await;
     Ok(())
 }
@@ -1958,7 +1989,7 @@ async fn runtimefiles_delete_backup() -> Result<(), TestingError> {
 /// regardless of OS consistent, to avoid duplicated entries."
 #[tokio::test]
 async fn runtimefiles_case_insensitive_filenames() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
@@ -2032,8 +2063,14 @@ async fn runtimefiles_case_insensitive_filenames() -> Result<(), TestingError> {
 /// x-sovd2uds-include-file-size, x-sovd2uds-include-revision.
 #[tokio::test]
 async fn runtimefiles_query_parameters() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(false).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
+
+    // The storage of a new CDA is empty; fill the current collection. Reads
+    // do not need the lock.
+    let lock_id = setup_with_lock(&runtime.config, &auth).await;
+    apply_full_database(&runtime.config, &auth).await?;
+    teardown_lock(&runtime.config, &auth, &lock_id).await;
 
     let mut hash_params = HashMap::new();
     hash_params.insert("x-sovd2uds-include-hash".to_owned(), "sha256".to_owned());
@@ -2048,12 +2085,14 @@ async fn runtimefiles_query_parameters() -> Result<(), TestingError> {
     )
     .await?;
     let hash_list = response_to_t::<BulkDataList>(&hash_response)?;
-    if let Some(first_item) = hash_list.items.first() {
-        assert!(
-            first_item.hash.is_some(),
-            "Expected 'hash' field when x-sovd2uds-include-hash=sha256 is set"
-        );
-    }
+    let first_item = hash_list
+        .items
+        .first()
+        .expect("Precondition: current must not be empty");
+    assert!(
+        first_item.hash.is_some(),
+        "Expected 'hash' field when x-sovd2uds-include-hash=sha256 is set"
+    );
 
     let mut size_params = HashMap::new();
     size_params.insert("x-sovd2uds-include-file-size".to_owned(), "true".to_owned());
@@ -2068,12 +2107,14 @@ async fn runtimefiles_query_parameters() -> Result<(), TestingError> {
     )
     .await?;
     let size_list = response_to_t::<BulkDataList>(&size_response)?;
-    if let Some(first_item) = size_list.items.first() {
-        assert!(
-            first_item.size.is_some(),
-            "Expected file size field when x-sovd2uds-include-file-size=true is set"
-        );
-    }
+    let first_item = size_list
+        .items
+        .first()
+        .expect("Precondition: current must not be empty");
+    assert!(
+        first_item.size.is_some(),
+        "Expected file size field when x-sovd2uds-include-file-size=true is set"
+    );
 
     let mut revision_params = HashMap::new();
     revision_params.insert("x-sovd2uds-include-revision".to_owned(), "true".to_owned());
@@ -2088,18 +2129,16 @@ async fn runtimefiles_query_parameters() -> Result<(), TestingError> {
     )
     .await?;
     let revision_list = response_to_t::<BulkDataList>(&revision_response)?;
-    if !revision_list.items.is_empty() {
-        // Not all the test ecus have a revision set
-        assert!(
-            revision_list
-                .items
-                .iter()
-                .any(|item| item.revision.is_some()),
-            "Expected at least one item with 'revision' field when \
-             x-sovd2uds-include-revision=true is set, items: {:?}",
-            revision_list.items
-        );
-    }
+    // Not all the test ecus have a revision set
+    assert!(
+        revision_list
+            .items
+            .iter()
+            .any(|item| item.revision.is_some()),
+        "Expected at least one item with 'revision' field when x-sovd2uds-include-revision=true \
+         is set, items: {:?}",
+        revision_list.items
+    );
 
     Ok(())
 }
@@ -2107,7 +2146,7 @@ async fn runtimefiles_query_parameters() -> Result<(), TestingError> {
 /// Spec: "Only the subject of the lock is allowed to use the endpoints."
 #[tokio::test]
 async fn runtimefiles_only_lock_holder_can_mutate() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
@@ -2205,15 +2244,15 @@ async fn runtimefiles_only_lock_holder_can_mutate() -> Result<(), TestingError> 
 /// the missing ECU's route returns 404, the health endpoint remains 204, and after
 /// Rollback the ECU route is restored (200).
 ///
-/// Workflow: upload FSNR2000 to trigger staging init from the seeded current collection,
-/// then explicitly delete flxc1000.mdd from nextupdate, then Apply.
+/// Workflow: apply the whole vehicle, so that the current collection holds it, upload
+/// FSNR2000 to trigger staging init from the current collection, then explicitly delete
+/// flxc1000.mdd from nextupdate, then Apply.
 #[tokio::test]
 async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
-    // Acquire an exclusive integration-test lock so no other test interferes.
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
 
-    // Pre-check: FLXC1000 exists at baseline (proves storage was seeded).
+    // Pre-check: FLXC1000 exists at baseline.
     send_cda_request(
         &runtime.config,
         sovd::ECU_FLXC1000_ENDPOINT,
@@ -2227,6 +2266,9 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
 
     // All mutating runtimefiles endpoints require a vehicle lock.
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
+
+    // The storage of a new CDA is empty; fill the current collection.
+    apply_full_database(&runtime.config, &auth).await?;
 
     // Upload FSNR2000.mdd -> triggers init_collection_from_copy_if_missing, copying all
     // current MDDs into nextupdate, then adds FSNR2000 on top.
@@ -2261,9 +2303,8 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
     execute_mode(&runtime.config, &auth, ExecutionMode::Rollback).await?;
 
     // Wait for all ECUs to come back online after the reload triggered by rollback.
-    // The reload creates a fresh DoIP gateway that must re-discover ECUs via VIR/VAM
-    // and run variant detection. Without this wait, subsequent tests may find ECUs
-    // still in Offline state.
+    // The reload creates a new DoIP gateway that must re-discover ECUs via VIR/VAM
+    // and run variant detection.
     wait_for_ecus_online(&runtime.config).await?;
 
     // Rollback restores the original database -> FLXC1000 is back.
@@ -2291,14 +2332,13 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
 /// Once the ECU lock is released, Apply must succeed (202 Accepted).
 #[tokio::test]
 async fn runtimefiles_apply_blocked_by_vehicle_and_ecu_lock() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
 
     // All mutating runtimefiles endpoints require a vehicle lock.
     let vehicle_lock_id = setup_with_lock(&runtime.config, &auth).await;
 
-    // Apply is a snapshot swap, so a one-file upload would leave the shared CDA
-    // serving a one-ECU vehicle to every later test.
+    // Apply is a snapshot swap; staging the whole vehicle keeps it intact.
     stage_full_database(&runtime.config, &auth).await?;
 
     // Creating an ECU lock while the vehicle lock is already held is allowed,
@@ -2338,9 +2378,6 @@ async fn runtimefiles_apply_blocked_by_vehicle_and_ecu_lock() -> Result<(), Test
     .await;
 
     // With only the vehicle lock held, the database swap is safe to proceed.
-    // No Rollback afterwards, because the staged snapshot was the active
-    // database. On a pristine container the backup Apply takes is empty, so
-    // Rollback would answer 404 and abort before the vehicle lock is released.
     execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
 
     teardown_lock(&runtime.config, &auth, &vehicle_lock_id).await;
