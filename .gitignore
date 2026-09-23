@@ -33,7 +33,6 @@ mdds/*.mdd
 # Docker environment settings
 .env
 
-cda-test-config.toml
 # mbedtls source directory
 mbedtls-4*
 
