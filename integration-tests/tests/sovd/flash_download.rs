@@ -18,19 +18,17 @@ use serde::Deserialize;
 use sovd_interfaces::components::ecu::modes::security_and_session::put::RequestSeedResponse;
 
 use crate::{
-    sovd::{
-        self, compute_security_key,
-        ecu::switch_session,
-        locks::{self, create_lock, lock_operation},
-        put_mode,
-    },
+    sovd::{self, ECU_FLXC1000, compute_security_key, ecu::switch_session, put_mode},
     util::{
         TestingError,
-        ecusim::{self},
+        ecusim::{self, EcuSim},
+        endpoints::SOVD2UDS_FLASH_FILES,
         http::{
-            auth_header, extract_field_from_json, response_to_json, response_to_t, send_cda_request,
+            extract_field_from_json, response_to_json, response_to_t,
+            send_authenticated_cda_request,
         },
-        runtime::setup_integration_test,
+        locks::{self, create_lock, lock_operation},
+        test_env::TestEnv,
     },
 };
 
@@ -47,8 +45,7 @@ use crate::{
     reason = "Test scenario is easier to understand kept together"
 )]
 async fn test_flash_download_transfer_sequence() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let test_env = TestEnv::builder().await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
     // Create and acquire ECU lock
@@ -57,8 +54,7 @@ async fn test_flash_download_transfer_sequence() {
         expiration_timeout,
         locks::ECU_ENDPOINT,
         StatusCode::CREATED,
-        &runtime.config,
-        &auth,
+        &test_env,
     )
     .await;
     let lock_id =
@@ -67,42 +63,34 @@ async fn test_flash_download_transfer_sequence() {
     lock_operation(
         locks::ECU_ENDPOINT,
         Some(&lock_id),
-        &runtime.config,
-        &auth,
+        &test_env,
         StatusCode::OK,
         Method::GET,
     )
     .await;
 
     // Switch ECU sim to BOOT variant
-    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "BOOT")
+    ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "BOOT")
         .await
         .unwrap();
 
     // Force variant detection so the CDA picks up the boot variant
-    send_cda_request(
-        &runtime.config,
+    send_authenticated_cda_request(
+        &test_env,
         ecu_endpoint,
         StatusCode::CREATED,
         Method::PUT,
         None,
-        Some(&auth),
         None,
     )
     .await
     .unwrap();
 
     // Switch to programming session
-    let session_result = switch_session(
-        "programming",
-        &runtime.config,
-        &auth,
-        ecu_endpoint,
-        StatusCode::OK,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let session_result = switch_session("programming", &test_env, ecu_endpoint, StatusCode::OK)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         session_result.value.to_lowercase(),
         "programming",
@@ -110,14 +98,14 @@ async fn test_flash_download_transfer_sequence() {
     );
 
     // Start recording to verify the raw UDS frames sent for SecurityAccess Level 7
-    ecusim::start_recording(&runtime.ecu_sim, "flxc1000")
+    let recorder = test_env
+        .record(ECU_FLXC1000)
         .await
         .expect("Failed to start ECU sim recording");
 
     // SecurityAccess Level 7 (request seed + send key)
     let seed_response: RequestSeedResponse = put_mode(
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         "security",
         sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
@@ -143,8 +131,7 @@ async fn test_flash_download_transfer_sequence() {
     let key_result: sovd_interfaces::components::ecu::modes::security_and_session::put::Response<
         String,
     > = put_mode(
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         "security",
         sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
@@ -165,7 +152,7 @@ async fn test_flash_download_transfer_sequence() {
     assert_eq!(key_result.value, "Level_7");
 
     // Verify the ECU sim is in the expected state
-    let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
+    let ecu_state = ecusim::get_ecu_state(&test_env.ecu_sim, ECU_FLXC1000)
         .await
         .expect("Failed to get ECU sim state");
     assert!(
@@ -180,7 +167,8 @@ async fn test_flash_download_transfer_sequence() {
     // Verify the raw UDS frames sent during SecurityAccess Level 7:
     //   RequestSeed: 27 07
     //   SendKey:     27 08 <key> (seed 00..07, key = each byte + 13 = 0d..14)
-    let recorded_frames = ecusim::stop_and_clear_recording(&runtime.ecu_sim, "flxc1000")
+    let recorded_frames = recorder
+        .stop()
         .await
         .expect("Failed to stop ECU sim recording");
     assert!(
@@ -198,13 +186,12 @@ async fn test_flash_download_transfer_sequence() {
     );
 
     // List flash files to get the file ID
-    let flash_files_response = send_cda_request(
-        &runtime.config,
-        "apps/sovd2uds/bulk-data/flashfiles",
+    let flash_files_response = send_authenticated_cda_request(
+        &test_env,
+        SOVD2UDS_FLASH_FILES,
         StatusCode::OK,
         Method::GET,
         None,
-        Some(&auth),
         None,
     )
     .await
@@ -260,13 +247,12 @@ async fn test_flash_download_transfer_sequence() {
             )
         }
     });
-    let request_download_response = send_cda_request(
-        &runtime.config,
+    let request_download_response = send_authenticated_cda_request(
+        &test_env,
         &format!("{ecu_endpoint}/x-sovd2uds-download/requestdownload"),
         StatusCode::OK,
         Method::PUT,
         Some(&request_download_body.to_string()),
-        Some(&auth),
         None,
     )
     .await
@@ -293,13 +279,12 @@ async fn test_flash_download_transfer_sequence() {
         "id": file_id
     });
 
-    let flash_transfer_response = send_cda_request(
-        &runtime.config,
+    let flash_transfer_response = send_authenticated_cda_request(
+        &test_env,
         &format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer"),
         StatusCode::OK,
         Method::POST,
         Some(&flash_transfer_body.to_string()),
-        Some(&auth),
         None,
     )
     .await
@@ -317,13 +302,12 @@ async fn test_flash_download_transfer_sequence() {
     for attempt in 0..20 {
         cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(500)).await;
 
-        let status_response = send_cda_request(
-            &runtime.config,
+        let status_response = send_authenticated_cda_request(
+            &test_env,
             &format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer/{transfer_id}"),
             StatusCode::OK,
             Method::GET,
             None,
-            Some(&auth),
             None,
         )
         .await
@@ -359,33 +343,31 @@ async fn test_flash_download_transfer_sequence() {
     );
 
     // Remove finished flash transfer
-    send_cda_request(
-        &runtime.config,
+    send_authenticated_cda_request(
+        &test_env,
         &format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer/{transfer_id}"),
         StatusCode::NO_CONTENT,
         Method::DELETE,
         None,
-        Some(&auth),
         None,
     )
     .await
     .unwrap();
 
     // TransferExit
-    send_cda_request(
-        &runtime.config,
+    send_authenticated_cda_request(
+        &test_env,
         &format!("{ecu_endpoint}/x-sovd2uds-download/transferexit"),
         StatusCode::NO_CONTENT,
         Method::PUT,
         None,
-        Some(&auth),
         None,
     )
     .await
     .unwrap();
 
     // Verify on ECU simulator
-    let sim_transfers = get_sim_data_transfers(&runtime.ecu_sim, "flxc1000")
+    let sim_transfers = get_sim_data_transfers(&test_env.ecu_sim, ECU_FLXC1000)
         .await
         .expect("Failed to get data transfers from ECU sim");
     assert!(
@@ -411,15 +393,14 @@ async fn test_flash_download_transfer_sequence() {
     lock_operation(
         locks::ECU_ENDPOINT,
         Some(&lock_id),
-        &runtime.config,
-        &auth,
+        &test_env,
         StatusCode::NO_CONTENT,
         Method::DELETE,
     )
     .await;
 
     // Reset ECU sim back to APPLICATION variant for other tests
-    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
+    ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "APPLICATION")
         .await
         .unwrap();
 }
@@ -433,8 +414,7 @@ async fn test_flash_download_transfer_sequence() {
     reason = "Test scenario is easier to understand kept together"
 )]
 async fn test_flash_transfer_zero_length_rejected() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let test_env = TestEnv::builder().await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
     // Create and acquire ECU lock
@@ -443,8 +423,7 @@ async fn test_flash_transfer_zero_length_rejected() {
         expiration_timeout,
         locks::ECU_ENDPOINT,
         StatusCode::CREATED,
-        &runtime.config,
-        &auth,
+        &test_env,
     )
     .await;
     let lock_id =
@@ -453,52 +432,44 @@ async fn test_flash_transfer_zero_length_rejected() {
     lock_operation(
         locks::ECU_ENDPOINT,
         Some(&lock_id),
-        &runtime.config,
-        &auth,
+        &test_env,
         StatusCode::OK,
         Method::GET,
     )
     .await;
 
     // Switch ECU sim to BOOT variant
-    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "BOOT")
+    ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "BOOT")
         .await
         .unwrap();
 
     // Force variant detection
-    send_cda_request(
-        &runtime.config,
+    send_authenticated_cda_request(
+        &test_env,
         ecu_endpoint,
         StatusCode::CREATED,
         Method::PUT,
         None,
-        Some(&auth),
         None,
     )
     .await
     .unwrap();
 
     // Switch to programming session
-    switch_session(
-        "programming",
-        &runtime.config,
-        &auth,
-        ecu_endpoint,
-        StatusCode::OK,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    switch_session("programming", &test_env, ecu_endpoint, StatusCode::OK)
+        .await
+        .unwrap()
+        .unwrap();
 
     // Start recording to verify the raw UDS frames sent for SecurityAccess Level 5
-    ecusim::start_recording(&runtime.ecu_sim, "flxc1000")
+    let recorder = test_env
+        .record(ECU_FLXC1000)
         .await
         .expect("Failed to start ECU sim recording");
 
     // SecurityAccess Level 5
     let seed_response: RequestSeedResponse = put_mode(
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         "security",
         sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
@@ -524,8 +495,7 @@ async fn test_flash_transfer_zero_length_rejected() {
     let key_result: sovd_interfaces::components::ecu::modes::security_and_session::put::Response<
         String,
     > = put_mode(
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         "security",
         sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
@@ -546,7 +516,7 @@ async fn test_flash_transfer_zero_length_rejected() {
     assert_eq!(key_result.value, "Level_5");
 
     // Verify the ECU sim is in the expected state
-    let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
+    let ecu_state = ecusim::get_ecu_state(&test_env.ecu_sim, ECU_FLXC1000)
         .await
         .expect("Failed to get ECU sim state");
     assert!(
@@ -561,7 +531,8 @@ async fn test_flash_transfer_zero_length_rejected() {
     // Verify the raw UDS frames sent during SecurityAccess Level 5:
     //   `RequestSeed`: 27 05
     //   `SendKey`:     27 06 <key> (seed 00..07, key = each byte + 13 = 0d..14)
-    let recorded_frames = ecusim::stop_and_clear_recording(&runtime.ecu_sim, "flxc1000")
+    let recorded_frames = recorder
+        .stop()
         .await
         .expect("Failed to stop ECU sim recording");
     assert!(
@@ -587,26 +558,24 @@ async fn test_flash_transfer_zero_length_rejected() {
             "MemorySize": "0x00 0x00 0x01 0x00"
         }
     });
-    send_cda_request(
-        &runtime.config,
+    send_authenticated_cda_request(
+        &test_env,
         &format!("{ecu_endpoint}/x-sovd2uds-download/requestdownload"),
         StatusCode::OK,
         Method::PUT,
         Some(&request_download_body.to_string()),
-        Some(&auth),
         None,
     )
     .await
     .unwrap();
 
     // List flash files to get a valid file ID
-    let flash_files_response = send_cda_request(
-        &runtime.config,
-        "apps/sovd2uds/bulk-data/flashfiles",
+    let flash_files_response = send_authenticated_cda_request(
+        &test_env,
+        SOVD2UDS_FLASH_FILES,
         StatusCode::OK,
         Method::GET,
         None,
-        Some(&auth),
         None,
     )
     .await
@@ -638,13 +607,12 @@ async fn test_flash_transfer_zero_length_rejected() {
         "id": file_id
     });
 
-    send_cda_request(
-        &runtime.config,
+    send_authenticated_cda_request(
+        &test_env,
         &format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer"),
         StatusCode::BAD_REQUEST,
         Method::POST,
         Some(&zero_length_body.to_string()),
-        Some(&auth),
         None,
     )
     .await
@@ -654,14 +622,13 @@ async fn test_flash_transfer_zero_length_rejected() {
     lock_operation(
         locks::ECU_ENDPOINT,
         Some(&lock_id),
-        &runtime.config,
-        &auth,
+        &test_env,
         StatusCode::NO_CONTENT,
         Method::DELETE,
     )
     .await;
 
-    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
+    ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "APPLICATION")
         .await
         .unwrap();
 }
@@ -682,8 +649,7 @@ async fn test_flash_transfer_zero_length_rejected() {
     reason = "Test scenario is easier to understand kept together"
 )]
 async fn test_security_access_supplier_level() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let test_env = TestEnv::builder().await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
     // Create and acquire ECU lock
@@ -692,8 +658,7 @@ async fn test_security_access_supplier_level() {
         expiration_timeout,
         locks::ECU_ENDPOINT,
         StatusCode::CREATED,
-        &runtime.config,
-        &auth,
+        &test_env,
     )
     .await;
     let lock_id =
@@ -702,45 +667,38 @@ async fn test_security_access_supplier_level() {
     lock_operation(
         locks::ECU_ENDPOINT,
         Some(&lock_id),
-        &runtime.config,
-        &auth,
+        &test_env,
         StatusCode::OK,
         Method::GET,
     )
     .await;
 
     // Switch ECU sim to BOOT variant (security access services live on the boot variant)
-    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "BOOT")
+    ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "BOOT")
         .await
         .unwrap();
 
     // Force variant detection
-    send_cda_request(
-        &runtime.config,
+    send_authenticated_cda_request(
+        &test_env,
         ecu_endpoint,
         StatusCode::CREATED,
         Method::PUT,
         None,
-        Some(&auth),
         None,
     )
     .await
     .unwrap();
 
     // Switch to programming session
-    switch_session(
-        "programming",
-        &runtime.config,
-        &auth,
-        ecu_endpoint,
-        StatusCode::OK,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    switch_session("programming", &test_env, ecu_endpoint, StatusCode::OK)
+        .await
+        .unwrap()
+        .unwrap();
 
     // Start recording to verify the raw UDS frames sent for SecurityAccess Supplier (Level 9)
-    ecusim::start_recording(&runtime.ecu_sim, "flxc1000")
+    let recorder = test_env
+        .record(ECU_FLXC1000)
         .await
         .expect("Failed to start ECU sim recording");
 
@@ -749,8 +707,7 @@ async fn test_security_access_supplier_level() {
     // split_at_last_underscore recognises "RequestSeed" as the service suffix and
     // produces level="Supplier", seed_service=Some("RequestSeed").
     let seed_response: RequestSeedResponse = put_mode(
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         "security",
         sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
@@ -775,8 +732,7 @@ async fn test_security_access_supplier_level() {
     let key_result: sovd_interfaces::components::ecu::modes::security_and_session::put::Response<
         String,
     > = put_mode(
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         "security",
         sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
@@ -797,7 +753,7 @@ async fn test_security_access_supplier_level() {
     assert_eq!(key_result.value, "Supplier");
 
     // Verify the ECU sim is in the expected state
-    let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
+    let ecu_state = ecusim::get_ecu_state(&test_env.ecu_sim, ECU_FLXC1000)
         .await
         .expect("Failed to get ECU sim state");
     assert!(
@@ -812,7 +768,8 @@ async fn test_security_access_supplier_level() {
     // Verify the raw UDS frames sent during SecurityAccess Supplier:
     //   RequestSeed: 27 09
     //   SendKey:     27 0A <key> (seed 00..07, key = each byte + 13 = 0d..14)
-    let recorded_frames = ecusim::stop_and_clear_recording(&runtime.ecu_sim, "flxc1000")
+    let recorded_frames = recorder
+        .stop()
         .await
         .expect("Failed to stop ECU sim recording");
     assert!(
@@ -833,14 +790,13 @@ async fn test_security_access_supplier_level() {
     lock_operation(
         locks::ECU_ENDPOINT,
         Some(&lock_id),
-        &runtime.config,
-        &auth,
+        &test_env,
         StatusCode::NO_CONTENT,
         Method::DELETE,
     )
     .await;
 
-    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
+    ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "APPLICATION")
         .await
         .unwrap();
 }
@@ -875,10 +831,7 @@ struct SimDataTransfers {
     transfers: Vec<SimDataTransferDownload>,
 }
 
-async fn get_sim_data_transfers(
-    sim: &crate::util::runtime::EcuSim,
-    ecu: &str,
-) -> Result<SimDataTransfers, TestingError> {
+async fn get_sim_data_transfers(sim: &EcuSim, ecu: &str) -> Result<SimDataTransfers, TestingError> {
     let url = reqwest::Url::parse(&format!(
         "http://{}:{}/{ecu}/datatransfers/downloads",
         sim.host, sim.control_port

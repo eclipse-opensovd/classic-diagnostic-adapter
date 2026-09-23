@@ -27,8 +27,10 @@ use sovd_interfaces::{
 use crate::util::{
     TestingError,
     http::{
-        QueryParams, extract_field_from_json, response_to_json, response_to_t, send_cda_request,
+        QueryParams, extract_field_from_json, response_to_json, response_to_t,
+        send_authenticated_cda_request, send_cda_request,
     },
+    test_env::TestEnv,
 };
 
 mod custom_routes;
@@ -44,14 +46,43 @@ mod runtimefiles;
 mod tester_present;
 mod version_endpoint;
 
-pub(crate) const ECU_FLXC1000_ENDPOINT: &str = "components/flxc1000";
-pub(crate) const ECU_FLXCNG1000_ENDPOINT: &str = "components/flxcng1000";
-pub(crate) const ECU_FSNR2000_ENDPOINT: &str = "components/fsnr2000";
-pub(crate) const ECU_TMCC3000_ENDPOINT: &str = "components/tmcc3000";
-pub(crate) const ECU_HOVR4000_ENDPOINT: &str = "components/hovr4000";
-pub(crate) const ECU_JGWT5000_ENDPOINT: &str = "components/jgwt5000";
+pub(crate) use crate::util::endpoints::{
+    ECU_FLXC1000, ECU_FLXC1000_DATA_ENDPOINT, ECU_FLXC1000_ENDPOINT, ECU_FLXC1000_VIN_ENDPOINT,
+    ECU_FLXCNG1000_ENDPOINT, ECU_FSNR2000, ECU_FSNR2000_ENDPOINT, ECU_HOVR4000,
+    ECU_HOVR4000_ENDPOINT, ECU_JGWT5000, ECU_JGWT5000_ENDPOINT, ECU_TMCC3000,
+    ECU_TMCC3000_ENDPOINT, FUNCTIONAL_GROUP_ENDPOINT,
+};
 
+/// [`put_mode_with_headers`] as the default test client of `test_env`.
+///
+/// # Errors
+/// See [`put_mode_with_headers`].
 pub(crate) async fn put_mode<T: DeserializeOwned, S: Serialize>(
+    test_env: &TestEnv,
+    ecu_endpoint: &str,
+    sub_path: &str,
+    request: S,
+    excepted_status: StatusCode,
+) -> Result<Option<T>, TestingError> {
+    let auth = test_env.auth_header().await?;
+    put_mode_with_headers(
+        &test_env.config,
+        &auth,
+        ecu_endpoint,
+        sub_path,
+        request,
+        excepted_status,
+    )
+    .await
+}
+
+/// Puts `request` to the mode `sub_path` of the ECU at `ecu_endpoint` with the
+/// given headers, e.g. as another user than the default test client.
+///
+/// # Errors
+/// Returns an error if the request fails or the status is not
+/// `excepted_status`.
+pub(crate) async fn put_mode_with_headers<T: DeserializeOwned, S: Serialize>(
     config: &Configuration,
     headers: &HeaderMap,
     ecu_endpoint: &str,
@@ -82,8 +113,7 @@ pub(crate) async fn put_mode<T: DeserializeOwned, S: Serialize>(
 /// is a `400 Bad Request` with an `invalid-parameter` vendor code and that
 /// the `possiblevalues` field contains exactly the expected values.
 pub(crate) async fn validate_invalid_parameter_error<S: Serialize>(
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
     sub_path: &str,
     request: S,
@@ -96,8 +126,7 @@ pub(crate) async fn validate_invalid_parameter_error<S: Serialize>(
     }
 
     let error_response: ApiErrorResponse<VendorErrorCode> = put_mode(
-        config,
-        headers,
+        test_env,
         ecu_endpoint,
         sub_path,
         request,
@@ -153,14 +182,35 @@ pub(crate) async fn validate_invalid_parameter_error<S: Serialize>(
     Ok(())
 }
 
+/// [`set_dtc_setting_with_headers`] as the default test client of `test_env`.
+///
+/// # Errors
+/// See [`set_dtc_setting_with_headers`].
 pub(crate) async fn set_dtc_setting(
+    value: &str,
+    test_env: &TestEnv,
+    ecu_endpoint: &str,
+    expected_status: StatusCode,
+) -> Result<Option<dtcsetting::put::Response>, TestingError> {
+    let auth = test_env.auth_header().await?;
+    set_dtc_setting_with_headers(
+        value,
+        &test_env.config,
+        &auth,
+        ecu_endpoint,
+        expected_status,
+    )
+    .await
+}
+
+pub(crate) async fn set_dtc_setting_with_headers(
     value: &str,
     config: &Configuration,
     headers: &HeaderMap,
     ecu_endpoint: &str,
     expected_status: StatusCode,
 ) -> Result<Option<dtcsetting::put::Response>, TestingError> {
-    put_mode(
+    put_mode_with_headers(
         config,
         headers,
         ecu_endpoint,
@@ -175,45 +225,35 @@ pub(crate) async fn set_dtc_setting(
 }
 
 pub(crate) async fn get_faults(
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
 ) -> Result<Vec<Fault>, TestingError> {
     let path = format!("{ecu_endpoint}/faults");
 
-    let response = send_cda_request(
-        config,
-        &path,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        Some(headers),
-        None,
-    )
-    .await
-    .expect("Failed to get faults");
+    let response =
+        send_authenticated_cda_request(test_env, &path, StatusCode::OK, Method::GET, None, None)
+            .await
+            .expect("Failed to get faults");
 
     let json = response_to_json(&response)?;
     extract_field_from_json::<Vec<Fault>>(&json, "items")
 }
 
 pub(crate) async fn get_fault(
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
     fault_code: &str,
 ) -> Result<Fault, TestingError> {
-    let json = do_get_fault(config, headers, ecu_endpoint, fault_code).await?;
+    let json = do_get_fault(test_env, ecu_endpoint, fault_code).await?;
     extract_field_from_json::<Fault>(&json, "item")
 }
 
 pub(crate) async fn get_extended_fault(
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
     fault_code: &str,
 ) -> Result<ExtendedFault<VendorErrorCode>, TestingError> {
-    let json = do_get_fault(config, headers, ecu_endpoint, fault_code).await?;
+    let json = do_get_fault(test_env, ecu_endpoint, fault_code).await?;
 
     serde_json::from_value(json)
         .ok()
@@ -228,109 +268,65 @@ pub(crate) async fn get_extended_fault(
 
 // Executes the GET method to the ECUSim for the specified DTC
 async fn do_get_fault(
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
     fault_code: &str,
 ) -> Result<serde_json::Value, TestingError> {
     let path = format!("{ecu_endpoint}/faults/{fault_code}");
 
-    let response = send_cda_request(
-        config,
-        &path,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        Some(headers),
-        None,
-    )
-    .await
-    .expect("Failed to get faults");
+    let response =
+        send_authenticated_cda_request(test_env, &path, StatusCode::OK, Method::GET, None, None)
+            .await
+            .expect("Failed to get faults");
 
     response_to_json(&response)
 }
 
 pub(crate) async fn delete_fault(
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
     fault_code: &str,
     expected_status: StatusCode,
 ) -> Result<(), TestingError> {
     let path = format!("{ecu_endpoint}/faults/{fault_code}");
-    send_cda_request(
-        config,
-        &path,
-        expected_status,
-        Method::DELETE,
-        None,
-        Some(headers),
-        None,
-    )
-    .await?;
+    send_authenticated_cda_request(test_env, &path, expected_status, Method::DELETE, None, None)
+        .await?;
     Ok(())
 }
 
 pub(crate) async fn delete_all_faults(
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
     expected_status: StatusCode,
 ) -> Result<(), TestingError> {
     let path = format!("{ecu_endpoint}/faults");
-    send_cda_request(
-        config,
-        &path,
-        expected_status,
-        Method::DELETE,
-        None,
-        Some(headers),
-        None,
-    )
-    .await?;
+    send_authenticated_cda_request(test_env, &path, expected_status, Method::DELETE, None, None)
+        .await?;
     Ok(())
 }
 
 pub(crate) async fn delete_all_faults_with_scope(
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
     scope: &str,
     expected_status: StatusCode,
 ) -> Result<(), TestingError> {
     let path = format!("{ecu_endpoint}/faults?scope={scope}");
-    send_cda_request(
-        config,
-        &path,
-        expected_status,
-        Method::DELETE,
-        None,
-        Some(headers),
-        None,
-    )
-    .await?;
+    send_authenticated_cda_request(test_env, &path, expected_status, Method::DELETE, None, None)
+        .await?;
     Ok(())
 }
 
 pub(crate) async fn delete_fault_with_scope(
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
     fault_code: &str,
     scope: &str,
     expected_status: StatusCode,
 ) -> Result<(), TestingError> {
     let path = format!("{ecu_endpoint}/faults/{fault_code}?scope={scope}");
-    send_cda_request(
-        config,
-        &path,
-        expected_status,
-        Method::DELETE,
-        None,
-        Some(headers),
-        None,
-    )
-    .await?;
+    send_authenticated_cda_request(test_env, &path, expected_status, Method::DELETE, None, None)
+        .await?;
     Ok(())
 }
 
@@ -357,6 +353,52 @@ pub(crate) fn compute_security_key(seed_response: &str) -> String {
         .join(" ")
 }
 
+/// Reads the SOVD component of the ECU at `ecu_endpoint`.
+///
+/// # Errors
+/// Returns an error if the request fails or the response cannot be parsed.
+pub(crate) async fn ecu_status(
+    test_env: &TestEnv,
+    ecu_endpoint: &str,
+) -> Result<sovd_interfaces::components::ecu::get::Response, TestingError> {
+    let http_response = send_authenticated_cda_request(
+        test_env,
+        ecu_endpoint,
+        StatusCode::OK,
+        Method::GET,
+        None,
+        None,
+    )
+    .await?;
+    response_to_t(&http_response)
+}
+
+/// Triggers the variant detection of the ECU at `ecu_endpoint` (an
+/// authenticated `PUT`, handled by `UdsVariant::detect_variant`).
+///
+/// A direct UDS-level probe against one ECU, not
+/// `CommunicationPlugin::trigger_detection()`, which has no HTTP-reachable path
+/// yet. `variant_detection` does not gate it, because it only controls the
+/// automatic whole-vehicle variant detection run as part of an activation.
+///
+/// # Errors
+/// Returns an error if the request fails or is not answered with `201`.
+pub(crate) async fn force_variant_detection(
+    test_env: &TestEnv,
+    ecu_endpoint: &str,
+) -> Result<(), TestingError> {
+    send_authenticated_cda_request(
+        test_env,
+        ecu_endpoint,
+        StatusCode::CREATED,
+        Method::PUT,
+        None,
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn get_ecu_component(
     config: &Configuration,
     ecu_endpoint: &str,
@@ -378,33 +420,4 @@ pub(crate) async fn get_ecu_component(
     // Returns the json instead of Ecu, because the deserialization for SdSdg deserializes
     // everything as Sd, we also fail on silent changes in the interface, which is desirable
     response_to_json(&response)
-}
-
-pub(crate) fn hook_cleanup<F, Fut>(cleanup_fn: F)
-where
-    F: Fn() -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = ()> + 'static,
-{
-    let previous_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |panic_info| {
-        // Run cleanup inside catch_unwind so a failure here never triggers
-        // a double-panic (which the runtime turns into SIGABRT).
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Drive the cleanup future on a dedicated thread: a nested
-            // runtime on a tokio worker thread panics (see
-            // https://docs.rs/tokio/latest/tokio/runtime/struct.Runtime.html#method.block_on),
-            // and a second panic while unwinding aborts the process.
-            std::thread::scope(|s| {
-                s.spawn(|| {
-                    if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                    {
-                        rt.block_on(cleanup_fn());
-                    }
-                });
-            });
-        }));
-        previous_hook(panic_info);
-    }));
 }

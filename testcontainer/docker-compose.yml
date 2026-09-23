@@ -71,7 +71,10 @@ services:
       - "${CDA_PORT:-20002}:20002"
     volumes:
       - ./odx:/app/odx:ro
-      - ./cda-test-config.toml:/app/cda-test-config.toml:ro
+      # A committed integration test configuration, see first_steps.md:
+      # cda-test-config.toml (DoIP), cda-test-config-can.toml or
+      # cda-test-config-mixed.toml. Regenerate with `make generate-test-config`.
+      - ./${CDA_TEST_CONFIG:-cda-test-config.toml}:/app/cda-test-config.toml:ro
       - ./flash_files:/app/flash:ro
     hostname: cda
     networks:

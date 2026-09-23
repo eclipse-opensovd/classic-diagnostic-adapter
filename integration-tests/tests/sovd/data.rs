@@ -14,11 +14,11 @@
 use http::{Method, StatusCode};
 
 use crate::{
-    sovd::hook_cleanup,
+    sovd::{ECU_FLXC1000_DATA_ENDPOINT, ECU_FLXC1000_VIN_ENDPOINT},
     util::{
-        ecusim,
-        http::{auth_header, send_cda_request},
-        runtime::{EcuSim, setup_integration_test},
+        ecusim::{self, EcuSim},
+        http::send_authenticated_cda_request,
+        test_env::TestEnv,
     },
 };
 
@@ -34,15 +34,7 @@ use crate::{
 /// HTTP 504 if no further correct message is received within the timeout period.
 #[tokio::test]
 async fn test_wrong_did_in_response_returns_504() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-
-    let cleanup_sim = runtime.ecu_sim.clone();
-    hook_cleanup(move || {
-        let sim = cleanup_sim.clone();
-        async move { cleanup(&sim).await }
-    });
-
-    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let test_env = TestEnv::builder().await.unwrap();
 
     // Install a raw response override on FLXC1000:
     // When the ECU receives ReadDataByIdentifier for DID 0xF190 (VIN),
@@ -52,7 +44,7 @@ async fn test_wrong_did_in_response_returns_504() {
     // Normal response: 62 F1 90 <VIN data>
     // Override response: 62 F2 00 41 42 43 (correct SID, wrong DID 0xF200, fake data "ABC")
     ecusim::set_interceptor(
-        &runtime.ecu_sim,
+        &test_env.ecu_sim,
         "FLXC1000",
         "did_mismatch",
         "22f190",
@@ -63,13 +55,12 @@ async fn test_wrong_did_in_response_returns_504() {
 
     // Attempt to read the VIN data from FLXC1000.
     // CDA should detect the DID mismatch and return 504 Gateway Timeout.
-    let result = send_cda_request(
-        &runtime.config,
-        "components/flxc1000/data/vindataidentifier",
+    let result = send_authenticated_cda_request(
+        &test_env,
+        ECU_FLXC1000_VIN_ENDPOINT,
         StatusCode::GATEWAY_TIMEOUT,
         Method::GET,
         None,
-        Some(&auth),
         None,
     )
     .await;
@@ -79,7 +70,7 @@ async fn test_wrong_did_in_response_returns_504() {
         "Expected 504 Gateway Timeout when ECU responds with wrong DID, got: {result:?}"
     );
 
-    cleanup(&runtime.ecu_sim).await;
+    cleanup(&test_env.ecu_sim).await;
 }
 
 /// Tests that CDA returns an error response when an ECU replies with a positive
@@ -94,15 +85,7 @@ async fn test_wrong_did_in_response_returns_504() {
 /// HTTP 400 Bad Request.
 #[tokio::test]
 async fn test_short_ecu_response_returns_error() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-
-    let cleanup_sim = runtime.ecu_sim.clone();
-    hook_cleanup(move || {
-        let sim = cleanup_sim.clone();
-        async move { cleanup_truncated(&sim).await }
-    });
-
-    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let test_env = TestEnv::builder().await.unwrap();
 
     // Install a raw response override on FLXC1000:
     // When the ECU receives ReadDataByIdentifier for DID 0xF200 (FluxCapacitorPowerConsumption),
@@ -112,7 +95,7 @@ async fn test_short_ecu_response_returns_error() {
     // Normal response: 62 F2 00 <4 data bytes>  (INT32 power consumption value)
     // Override response: 62 F2 00  (correct SID+DID, but missing the 4 data bytes)
     ecusim::set_interceptor(
-        &runtime.ecu_sim,
+        &test_env.ecu_sim,
         "FLXC1000",
         "truncated_response",
         "22f200",
@@ -123,13 +106,12 @@ async fn test_short_ecu_response_returns_error() {
 
     // Attempt to read the FluxCapacitorPowerConsumption data from FLXC1000.
     // CDA should detect the truncated payload and return an error, not 204 No Content.
-    let result = send_cda_request(
-        &runtime.config,
-        "components/flxc1000/data/fluxcapacitorpowerconsumption",
+    let result = send_authenticated_cda_request(
+        &test_env,
+        &format!("{ECU_FLXC1000_DATA_ENDPOINT}/fluxcapacitorpowerconsumption"),
         StatusCode::BAD_REQUEST,
         Method::GET,
         None,
-        Some(&auth),
         None,
     )
     .await;
@@ -139,20 +121,20 @@ async fn test_short_ecu_response_returns_error() {
         "Expected 400 Bad Request when ECU responds with truncated payload, got: {result:?}"
     );
 
-    cleanup_truncated(&runtime.ecu_sim).await;
+    cleanup_truncated(&test_env.ecu_sim).await;
 }
 
 async fn cleanup(ecu_sim: &EcuSim) {
-    // Clean up: remove the interceptor so other tests are not affected.
-    // Cannot use panic, in a panic handler, hence have to resort to eprintln
+    // Clean up: remove the interceptor. If the test fails before this, the
+    // next lease of the environment resets ecu-sim, which removes it too.
     if let Err(e) = ecusim::clear_interceptor(ecu_sim, "FLXC1000", "did_mismatch").await {
         eprintln!("Failed to clear raw response override: {e}");
     }
 }
 
 async fn cleanup_truncated(ecu_sim: &EcuSim) {
-    // Clean up: remove the interceptor so other tests are not affected.
-    // Cannot use panic, in a panic handler, hence have to resort to eprintln
+    // Clean up: remove the interceptor. If the test fails before this, the
+    // next lease of the environment resets ecu-sim, which removes it too.
     if let Err(e) = ecusim::clear_interceptor(ecu_sim, "FLXC1000", "truncated_response").await {
         eprintln!("Failed to clear truncated response interceptor: {e}");
     }

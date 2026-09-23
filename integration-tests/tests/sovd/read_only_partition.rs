@@ -16,7 +16,7 @@ use testcontainers::{ImageExt, runners::AsyncRunner};
 use crate::{
     sovd::{
         ECU_FLXC1000_ENDPOINT, get_ecu_component,
-        runtimefiles::{setup_with_lock, upload_mdd},
+        runtimefiles::{setup_with_lock_with_headers, upload_mdd_with_headers},
     },
     util::{
         TestingError,
@@ -57,9 +57,9 @@ async fn database_update_on_read_only_partition_returns_read_only_error() -> Res
 
     let config = cda_container_config(&cda).await?;
     let auth = auth_header(&config, None).await?;
-    let _lock_id = setup_with_lock(&config, &auth).await;
+    let _lock_id = setup_with_lock_with_headers(&config, &auth).await;
 
-    let response = upload_mdd(&config, &auth).await;
+    let response = upload_mdd_with_headers(&config, &auth).await;
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body = response
         .text()

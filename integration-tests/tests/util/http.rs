@@ -18,14 +18,10 @@ use opensovd_cda_lib::config::configfile::Configuration;
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 
-use crate::util::TestingError;
+use crate::util::{TestingError, test_env::TestEnv};
 
 #[derive(Debug)]
 pub(crate) struct Response {
-    #[allow(
-        dead_code,
-        reason = "Status captured for debugging. Not all tests assert on it"
-    )]
     status: StatusCode,
     body: Option<String>,
     #[allow(
@@ -164,6 +160,42 @@ pub(crate) async fn send_cda_json_request(
     .await
 }
 
+/// The URL of `endpoint` below `/vehicle/v15/` of the CDA configured by
+/// `config`, e.g. `components/flxc1000/data`.
+pub(crate) fn vehicle_url(config: &Configuration, endpoint: &str) -> String {
+    format!(
+        "http://{}:{}/vehicle/v15/{endpoint}",
+        config.server.address(),
+        config.server.port()
+    )
+}
+
+/// [`send_cda_request`] to the CDA of `test_env`, authorized as the default
+/// test client, see [`TestEnv::auth_header`].
+///
+/// # Errors
+/// See [`send_cda_request`], or the client is not authorized.
+pub(crate) async fn send_authenticated_cda_request(
+    test_env: &TestEnv,
+    endpoint: &str,
+    expected_status: StatusCode,
+    method: Method,
+    data: Option<&str>,
+    query_params: Option<&QueryParams>,
+) -> Result<Response, TestingError> {
+    let auth = test_env.auth_header().await?;
+    send_cda_request(
+        &test_env.config,
+        endpoint,
+        expected_status,
+        method,
+        data,
+        Some(&auth),
+        query_params,
+    )
+    .await
+}
+
 pub(crate) async fn send_cda_request(
     config: &Configuration,
     endpoint: &str,
@@ -173,26 +205,37 @@ pub(crate) async fn send_cda_request(
     headers: Option<&HeaderMap>,
     query_params: Option<&QueryParams>,
 ) -> Result<Response, TestingError> {
-    let base_url = format!(
-        "http://{}:{}",
-        config.server.address(),
-        config.server.port()
-    );
     let url_params = query_params
         .unwrap_or(&QueryParams::default())
         .to_query_string();
-    let endpoint_path = format!("/vehicle/v15/{endpoint}{url_params}");
-
-    let url = reqwest::Url::parse(&base_url)
-        .expect("Invalid base URL")
-        .join(&endpoint_path)
-        .expect("Invalid endpoint path");
+    let url = reqwest::Url::parse(&vehicle_url(config, &format!("{endpoint}{url_params}")))
+        .expect("Invalid endpoint URL");
 
     send_request(expected_status, method, data, headers, url).await
 }
 
 pub(crate) async fn send_request(
     expected_status: StatusCode,
+    method: Method,
+    data: Option<&str>,
+    headers: Option<&HeaderMap>,
+    url: reqwest::Url,
+) -> Result<Response, TestingError> {
+    let response = send_request_any_status(method, data, headers, url.clone()).await?;
+    if response.status != expected_status {
+        return Err(TestingError::UnexpectedResponse {
+            expected: expected_status,
+            actual: response.status,
+            body: response.body,
+            message: "Expected status does not match".to_owned(),
+            url: url.to_string(),
+        });
+    }
+    Ok(response)
+}
+
+/// Sends a request and returns the response whatever its status.
+async fn send_request_any_status(
     method: Method,
     data: Option<&str>,
     headers: Option<&HeaderMap>,
@@ -231,7 +274,7 @@ pub(crate) async fn send_request(
                 .text()
                 .await
                 .map_err(|_| TestingError::UnexpectedResponse {
-                    expected: expected_status,
+                    expected: status,
                     actual: status,
                     body: None,
                     message: "Failed to get text from response".to_owned(),
@@ -240,21 +283,60 @@ pub(crate) async fn send_request(
         )
     };
 
-    if status != expected_status {
-        return Err(TestingError::UnexpectedResponse {
-            expected: expected_status,
-            actual: status,
-            body,
-            message: "Expected status does not match".to_owned(),
-            url: url.to_string(),
-        });
-    }
-
     Ok(Response {
         status,
-        body: body.clone(),
+        body,
         header_map,
     })
+}
+
+/// Sends authenticated `GET`s to `endpoint` of the CDA of `test_env`, see
+/// [`send_authenticated_cda_request`], for as long as it answers `pending`,
+/// and returns the first other response, whatever its status.
+///
+/// # Errors
+/// See [`poll_while`].
+pub(crate) async fn poll_authenticated_while(
+    test_env: &TestEnv,
+    endpoint: &str,
+    pending: StatusCode,
+    timeout: Duration,
+) -> Result<Response, TestingError> {
+    let auth = test_env.auth_header().await?;
+    poll_while(&test_env.config, &auth, endpoint, pending, timeout).await
+}
+
+/// Sends `GET`s with `headers` to `endpoint` of the CDA configured by
+/// `config` for as long as it answers `pending`, and returns the first other
+/// response, whatever its status.
+///
+/// # Errors
+/// Returns [`TestingError::Timeout`] if the CDA still answers `pending` after
+/// `timeout`, or an error if a request fails.
+pub(crate) async fn poll_while(
+    config: &Configuration,
+    headers: &HeaderMap,
+    endpoint: &str,
+    pending: StatusCode,
+    timeout: Duration,
+) -> Result<Response, TestingError> {
+    let url = reqwest::Url::parse(&vehicle_url(config, endpoint)).expect("Invalid endpoint URL");
+    let deadline = std::time::Instant::now()
+        .checked_add(timeout)
+        .expect("Timeout is too large");
+    loop {
+        let response =
+            send_request_any_status(Method::GET, None, Some(headers), url.clone()).await?;
+        if response.status != pending {
+            return Ok(response);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(TestingError::Timeout(format!(
+                "{endpoint} still answers {pending} after {timeout:?}"
+            )));
+        }
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(100)).await;
+    }
 }
 
 impl QueryParams {
@@ -274,6 +356,10 @@ impl QueryParams {
 }
 
 impl Response {
+    pub(crate) fn status(&self) -> StatusCode {
+        self.status
+    }
+
     pub(crate) fn header(&self, name: http::header::HeaderName) -> Option<&http::HeaderValue> {
         self.header_map.get(name)
     }

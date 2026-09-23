@@ -13,7 +13,14 @@
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
 
-use crate::util::{TestingError, runtime::EcuSim};
+use crate::util::TestingError;
+
+/// Where a test reaches the control API of an ecu-sim.
+#[derive(Clone, Debug)]
+pub(crate) struct EcuSim {
+    pub(crate) host: String,
+    pub(crate) control_port: u16,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -276,23 +283,6 @@ pub(crate) async fn get_dtcs(
     crate::util::http::response_to_t(&response)
 }
 
-/// Delete all DTCs from the ECU simulator
-pub(crate) async fn clear_all_dtcs(
-    sim: &EcuSim,
-    ecu: &str,
-    fault_memory: &str,
-) -> Result<(), TestingError> {
-    let mut url = sim_endpoint(sim)?;
-    url.path_segments_mut()
-        .map_err(|()| TestingError::InvalidUrl("cannot modify URL path".to_owned()))?
-        .push(ecu)
-        .push("dtc")
-        .push(fault_memory);
-
-    crate::util::http::send_request(StatusCode::OK, http::Method::DELETE, None, None, url).await?;
-    Ok(())
-}
-
 pub(crate) async fn reset_sim(sim: &EcuSim) -> Result<(), TestingError> {
     let mut url = sim_endpoint(sim)?;
     url.path_segments_mut()
@@ -304,41 +294,72 @@ pub(crate) async fn reset_sim(sim: &EcuSim) -> Result<(), TestingError> {
     Ok(())
 }
 
-/// Start recording inbound UDS frames on the ECU simulator.
+/// Records the UDS requests one ECU of ecu-sim receives, from
+/// [`TestEnv::record`](crate::util::test_env::TestEnv::record) or
+/// [`Lease::recorder`](crate::util::test_env::Lease::recorder).
 ///
-/// Each received frame is appended as a lowercase hex string with no separator
-/// (e.g. `"31011001"`). Call [`get_recordings`] or [`stop_and_clear_recording`]
-/// to retrieve the accumulated frames.
-pub(crate) async fn start_recording(sim: &EcuSim, ecu: &str) -> Result<(), TestingError> {
-    let mut url = sim_endpoint(sim)?;
-    url.path_segments_mut()
-        .map_err(|()| TestingError::InvalidUrl("cannot modify URL path".to_owned()))?
-        .push(ecu)
-        .push("record");
-
-    crate::util::http::send_request(StatusCode::NO_CONTENT, http::Method::POST, None, None, url)
-        .await?;
-    Ok(())
+/// Every request is recorded as a lowercase hex string without separators,
+/// e.g. `"31011001"`. [`Self::stop`] returns the requests since the recording
+/// started. A recorder dropped without being stopped keeps recording until the
+/// next lease resets ecu-sim.
+#[must_use = "a recorder returns its frames only through `stop`"]
+pub(crate) struct Recorder {
+    sim: EcuSim,
+    ecu: String,
 }
 
-/// Stop the recorder and return all frames recorded since [`start_recording`].
-///
-/// The recorder is removed from the ECU simulator after this call; subsequent
-/// frames are no longer captured until [`start_recording`] is called again.
-pub(crate) async fn stop_and_clear_recording(
-    sim: &EcuSim,
-    ecu: &str,
-) -> Result<Vec<String>, TestingError> {
+impl Recorder {
+    /// Starts recording the requests `ecu` receives, discarding earlier
+    /// recordings of it.
+    ///
+    /// # Errors
+    /// Returns an error if ecu-sim cannot be reached or does not know `ecu`.
+    pub(crate) async fn start(sim: &EcuSim, ecu: &str) -> Result<Self, TestingError> {
+        crate::util::http::send_request(
+            StatusCode::NO_CONTENT,
+            http::Method::POST,
+            None,
+            None,
+            record_endpoint(sim, ecu)?,
+        )
+        .await?;
+        Ok(Self {
+            sim: sim.clone(),
+            ecu: ecu.to_owned(),
+        })
+    }
+
+    /// The ECU whose requests are recorded.
+    pub(crate) fn ecu(&self) -> &str {
+        &self.ecu
+    }
+
+    /// Stops recording and returns the requests recorded since the start.
+    ///
+    /// # Errors
+    /// Returns an error if ecu-sim cannot be reached, e.g. because it was
+    /// restarted since the recording started, which loses the recording.
+    pub(crate) async fn stop(self) -> Result<Vec<String>, TestingError> {
+        let response = crate::util::http::send_request(
+            StatusCode::OK,
+            http::Method::DELETE,
+            None,
+            None,
+            record_endpoint(&self.sim, &self.ecu)?,
+        )
+        .await?;
+        crate::util::http::response_to_t(&response)
+    }
+}
+
+/// The recording endpoint of `ecu` in ecu-sim.
+fn record_endpoint(sim: &EcuSim, ecu: &str) -> Result<reqwest::Url, TestingError> {
     let mut url = sim_endpoint(sim)?;
     url.path_segments_mut()
         .map_err(|()| TestingError::InvalidUrl("cannot modify URL path".to_owned()))?
         .push(ecu)
         .push("record");
-
-    let response =
-        crate::util::http::send_request(StatusCode::OK, http::Method::DELETE, None, None, url)
-            .await?;
-    crate::util::http::response_to_t(&response)
+    Ok(url)
 }
 
 /// Install a named inbound interceptor on the ECU simulator.

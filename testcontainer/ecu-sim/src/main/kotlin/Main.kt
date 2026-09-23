@@ -93,7 +93,7 @@ fun main() {
         }) {
             // Each example ECU gets a distinct (rxId, txId) pair so the right
             // SimEcu instance answers on the bus. The integration test config
-            // (`[[can.ecu_mappings]]` in runtime.rs) mirrors this assignment.
+            // (`can_ecu_mappings` in integration-tests/tests/util/config.rs) mirrors this assignment.
             addSimCanEcu("FLXC1000", rxId = 0x700, txId = 0x708)
             addSimCanEcu("TMC1001", rxId = 0x710, txId = 0x718)
             addSimCanEcu("FSNR2000", rxId = 0x720, txId = 0x728)

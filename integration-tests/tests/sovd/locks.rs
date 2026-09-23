@@ -13,67 +13,44 @@
 
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use http::{HeaderMap, Method, StatusCode};
-use opensovd_cda_lib::config::configfile::Configuration;
 use serde::{self, Deserialize};
-use serde_json::Value;
 
 use crate::{
     sovd,
-    sovd::set_dtc_setting,
+    sovd::{ECU_FLXC1000, set_dtc_setting_with_headers},
     util::{
-        TestingError, ecusim,
+        TestingError,
         http::{
-            Response, auth_header, extract_field_from_json, response_to_json,
-            response_to_json_to_field, send_cda_json_request, send_cda_request,
+            extract_field_from_json, response_to_json, response_to_json_to_field, send_cda_request,
         },
-        runtime::{TestRuntime, setup_integration_test},
+        locks::{
+            ECU_ENDPOINT, ENDPOINTS, FUNCTIONAL_GROUP_ENDPOINT, NON_OWNER_BEARER_TOKEN,
+            VEHICLE_ENDPOINT, bearer_token_header, create_lock, create_lock_with_headers,
+            create_lock_with_payload, default_timeout, lock_expiration, lock_operation,
+            lock_operation_with_headers,
+        },
+        test_env::TestEnv,
     },
 };
 
-// must be skipped due to conflicting formatter rules between nightly and stable
-#[rustfmt::skip]
-pub(crate) const NON_OWNER_BEARER_TOKEN: &str =
-    "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJvd25lcnNoaXAtdGVzdCIsImV4cCI6MjAwMDAwMDAwMH0.\
-     _qb-vSkPnV_Lff2wNH4VXugc-DcvGdzJxwTmb4J48Xs";
-
-pub(crate) fn bearer_token_header(token: &str) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        reqwest::header::AUTHORIZATION,
-        format!("Bearer {token}")
-            .parse()
-            .expect("invalid header value"),
-    );
-    headers
-}
-
 #[tokio::test]
 async fn lock_unlock() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
-    let auth = auth_header(&runtime.config, None).await?;
+    let test_env = TestEnv::builder().await?;
 
     for endpoint in ENDPOINTS {
         // Check if the lock is created successfully and deleted after the timeout
         {
             let expiration_timeout = Duration::from_secs(2);
-            let timing_out_lock = create_lock(
-                expiration_timeout,
-                endpoint,
-                StatusCode::CREATED,
-                &runtime.config,
-                &auth,
-            )
-            .await;
+            let timing_out_lock =
+                create_lock(expiration_timeout, endpoint, StatusCode::CREATED, &test_env).await;
             let lock_id =
                 extract_field_from_json::<String>(&response_to_json(&timing_out_lock)?, "id")?;
 
             lock_operation(
                 endpoint,
                 Some(&lock_id),
-                &runtime.config,
-                &auth,
+                &test_env,
                 StatusCode::OK,
                 Method::GET,
             )
@@ -82,8 +59,7 @@ async fn lock_unlock() -> Result<(), TestingError> {
             lock_operation(
                 endpoint,
                 Some(&lock_id),
-                &runtime.config,
-                &auth,
+                &test_env,
                 StatusCode::NOT_FOUND,
                 Method::GET,
             )
@@ -93,8 +69,7 @@ async fn lock_unlock() -> Result<(), TestingError> {
             lock_operation(
                 endpoint,
                 Some(&lock_id),
-                &runtime.config,
-                &auth,
+                &test_env,
                 StatusCode::NOT_FOUND,
                 Method::DELETE,
             )
@@ -104,14 +79,8 @@ async fn lock_unlock() -> Result<(), TestingError> {
         // Test if creating a lock twice extends the expiration time on the same lock
         // instead of creating a new lock or returning an error.
         {
-            let create_first = create_lock(
-                default_timeout(),
-                endpoint,
-                StatusCode::CREATED,
-                &runtime.config,
-                &auth,
-            )
-            .await;
+            let create_first =
+                create_lock(default_timeout(), endpoint, StatusCode::CREATED, &test_env).await;
             let create_first_json = response_to_json(&create_first)?;
             let lock_id = extract_field_from_json::<String>(&create_first_json, "id")?;
             let expected_location = format!("/vehicle/v15/{endpoint}/{lock_id}");
@@ -122,19 +91,12 @@ async fn lock_unlock() -> Result<(), TestingError> {
                 Some(expected_location.as_str())
             );
 
-            let expiration_first =
-                lock_expiration(&runtime.config, &auth, endpoint, &lock_id).await?;
+            let expiration_first = lock_expiration(&test_env, endpoint, &lock_id).await?;
 
             cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(2)).await;
 
-            let create_second = create_lock(
-                default_timeout(),
-                endpoint,
-                StatusCode::OK,
-                &runtime.config,
-                &auth,
-            )
-            .await;
+            let create_second =
+                create_lock(default_timeout(), endpoint, StatusCode::OK, &test_env).await;
 
             let create_second_json = response_to_json(&create_second)?;
             assert_eq!(
@@ -143,8 +105,7 @@ async fn lock_unlock() -> Result<(), TestingError> {
                     .and_then(|value| value.to_str().ok()),
                 None
             );
-            let expiration_second =
-                lock_expiration(&runtime.config, &auth, endpoint, &lock_id).await?;
+            let expiration_second = lock_expiration(&test_env, endpoint, &lock_id).await?;
 
             assert!(expiration_first < expiration_second);
 
@@ -153,8 +114,7 @@ async fn lock_unlock() -> Result<(), TestingError> {
             lock_operation(
                 endpoint,
                 Some(&lock_id),
-                &runtime.config,
-                &auth,
+                &test_env,
                 StatusCode::NO_CONTENT,
                 Method::DELETE,
             )
@@ -167,15 +127,13 @@ async fn lock_unlock() -> Result<(), TestingError> {
 
 #[tokio::test]
 async fn unrelated_functional_group_and_ecu_locks_can_coexist() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
-    let auth = auth_header(&runtime.config, None).await?;
+    let test_env = TestEnv::builder().await?;
 
     let func_lock_response = create_lock(
         default_timeout(),
         FUNCTIONAL_GROUP_ENDPOINT,
         StatusCode::CREATED,
-        &runtime.config,
-        &auth,
+        &test_env,
     )
     .await;
     let lock_id: String = response_to_json_to_field(&func_lock_response, "id")?;
@@ -184,8 +142,7 @@ async fn unrelated_functional_group_and_ecu_locks_can_coexist() -> Result<(), Te
         default_timeout(),
         ECU_ENDPOINT,
         StatusCode::CREATED,
-        &runtime.config,
-        &auth,
+        &test_env,
     )
     .await;
     let ecu_lock_id: String = response_to_json_to_field(&ecu_lock_response, "id")?;
@@ -193,8 +150,7 @@ async fn unrelated_functional_group_and_ecu_locks_can_coexist() -> Result<(), Te
     lock_operation(
         ECU_ENDPOINT,
         Some(&ecu_lock_id),
-        &runtime.config,
-        &auth,
+        &test_env,
         StatusCode::NO_CONTENT,
         Method::DELETE,
     )
@@ -203,8 +159,7 @@ async fn unrelated_functional_group_and_ecu_locks_can_coexist() -> Result<(), Te
     lock_operation(
         FUNCTIONAL_GROUP_ENDPOINT,
         Some(&lock_id),
-        &runtime.config,
-        &auth,
+        &test_env,
         StatusCode::NO_CONTENT,
         Method::DELETE,
     )
@@ -226,29 +181,22 @@ async fn ownership() -> Result<(), TestingError> {
         items: Vec<LockElement>,
     }
 
-    let (runtime, _lock) = setup_integration_test(true).await?;
-    let auth_owner = auth_header(&runtime.config, None).await?;
-    let auth_other = auth_header(&runtime.config, Some("ownership-test")).await?;
+    let test_env = TestEnv::builder().await?;
+    let auth_owner = test_env.auth_header().await?;
+    let auth_other = test_env.auth_header_for("ownership-test").await?;
 
     for endpoint in ENDPOINTS {
         let lock_id: String = response_to_json_to_field(
-            &create_lock(
-                default_timeout(),
-                endpoint,
-                StatusCode::CREATED,
-                &runtime.config,
-                &auth_owner,
-            )
-            .await,
+            &create_lock(default_timeout(), endpoint, StatusCode::CREATED, &test_env).await,
             "id",
         )?;
 
         let get_lock_list = async |auth: &HeaderMap| {
             serde_json::from_value(response_to_json(
-                &lock_operation(
+                &lock_operation_with_headers(
                     endpoint,
                     None,
-                    &runtime.config,
+                    &test_env.config,
                     auth,
                     StatusCode::OK,
                     Method::GET,
@@ -281,19 +229,18 @@ async fn ownership() -> Result<(), TestingError> {
         lock_operation(
             endpoint,
             Some(&lock_id),
-            &runtime.config,
-            &auth_owner,
+            &test_env,
             StatusCode::NO_CONTENT,
             Method::DELETE,
         )
         .await;
 
         let lock_id: String = response_to_json_to_field(
-            &create_lock(
+            &create_lock_with_headers(
                 default_timeout(),
                 endpoint,
                 StatusCode::CREATED,
-                &runtime.config,
+                &test_env.config,
                 &auth_other,
             )
             .await,
@@ -307,10 +254,10 @@ async fn ownership() -> Result<(), TestingError> {
             .unwrap_or_else(|| panic!("After delete, user 2 lock id {lock_id} not found"));
         assert!(item_user_2.owned);
 
-        lock_operation(
+        lock_operation_with_headers(
             endpoint,
             Some(&lock_id),
-            &runtime.config,
+            &test_env.config,
             &auth_other,
             StatusCode::NO_CONTENT,
             Method::DELETE,
@@ -323,9 +270,8 @@ async fn ownership() -> Result<(), TestingError> {
 
 #[tokio::test]
 async fn test_vehicle_locking_blocked_by_other() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
-    let auth_user1 = auth_header(&runtime.config, None).await?;
-    let auth_user2 = auth_header(&runtime.config, Some("user2")).await?;
+    let test_env = TestEnv::builder().await?;
+    let auth_user2 = test_env.auth_header_for("user2").await?;
 
     // User1 creates a functional lock
     let func_lock_id: String = response_to_json_to_field(
@@ -333,19 +279,18 @@ async fn test_vehicle_locking_blocked_by_other() -> Result<(), TestingError> {
             default_timeout(),
             FUNCTIONAL_GROUP_ENDPOINT,
             StatusCode::CREATED,
-            &runtime.config,
-            &auth_user1,
+            &test_env,
         )
         .await,
         "id",
     )?;
 
     // User2 cannot create a vehicle lock because user1 holds a lock
-    create_lock(
+    create_lock_with_headers(
         default_timeout(),
         VEHICLE_ENDPOINT,
         StatusCode::LOCKED,
-        &runtime.config,
+        &test_env.config,
         &auth_user2,
     )
     .await;
@@ -354,8 +299,7 @@ async fn test_vehicle_locking_blocked_by_other() -> Result<(), TestingError> {
     lock_operation(
         FUNCTIONAL_GROUP_ENDPOINT,
         Some(&func_lock_id),
-        &runtime.config,
-        &auth_user1,
+        &test_env,
         StatusCode::NO_CONTENT,
         Method::DELETE,
     )
@@ -368,15 +312,15 @@ async fn test_vehicle_locking_blocked_by_other() -> Result<(), TestingError> {
 async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
     async fn create_ecu_and_func_lock(
         user: &HeaderMap,
-        runtime: &TestRuntime,
+        test_env: &TestEnv,
     ) -> Result<(String, String), TestingError> {
         // Create locks in correct hierarchy: ECU (lowest) -> Functional -> Vehicle (highest)
         let ecu_lock_id: String = response_to_json_to_field(
-            &create_lock(
+            &create_lock_with_headers(
                 default_timeout(),
                 ECU_ENDPOINT,
                 StatusCode::CREATED,
-                &runtime.config,
+                &test_env.config,
                 user,
             )
             .await,
@@ -384,11 +328,11 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
         )?;
 
         let func_lock_id: String = response_to_json_to_field(
-            &create_lock(
+            &create_lock_with_headers(
                 default_timeout(),
                 FUNCTIONAL_GROUP_ENDPOINT,
                 StatusCode::CREATED,
-                &runtime.config,
+                &test_env.config,
                 user,
             )
             .await,
@@ -402,22 +346,22 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
         ecu_lock_id: &str,
         func_lock_id: &str,
         user: &HeaderMap,
-        runtime: &TestRuntime,
+        test_env: &TestEnv,
     ) {
-        lock_operation(
+        lock_operation_with_headers(
             ECU_ENDPOINT,
             Some(ecu_lock_id),
-            &runtime.config,
+            &test_env.config,
             user,
             StatusCode::NOT_FOUND,
             Method::GET,
         )
         .await;
 
-        lock_operation(
+        lock_operation_with_headers(
             FUNCTIONAL_GROUP_ENDPOINT,
             Some(func_lock_id),
-            &runtime.config,
+            &test_env.config,
             user,
             StatusCode::NOT_FOUND,
             Method::GET,
@@ -426,15 +370,15 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
     }
 
     async fn create_vehicle_lock(
-        runtime: &TestRuntime,
+        test_env: &TestEnv,
         user: &HeaderMap,
     ) -> Result<String, TestingError> {
         response_to_json_to_field(
-            &create_lock(
+            &create_lock_with_headers(
                 default_timeout(),
                 VEHICLE_ENDPOINT,
                 StatusCode::CREATED,
-                &runtime.config,
+                &test_env.config,
                 user,
             )
             .await,
@@ -442,11 +386,11 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
         )
     }
 
-    async fn delete_lock(runtime: &TestRuntime, user: &HeaderMap, lock_id: &str) {
-        lock_operation(
+    async fn delete_lock(test_env: &TestEnv, user: &HeaderMap, lock_id: &str) {
+        lock_operation_with_headers(
             VEHICLE_ENDPOINT,
             Some(lock_id),
-            &runtime.config,
+            &test_env.config,
             user,
             StatusCode::NO_CONTENT,
             Method::DELETE,
@@ -454,28 +398,28 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
         .await;
     }
 
-    let (runtime, _lock) = setup_integration_test(true).await?;
-    let auth_user1 = auth_header(&runtime.config, None).await?;
-    let auth_user2 = auth_header(&runtime.config, Some("user2")).await?;
+    let test_env = TestEnv::builder().await?;
+    let auth_user1 = test_env.auth_header().await?;
+    let auth_user2 = test_env.auth_header_for("user2").await?;
 
     // tests are done with two users to ensure locks are properly deleted
     // test with locks created before vehicle lock
     {
         for user in [&auth_user1, &auth_user2] {
-            let (ecu_lock_id, func_lock_id) = create_ecu_and_func_lock(user, runtime).await?;
-            let vehicle_lock = create_vehicle_lock(runtime, user).await?;
-            delete_lock(runtime, user, &vehicle_lock).await;
-            assert_ecu_and_func_locks_deleted(&ecu_lock_id, &func_lock_id, user, runtime).await;
+            let (ecu_lock_id, func_lock_id) = create_ecu_and_func_lock(user, &test_env).await?;
+            let vehicle_lock = create_vehicle_lock(&test_env, user).await?;
+            delete_lock(&test_env, user, &vehicle_lock).await;
+            assert_ecu_and_func_locks_deleted(&ecu_lock_id, &func_lock_id, user, &test_env).await;
         }
     }
 
     // test with locks created after vehicle lock
     {
         for user in [&auth_user1, &auth_user2] {
-            let vehicle_lock = create_vehicle_lock(runtime, user).await?;
-            let (ecu_lock_id, func_lock_id) = create_ecu_and_func_lock(user, runtime).await?;
-            delete_lock(runtime, user, &vehicle_lock).await;
-            assert_ecu_and_func_locks_deleted(&ecu_lock_id, &func_lock_id, user, runtime).await;
+            let vehicle_lock = create_vehicle_lock(&test_env, user).await?;
+            let (ecu_lock_id, func_lock_id) = create_ecu_and_func_lock(user, &test_env).await?;
+            delete_lock(&test_env, user, &vehicle_lock).await;
+            assert_ecu_and_func_locks_deleted(&ecu_lock_id, &func_lock_id, user, &test_env).await;
         }
     }
     Ok(())
@@ -483,9 +427,8 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
 
 #[tokio::test]
 async fn test_vehicle_lock_cannot_be_deleted_by_non_owner() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
-    let auth_owner = auth_header(&runtime.config, None).await?;
-    let auth_other = auth_header(&runtime.config, Some("other-user")).await?;
+    let test_env = TestEnv::builder().await?;
+    let auth_other = test_env.auth_header_for("other-user").await?;
 
     // Owner creates vehicle lock
     let vehicle_lock_id: String = response_to_json_to_field(
@@ -493,18 +436,17 @@ async fn test_vehicle_lock_cannot_be_deleted_by_non_owner() -> Result<(), Testin
             default_timeout(),
             VEHICLE_ENDPOINT,
             StatusCode::CREATED,
-            &runtime.config,
-            &auth_owner,
+            &test_env,
         )
         .await,
         "id",
     )?;
 
     // Other user cannot delete the vehicle lock
-    lock_operation(
+    lock_operation_with_headers(
         VEHICLE_ENDPOINT,
         Some(&vehicle_lock_id),
-        &runtime.config,
+        &test_env.config,
         &auth_other,
         StatusCode::FORBIDDEN,
         Method::DELETE,
@@ -515,8 +457,7 @@ async fn test_vehicle_lock_cannot_be_deleted_by_non_owner() -> Result<(), Testin
     lock_operation(
         VEHICLE_ENDPOINT,
         Some(&vehicle_lock_id),
-        &runtime.config,
-        &auth_owner,
+        &test_env,
         StatusCode::OK,
         Method::GET,
     )
@@ -526,8 +467,7 @@ async fn test_vehicle_lock_cannot_be_deleted_by_non_owner() -> Result<(), Testin
     lock_operation(
         VEHICLE_ENDPOINT,
         Some(&vehicle_lock_id),
-        &runtime.config,
-        &auth_owner,
+        &test_env,
         StatusCode::NO_CONTENT,
         Method::DELETE,
     )
@@ -538,8 +478,7 @@ async fn test_vehicle_lock_cannot_be_deleted_by_non_owner() -> Result<(), Testin
 
 #[tokio::test]
 async fn test_component_ownership_protection_with_vehicle_lock_only() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
-    let auth_owner = auth_header(&runtime.config, None).await?;
+    let test_env = TestEnv::builder().await?;
 
     // Lock the vehicle as 'owner'
     let expiration_timeout = Duration::from_secs(30);
@@ -547,8 +486,7 @@ async fn test_component_ownership_protection_with_vehicle_lock_only() -> Result<
         expiration_timeout,
         VEHICLE_ENDPOINT,
         StatusCode::CREATED,
-        &runtime.config,
-        &auth_owner,
+        &test_env,
     )
     .await;
     let lock_id = extract_field_from_json::<String>(&response_to_json(&ecu_lock)?, "id")?;
@@ -558,9 +496,9 @@ async fn test_component_ownership_protection_with_vehicle_lock_only() -> Result<
 
     // Non-owner tries to set dtcsetting - should fail because lock owners differ
     // Without lock, the CDA should reject the request
-    set_dtc_setting(
+    set_dtc_setting_with_headers(
         "On",
-        &runtime.config,
+        &test_env.config,
         &auth_non_owner,
         sovd::ECU_FLXC1000_ENDPOINT,
         StatusCode::LOCKED,
@@ -571,8 +509,7 @@ async fn test_component_ownership_protection_with_vehicle_lock_only() -> Result<
     lock_operation(
         VEHICLE_ENDPOINT,
         Some(&lock_id),
-        &runtime.config,
-        &auth_owner,
+        &test_env,
         StatusCode::NO_CONTENT,
         Method::DELETE,
     )
@@ -583,17 +520,14 @@ async fn test_component_ownership_protection_with_vehicle_lock_only() -> Result<
 
 #[tokio::test]
 async fn vehicle_lock_exclusivity_controls_foreign_communication() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
-    let owner = auth_header(&runtime.config, None).await?;
+    let test_env = TestEnv::builder().await?;
     let other = bearer_token_header(NON_OWNER_BEARER_TOKEN);
-    let data_endpoint = format!("{}/data/vindataidentifier", sovd::ECU_FLXC1000_ENDPOINT);
 
     let non_exclusive_id: String = response_to_json_to_field(
         &create_lock_with_payload(
             VEHICLE_ENDPOINT,
             StatusCode::CREATED,
-            &runtime.config,
-            &owner,
+            &test_env,
             &serde_json::json!({
                 "lock_expiration": default_timeout().as_secs(),
                 "x-sovd2uds-isexclusive": false,
@@ -603,8 +537,8 @@ async fn vehicle_lock_exclusivity_controls_foreign_communication() -> Result<(),
         "id",
     )?;
     send_cda_request(
-        &runtime.config,
-        &data_endpoint,
+        &test_env.config,
+        sovd::ECU_FLXC1000_VIN_ENDPOINT,
         StatusCode::OK,
         Method::GET,
         None,
@@ -612,9 +546,9 @@ async fn vehicle_lock_exclusivity_controls_foreign_communication() -> Result<(),
         None,
     )
     .await?;
-    set_dtc_setting(
+    set_dtc_setting_with_headers(
         "On",
-        &runtime.config,
+        &test_env.config,
         &other,
         sovd::ECU_FLXC1000_ENDPOINT,
         StatusCode::LOCKED,
@@ -623,8 +557,7 @@ async fn vehicle_lock_exclusivity_controls_foreign_communication() -> Result<(),
     lock_operation(
         VEHICLE_ENDPOINT,
         Some(&non_exclusive_id),
-        &runtime.config,
-        &owner,
+        &test_env,
         StatusCode::NO_CONTENT,
         Method::DELETE,
     )
@@ -634,8 +567,7 @@ async fn vehicle_lock_exclusivity_controls_foreign_communication() -> Result<(),
         &create_lock_with_payload(
             VEHICLE_ENDPOINT,
             StatusCode::CREATED,
-            &runtime.config,
-            &owner,
+            &test_env,
             &serde_json::json!({
                 "lock_expiration": default_timeout().as_secs(),
                 "x-sovd2uds-isexclusive": true,
@@ -644,10 +576,10 @@ async fn vehicle_lock_exclusivity_controls_foreign_communication() -> Result<(),
         .await,
         "id",
     )?;
-    ecusim::start_recording(&runtime.ecu_sim, "flxc1000").await?;
+    let recorder = test_env.record(ECU_FLXC1000).await?;
     send_cda_request(
-        &runtime.config,
-        &data_endpoint,
+        &test_env.config,
+        sovd::ECU_FLXC1000_VIN_ENDPOINT,
         StatusCode::LOCKED,
         Method::GET,
         None,
@@ -655,114 +587,16 @@ async fn vehicle_lock_exclusivity_controls_foreign_communication() -> Result<(),
         None,
     )
     .await?;
-    let frames = ecusim::stop_and_clear_recording(&runtime.ecu_sim, "flxc1000").await?;
+    let frames = recorder.stop().await?;
     assert!(frames.is_empty(), "Rejected read reached ECU: {frames:?}");
     lock_operation(
         VEHICLE_ENDPOINT,
         Some(&exclusive_id),
-        &runtime.config,
-        &owner,
+        &test_env,
         StatusCode::NO_CONTENT,
         Method::DELETE,
     )
     .await;
 
     Ok(())
-}
-
-pub(crate) const FUNCTIONAL_GROUP_ENDPOINT: &str =
-    "functions/functionalgroups/fgl_uds_ethernet_doip_dobt/locks";
-
-pub(crate) const ECU_ENDPOINT: &str =
-    const_format::formatcp!("{}/locks", sovd::ECU_FLXC1000_ENDPOINT);
-
-pub(crate) const VEHICLE_ENDPOINT: &str = "locks";
-
-pub(crate) const ENDPOINTS: [&str; 3] = [FUNCTIONAL_GROUP_ENDPOINT, VEHICLE_ENDPOINT, ECU_ENDPOINT];
-
-pub(crate) async fn lock_operation(
-    endpoint: &str,
-    lock_id: Option<&str>,
-    config: &Configuration,
-    headers: &HeaderMap,
-    status: StatusCode,
-    method: Method,
-) -> Response {
-    let lock_endpoint = format!(
-        "{endpoint}{}",
-        lock_id.map_or(String::new(), |id| format!("/{id}"))
-    );
-    send_cda_request(
-        config,
-        &lock_endpoint,
-        status,
-        method,
-        None,
-        Some(headers),
-        None,
-    )
-    .await
-    .expect("lock operation failed")
-}
-
-pub(crate) async fn create_lock(
-    expiration: Duration,
-    endpoint: &str,
-    status: StatusCode,
-    webserver: &Configuration,
-    auth: &HeaderMap,
-) -> Response {
-    let payload = serde_json::json!({
-        "lock_expiration": expiration.as_secs(),
-    });
-    create_lock_with_payload(endpoint, status, webserver, auth, &payload).await
-}
-
-pub(crate) async fn create_lock_with_payload(
-    endpoint: &str,
-    status: StatusCode,
-    webserver: &Configuration,
-    auth: &HeaderMap,
-    payload: &Value,
-) -> Response {
-    send_cda_json_request(
-        webserver,
-        endpoint,
-        status,
-        Method::POST,
-        payload,
-        Some(auth),
-    )
-    .await
-    .expect("Failed to create lock")
-}
-
-pub(crate) fn default_timeout() -> Duration {
-    Duration::from_secs(3600)
-}
-
-async fn lock_expiration(
-    cfg: &Configuration,
-    auth_header: &HeaderMap,
-    endpoint: &str,
-    lock_id: &str,
-) -> Result<DateTime<Utc>, TestingError> {
-    let response = lock_operation(
-        endpoint,
-        Some(lock_id),
-        cfg,
-        auth_header,
-        StatusCode::OK,
-        Method::GET,
-    )
-    .await;
-
-    let expiration: String = response_to_json_to_field(&response, "lock_expiration")?;
-
-    match expiration.parse::<DateTime<Utc>>() {
-        Ok(date_time) => Ok(date_time),
-        Err(_) => Err(TestingError::InvalidData(
-            "Failed to parse lock expiration datetime".to_string(),
-        )),
-    }
 }

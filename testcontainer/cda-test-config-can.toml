@@ -1,0 +1,459 @@
+# SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+flash_files_path = "/app/flash"
+
+[can]
+default_probes = true
+interface = "socketcand:socketcand:29536:vcan0"
+keepalive_interval_ms = 2000
+probe_fallbacks = []
+probe_retries = 0
+probe_retry_delay_ms = 100
+probe_timeout_ms = 500
+response_timeout_ms = 2000
+transport_overrides = []
+
+[[can.ecu_mappings]]
+addressing_mode = "standard"
+ecu_name = "FLXC1000"
+request_id = 1792
+response_id = 1800
+
+[[can.ecu_mappings]]
+addressing_mode = "standard"
+ecu_name = "TMC1001"
+request_id = 1808
+response_id = 1816
+
+[[can.ecu_mappings]]
+addressing_mode = "standard"
+ecu_name = "FSNR2000"
+request_id = 1824
+response_id = 1832
+
+[[can.ecu_mappings]]
+addressing_mode = "standard"
+ecu_name = "TMCC3000"
+request_id = 1840
+response_id = 1848
+
+[[can.ecu_mappings]]
+addressing_mode = "standard"
+ecu_name = "HOVR4000"
+request_id = 1856
+response_id = 1864
+
+[[can.ecu_mappings]]
+addressing_mode = "standard"
+ecu_name = "JGWT5000"
+request_id = 1872
+response_id = 1880
+
+[com_params.can]
+unique_resp_id_table_name = "CP_UniqueRespIdTable"
+
+[com_params.can.functional_id]
+name = "CP_CanFuncReqId"
+precedence = "Database"
+
+[com_params.can.physical_request_id]
+name = "CP_CanPhysReqId"
+precedence = "Database"
+
+[com_params.can.physical_response_id]
+name = "CP_CanRespUSDTId"
+precedence = "Database"
+
+[com_params.doip]
+logical_response_id_table_name = "CP_UniqueRespIdTable"
+
+[com_params.doip.connection_retry_attempts]
+name = "CP_DoIPConnectionRetryAttempts"
+precedence = "Database"
+value = 100
+
+[com_params.doip.connection_retry_delay]
+name = "CP_DoIPConnectionRetryDelay"
+precedence = "Config"
+
+[com_params.doip.connection_retry_delay.value]
+nanos = 0
+secs = 1
+
+[com_params.doip.connection_timeout]
+name = "CP_DoIPConnectionTimeout"
+precedence = "Database"
+
+[com_params.doip.connection_timeout.value]
+nanos = 0
+secs = 30
+
+[com_params.doip.diagnostic_ack_timeout]
+name = "CP_DoIPDiagnosticAckTimeout"
+precedence = "Database"
+
+[com_params.doip.diagnostic_ack_timeout.value]
+nanos = 0
+secs = 1
+
+[com_params.doip.logical_ecu_address]
+name = "CP_DoIPLogicalEcuAddress"
+precedence = "Database"
+value = 0
+
+[com_params.doip.logical_functional_address]
+name = "CP_DoIPLogicalFunctionalAddress"
+precedence = "Database"
+value = 65535
+
+[com_params.doip.logical_gateway_address]
+name = "CP_DoIPLogicalGatewayAddress"
+precedence = "Database"
+value = 0
+
+[com_params.doip.logical_tester_address]
+name = "CP_DoIPLogicalTesterAddress"
+precedence = "Database"
+value = 0
+
+[com_params.doip.nack_number_of_retries]
+name = "CP_DoIPNumberOfRetries"
+precedence = "Database"
+
+[com_params.doip.nack_number_of_retries.value]
+0x03 = 3
+
+[com_params.doip.repeat_request_count_transmission]
+name = "CP_RepeatReqCountTrans"
+precedence = "Database"
+value = 3
+
+[com_params.doip.retry_period]
+name = "CP_DoIPRetryPeriod"
+precedence = "Database"
+
+[com_params.doip.retry_period.value]
+nanos = 200000000
+secs = 0
+
+[com_params.doip.routing_activation_timeout]
+name = "CP_DoIPRoutingActivationTimeout"
+precedence = "Database"
+
+[com_params.doip.routing_activation_timeout.value]
+nanos = 0
+secs = 30
+
+[com_params.uds.rc_21_completion_timeout]
+name = "CP_RC21CompletionTimeout"
+precedence = "Database"
+
+[com_params.uds.rc_21_completion_timeout.value]
+nanos = 0
+secs = 25
+
+[com_params.uds.rc_21_repeat_request_time]
+name = "CP_RC21RequestTime"
+precedence = "Database"
+
+[com_params.uds.rc_21_repeat_request_time.value]
+nanos = 200000000
+secs = 0
+
+[com_params.uds.rc_21_retry_policy]
+name = "CP_RC21Handling"
+precedence = "Database"
+value = "ContinueUntilTimeout"
+
+[com_params.uds.rc_78_completion_timeout]
+name = "CP_RC78CompletionTimeout"
+precedence = "Database"
+
+[com_params.uds.rc_78_completion_timeout.value]
+nanos = 0
+secs = 25
+
+[com_params.uds.rc_78_retry_policy]
+name = "CP_RC78Handling"
+precedence = "Database"
+value = "ContinueUntilTimeout"
+
+[com_params.uds.rc_78_timeout]
+name = "CP_P6Star"
+precedence = "Database"
+
+[com_params.uds.rc_78_timeout.value]
+nanos = 0
+secs = 1
+
+[com_params.uds.rc_94_completion_timeout]
+name = "CP_RC94CompletionTimeout"
+precedence = "Database"
+
+[com_params.uds.rc_94_completion_timeout.value]
+nanos = 0
+secs = 25
+
+[com_params.uds.rc_94_repeat_request_time]
+name = "CP_RC94RequestTime"
+precedence = "Database"
+
+[com_params.uds.rc_94_repeat_request_time.value]
+nanos = 200000000
+secs = 0
+
+[com_params.uds.rc_94_retry_policy]
+name = "CP_RC94Handling"
+precedence = "Database"
+value = "ContinueUntilTimeout"
+
+[com_params.uds.repeat_req_count_app]
+name = "CP_RepeatReqCountApp"
+precedence = "Database"
+value = 2
+
+[com_params.uds.tester_present_addr_mode]
+name = "CP_TesterPresentAddrMode"
+precedence = "Database"
+value = "Physical"
+
+[com_params.uds.tester_present_exp_neg_resp]
+name = "CP_TesterPresentExpNegResp"
+precedence = "Database"
+value = [
+    127,
+    62,
+]
+
+[com_params.uds.tester_present_exp_pos_resp]
+name = "CP_TesterPresentExpPosResp"
+precedence = "Database"
+value = [
+    126,
+    0,
+]
+
+[com_params.uds.tester_present_message]
+name = "CP_TesterPresentMessage"
+precedence = "Database"
+value = [
+    62,
+    0,
+]
+
+[com_params.uds.tester_present_response_expected]
+name = "CP_TesterPresentReqResp"
+precedence = "Database"
+value = "true"
+
+[com_params.uds.tester_present_retry_policy]
+name = "CP_TesterPresentHandling"
+precedence = "Database"
+value = "true"
+
+[com_params.uds.tester_present_send_type]
+name = "CP_TesterPresentSendType"
+precedence = "Database"
+value = "OnIdle"
+
+[com_params.uds.tester_present_time]
+name = "CP_TesterPresentTime"
+precedence = "Database"
+
+[com_params.uds.tester_present_time.value]
+nanos = 0
+secs = 2
+
+[com_params.uds.timeout_default]
+name = "CP_P6Max"
+precedence = "Database"
+
+[com_params.uds.timeout_default.value]
+nanos = 0
+secs = 1
+
+[communication]
+deferred_retry_after_seconds = 30
+init_mode = "Always"
+post_update_mode = "Enabled"
+variant_detection = "Always"
+
+[components.additional_fields]
+
+[database]
+dir = "/app/odx"
+exit_no_database_loaded = true
+fallback_to_base_variant = true
+ignore_invalid_mdd = false
+ignore_protocol = false
+
+[database.naming_convention]
+can_protocol_aliases = [
+    "UDS_CAN",
+    "ISO_11898_2_DWCAN",
+    "ISO_11898_3_DWFTCAN",
+    "CAN",
+    "ISO_15765_2",
+    "ISO_15765_3",
+]
+can_protocol_markers = [
+    "CAN",
+    "ISO_11898",
+]
+category_mapping = []
+configuration_functional_classes = ["varcoding"]
+configuration_service_parameter_semantic_id = "ID"
+default_category = "x-sovd2uds-unmapped"
+long_name_affix_position = "Suffix"
+long_name_affixes = [
+    " read",
+    " write",
+    " read dump",
+    " write dump",
+    " dump",
+    " read func",
+    " write func",
+    " read dump func",
+    " write dump func",
+    " dump func",
+    " control func",
+    " control",
+]
+short_name_affix_position = "Suffix"
+short_name_affixes = [
+    "_read",
+    "_write",
+    "_read_dump",
+    "_write_dump",
+    "_dump",
+    "_read_func",
+    "_write_func",
+    "_read_dump_func",
+    "_write_dump_func",
+    "_dump_func",
+    "_control_func",
+    "_control",
+]
+
+[database.naming_convention.action_affixes]
+position = "Suffix"
+read = "_Read"
+request_results = "_RequestResults"
+start = "_Start"
+stop = "_Stop"
+write = "_Write"
+
+[database.naming_convention.semantics]
+data = "DATA"
+security = "SECURITY"
+service_id_rq = "SERVICEIDRQ"
+session = "SESSION"
+
+[database.naming_convention.service_affixes]
+133 = [
+    "Prefix",
+    ["DTC_Setting_Mode_"],
+]
+49 = [
+    "Suffix",
+    [
+    "_start",
+    "_stop",
+    "_requestresults",
+    "_start_func",
+    "_stop_func",
+    "_requestresults_func",
+],
+]
+
+[doip]
+alive_check_interval_secs = 1800
+enabled = false
+gateway_port = 13400
+protocol_name = "UDS_Ethernet_DoIP_DOBT"
+send_diagnostic_message_ack = true
+send_timeout_ms = 1000
+tester_address = "0.0.0.0"
+tester_subnet = "255.255.0.0"
+tls_port = 3496
+
+[ecu.HOVR4000]
+ignore_protocol = true
+
+[ecu.JGWT5000]
+ignore_protocol = true
+
+[ecu.TMCC3000]
+ignore_protocol = true
+
+[faults]
+default_scope = "FaultMem"
+user_defined_dtc_clear_service = [
+    49,
+    1,
+    66,
+    0,
+]
+user_memory_scope = "Development"
+
+[flat_buf]
+ignore_missing_null_terminator = false
+max_apparent_size = 9223372036854775807
+max_depth = 64
+max_tables = 100000000
+mdd_decompress = false
+verify = false
+
+[functional_description]
+description_database = "functional_groups"
+protocol_position = "Suffix"
+
+[health]
+enabled = true
+
+[locks]
+lock_exclusivity_policy = "exclusive_by_default"
+priority_lifecycle_queue_capacity = 256
+priority_lifecycle_timeout_ms = 5000
+priority_policy_stale_retries = 1
+priority_policy_timeout_ms = 5000
+
+[logging]
+timestamp_format = "%T%.3f"
+
+[logging.log_file_config]
+append_enabled = false
+date_format = "%F %T%.3f"
+enabled = false
+name = "opensovd-cda.log"
+path = "/var/log/opensovd-cda"
+
+[logging.otel]
+enabled = false
+endpoint = "http://localhost:4317"
+
+[runtime_update_config]
+retry_after_seconds = 1
+storage_dir = "."
+storage_dir_load_retry_attempts = 100
+storage_dir_load_retry_delay_ms = 3000
+upload_body_limit_bytes = 52428800
+
+[server]
+address = "0.0.0.0"
+port = 20002
+transport = "tcp"
+
+[strict]
+ecu_config = false
+enabled = false
+parameter_validation = false

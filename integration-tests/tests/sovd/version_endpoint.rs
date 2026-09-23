@@ -16,8 +16,9 @@ use opensovd_cda_lib::cda_version;
 use reqwest::Method;
 
 use crate::util::{
+    endpoints::SOVD2UDS_VERSION,
     http::{extract_field_from_json, response_to_json},
-    runtime::setup_integration_test,
+    test_env::TestEnv,
 };
 
 fn assert_version_response(json: &serde_json::Value) {
@@ -45,15 +46,10 @@ fn assert_version_response(json: &serde_json::Value) {
 /// [[ itest~sovd-api-version-endpoint, Version Endpoint Integration Test, itest ]]
 #[tokio::test]
 async fn test_version_endpoint() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-    let host = runtime.config.server.address();
-    let port = runtime.config.server.port();
-
+    let test_env = TestEnv::builder().await.unwrap();
     // Test app-scoped version endpoint
-    let app_url = reqwest::Url::parse(&format!(
-        "http://{host}:{port}/vehicle/v15/apps/sovd2uds/data/version"
-    ))
-    .expect("Invalid URL");
+    let app_url =
+        reqwest::Url::parse(&test_env.vehicle_url(SOVD2UDS_VERSION)).expect("Invalid URL");
 
     let response =
         crate::util::http::send_request(StatusCode::OK, Method::GET, None, None, app_url)
@@ -64,8 +60,8 @@ async fn test_version_endpoint() {
     assert_version_response(&json);
 
     // Test global version endpoint
-    let global_url = reqwest::Url::parse(&format!("http://{host}:{port}/vehicle/v15/data/version"))
-        .expect("Invalid URL");
+    let global_url =
+        reqwest::Url::parse(&test_env.vehicle_url("data/version")).expect("Invalid URL");
 
     let response =
         crate::util::http::send_request(StatusCode::OK, Method::GET, None, None, global_url)

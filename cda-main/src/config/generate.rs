@@ -165,8 +165,10 @@ value = 2015
     config
 }
 
+/// License header of the generated configuration files: `opensovd-cda.toml`
+/// and the integration test configurations in `testcontainer/`.
 #[rustfmt::skip]
-const SPDX_HEADER: &str = "\
+pub const SPDX_HEADER: &str = "\
 # SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
 #
 # See the NOTICE file(s) distributed with this work for additional
