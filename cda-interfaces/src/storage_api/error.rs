@@ -49,6 +49,11 @@ pub enum StorageError {
     #[error("Storage corruption: {0}")]
     Corruption(String),
 
+    /// The storage is not available yet, e.g. because it is not mounted yet.
+    /// Transient: retrying once it is available succeeds.
+    #[error("Storage is not available yet: {0}")]
+    Unavailable(String),
+
     /// The storage is read-only. Not transient: retrying cannot change it.
     #[error("Storage is read-only: {0}")]
     ReadOnly(String),

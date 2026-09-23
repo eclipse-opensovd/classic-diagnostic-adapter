@@ -272,6 +272,9 @@ pub enum VendorErrorCode {
     /// Used when a storage operation cannot be execution because a conflicting operation
     /// Already is in progress.
     StorageTransactionBusy,
+    /// The storage is not available yet, e.g. because it is not mounted yet.
+    /// Retry after the interval given in the `Retry-After` header.
+    StorageUnavailable,
     /// The provided data was not valid.
     InvalidData,
     /// A communication request requires a lock that the client does not hold.

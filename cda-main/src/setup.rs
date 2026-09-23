@@ -48,9 +48,10 @@ use cda_plugin_communication_management::{
 use cda_plugin_security::{
     DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,
 };
-use cda_storage::LocalStorage;
 
-use crate::{error::AppError, update::UpdatePluginBuilder, vehicle::UdsManagerType};
+use crate::{
+    MountedStorage, error::AppError, update::UpdatePluginBuilder, vehicle::UdsManagerType,
+};
 
 /// Builder for customizing the CDA startup sequence.
 ///
@@ -212,7 +213,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
     /// [`UpdatePluginResources`]: crate::update::UpdatePluginResources
     pub fn with_update_plugin<UPB2>(self, builder: UPB2) -> Setup<SP, SL, UPB2, CPB>
     where
-        UPB2: UpdatePluginBuilder<LocalStorage>,
+        UPB2: UpdatePluginBuilder<MountedStorage>,
     {
         Setup {
             _phantom: self._phantom,
@@ -533,7 +534,7 @@ mod tests {
     }
     #[test]
     fn documented_public_api_type_checks() {
-        let _: Option<UpdatePluginResources<LocalStorage>> = None;
+        let _: Option<UpdatePluginResources<MountedStorage>> = None;
     }
 
     #[test]
@@ -563,7 +564,7 @@ mod tests {
     fn with_update_plugin_stores_builder() {
         // Use `update_plugin_fn` as a convenient closure adapter.
         let builder: UpdatePluginFn<_> =
-            update_plugin_fn(|_resources: UpdatePluginResources<LocalStorage>| async {
+            update_plugin_fn(|_resources: UpdatePluginResources<MountedStorage>| async {
                 Ok(NoOpPlugin)
             });
 
@@ -578,7 +579,7 @@ mod tests {
     #[test]
     fn chaining_component_then_plugin_retains_both() {
         let builder: UpdatePluginFn<_> =
-            update_plugin_fn(|_resources: UpdatePluginResources<LocalStorage>| async {
+            update_plugin_fn(|_resources: UpdatePluginResources<MountedStorage>| async {
                 Ok(NoOpPlugin)
             });
 
@@ -596,7 +597,7 @@ mod tests {
     #[test]
     fn chaining_plugin_then_component_retains_both() {
         let builder: UpdatePluginFn<_> =
-            update_plugin_fn(|_resources: UpdatePluginResources<LocalStorage>| async {
+            update_plugin_fn(|_resources: UpdatePluginResources<MountedStorage>| async {
                 Ok(NoOpPlugin)
             });
 
