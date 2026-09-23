@@ -40,23 +40,31 @@ pub enum CdaStage {
     /// The lifecycle manager, built over the runtime's disable authority. It is
     /// what every later dispatch goes through.
     LifecycleManager,
-    /// The update storage and the transaction the file stages are run over,
-    /// opened through the manager.
+    /// The update plugin over the storage handle, and the transaction the file
+    /// stages are run over. The storage itself is mounted later, in
+    /// [`CdaStage::StorageMount`].
     Storage,
     /// The HTTP that answers without any ECU data: health, version, `OpenAPI`
     /// and the runtime-update endpoints.
     StaticApi,
     /// The port is open and the mounted routes answer.
     Serving,
+    /// The storage is opened, waiting for it to be mounted.
+    ///
+    /// It follows [`CdaStage::Serving`] so that health is served while the
+    /// wait lasts: the storage handle is published in [`CdaStage::Storage`],
+    /// but only mounted once the port is open. Everything that reads the
+    /// storage comes after.
+    StorageMount,
     /// The database files an execution moves.
     ///
     /// It has to follow [`CdaStage::Storage`], because the transaction it is
     /// built over is published there. It is declared after
-    /// [`CdaStage::Serving`] instead, which is a legibility choice and not a
-    /// correctness constraint: nothing here starts or stops, a reload runs long
-    /// after the port opened, and the single edge only buys a reload spine that
-    /// reads as one line. Moving it back to `Storage` would change no
-    /// behaviour.
+    /// [`CdaStage::StorageMount`] instead, which is a legibility choice and not
+    /// a correctness constraint: nothing here starts or stops, a reload runs
+    /// long after the storage is mounted, and the single edge only buys a
+    /// reload spine that reads as one line. Moving it back to `Storage` would
+    /// change no behaviour.
     DatabaseFiles,
     /// Reading the diagnostic databases from whatever the files left behind.
     /// The slowest part of a start, which is why it runs against a runtime that
@@ -85,13 +93,14 @@ pub enum CdaStage {
 /// declares it is refused at registration, naming it. The position of a variant
 /// in this list decides nothing; stages that no chain of edges separates are
 /// shuffled apart in debug and test builds.
-const ALL: [CdaStage; 14] = [
+const ALL: [CdaStage; 15] = [
     CdaStage::Transports,
     CdaStage::CommunicationRuntime,
     CdaStage::LifecycleManager,
     CdaStage::Storage,
     CdaStage::StaticApi,
     CdaStage::Serving,
+    CdaStage::StorageMount,
     CdaStage::DatabaseFiles,
     CdaStage::EcuData,
     CdaStage::Diagnostics,
@@ -115,7 +124,8 @@ impl Stage for CdaStage {
             CdaStage::Storage => &[CdaStage::LifecycleManager],
             CdaStage::StaticApi => &[CdaStage::Storage],
             CdaStage::Serving => &[CdaStage::StaticApi],
-            CdaStage::DatabaseFiles => &[CdaStage::Serving],
+            CdaStage::StorageMount => &[CdaStage::Serving],
+            CdaStage::DatabaseFiles => &[CdaStage::StorageMount],
             CdaStage::EcuData => &[CdaStage::DatabaseFiles],
             CdaStage::Diagnostics => &[CdaStage::EcuData],
             CdaStage::VehicleApi | CdaStage::StagedFiles | CdaStage::Version => {
@@ -161,11 +171,18 @@ mod tests {
     }
 
     /// What is forced is only that this stage follows Storage, which publishes
-    /// the transaction it reads. Declaring it against Serving is the
+    /// the transaction it reads. Declaring it against `StorageMount` is the
     /// deliberate part, so it is pinned rather than left to a doc comment.
     #[test]
-    fn the_database_files_stage_follows_serving() {
-        assert_eq!(CdaStage::DatabaseFiles.follows(), [CdaStage::Serving]);
+    fn the_database_files_stage_follows_the_storage_mount() {
+        assert_eq!(CdaStage::DatabaseFiles.follows(), [CdaStage::StorageMount]);
+    }
+
+    /// The storage is mounted only once the port is open, so health answers
+    /// while the mount is awaited.
+    #[test]
+    fn the_storage_is_mounted_after_serving() {
+        assert_eq!(CdaStage::StorageMount.follows(), [CdaStage::Serving]);
     }
 
     /// Nothing orders these three against each other, and the resolver shuffles
@@ -229,6 +246,7 @@ mod tests {
             "communication-runtime"
         );
         assert_eq!(CdaStage::StaticApi.name(), "static-api");
+        assert_eq!(CdaStage::StorageMount.name(), "storage-mount");
         assert_eq!(CdaStage::DatabaseFiles.name(), "database-files");
         assert_eq!(CdaStage::EcuData.name(), "ecu-data");
     }

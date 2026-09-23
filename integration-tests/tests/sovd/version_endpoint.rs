@@ -20,8 +20,8 @@ use axum::http::StatusCode;
 use cda_plugin_communication_management::plugin::CommunicationPluginBuilder;
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 use opensovd_cda_lib::{
-    CdaEvent, CdaStage, Component, Constructed, ConstructedComponent, LifecycleError, LocalStorage,
-    StageResources, WeakLifecycleHandle, cda_version,
+    CdaEvent, CdaStage, Component, Constructed, ConstructedComponent, LifecycleError,
+    MountedStorage, StageResources, WeakLifecycleHandle, cda_version,
     config::configfile::Configuration,
     startup::resources::CdaLifecycle,
     update::{UpdatePluginBuilder, create_default_update_plugin, update_plugin_fn},
@@ -75,7 +75,7 @@ fn start_in_process_cda<UPB, CPB>(
     setup: opensovd_cda_lib::Setup<DefaultSecurityPluginData, DefaultSecurityPlugin, UPB, CPB>,
 ) -> Result<InProcessCda, TestingError>
 where
-    UPB: UpdatePluginBuilder<LocalStorage> + Send + 'static,
+    UPB: UpdatePluginBuilder<MountedStorage> + Send + 'static,
     CPB: CommunicationPluginBuilder + Send + 'static,
 {
     let (config, storage) = in_process_config()?;

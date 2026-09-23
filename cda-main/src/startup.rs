@@ -44,11 +44,10 @@ use cda_interfaces::{
 use cda_lifecycle::{CdaEvent, EcuRevisions, LifecycleHandle};
 use cda_plugin_communication_management::plugin::CommunicationPluginBuilder;
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
-use cda_storage::LocalStorage;
 use tokio::sync::Notify;
 
 use crate::{
-    AppError,
+    AppError, MountedStorage,
     config::configfile::Configuration,
     database_reload::VehicleDatabaseLoader,
     setup::Setup,
@@ -169,7 +168,7 @@ pub(crate) async fn run<SP, SL, UPB, CPB>(
 where
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
-    UPB: UpdatePluginBuilder<LocalStorage> + 'static,
+    UPB: UpdatePluginBuilder<MountedStorage> + 'static,
     CPB: CommunicationPluginBuilder + 'static,
 {
     let config = Arc::new(config);
@@ -186,8 +185,10 @@ where
         .shutdown_signal
         .unwrap_or_else(|| cda_interfaces::shutdown_signal(crate::shutdown_signal()));
 
-    // Done as first initialization step, since the application will not function without storage.
-    let storage = crate::initialize_storage(&config).await?;
+    // Not opened here: opening waits for the storage to be mounted, and health
+    // has to answer while it waits. The storage-mount component opens it once
+    // the port is open; until then its users see it as unavailable.
+    let storage = Arc::new(MountedStorage::new());
 
     let runtime = register::<SP, SL, UPB, CPB>(
         &config,
@@ -296,13 +297,13 @@ async fn register<SP, SL, UPB, CPB>(
     extra: Vec<Box<dyn ErasedComponent<CdaEvent>>>,
     build_update_plugin: Option<UPB>,
     build_communication_plugin: CPB,
-    storage: Arc<LocalStorage>,
+    storage: Arc<MountedStorage>,
     database_validator: Arc<dyn cda_interfaces::runtime_update_api::DatabaseValidator>,
 ) -> cda_lifecycle::LifecycleRuntime<CdaEvent>
 where
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
-    UPB: UpdatePluginBuilder<LocalStorage> + 'static,
+    UPB: UpdatePluginBuilder<MountedStorage> + 'static,
     CPB: CommunicationPluginBuilder + 'static,
 {
     let (variant_detection_sender, variant_detection_receiver) =
@@ -331,6 +332,7 @@ where
         crate::version_payload(&cda_interfaces::HashMap::default()),
     ))));
     runtime.provide(Arc::new(EcuRevisions::default()));
+    runtime.provide(Arc::clone(&storage));
 
     let loader = Arc::new(VehicleDatabaseLoader::<SP>::new(
         variant_detection_sender.clone(),
@@ -362,6 +364,7 @@ where
         Arc::clone(config),
         Arc::clone(&health),
     ));
+    runtime.register(components::StorageMount);
     runtime.register(components::DatabaseFiles);
     runtime.register(components::Diagnostics::<SP>::new(
         Arc::clone(config),
@@ -390,6 +393,7 @@ where
 mod tests {
     use cda_plugin_communication_management::plugin::default::DefaultCommunicationPluginBuilder;
     use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
+    use cda_storage::LocalStorage;
 
     use super::*;
     use crate::update::{UpdatePluginFn, create_default_update_plugin, update_plugin_fn};
@@ -401,7 +405,9 @@ mod tests {
         let builder: UpdatePluginFn<_> =
             update_plugin_fn(|resources| async { create_default_update_plugin(resources).await });
         let storage_dir = tempfile::tempdir().expect("storage dir");
-        let storage = Arc::new(LocalStorage::new(storage_dir.path()).expect("storage"));
+        let storage = Arc::new(MountedStorage::mounted(Arc::new(
+            LocalStorage::new(storage_dir.path()).expect("storage"),
+        )));
 
         register::<
             DefaultSecurityPluginData,
@@ -449,7 +455,8 @@ mod tests {
             ["lifecycle-manager", "storage"],
             ["storage", "static-api"],
             ["static-api", "serving"],
-            ["serving", "database-files"],
+            ["serving", "storage-mount"],
+            ["storage-mount", "database-files"],
             ["database-files", "ecu-data"],
             ["ecu-data", "diagnostics"],
             ["vehicle-api", "activation"],

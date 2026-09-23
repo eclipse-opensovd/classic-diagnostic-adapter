@@ -20,9 +20,9 @@ use cda_interfaces::{
     },
 };
 use cda_plugin_security::SecurityPlugin;
-use cda_storage::LocalStorage;
 
 use crate::{
+    MountedStorage,
     config::configfile::Configuration,
     mdd,
     vehicle::{VehicleDataSource, load_vehicle_databases},
@@ -37,7 +37,7 @@ where
     SP: SecurityPlugin,
 {
     variant_detection: VariantDetectionSender,
-    storage: Arc<LocalStorage>,
+    storage: Arc<MountedStorage>,
     database_validator: Arc<dyn DatabaseValidator>,
     _phantom: std::marker::PhantomData<SP>,
 }
@@ -49,7 +49,7 @@ where
     #[must_use]
     pub fn new(
         variant_detection: VariantDetectionSender,
-        storage: Arc<LocalStorage>,
+        storage: Arc<MountedStorage>,
         database_validator: Arc<dyn DatabaseValidator>,
     ) -> Self {
         Self {
@@ -72,11 +72,15 @@ where
         config: &Configuration,
         health_providers: Option<&HashMap<String, Arc<dyn HealthProvider>>>,
     ) -> Result<VehicleDataSource<SP>, ReloadError> {
+        let storage = self
+            .storage
+            .local()
+            .map_err(|error| ReloadError::General(error.to_string()))?;
         Ok(load_vehicle_databases::<SP>(
             config,
             health_providers,
             self.variant_detection.clone(),
-            &self.storage,
+            storage,
             &*self.database_validator,
         )
         .await?)
@@ -93,7 +97,14 @@ where
         reason = "Type alias doesn't allow specifying hasher"
     )]
     pub(crate) async fn revisions(&self, config: &Configuration) -> HashMap<String, String> {
-        let paths = mdd::resolve_mdd_paths(&self.storage, &config.database.dir).await;
+        let storage = match self.storage.local() {
+            Ok(storage) => storage,
+            Err(error) => {
+                tracing::warn!(error = %error, "Cannot read database revisions");
+                return HashMap::default();
+            }
+        };
+        let paths = mdd::resolve_mdd_paths(storage, &config.database.dir).await;
 
         let mut revisions = HashMap::default();
         for path in paths {

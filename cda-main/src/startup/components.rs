@@ -55,10 +55,9 @@ use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
 use cda_sovd::{
     SovdLockStateView, SovdRegistry, SovdRegistrySnapshot, dynamic_router::DynamicRouter,
 };
-use cda_storage::LocalStorage;
 
 use crate::{
-    AppError,
+    AppError, MountedStorage,
     config::configfile::Configuration,
     database_reload::{PreparedVehicleData, VehicleDatabaseLoader},
     setup,
@@ -441,17 +440,19 @@ impl Component<CdaEvent> for Lifecycle {
 
 /// Builds the runtime-update plugin over the process-wide storage.
 ///
-/// The storage is the one [`LocalStorage`] the process opened, so the plugin
-/// and the database loader read and write the same instance.
-pub(crate) struct Storage<UPB: UpdatePluginBuilder<LocalStorage>> {
+/// The storage is the one [`MountedStorage`] of the process, so the plugin and
+/// the database loader read and write the same instance. It is mounted later,
+/// by [`StorageMount`]; until then the plugin's operations report the storage
+/// as unavailable.
+pub(crate) struct Storage<UPB: UpdatePluginBuilder<MountedStorage>> {
     config: Arc<Configuration>,
     builder: Option<UPB>,
-    store: Arc<LocalStorage>,
+    store: Arc<MountedStorage>,
     database_validator: Arc<dyn cda_interfaces::runtime_update_api::DatabaseValidator>,
 }
 
 #[async_trait]
-impl<UPB: UpdatePluginBuilder<LocalStorage> + 'static> Component<CdaEvent> for Storage<UPB> {
+impl<UPB: UpdatePluginBuilder<MountedStorage> + 'static> Component<CdaEvent> for Storage<UPB> {
     type Provides = (Arc<UpdatePlugin<UPB::Plugin>>, Arc<FileTransaction>);
 
     fn name(&self) -> &'static str {
@@ -511,11 +512,11 @@ impl<UPB: UpdatePluginBuilder<LocalStorage> + 'static> Component<CdaEvent> for S
     }
 }
 
-impl<UPB: UpdatePluginBuilder<LocalStorage>> Storage<UPB> {
+impl<UPB: UpdatePluginBuilder<MountedStorage>> Storage<UPB> {
     pub(crate) fn new(
         config: Arc<Configuration>,
         builder: Option<UPB>,
-        store: Arc<LocalStorage>,
+        store: Arc<MountedStorage>,
         database_validator: Arc<dyn cda_interfaces::runtime_update_api::DatabaseValidator>,
     ) -> Self {
         Self {
@@ -524,6 +525,59 @@ impl<UPB: UpdatePluginBuilder<LocalStorage>> Storage<UPB> {
             store,
             database_validator,
         }
+    }
+}
+
+/// Opens the storage once the port is open.
+///
+/// Opening waits for the storage to be mounted, and health has to answer while
+/// it waits, so the wait is a start in [`CdaStage::StorageMount`], which follows
+/// [`CdaStage::Serving`]. The storage users were handed the
+/// [`MountedStorage`] at construction; this is what mounts the storage into it.
+pub(crate) struct StorageMount;
+
+struct StorageMounter {
+    config: Arc<Configuration>,
+    storage: Arc<MountedStorage>,
+}
+
+#[async_trait]
+impl ConstructedComponent<CdaEvent> for StorageMounter {
+    fn name(&self) -> &'static str {
+        "storage-mount"
+    }
+
+    async fn start(&self) -> Result<(), LifecycleError> {
+        let storage = crate::initialize_storage(&self.config)
+            .await
+            .map_err(|error| failed(self.name(), START, error))?;
+        self.storage.mount(storage);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Component<CdaEvent> for StorageMount {
+    type Provides = ();
+
+    fn name(&self) -> &'static str {
+        "storage-mount"
+    }
+
+    fn stage(&self) -> CdaStage {
+        CdaStage::StorageMount
+    }
+
+    async fn construct(
+        self,
+        resources: &StageResources<'_>,
+    ) -> Result<Constructed<Self::Provides, CdaEvent>, LifecycleError> {
+        Ok(
+            Constructed::new(()).with_component(Arc::new(StorageMounter {
+                config: resources.get::<Configuration>()?,
+                storage: resources.get::<MountedStorage>()?,
+            })),
+        )
     }
 }
 

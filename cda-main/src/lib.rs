@@ -40,6 +40,7 @@ pub mod database_reload;
 pub mod error;
 pub mod mdd;
 pub mod mdd_inspector;
+pub mod mounted_storage;
 pub mod setup;
 pub mod startup;
 pub mod update;
@@ -51,6 +52,7 @@ pub use cda_lifecycle::{
 };
 pub use cda_storage::LocalStorage;
 pub use error::AppError;
+pub use mounted_storage::MountedStorage;
 pub use setup::Setup;
 pub use vehicle::{TransportConfigs, create_diagnostic_gateway};
 
@@ -216,7 +218,7 @@ pub async fn run_with_ext<SP, SL, UPB, CPB>(
 where
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
-    UPB: UpdatePluginBuilder<LocalStorage> + 'static,
+    UPB: UpdatePluginBuilder<MountedStorage> + 'static,
     CPB: CommunicationPluginBuilder + 'static,
 {
     if let Some(Command::GenerateConfig { output }) = args.command.as_ref() {
@@ -286,7 +288,7 @@ pub async fn run_with_ext_from_config<SP, SL, UPB, CPB>(
 where
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
-    UPB: UpdatePluginBuilder<LocalStorage> + 'static,
+    UPB: UpdatePluginBuilder<MountedStorage> + 'static,
     CPB: CommunicationPluginBuilder + 'static,
 {
     startup::run::<SP, SL, UPB, CPB>(config, setup).await
@@ -509,16 +511,93 @@ pub fn cda_version() -> &'static str {
 mod webserver_lifecycle_tests {
     use super::*;
 
+    fn available_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("Bind temporary port")
+            .local_addr()
+            .expect("Read temporary port")
+            .port()
+    }
+
+    fn start_cda(config: Configuration) -> tokio::task::JoinHandle<Result<(), AppError>> {
+        tokio::spawn(run_with_ext_from_config(
+            config,
+            Setup::<
+                cda_plugin_security::DefaultSecurityPluginData,
+                cda_plugin_security::DefaultSecurityPlugin,
+            >::new()
+            .with_existing_tracing()
+            .with_update_plugin(update::update_plugin_fn(|resources| async {
+                update::create_default_update_plugin(resources).await
+            })),
+        ))
+    }
+
+    /// The status line `GET path` answers with, or `None` while nothing listens.
+    async fn status_line(port: u16, path: &str) -> Option<String> {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .ok()?;
+        stream
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .ok()?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.ok()?;
+        response.lines().next().map(str::to_owned)
+    }
+
+    /// Health answers while the storage is awaited, and the CDA comes up once
+    /// the storage appears.
+    #[tokio::test]
+    async fn health_is_served_while_waiting_for_the_storage() {
+        let database_dir = tempfile::tempdir().expect("Create empty database directory");
+        let mount_point = tempfile::tempdir().expect("Create mount point");
+        let storage_dir = mount_point.path().join("cda");
+        let mut config = Configuration::default();
+        config.server.port = available_port();
+        config.doip.tester_address = "127.0.0.1".to_owned();
+        config.doip.gateway_port = available_port();
+        config.database.dir = database_dir.path().to_string_lossy().into_owned();
+        config.database.exit_no_database_loaded = false;
+        config.runtime_update_config.storage_dir = storage_dir.to_string_lossy().into_owned();
+        config.runtime_update_config.storage_dir_load_retry_attempts = 1000;
+        config.runtime_update_config.storage_dir_load_retry_delay_ms = 10;
+        let port = config.server.port;
+
+        let task = start_cda(config);
+
+        let mut health = None;
+        for _ in 0..200 {
+            health = status_line(port, "/health").await;
+            if health.is_some() {
+                break;
+            }
+            cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(25)).await;
+        }
+        let health = health.expect("health must answer while the storage is awaited");
+        assert!(health.contains(" 200 "), "{health}");
+        assert!(!storage_dir.exists(), "the storage must still be awaited");
+        assert!(!task.is_finished(), "CDA must keep waiting for the storage");
+
+        std::fs::create_dir_all(&storage_dir).expect("Mount the storage");
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(250)).await;
+        assert!(
+            !task.is_finished(),
+            "CDA must come up once the storage appears"
+        );
+
+        task.abort();
+        task.await.expect_err("CDA task must be cancelled");
+    }
+
     #[tokio::test]
     async fn cda_stays_running_when_no_database_loaded_and_exit_flag_is_false() {
-        fn available_port() -> u16 {
-            std::net::TcpListener::bind("127.0.0.1:0")
-                .expect("Bind temporary port")
-                .local_addr()
-                .expect("Read temporary port")
-                .port()
-        }
-
         let database_dir = tempfile::tempdir().expect("Create empty database directory");
         let storage_dir = tempfile::tempdir().expect("Create empty storage directory");
         let mut config = Configuration::default();
@@ -530,17 +609,7 @@ mod webserver_lifecycle_tests {
         config.runtime_update_config.storage_dir =
             storage_dir.path().to_string_lossy().into_owned();
 
-        let task = tokio::spawn(run_with_ext_from_config(
-            config,
-            Setup::<
-                cda_plugin_security::DefaultSecurityPluginData,
-                cda_plugin_security::DefaultSecurityPlugin,
-            >::new()
-            .with_existing_tracing()
-            .with_update_plugin(update::update_plugin_fn(|resources| async {
-                update::create_default_update_plugin(resources).await
-            })),
-        ));
+        let task = start_cda(config);
 
         cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(250)).await;
         assert!(
