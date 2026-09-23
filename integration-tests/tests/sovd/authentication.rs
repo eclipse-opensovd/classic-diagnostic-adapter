@@ -26,20 +26,19 @@ use serde_json::{Value, json};
 use sovd_interfaces::components::ecu::modes::authentication;
 
 use crate::{
-    sovd::{
-        self, hook_cleanup,
-        locks::{self, create_lock, lock_operation},
-    },
+    sovd::ECU_FLXC1000,
     util::{
         TestingError,
         ecusim::{self, Authentication},
-        http::{auth_header, extract_field_from_json, response_to_json, send_cda_request},
-        runtime::{TestRuntime, setup_integration_test},
+        endpoints::COMPONENTS_FLXC1000_BASE,
+        http::{extract_field_from_json, response_to_json, send_cda_request},
+        locks::{COMPONENTS_FLXC1000_LOCKS, create_lock, lock_operation},
+        test_env::TestEnv,
     },
 };
 
-const ECU_ENDPOINT: &str = sovd::ECU_FLXC1000_ENDPOINT;
-const ECU_SIM_NAME: &str = "flxc1000";
+const ECU_ENDPOINT: &str = COMPONENTS_FLXC1000_BASE;
+const ECU_SIM_NAME: &str = ECU_FLXC1000;
 const MODE: &str = "authentication";
 
 const DE_AUTHENTICATED: &str = "deAuthenticated";
@@ -196,14 +195,13 @@ async fn assert_cda_state(
     state
 }
 
-/// Checks only the status. The last sub-function is kept across tests, since
-/// the CDA is shared.
+/// Checks only the status, not the last sub-function.
 async fn assert_cda_status(config: &Configuration, headers: &HeaderMap, status: &str) {
     let state = get_authentication(config, headers).await;
     assert_eq!(state.value, status, "Unexpected CDA authentication state");
 }
 
-async fn assert_sim_state(runtime: &TestRuntime, expected: &Authentication) {
+async fn assert_sim_state(runtime: &TestEnv, expected: &Authentication) {
     let state = ecusim::get_ecu_state(&runtime.ecu_sim, ECU_SIM_NAME)
         .await
         .expect("Failed to get ECU sim state");
@@ -214,52 +212,24 @@ async fn assert_sim_state(runtime: &TestRuntime, expected: &Authentication) {
     );
 }
 
-/// Acquires the ECU lock and releases it if the test panics, so following
-/// tests are not affected by a left over lock or authentication.
-async fn acquire_lock(runtime: &TestRuntime, headers: &HeaderMap) -> String {
+/// Acquires the ECU lock.
+async fn acquire_lock(runtime: &TestEnv, headers: &HeaderMap) -> String {
     let response = create_lock(
         Duration::from_secs(60),
-        locks::ECU_ENDPOINT,
+        COMPONENTS_FLXC1000_LOCKS,
         StatusCode::CREATED,
-        &runtime.config,
-        headers,
+        &runtime.with_headers(headers),
     )
     .await;
-    let lock_id = extract_field_from_json::<String>(
-        &response_to_json(&response).expect("Invalid lock"),
-        "id",
-    )
-    .expect("Lock id missing");
-
-    let config = runtime.config.clone();
-    let headers = headers.clone();
-    let cleanup_lock_id = lock_id.clone();
-    hook_cleanup(move || {
-        let config = config.clone();
-        let headers = headers.clone();
-        let lock_id = cleanup_lock_id.clone();
-        async move {
-            let _ = send_cda_request(
-                &config,
-                &format!("{}/{lock_id}", locks::ECU_ENDPOINT),
-                StatusCode::NO_CONTENT,
-                Method::DELETE,
-                None,
-                Some(&headers),
-                None,
-            )
-            .await;
-        }
-    });
-    lock_id
+    extract_field_from_json::<String>(&response_to_json(&response).expect("Invalid lock"), "id")
+        .expect("Lock id missing")
 }
 
-async fn release_lock(runtime: &TestRuntime, headers: &HeaderMap, lock_id: &str) {
+async fn release_lock(runtime: &TestEnv, headers: &HeaderMap, lock_id: &str) {
     lock_operation(
-        locks::ECU_ENDPOINT,
+        COMPONENTS_FLXC1000_LOCKS,
         Some(lock_id),
-        &runtime.config,
-        headers,
+        &runtime.with_headers(headers),
         StatusCode::NO_CONTENT,
         Method::DELETE,
     )
@@ -294,14 +264,15 @@ async fn proof_of_ownership(
 /// [[ itest~sovd-api-authentication-modes-pki, Authentication with PKI certificate exchange, itest ]]
 #[tokio::test]
 async fn authentication_with_pki_certificate_exchange() {
-    let (runtime, _exclusive) = setup_integration_test(true).await.unwrap();
-    let auth = auth_header(&runtime.config, None).await.unwrap();
-    let lock_id = acquire_lock(runtime, &auth).await;
+    let runtime = TestEnv::builder().await.unwrap();
+    let auth = runtime.auth_header().await.unwrap();
+    let lock_id = acquire_lock(&runtime, &auth).await;
 
     assert_cda_status(&runtime.config, &auth, DE_AUTHENTICATED).await;
-    assert_sim_state(runtime, &Authentication::Unauthenticated).await;
+    assert_sim_state(&runtime, &Authentication::Unauthenticated).await;
 
-    ecusim::start_recording(&runtime.ecu_sim, ECU_SIM_NAME)
+    let recorder = runtime
+        .record(ECU_SIM_NAME)
         .await
         .expect("Failed to start recording");
 
@@ -336,9 +307,7 @@ async fn authentication_with_pki_certificate_exchange() {
     assert_return_parameter(&proof, RETURN_AUTHENTICATION_COMPLETE);
     assert_eq!(bytes_of(param(&proof, "sessionKeyInfo")), sequenced(0x01));
 
-    let frames = ecusim::stop_and_clear_recording(&runtime.ecu_sim, ECU_SIM_NAME)
-        .await
-        .expect("Failed to stop recording");
+    let frames = recorder.stop().await.expect("Failed to stop recording");
     // SID, sub-function, communicationConfiguration, then length + value
     // for certificateClient and challengeClient
     let expected_verify = "2901000003c0c1c20002d0d1";
@@ -367,7 +336,7 @@ async fn authentication_with_pki_certificate_exchange() {
         "No expiration requested, but got {:?}",
         state.expires_at
     );
-    assert_sim_state(runtime, &Authentication::Development).await;
+    assert_sim_state(&runtime, &Authentication::Development).await;
 
     let deauth = authenticate(&runtime.config, &auth, "deAuthenticate", None, None).await;
     assert_return_parameter(&deauth, RETURN_DEAUTHENTICATION_SUCCESSFUL);
@@ -378,9 +347,9 @@ async fn authentication_with_pki_certificate_exchange() {
         Some("deAuthenticate"),
     )
     .await;
-    assert_sim_state(runtime, &Authentication::Unauthenticated).await;
+    assert_sim_state(&runtime, &Authentication::Unauthenticated).await;
 
-    release_lock(runtime, &auth, &lock_id).await;
+    release_lock(&runtime, &auth, &lock_id).await;
 }
 
 /// Authentication with PKI certificate exchange, bidirectional, and
@@ -390,9 +359,9 @@ async fn authentication_with_pki_certificate_exchange() {
 /// [[ itest~sovd-api-authentication-modes-pki-bidirectional, Bidirectional certificate exchange and transmitCertificate, itest ]]
 #[tokio::test]
 async fn authentication_bidirectional_and_transmit_certificate() {
-    let (runtime, _exclusive) = setup_integration_test(true).await.unwrap();
-    let auth = auth_header(&runtime.config, None).await.unwrap();
-    let lock_id = acquire_lock(runtime, &auth).await;
+    let runtime = TestEnv::builder().await.unwrap();
+    let auth = runtime.auth_header().await.unwrap();
+    let lock_id = acquire_lock(&runtime, &auth).await;
 
     let verify = authenticate(
         &runtime.config,
@@ -442,11 +411,11 @@ async fn authentication_bidirectional_and_transmit_certificate() {
         Some("transmitCertificate"),
     )
     .await;
-    assert_sim_state(runtime, &Authentication::Unauthenticated).await;
+    assert_sim_state(&runtime, &Authentication::Unauthenticated).await;
 
     // Certificate transmission did not authenticate the ECU, so cleanup has
     // no authenticated state to reset.
-    release_lock(runtime, &auth, &lock_id).await;
+    release_lock(&runtime, &auth, &lock_id).await;
     assert_cda_state(
         &runtime.config,
         &auth,
@@ -464,9 +433,9 @@ async fn authentication_bidirectional_and_transmit_certificate() {
 /// [[ itest~sovd-api-authentication-modes-challenge-response, Challenge-response authentication, itest ]]
 #[tokio::test]
 async fn authentication_with_challenge_response() {
-    let (runtime, _exclusive) = setup_integration_test(true).await.unwrap();
-    let auth = auth_header(&runtime.config, None).await.unwrap();
-    let lock_id = acquire_lock(runtime, &auth).await;
+    let runtime = TestEnv::builder().await.unwrap();
+    let auth = runtime.auth_header().await.unwrap();
+    let lock_id = acquire_lock(&runtime, &auth).await;
 
     let configuration = authenticate(
         &runtime.config,
@@ -539,7 +508,7 @@ async fn authentication_with_challenge_response() {
         Some("verifyProofOfOwnershipUnidirectional"),
     )
     .await;
-    assert_sim_state(runtime, &Authentication::AfterSales).await;
+    assert_sim_state(&runtime, &Authentication::AfterSales).await;
 
     let bidirectional = authenticate(
         &runtime.config,
@@ -564,10 +533,10 @@ async fn authentication_with_challenge_response() {
         Some("verifyProofOfOwnershipBidirectional"),
     )
     .await;
-    assert_sim_state(runtime, &Authentication::AfterMarket).await;
+    assert_sim_state(&runtime, &Authentication::AfterMarket).await;
 
-    release_lock(runtime, &auth, &lock_id).await;
-    assert_sim_state(runtime, &Authentication::Unauthenticated).await;
+    release_lock(&runtime, &auth, &lock_id).await;
+    assert_sim_state(&runtime, &Authentication::Unauthenticated).await;
 }
 
 /// A positive response that does not complete the authentication
@@ -576,9 +545,9 @@ async fn authentication_with_challenge_response() {
 /// [[ itest~sovd-api-authentication-modes-rejected, Rejected proof of ownership, itest ]]
 #[tokio::test]
 async fn authentication_rejected_proof_of_ownership() {
-    let (runtime, _exclusive) = setup_integration_test(true).await.unwrap();
-    let auth = auth_header(&runtime.config, None).await.unwrap();
-    let lock_id = acquire_lock(runtime, &auth).await;
+    let runtime = TestEnv::builder().await.unwrap();
+    let auth = runtime.auth_header().await.unwrap();
+    let lock_id = acquire_lock(&runtime, &auth).await;
 
     let proof = proof_of_ownership(&runtime.config, &auth, "INVALID", None).await;
     assert_return_parameter(&proof, RETURN_GENERAL_REJECT);
@@ -589,9 +558,9 @@ async fn authentication_rejected_proof_of_ownership() {
         Some("proofOfOwnership"),
     )
     .await;
-    assert_sim_state(runtime, &Authentication::Unauthenticated).await;
+    assert_sim_state(&runtime, &Authentication::Unauthenticated).await;
 
-    release_lock(runtime, &auth, &lock_id).await;
+    release_lock(&runtime, &auth, &lock_id).await;
 }
 
 /// `mode_expiration` sends deAuthenticate when it elapses.
@@ -599,9 +568,9 @@ async fn authentication_rejected_proof_of_ownership() {
 /// [[ itest~sovd-api-authentication-modes-expiration, Authentication mode expiration, itest ]]
 #[tokio::test]
 async fn authentication_mode_expiration() {
-    let (runtime, _exclusive) = setup_integration_test(true).await.unwrap();
-    let auth = auth_header(&runtime.config, None).await.unwrap();
-    let lock_id = acquire_lock(runtime, &auth).await;
+    let runtime = TestEnv::builder().await.unwrap();
+    let auth = runtime.auth_header().await.unwrap();
+    let lock_id = acquire_lock(&runtime, &auth).await;
 
     let expiration = 2u64;
     proof_of_ownership(
@@ -619,7 +588,7 @@ async fn authentication_mode_expiration() {
     )
     .await;
     assert!(state.expires_at.is_some(), "Expected x-sovd2uds-expires-at");
-    assert_sim_state(runtime, &Authentication::Development).await;
+    assert_sim_state(&runtime, &Authentication::Development).await;
 
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(expiration + 2)).await;
 
@@ -631,9 +600,9 @@ async fn authentication_mode_expiration() {
     )
     .await;
     assert!(state.expires_at.is_none());
-    assert_sim_state(runtime, &Authentication::Unauthenticated).await;
+    assert_sim_state(&runtime, &Authentication::Unauthenticated).await;
 
-    release_lock(runtime, &auth, &lock_id).await;
+    release_lock(&runtime, &auth, &lock_id).await;
 }
 
 /// A negative response of the ECU is reported with the NRC and leaves the
@@ -644,9 +613,9 @@ async fn authentication_mode_expiration() {
 async fn authentication_negative_response() {
     const INTERCEPTOR: &str = "authentication_nrc";
 
-    let (runtime, _exclusive) = setup_integration_test(true).await.unwrap();
-    let auth = auth_header(&runtime.config, None).await.unwrap();
-    let lock_id = acquire_lock(runtime, &auth).await;
+    let runtime = TestEnv::builder().await.unwrap();
+    let auth = runtime.auth_header().await.unwrap();
+    let lock_id = acquire_lock(&runtime, &auth).await;
 
     proof_of_ownership(&runtime.config, &auth, VALID_PROOF_OF_OWNERSHIP, None).await;
     assert_cda_state(
@@ -656,14 +625,6 @@ async fn authentication_negative_response() {
         Some("proofOfOwnership"),
     )
     .await;
-
-    let cleanup_sim = runtime.ecu_sim.clone();
-    hook_cleanup(move || {
-        let sim = cleanup_sim.clone();
-        async move {
-            let _ = ecusim::clear_interceptor(&sim, "FLXC1000", INTERCEPTOR).await;
-        }
-    });
 
     // NRC 0x53 certificateVerificationFailed_InvalidSignature
     ecusim::set_interceptor(
@@ -706,11 +667,11 @@ async fn authentication_negative_response() {
         Some("proofOfOwnership"),
     )
     .await;
-    assert_sim_state(runtime, &Authentication::Development).await;
+    assert_sim_state(&runtime, &Authentication::Development).await;
 
     // Releasing the lock still deauthenticates the ECU.
-    release_lock(runtime, &auth, &lock_id).await;
-    assert_sim_state(runtime, &Authentication::Unauthenticated).await;
+    release_lock(&runtime, &auth, &lock_id).await;
+    assert_sim_state(&runtime, &Authentication::Unauthenticated).await;
 }
 
 /// Invalid requests are rejected without communicating with the ECU, and
@@ -719,8 +680,8 @@ async fn authentication_negative_response() {
 /// [[ itest~sovd-api-authentication-modes-invalid, Invalid authentication requests, itest ]]
 #[tokio::test]
 async fn authentication_invalid_requests() {
-    let (runtime, _exclusive) = setup_integration_test(true).await.unwrap();
-    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let runtime = TestEnv::builder().await.unwrap();
+    let auth = runtime.auth_header().await.unwrap();
 
     // Without a lock
     put_authentication(
@@ -732,7 +693,7 @@ async fn authentication_invalid_requests() {
     .await
     .expect("Expected rejection without lock");
 
-    let lock_id = acquire_lock(runtime, &auth).await;
+    let lock_id = acquire_lock(&runtime, &auth).await;
 
     for body in [
         json!({ "value": "unknownSubFunction" }),
@@ -744,5 +705,5 @@ async fn authentication_invalid_requests() {
     }
     assert_cda_status(&runtime.config, &auth, DE_AUTHENTICATED).await;
 
-    release_lock(runtime, &auth, &lock_id).await;
+    release_lock(&runtime, &auth, &lock_id).await;
 }
