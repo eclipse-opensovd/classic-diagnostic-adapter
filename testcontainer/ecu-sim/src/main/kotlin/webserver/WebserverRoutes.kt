@@ -110,8 +110,11 @@ fun Route.addFlashTransferRoutes() {
 fun SimEcu.recordedData() = this.storedProperty { mutableListOf<String>() }
 
 fun Route.addRecordingRoutes() {
+    // Starts a new recording, discarding the frames of an earlier one.
     post("/{ecu}/record") {
         val ecu = findByEcuName(call.parameters["ecu"]!!) ?: throw NotFoundException()
+        val earlierRecording by ecu.recordedData()
+        earlierRecording.clear()
         ecu.addOrReplaceEcuInterceptor("RECORDER", alsoCallWhenEcuIsBusy = true) {
             val recordedData by ecu.recordedData()
             recordedData.add(this.message.toHexString(separator = ""))
@@ -120,11 +123,14 @@ fun Route.addRecordingRoutes() {
         call.respond(HttpStatusCode.NoContent)
     }
 
+    // Stops the recording and returns its frames, which are then discarded.
     delete("/{ecu}/record") {
         val ecu = findByEcuName(call.parameters["ecu"]!!) ?: throw NotFoundException()
         ecu.removeInterceptor("RECORDER")
         val recordedData by ecu.recordedData()
-        call.respond(HttpStatusCode.OK, recordedData)
+        val frames = recordedData.toList()
+        recordedData.clear()
+        call.respond(HttpStatusCode.OK, frames)
     }
 
     get("/{ecu}/record") {
