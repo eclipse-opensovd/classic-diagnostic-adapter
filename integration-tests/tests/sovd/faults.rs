@@ -32,14 +32,14 @@ use crate::{
     util::{
         ecusim::{self, DtcExtended, DtcMinimal, ExtDataRecord, SnapshotData, SnapshotRecord},
         http::{auth_header, extract_field_from_json, response_to_json, send_cda_request},
-        runtime::setup_integration_test,
+        test_env::setup_integration_test,
     },
 };
 
 #[tokio::test]
 #[allow(clippy::too_many_lines, reason = "Keep test together")]
 async fn test_dtc_setting() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
@@ -229,7 +229,7 @@ async fn test_dtc_setting() {
     reason = "Easier to understand the test if kept together"
 )]
 async fn test_dtc_deletion() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
     let ecu_name = "flxc1000";
@@ -427,7 +427,7 @@ async fn test_dtc_deletion() {
 #[tokio::test]
 #[allow(clippy::too_many_lines, reason = "Keep test together")]
 async fn test_get_faults_with_different_dtc_masks() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
     let ecu_name = "flxc1000";
@@ -781,7 +781,7 @@ async fn test_get_faults_with_different_dtc_masks() {
 
 #[tokio::test]
 async fn test_get_fault_with_extended_dtc() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
     let ecu_name = "flxc1000";
@@ -1092,7 +1092,7 @@ fn assert_dtc_extended_data(
 /// Test GET /faults/{fault-code} with non-existent fault code
 #[tokio::test]
 async fn test_get_nonexistent_fault() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
     let ecu_name = "flxc1000";
@@ -1126,7 +1126,7 @@ async fn test_get_nonexistent_fault() {
 /// Test GET /faults with empty fault memory
 #[tokio::test]
 async fn test_get_faults_empty() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
     let ecu_name = "flxc1000";
@@ -1170,7 +1170,7 @@ fn filter_failed_faults(faults: Vec<Fault>) -> Vec<Fault> {
     reason = "Test scenario is easier to understand kept together"
 )]
 async fn test_dtc_deletion_user_memory() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
     let ecu_name = "flxc1000";

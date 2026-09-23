@@ -12,6 +12,14 @@
 ARG RUST_VERSION=1.88
 ARG SOURCE_DATE_EPOCH
 ARG SOURCE_GIT_SHA
+# The tests run an optimized build with debug assertions and overflow checks
+# on, locally and in CI. A dev build would raise the assertions too, but runs
+# unoptimized, so timing-sensitive behavior (tester present, reconnects,
+# timeouts) would differ from the release binary that ships. A plain release
+# build keeps that timing but silently skips debug_assert! and wraps on
+# integer overflow. This is a compromise: it still differs from the shipped
+# binary in those checks, and from a dev build in timing.
+ARG CHECK_RUSTFLAGS="-C debug-assertions -C overflow-checks=on"
 
 # --- Stage 1: Install cargo-chef and sccache ---
 FROM rust:${RUST_VERSION}-slim-trixie AS chef
@@ -67,6 +75,7 @@ COPY --from=planner /app/recipe.json recipe.json
 
 ARG BUILD_PROFILE=release
 ARG RUSTFLAGS=
+ARG CHECK_RUSTFLAGS
 
 # Use BuildKit cache mounts for Cargo registry, Git, and sccache
 # This significantly speeds up subsequent builds by reusing downloaded crates and compiled artifacts.
@@ -75,7 +84,7 @@ ENV RUSTC_WRAPPER=sccache \
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
-    export RUSTFLAGS="$RUSTFLAGS"; \
+    export RUSTFLAGS="$CHECK_RUSTFLAGS $RUSTFLAGS"; \
     if [ "$BUILD_PROFILE" = "dev" ]; then \
     cargo chef cook --profile dev --recipe-path recipe.json; \
     else \
@@ -88,6 +97,7 @@ ARG SOURCE_DATE_EPOCH
 ARG SOURCE_GIT_SHA
 ARG BUILD_PROFILE=release
 ARG RUSTFLAGS=
+ARG CHECK_RUSTFLAGS
 # Optional extra cargo features for the opensovd-cda binary, e.g.
 # "can-socketcand" to compile in the socketcand-backed CAN transport used by
 # the CAN integration tests.
@@ -130,7 +140,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
     export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} && \
     export SOURCE_GIT_SHA=${SOURCE_GIT_SHA} && \
-    export RUSTFLAGS="$RUSTFLAGS"; \
+    export RUSTFLAGS="$CHECK_RUSTFLAGS $RUSTFLAGS"; \
     if [ "$BUILD_PROFILE" = "dev" ]; then \
     cargo build --profile dev --bin opensovd-cda ${CDA_FEATURES:+--features "$CDA_FEATURES"} && \
     cp target/debug/opensovd-cda /tmp/opensovd-cda; \

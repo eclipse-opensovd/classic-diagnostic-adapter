@@ -17,7 +17,7 @@ use reqwest::Method;
 
 use crate::util::{
     http::{extract_field_from_json, response_to_json},
-    runtime::setup_integration_test,
+    test_env::setup_integration_test,
 };
 
 fn assert_version_response(json: &serde_json::Value) {
@@ -45,7 +45,7 @@ fn assert_version_response(json: &serde_json::Value) {
 /// [[ itest~sovd-api-version-endpoint, Version Endpoint Integration Test, itest ]]
 #[tokio::test]
 async fn test_version_endpoint() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let host = &runtime.config.server.address;
     let port = runtime.config.server.port;
 

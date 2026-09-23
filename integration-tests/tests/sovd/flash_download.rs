@@ -26,11 +26,11 @@ use crate::{
     },
     util::{
         TestingError,
-        ecusim::{self},
+        ecusim::{self, EcuSim},
         http::{
             auth_header, extract_field_from_json, response_to_json, response_to_t, send_cda_request,
         },
-        runtime::setup_integration_test,
+        test_env::setup_integration_test,
     },
 };
 
@@ -47,7 +47,7 @@ use crate::{
     reason = "Test scenario is easier to understand kept together"
 )]
 async fn test_flash_download_transfer_sequence() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
@@ -433,7 +433,7 @@ async fn test_flash_download_transfer_sequence() {
     reason = "Test scenario is easier to understand kept together"
 )]
 async fn test_flash_transfer_zero_length_rejected() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
@@ -682,7 +682,7 @@ async fn test_flash_transfer_zero_length_rejected() {
     reason = "Test scenario is easier to understand kept together"
 )]
 async fn test_security_access_supplier_level() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
@@ -875,10 +875,7 @@ struct SimDataTransfers {
     transfers: Vec<SimDataTransferDownload>,
 }
 
-async fn get_sim_data_transfers(
-    sim: &crate::util::runtime::EcuSim,
-    ecu: &str,
-) -> Result<SimDataTransfers, TestingError> {
+async fn get_sim_data_transfers(sim: &EcuSim, ecu: &str) -> Result<SimDataTransfers, TestingError> {
     let url = reqwest::Url::parse(&format!(
         "http://{}:{}/{ecu}/datatransfers/downloads",
         sim.host, sim.control_port

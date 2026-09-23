@@ -149,8 +149,9 @@ jobs:
         with:
           context: .
           file: testcontainer/cda/Dockerfile
+          # Optimized, with debug assertions like every test build; see
+          # CHECK_RUSTFLAGS in testcontainer/cda/Dockerfile.
           build-args: |
-            BUILD_PROFILE=dev
             RUSTFLAGS=-C instrument-coverage
           push: false
           tags: ghcr.io/${{ github.repository }}/opensovd-cda:coverage
@@ -180,11 +181,13 @@ jobs:
         run: cargo llvm-cov --locked --workspace --lcov --output-path lcov.info -- --show-output
       - name: Run integration tests with Docker coverage
         env:
-          CACHE_REGISTRY: ghcr.io/${{ github.repository }}
-          # Lets testcontainers-based tests use the image built above.
+          CDA_INTEGRATION_TEST_COVERAGE: "true"
+          # The suites on TestEnv use the images built above instead of
+          # building them again.
           CDA_TEST_IMAGE_NAME: ghcr.io/${{ github.repository }}/opensovd-cda
           CDA_TEST_IMAGE_TAG: coverage
-          CDA_INTEGRATION_TEST_COVERAGE: "true"
+          ECU_SIM_TEST_IMAGE_NAME: ghcr.io/${{ github.repository }}/ecu-sim
+          ECU_SIM_TEST_IMAGE_TAG: latest
         run: cargo test --locked -p integration-tests --features integration-tests -- --show-output
       - name: Install lcov
         run: sudo apt-get update && sudo apt-get install -y lcov
@@ -233,18 +236,18 @@ jobs:
         with:
           toolchain: 1.88.0
           components: clippy, rustfmt, llvm-tools
-      # The vcan kernel module backs the socketcand container's shared bus.
+      # The vcan kernel module backs the vcan0 bus each socketcand container
+      # creates in its own network namespace.
       - name: Load vcan kernel module
         run: |
           sudo apt-get update
           sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
           sudo modprobe vcan
-      # The CAN suite runs the same containers as the DoIP suite plus a
-      # socketcand daemon (compose profile `can`) that fronts a shared vcan
-      # bus. The CDA image is built with the `can-socketcand` transport and the
-      # ecu-sim connects to the daemon (wired via docker-compose
-      # `SIM_CAN_SOCKETCAND_*`/`CDA_FEATURES`, written into the generated .env by
-      # the test harness). CDA and the ecu-sim reach the bus over TCP.
+      # Every test environment of the CAN suite runs the same containers as the
+      # DoIP suite plus a socketcand daemon of its own that fronts a vcan bus.
+      # The CDA image is built with the `can-socketcand` transport; CDA and the
+      # ecu-sim reach the bus over TCP. The test harness starts the containers
+      # from the images built here (the *_TEST_IMAGE_NAME/_TAG variables).
       # The suite always runs coverage-instrumented so it counts toward the
       # merged coverage report (see merge_coverage).
       - name: Build CDA docker image (can-socketcand, coverage-enabled)
@@ -255,8 +258,9 @@ jobs:
           push: false
           tags: ghcr.io/${{ github.repository }}/opensovd-cda:coverage
           load: true
+          # Optimized, with debug assertions like every test build; see
+          # CHECK_RUSTFLAGS in testcontainer/cda/Dockerfile.
           build-args: |
-            BUILD_PROFILE=dev
             RUSTFLAGS=-C instrument-coverage
             CDA_FEATURES=can-socketcand
           cache-from: |
@@ -280,6 +284,19 @@ jobs:
             type=gha,scope=ecu-sim-gradle-main
           cache-to: |
             type=gha,mode=max,scope=ecu-sim-gradle-${{ github.ref_name }}
+      - name: Build socketcand docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: testcontainer/socketcand/
+          file: testcontainer/socketcand/Dockerfile
+          push: false
+          tags: ghcr.io/${{ github.repository }}/socketcand:latest
+          load: true
+          cache-from: |
+            type=gha,scope=socketcand-${{ github.ref_name }}
+            type=gha,scope=socketcand-main
+          cache-to: |
+            type=gha,mode=max,scope=socketcand-${{ github.ref_name }}
       # Unit tests gated on the can features (e.g. the CAN example config
       # validity test) run nowhere else: the main test job uses default
       # features and the clippy workflow does not execute tests. Collected
@@ -291,15 +308,15 @@ jobs:
         run: cargo llvm-cov --locked -p opensovd-cda -p cda-comm-can --features opensovd-cda/can-socketcand,cda-comm-can/can-socketcand --lcov --output-path lcov-can-unit.info -- --show-output
       - name: Run CAN integration tests
         env:
-          CACHE_REGISTRY: ghcr.io/${{ github.repository }}
-          # Lets testcontainers-based tests use the image built above.
-          CDA_TEST_IMAGE_NAME: ghcr.io/${{ github.repository }}/opensovd-cda
-          CDA_TEST_IMAGE_TAG: coverage
           CDA_INTEGRATION_TEST_USE_CAN: "true"
           CDA_INTEGRATION_TEST_COVERAGE: "true"
-        # Run serially: the CAN transport is timing-sensitive (per-transaction
-        # TCP sockets + TesterPresent keepalive), so parallel tests can flake.
-        run: cargo test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
+          CDA_TEST_IMAGE_NAME: ghcr.io/${{ github.repository }}/opensovd-cda
+          CDA_TEST_IMAGE_TAG: coverage
+          ECU_SIM_TEST_IMAGE_NAME: ghcr.io/${{ github.repository }}/ecu-sim
+          ECU_SIM_TEST_IMAGE_TAG: latest
+          SOCKETCAND_TEST_IMAGE_NAME: ghcr.io/${{ github.repository }}/socketcand
+          SOCKETCAND_TEST_IMAGE_TAG: latest
+        run: cargo test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output
       - name: Install lcov
         run: sudo apt-get update && sudo apt-get install -y lcov
       - name: Process Docker coverage
@@ -363,8 +380,9 @@ jobs:
           push: false
           tags: ghcr.io/${{ github.repository }}/opensovd-cda:coverage
           load: true
+          # Optimized, with debug assertions like every test build; see
+          # CHECK_RUSTFLAGS in testcontainer/cda/Dockerfile.
           build-args: |
-            BUILD_PROFILE=dev
             RUSTFLAGS=-C instrument-coverage
             CDA_FEATURES=can-socketcand
           cache-from: |
@@ -388,15 +406,30 @@ jobs:
             type=gha,scope=ecu-sim-gradle-main
           cache-to: |
             type=gha,mode=max,scope=ecu-sim-gradle-${{ github.ref_name }}
+      - name: Build socketcand docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: testcontainer/socketcand/
+          file: testcontainer/socketcand/Dockerfile
+          push: false
+          tags: ghcr.io/${{ github.repository }}/socketcand:latest
+          load: true
+          cache-from: |
+            type=gha,scope=socketcand-${{ github.ref_name }}
+            type=gha,scope=socketcand-main
+          cache-to: |
+            type=gha,mode=max,scope=socketcand-${{ github.ref_name }}
       - name: Run mixed integration tests
         env:
-          CACHE_REGISTRY: ghcr.io/${{ github.repository }}
-          # Lets testcontainers-based tests use the image built above.
-          CDA_TEST_IMAGE_NAME: ghcr.io/${{ github.repository }}/opensovd-cda
-          CDA_TEST_IMAGE_TAG: coverage
           CDA_INTEGRATION_TEST_USE_MIXED: "true"
           CDA_INTEGRATION_TEST_COVERAGE: "true"
-        run: cargo test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
+          CDA_TEST_IMAGE_NAME: ghcr.io/${{ github.repository }}/opensovd-cda
+          CDA_TEST_IMAGE_TAG: coverage
+          ECU_SIM_TEST_IMAGE_NAME: ghcr.io/${{ github.repository }}/ecu-sim
+          ECU_SIM_TEST_IMAGE_TAG: latest
+          SOCKETCAND_TEST_IMAGE_NAME: ghcr.io/${{ github.repository }}/socketcand
+          SOCKETCAND_TEST_IMAGE_TAG: latest
+        run: cargo test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output
       - name: Process Docker coverage
         uses: ./.github/actions/process-docker-coverage
         with:

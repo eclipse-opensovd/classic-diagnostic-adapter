@@ -9,28 +9,14 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-services:
-  # socketcand daemon fronting a shared vcan bus. Only started for the CAN
-  # integration tests (compose profile `can`); requires the `vcan` kernel
-  # module on the host. CDA and the ecu-sim both connect to it over TCP.
-  socketcand:
-    build:
-      context: ./socketcand
-    privileged: true
-    cap_add:
-      - NET_ADMIN
-    profiles:
-      - can
-    networks:
-      - testcontainer-net
-    healthcheck:
-      test: ["CMD-SHELL", "ss -ltn | grep -q 29536 || exit 1"]
-      interval: 1s
-      timeout: 5s
-      retries: 15
-      start_period: 10s
-    restart: unless-stopped
+# ECU simulator and CDA over DoIP, for trying out the CDA by hand, see
+# first_steps.md. The integration tests do not use this file; they start
+# their own containers with testcontainers (integration-tests/tests/util).
+#
+# The CDA runs with its default configuration, which serves FLXC1000,
+# FLXCNG1000 and FSNR2000.
 
+services:
   ecu-sim:
     build:
       context: ./ecu-sim
@@ -41,53 +27,29 @@ services:
     environment:
       - USE_MULTIPLE_IPS=true
       - SIM_NETWORK_INTERFACE=eth0
-      # When a socketcand host is set the sim serves its ECUs over CAN/ISO-TP
-      # via that daemon. Empty/unset disables the CAN path (DoIP-only).
-      - SIM_CAN_SOCKETCAND_HOST=${SIM_CAN_SOCKETCAND_HOST:-}
-      - SIM_CAN_SOCKETCAND_PORT=${SIM_CAN_SOCKETCAND_PORT:-29536}
-      - SIM_CAN_SOCKETCAND_BUS=${SIM_CAN_SOCKETCAND_BUS:-vcan0}
     ports:
-      - "${SIM_CONTROL_PORT:-8181}:8181"
-    networks:
-      - testcontainer-net
+      - "8181:8181"
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8181/ || exit 1"]
       interval: 1s
       timeout: 5s
       retries: 10
       start_period: 30s
-    restart: unless-stopped
 
   cda:
     build:
       context: ..
       dockerfile: testcontainer/cda/Dockerfile
       args:
-        - SOURCE_DATE_EPOCH
-        - SOURCE_GIT_SHA
-        # Extra cargo features for the CDA image; "can-socketcand" for CAN tests.
-        - CDA_FEATURES=${CDA_FEATURES:-}
+        - SOURCE_DATE_EPOCH=0
+        - SOURCE_GIT_SHA=unknown
     ports:
-      - "${CDA_PORT:-20002}:20002"
+      - "20002:20002"
     volumes:
       - ./odx:/app/odx:ro
-      - ./cda-test-config.toml:/app/cda-test-config.toml:ro
-      - ./flash_files:/app/flash:ro
-    hostname: cda
-    networks:
-      - testcontainer-net
     depends_on:
       ecu-sim:
         condition: service_healthy
     environment:
-      - RUST_LOG=debug
-      - CDA_CONFIG_FILE=/app/cda-test-config.toml
+      - RUST_LOG=info
     command: ["-d", "/app/odx"]
-    restart: unless-stopped
-
-networks:
-  testcontainer-net:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.42.0.0/16

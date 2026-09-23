@@ -13,13 +13,10 @@
 
 use http::{Method, StatusCode};
 
-use crate::{
-    sovd::hook_cleanup,
-    util::{
-        ecusim,
-        http::{auth_header, send_cda_request},
-        runtime::{EcuSim, setup_integration_test},
-    },
+use crate::util::{
+    ecusim::{self, EcuSim},
+    http::{auth_header, send_cda_request},
+    test_env::setup_integration_test,
 };
 
 /// Tests that CDA correctly rejects ECU responses where the DID (Data Identifier)
@@ -34,13 +31,7 @@ use crate::{
 /// HTTP 504 if no further correct message is received within the timeout period.
 #[tokio::test]
 async fn test_wrong_did_in_response_returns_504() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-
-    let cleanup_sim = runtime.ecu_sim.clone();
-    hook_cleanup(move || {
-        let sim = cleanup_sim.clone();
-        async move { cleanup(&sim).await }
-    });
+    let runtime = setup_integration_test().await.unwrap();
 
     let auth = auth_header(&runtime.config, None).await.unwrap();
 
@@ -94,13 +85,7 @@ async fn test_wrong_did_in_response_returns_504() {
 /// HTTP 400 Bad Request.
 #[tokio::test]
 async fn test_short_ecu_response_returns_error() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-
-    let cleanup_sim = runtime.ecu_sim.clone();
-    hook_cleanup(move || {
-        let sim = cleanup_sim.clone();
-        async move { cleanup_truncated(&sim).await }
-    });
+    let runtime = setup_integration_test().await.unwrap();
 
     let auth = auth_header(&runtime.config, None).await.unwrap();
 
@@ -143,16 +128,16 @@ async fn test_short_ecu_response_returns_error() {
 }
 
 async fn cleanup(ecu_sim: &EcuSim) {
-    // Clean up: remove the interceptor so other tests are not affected.
-    // Cannot use panic, in a panic handler, hence have to resort to eprintln
+    // Clean up: remove the interceptor. If the test fails before this, the
+    // next lease of the environment resets ecu-sim, which removes it too.
     if let Err(e) = ecusim::clear_interceptor(ecu_sim, "FLXC1000", "did_mismatch").await {
         eprintln!("Failed to clear raw response override: {e}");
     }
 }
 
 async fn cleanup_truncated(ecu_sim: &EcuSim) {
-    // Clean up: remove the interceptor so other tests are not affected.
-    // Cannot use panic, in a panic handler, hence have to resort to eprintln
+    // Clean up: remove the interceptor. If the test fails before this, the
+    // next lease of the environment resets ecu-sim, which removes it too.
     if let Err(e) = ecusim::clear_interceptor(ecu_sim, "FLXC1000", "truncated_response").await {
         eprintln!("Failed to clear truncated response interceptor: {e}");
     }

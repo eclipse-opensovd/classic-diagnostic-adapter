@@ -302,57 +302,60 @@ Integration tests are located in the `integration-tests/` directory and test the
 - ECU communication via DoIP
 - Session management and locking
 
-The integration test framework automatically manages the test environment by:
+The tests start their containers themselves with [testcontainers](https://docs.rs/testcontainers);
+only Docker is required. Each test environment has a Docker network of its own with an
+ECU simulator, a CDA and, for CAN, a socketcand daemon, so tests are isolated from each other
+and run in parallel:
 
-1. Starting an ECU simulator
-2. Starting the CDA with appropriate configuration
-3. Running tests against the running system
-4. Cleaning up resources after tests complete
+1. The images are built once per test process, or taken from the `*_TEST_IMAGE` variables below
+2. Tests lease an environment from a pool per transport; the ECU simulator is reset and a fresh
+   CDA container is started for every lease
+3. Container output is printed with the test name as prefix
+4. Containers and networks are removed when the test process exits
 
 ##### running integration tests
 
-Docker spins up the ECU simulator and CDA in isolated containers:
+```shell
+cargo test --locked -p integration-tests --features integration-tests
+```
+
+The CAN and mixed suites need the `can-integration-tests` feature and the `vcan` kernel module
+on the Docker host (`sudo modprobe vcan`); every socketcand container creates its own `vcan0`.
+Docker Desktop for macOS does not provide `vcan`, so these suites only run on Linux hosts.
 
 ```shell
-cargo test --locked --features integration-tests
+CDA_INTEGRATION_TEST_USE_CAN=true cargo test --locked -p integration-tests \
+  --features can-integration-tests --test integration_tests
 ```
 
 ##### environment variables
 
-The integration test framework supports the following environment variables:
-
+- **`CDA_INTEGRATION_TEST_USE_CAN`**, **`CDA_INTEGRATION_TEST_USE_MIXED`** (default: `false`)
+  Run the suites over CAN only, or over DoIP and CAN at the same time.
 - **`CDA_INTEGRATION_TEST_COVERAGE`** (default: `false`)
-  When set to `true`, uses coverage-instrumented Docker images for integration tests.
-  This enables code coverage collection from tests running inside Docker containers.
-
-  Example:
-
-  ```shell
-  export CDA_INTEGRATION_TEST_COVERAGE=true
-  cargo llvm-cov --locked --features integration-tests --lcov --output-path lcov.info
-  ```
+  Run a coverage-instrumented CDA (`-C instrument-coverage`; a prebuilt CDA image has to be built
+  that way). The profile of every CDA container and the instrumented binary are copied to
+  `target/coverage/` (`*.profraw`, `opensovd-cda`).
+- **`CDA_TEST_IMAGE_NAME`**/**`_TAG`**, **`ECU_SIM_TEST_IMAGE_NAME`**/**`_TAG`**,
+  **`SOCKETCAND_TEST_IMAGE_NAME`**/**`_TAG`** (default: unset)
+  Prebuilt images to use instead of building them, e.g. in CI. Name and tag are set together.
+- **`CDA_TEST_POOL_SIZE`** (default: `4`)
+  Number of environments per transport. An environment needs about 1 GB of memory.
 
 ##### test structure
 
-Tests use a shared runtime to avoid repeatedly starting/stopping the CDA and ECU simulator:
-
-- Tests can request exclusive or shared access to the test runtime
-- Exclusive tests hold a mutex lock to prevent concurrent execution
-- The test framework automatically finds available ports when using Docker
-- Test resources (Docker containers, processes) are automatically cleaned up on exit
-
-Example test:
+A test leases an environment and does not have to undo its changes; the next lease restores the
+defaults:
 
 ```rust
 #[tokio::test]
 async fn test_ecu_session_switching() {
-    // Request exclusive access to prevent concurrent modifications
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let mut env = setup_integration_test().await.unwrap();
 
-    // runtime.config contains CDA configuration
-    // runtime.ecu_sim contains ECU simulator connection info
+    // env.config is the CDA configuration, as reachable from the test
+    // env.ecu_sim is the control API of the ECU simulator
 
-    // ... perform test operations ...
+    // env.restart_cda_with_config(..), env.stop_ecu_sim(), ... change the environment
 }
 ```
 

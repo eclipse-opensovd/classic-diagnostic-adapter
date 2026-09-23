@@ -33,13 +33,13 @@ use crate::{
             QueryParams, auth_header, extract_field_from_json, response_to_json, response_to_t,
             send_cda_request,
         },
-        runtime::setup_integration_test,
+        test_env::{TestEnv, setup_integration_test},
     },
 };
 
 #[tokio::test]
 async fn test_list_operations() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
@@ -88,7 +88,7 @@ async fn test_list_operations() {
 
 #[tokio::test]
 async fn test_sync_operation_no_lock() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
@@ -107,11 +107,11 @@ async fn test_sync_operation_no_lock() {
 
 #[tokio::test]
 async fn test_async_operation_delete_no_lock() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let lock_id = acquire_ecu_lock(runtime, &auth).await;
+    let lock_id = acquire_ecu_lock(&runtime, &auth).await;
 
     // Start async operation while holding the lock
     let post_response = send_cda_request(
@@ -129,7 +129,7 @@ async fn test_async_operation_delete_no_lock() {
     let execution_id = post_body.id.clone();
 
     // Release the lock before attempting DELETE
-    release_ecu_lock(runtime, &auth, &lock_id).await;
+    release_ecu_lock(&runtime, &auth, &lock_id).await;
 
     // DELETE without a lock - should be 403
     send_cda_request(
@@ -145,7 +145,7 @@ async fn test_async_operation_delete_no_lock() {
     .unwrap();
 
     // Re-acquire lock for cleanup
-    let lock_id2 = acquire_ecu_lock(runtime, &auth).await;
+    let lock_id2 = acquire_ecu_lock(&runtime, &auth).await;
     let query_params = QueryParams(HashMap::from_iter([(
         "x-sovd2uds-force".to_string(),
         "true".to_string(),
@@ -162,16 +162,16 @@ async fn test_async_operation_delete_no_lock() {
     )
     .await
     .unwrap();
-    release_ecu_lock(runtime, &auth, &lock_id2).await;
+    release_ecu_lock(&runtime, &auth, &lock_id2).await;
 }
 
 #[tokio::test]
 async fn test_sync_operation() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let lock_id = acquire_ecu_lock(runtime, &auth).await;
+    let lock_id = acquire_ecu_lock(&runtime, &auth).await;
 
     send_cda_request(
         &runtime.config,
@@ -185,16 +185,16 @@ async fn test_sync_operation() {
     .await
     .unwrap();
 
-    release_ecu_lock(runtime, &auth, &lock_id).await;
+    release_ecu_lock(&runtime, &auth, &lock_id).await;
 }
 
 #[tokio::test]
 async fn test_async_operation_lifecycle() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let lock_id = acquire_ecu_lock(runtime, &auth).await;
+    let lock_id = acquire_ecu_lock(&runtime, &auth).await;
 
     // Start the async calibration - expect 202 Accepted
     let post_response = send_cda_request(
@@ -271,16 +271,16 @@ async fn test_async_operation_lifecycle() {
     .await
     .unwrap();
 
-    release_ecu_lock(runtime, &auth, &lock_id).await;
+    release_ecu_lock(&runtime, &auth, &lock_id).await;
 }
 
 #[tokio::test]
 async fn test_async_operation_get_results_after_stop() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let lock_id = acquire_ecu_lock(runtime, &auth).await;
+    let lock_id = acquire_ecu_lock(&runtime, &auth).await;
 
     // Start async operation
     let post_response = send_cda_request(
@@ -323,16 +323,16 @@ async fn test_async_operation_get_results_after_stop() {
     .await
     .unwrap();
 
-    release_ecu_lock(runtime, &auth, &lock_id).await;
+    release_ecu_lock(&runtime, &auth, &lock_id).await;
 }
 
 #[tokio::test]
 async fn test_async_operation_not_found() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let lock_id = acquire_ecu_lock(runtime, &auth).await;
+    let lock_id = acquire_ecu_lock(&runtime, &auth).await;
 
     send_cda_request(
         &runtime.config,
@@ -346,16 +346,16 @@ async fn test_async_operation_not_found() {
     .await
     .unwrap();
 
-    release_ecu_lock(runtime, &auth, &lock_id).await;
+    release_ecu_lock(&runtime, &auth, &lock_id).await;
 }
 
 #[tokio::test]
 async fn test_async_operation_in_flight_conflict() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let lock_id = acquire_ecu_lock(runtime, &auth).await;
+    let lock_id = acquire_ecu_lock(&runtime, &auth).await;
 
     // First POST - should succeed with 202
     let post_response = send_cda_request(
@@ -403,16 +403,16 @@ async fn test_async_operation_in_flight_conflict() {
     .await
     .unwrap();
 
-    release_ecu_lock(runtime, &auth, &lock_id).await;
+    release_ecu_lock(&runtime, &auth, &lock_id).await;
 }
 
 #[tokio::test]
 async fn test_sync_operation_sends_correct_uds_frame() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let lock_id = acquire_ecu_lock(runtime, &auth).await;
+    let lock_id = acquire_ecu_lock(&runtime, &auth).await;
 
     ecusim::start_recording(&runtime.ecu_sim, "flxc1000")
         .await
@@ -440,16 +440,16 @@ async fn test_sync_operation_sends_correct_uds_frame() {
         "expected SelfTest Start frame 31011001, got: {recordings:?}"
     );
 
-    release_ecu_lock(runtime, &auth, &lock_id).await;
+    release_ecu_lock(&runtime, &auth, &lock_id).await;
 }
 
 #[tokio::test]
 async fn test_async_operation_sends_correct_uds_frames() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let lock_id = acquire_ecu_lock(runtime, &auth).await;
+    let lock_id = acquire_ecu_lock(&runtime, &auth).await;
 
     ecusim::start_recording(&runtime.ecu_sim, "flxc1000")
         .await
@@ -520,14 +520,14 @@ async fn test_async_operation_sends_correct_uds_frames() {
         "expected CalibrateSensors Stop frame 31021002, got: {recordings:?}"
     );
 
-    release_ecu_lock(runtime, &auth, &lock_id).await;
+    release_ecu_lock(&runtime, &auth, &lock_id).await;
 }
 
 /// Verify that the `TimeCircuits` routine is listed as an asynchronous operation
 /// (it has Start/Stop/RequestResults).
 #[tokio::test]
 async fn test_time_circuits_operation_listed() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
@@ -566,11 +566,11 @@ async fn test_time_circuits_operation_listed() {
 /// non-empty `message` is returned), then Stop.
 #[tokio::test]
 async fn test_time_circuits_lifecycle() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let lock_id = acquire_ecu_lock(runtime, &auth).await;
+    let lock_id = acquire_ecu_lock(&runtime, &auth).await;
 
     // Start with the default ("PresentDay") travel method - travelMethod (the
     // TABLE-KEY row selector) and travelMethodData (the TABLE-STRUCT
@@ -662,18 +662,18 @@ async fn test_time_circuits_lifecycle() {
     .await
     .unwrap();
 
-    release_ecu_lock(runtime, &auth, &lock_id).await;
+    release_ecu_lock(&runtime, &auth, &lock_id).await;
 }
 
 /// Verify the exact UDS frames sent for the `TimeCircuits` Start/RequestResults/Stop
 /// sequence (routine id `0x1003`).
 #[tokio::test]
 async fn test_time_circuits_sends_correct_uds_frames() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let lock_id = acquire_ecu_lock(runtime, &auth).await;
+    let lock_id = acquire_ecu_lock(&runtime, &auth).await;
 
     ecusim::start_recording(&runtime.ecu_sim, "flxc1000")
         .await
@@ -744,7 +744,7 @@ async fn test_time_circuits_sends_correct_uds_frames() {
         "expected TimeCircuits Stop frame 31021003, got: {recordings:?}"
     );
 
-    release_ecu_lock(runtime, &auth, &lock_id).await;
+    release_ecu_lock(&runtime, &auth, &lock_id).await;
 }
 
 /// Verify the correct UDS frame for `TimeCircuits` Start with `ManualEntry` travel method.
@@ -752,11 +752,11 @@ async fn test_time_circuits_sends_correct_uds_frames() {
 /// destinationYear (uint16), destinationMonth (uint8), destinationDay (uint8).
 #[tokio::test]
 async fn test_time_circuits_manual_entry_uds_frame() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let lock_id = acquire_ecu_lock(runtime, &auth).await;
+    let lock_id = acquire_ecu_lock(&runtime, &auth).await;
 
     ecusim::start_recording(&runtime.ecu_sim, "flxc1000")
         .await
@@ -815,18 +815,18 @@ async fn test_time_circuits_manual_entry_uds_frame() {
         "expected TimeCircuits ManualEntry Start frame '{expected_start}', got: {recordings:?}"
     );
 
-    release_ecu_lock(runtime, &auth, &lock_id).await;
+    release_ecu_lock(&runtime, &auth, &lock_id).await;
 }
 
 /// Verify the correct UDS frame for `TimeCircuits` Start with `PresetDestination` travel method.
 /// The `PresetDestination` row encodes: travelMethod key=0x02 followed by presetId (uint8 texttable).
 #[tokio::test]
 async fn test_time_circuits_preset_destination_uds_frame() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let lock_id = acquire_ecu_lock(runtime, &auth).await;
+    let lock_id = acquire_ecu_lock(&runtime, &auth).await;
 
     ecusim::start_recording(&runtime.ecu_sim, "flxc1000")
         .await
@@ -885,13 +885,10 @@ async fn test_time_circuits_preset_destination_uds_frame() {
          {recordings:?}"
     );
 
-    release_ecu_lock(runtime, &auth, &lock_id).await;
+    release_ecu_lock(&runtime, &auth, &lock_id).await;
 }
 
-async fn acquire_ecu_lock(
-    runtime: &crate::util::runtime::TestRuntime,
-    auth: &http::HeaderMap,
-) -> String {
+async fn acquire_ecu_lock(runtime: &TestEnv, auth: &http::HeaderMap) -> String {
     use std::time::Duration;
 
     use crate::sovd::locks::{self, create_lock, lock_operation};
@@ -924,11 +921,7 @@ async fn acquire_ecu_lock(
     lock_id
 }
 
-async fn release_ecu_lock(
-    runtime: &crate::util::runtime::TestRuntime,
-    auth: &http::HeaderMap,
-    lock_id: &str,
-) {
+async fn release_ecu_lock(runtime: &TestEnv, auth: &http::HeaderMap, lock_id: &str) {
     use crate::sovd::locks::{self, lock_operation};
 
     lock_operation(
@@ -944,10 +937,7 @@ async fn release_ecu_lock(
 
 const FG_ENDPOINT: &str = "functions/functionalgroups/fgl_uds_ethernet_doip_dobt";
 
-async fn acquire_fg_lock(
-    runtime: &crate::util::runtime::TestRuntime,
-    auth: &http::HeaderMap,
-) -> String {
+async fn acquire_fg_lock(runtime: &TestEnv, auth: &http::HeaderMap) -> String {
     use std::time::Duration;
 
     use crate::sovd::locks::{self, create_lock, lock_operation};
@@ -980,11 +970,7 @@ async fn acquire_fg_lock(
     lock_id
 }
 
-async fn release_fg_lock(
-    runtime: &crate::util::runtime::TestRuntime,
-    auth: &http::HeaderMap,
-    lock_id: &str,
-) {
+async fn release_fg_lock(runtime: &TestEnv, auth: &http::HeaderMap, lock_id: &str) {
     use crate::sovd::locks::{self, lock_operation};
 
     lock_operation(
@@ -1002,7 +988,7 @@ async fn release_fg_lock(
 /// `engage_safety_squints` and that it is marked as asynchronous (it has Stop).
 #[tokio::test]
 async fn test_functional_operation_list() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
 
     let response = send_cda_request(
@@ -1038,7 +1024,7 @@ async fn test_functional_operation_list() {
 /// is rejected with 403 Forbidden.
 #[tokio::test]
 async fn test_functional_operation_post_no_lock() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
 
     send_cda_request(
@@ -1061,10 +1047,10 @@ async fn test_functional_operation_post_no_lock() {
 /// 3. **DELETE** (Stop) -> 204 No Content (execution removed)
 #[tokio::test]
 async fn test_functional_operation_lifecycle_no_request_results() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
 
-    let lock_id = acquire_fg_lock(runtime, &auth).await;
+    let lock_id = acquire_fg_lock(&runtime, &auth).await;
 
     // 1. POST (Start) -> 202 Accepted
     let post_response = send_cda_request(
@@ -1137,14 +1123,14 @@ async fn test_functional_operation_lifecycle_no_request_results() {
     .await
     .unwrap();
 
-    release_fg_lock(runtime, &auth, &lock_id).await;
+    release_fg_lock(&runtime, &auth, &lock_id).await;
 }
 
 /// Verify that GET `{ecu}/operations/{op}` returns 200 OK with the correct operation info even
 /// when the ECU has never been contacted (variant is in the initial `NotTested` state).
 #[tokio::test]
 async fn test_get_operation_info_before_variant_detection() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 

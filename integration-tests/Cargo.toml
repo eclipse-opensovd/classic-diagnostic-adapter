@@ -52,23 +52,10 @@ mime = { workspace = true }
 schemars = { workspace = true }
 url = { workspace = true }
 urlencoding = { workspace = true }
-# logging
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true, features = [
-  "ansi",
-  "chrono",
-  "env-filter",
-  "fmt",
-  "json",
-  "parking_lot",
-  "std",
-] }
 # error
 thiserror = { workspace = true }
 # toml serialization
 toml = { workspace = true }
-# config merging
-figment = { workspace = true, features = ["toml"] }
 # time
 chrono = { workspace = true }
 # future
@@ -93,9 +80,12 @@ cargo_metadata = { workspace = true }
 default = ["opensovd_cda_lib/health"]
 integration-tests = []
 # Variant of the integration tests that exercises the CAN transport
-# (`CDA_INTEGRATION_TEST_USE_CAN=true`). Compiles in `can-socketcand` so the
-# CDA-side socketcand backend is actually wired in; the ECU simulator reaches
-# the same vcan bus through a socketcand daemon.
+# (`CDA_INTEGRATION_TEST_USE_CAN=true` or `CDA_INTEGRATION_TEST_USE_MIXED=true`).
+# The CDA runs in a container built with `can-socketcand`, but the harness
+# validates the CAN test configuration in the test process
+# (`Configuration::validate_sanity`), which rejects a `[can]` section unless
+# the `can` feature is compiled in. `can-socketcand` enables it, and unlike
+# `can` alone it also builds off Linux.
 can-integration-tests = ["integration-tests", "opensovd_cda_lib/can-socketcand"]
 
 # Integration tests are only compiled when the feature is enabled.

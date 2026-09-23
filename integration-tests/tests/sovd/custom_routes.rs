@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::util::{
     http::response_to_t,
-    runtime::{find_available_tcp_port, host, wait_for_cda_online},
+    test_env::{find_available_tcp_port, host, wait_for_cda_online},
 };
 
 const MAIN_HEALTH_COMPONENT_KEY: &str = "main";

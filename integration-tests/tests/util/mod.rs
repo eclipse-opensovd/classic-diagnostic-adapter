@@ -14,10 +14,11 @@
 use ::http::StatusCode;
 use thiserror::Error;
 
+pub(crate) mod config;
 pub(crate) mod ecusim;
 pub(crate) mod http;
-pub(crate) mod runtime;
 pub(crate) mod test_containers;
+pub(crate) mod test_env;
 
 #[derive(Error, Debug)]
 pub enum TestingError {

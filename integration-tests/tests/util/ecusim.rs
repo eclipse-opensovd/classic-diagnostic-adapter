@@ -13,7 +13,14 @@
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
 
-use crate::util::{TestingError, runtime::EcuSim};
+use crate::util::TestingError;
+
+/// Where a test reaches the control API of an ecu-sim.
+#[derive(Clone, Debug)]
+pub(crate) struct EcuSim {
+    pub(crate) host: String,
+    pub(crate) control_port: u16,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
