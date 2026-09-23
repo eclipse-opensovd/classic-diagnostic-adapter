@@ -11,36 +11,29 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use http::StatusCode;
-use testcontainers::{ImageExt, runners::AsyncRunner};
 
 use crate::{
     sovd::{
-        ECU_FLXC1000_ENDPOINT, get_ecu_component,
+        COMPONENTS_FLXC1000_BASE, get_ecu_component,
         runtimefiles::{setup_with_lock, upload_mdd},
     },
-    util::{
-        TestingError,
-        http::auth_header,
-        test_containers::{cda_container, cda_container_config},
-    },
+    util::{TestingError, test_env::TestEnv},
 };
 
 /// Everything the CDA reads at startup is read-only: the root filesystem,
 /// which holds the default storage directory, and the databases directory.
 #[tokio::test]
 async fn cda_should_work_on_a_read_only_partition() -> Result<(), TestingError> {
-    let cda = cda_container()
-        .await?
-        .with_readonly_rootfs(true)
-        // Returns once the CDA reports ready, i.e. has loaded its databases.
-        .start()
-        .await
-        .map_err(|e| TestingError::SetupError(format!("Failed to start CDA container: {e}")))?;
-
-    let config = cda_container_config(&cda).await?;
+    let test_env = TestEnv::builder().with_read_only_rootfs().await?;
 
     // Served from the databases loaded out of the read-only directory.
-    get_ecu_component(&config, ECU_FLXC1000_ENDPOINT, StatusCode::OK, None).await?;
+    get_ecu_component(
+        &test_env.config,
+        COMPONENTS_FLXC1000_BASE,
+        StatusCode::OK,
+        None,
+    )
+    .await?;
 
     Ok(())
 }
@@ -48,18 +41,10 @@ async fn cda_should_work_on_a_read_only_partition() -> Result<(), TestingError> 
 #[tokio::test]
 async fn database_update_on_read_only_partition_returns_read_only_error() -> Result<(), TestingError>
 {
-    let cda = cda_container()
-        .await?
-        .with_readonly_rootfs(true)
-        .start()
-        .await
-        .map_err(|e| TestingError::SetupError(format!("Failed to start CDA container: {e}")))?;
+    let test_env = TestEnv::builder().with_read_only_rootfs().await?;
+    setup_with_lock(&test_env).await;
 
-    let config = cda_container_config(&cda).await?;
-    let auth = auth_header(&config, None).await?;
-    let _lock_id = setup_with_lock(&config, &auth).await;
-
-    let response = upload_mdd(&config, &auth).await;
+    let response = upload_mdd(&test_env).await;
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body = response
         .text()
@@ -77,7 +62,13 @@ async fn database_update_on_read_only_partition_returns_read_only_error() -> Res
     );
 
     // The failed write must not bring down the CDA or prevent further reads.
-    get_ecu_component(&config, ECU_FLXC1000_ENDPOINT, StatusCode::OK, None).await?;
+    get_ecu_component(
+        &test_env.config,
+        COMPONENTS_FLXC1000_BASE,
+        StatusCode::OK,
+        None,
+    )
+    .await?;
 
     Ok(())
 }
