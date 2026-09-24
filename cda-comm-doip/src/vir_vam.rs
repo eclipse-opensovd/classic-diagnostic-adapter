@@ -438,42 +438,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::EcuAddresses;
     use doip_definitions::header::ProtocolVersion;
 
     use super::{add_discovered_gateway, is_gateway};
-    use crate::DiscoveredGateway;
-
-    struct TestEcu {
-        logical_address: u16,
-        gateway_address: u16,
-    }
-
-    impl EcuAddresses for TestEcu {
-        fn tester_address(&self) -> u16 {
-            0x0E80
-        }
-
-        fn logical_address(&self) -> u16 {
-            self.logical_address
-        }
-
-        fn logical_gateway_address(&self) -> u16 {
-            self.gateway_address
-        }
-
-        fn logical_functional_address(&self) -> u16 {
-            0xE400
-        }
-
-        fn ecu_name(&self) -> String {
-            "test".to_owned()
-        }
-
-        fn logical_address_eq<T: EcuAddresses>(&self, other: &T) -> bool {
-            self.logical_address == other.logical_address()
-        }
-    }
+    use crate::{DiscoveredGateway, test_helpers::TestEcu};
 
     fn gateway(ecu_name: &str, logical_address: u16) -> DiscoveredGateway {
         DiscoveredGateway {
@@ -505,17 +473,11 @@ mod tests {
 
     #[test]
     fn ecu_with_own_gateway_address_is_a_gateway() {
-        assert!(is_gateway(&TestEcu {
-            logical_address: 0x110A,
-            gateway_address: 0x110A,
-        }));
+        assert!(is_gateway(&TestEcu::new(0x110A, 0x110A)));
     }
 
     #[test]
     fn ecu_behind_another_gateway_is_not_a_gateway() {
-        assert!(!is_gateway(&TestEcu {
-            logical_address: 0x1163,
-            gateway_address: 0x110A,
-        }));
+        assert!(!is_gateway(&TestEcu::new(0x1163, 0x110A)));
     }
 }

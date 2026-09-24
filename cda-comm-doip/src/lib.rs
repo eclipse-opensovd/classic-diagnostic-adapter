@@ -53,6 +53,9 @@ mod ecu_connection;
 pub mod socket;
 mod vir_vam;
 
+#[cfg(test)]
+pub(crate) mod test_helpers;
+
 use crate::{
     config::DoipConfig,
     connections::{EcuError, GatewayState},
@@ -1359,9 +1362,9 @@ mod tests {
     use std::{net::UdpSocket, sync::Arc, time::Duration};
 
     use cda_interfaces::{
-        DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, HashMap,
-        HashMapExtensions, PendingNrc, PhysicalTransport, ServicePayload, TransmissionParameters,
-        TransportResponse, UDS_ID_RESPONSE_BITMASK, VariantDetectionSender,
+        DiagServiceError, EcuConnectivityHandler, HashMap, HashMapExtensions, PendingNrc,
+        PhysicalTransport, ServicePayload, TransmissionParameters, TransportResponse,
+        UDS_ID_RESPONSE_BITMASK, VariantDetectionSender,
         communication_control::{GatewayLifecycle, TransportState},
         nrc, service_ids,
     };
@@ -1374,7 +1377,7 @@ mod tests {
     use crate::{
         ConnectionTasks, DiagnosticResponse, DoIPUdpSocket, DoipConfig, DoipConnection,
         DoipDiagGateway, DoipEcu, DoipGatewayState, read_ecu_responses, spawn_connection_task,
-        wait_for_ack_or_response_until_timeout,
+        test_helpers::TestEcu, wait_for_ack_or_response_until_timeout,
     };
 
     const ECU_ADDR: u16 = 0x0E80;
@@ -1389,12 +1392,6 @@ mod tests {
         0x01,
     ];
 
-    /// Minimal stub that satisfies the `EcuAddresses + DoipComParams` bounds on
-    /// `DoipDiagGateway<T>`.  The methods are never called during `send()` once
-    /// the ECU mutex has been resolved, so every body is `unimplemented!()`.
-    #[derive(Clone)]
-    struct TestEcu;
-
     struct TestConnectivityHandler;
 
     #[async_trait::async_trait]
@@ -1402,54 +1399,6 @@ mod tests {
         async fn on_gateway_connected(&self, _ecu_names: &[String]) {}
 
         async fn on_gateway_disconnected(&self, _ecu_names: &[String]) {}
-    }
-
-    impl EcuAddresses for TestEcu {
-        fn tester_address(&self) -> u16 {
-            unimplemented!()
-        }
-        fn logical_address(&self) -> u16 {
-            unimplemented!()
-        }
-        fn logical_gateway_address(&self) -> u16 {
-            unimplemented!()
-        }
-        fn logical_functional_address(&self) -> u16 {
-            unimplemented!()
-        }
-        fn ecu_name(&self) -> String {
-            unimplemented!()
-        }
-        fn logical_address_eq<T: EcuAddresses>(&self, _other: &T) -> bool {
-            unimplemented!()
-        }
-    }
-
-    impl DoipComParams for TestEcu {
-        fn nack_number_of_retries(&self) -> &HashMap<u8, u32> {
-            unimplemented!()
-        }
-        fn diagnostic_ack_timeout(&self) -> Duration {
-            unimplemented!()
-        }
-        fn retry_period(&self) -> Duration {
-            unimplemented!()
-        }
-        fn routing_activation_timeout(&self) -> Duration {
-            unimplemented!()
-        }
-        fn repeat_request_count_transmission(&self) -> u32 {
-            unimplemented!()
-        }
-        fn connection_timeout(&self) -> Duration {
-            unimplemented!()
-        }
-        fn connection_retry_delay(&self) -> Duration {
-            unimplemented!()
-        }
-        fn connection_retry_attempts(&self) -> u32 {
-            unimplemented!()
-        }
     }
 
     /// Builds a minimal `DoipDiagGateway` whose single ECU is backed by the
