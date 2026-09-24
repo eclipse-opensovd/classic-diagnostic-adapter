@@ -33,6 +33,7 @@ members = [
   "cda-plugin-runtime-update",
   "cda-plugin-communication-management",
   "cda-health",
+  "cda-lifecycle",
   "cda-extra",
   "cda-storage",
   "integration-tests",
@@ -61,6 +62,7 @@ cda-plugin-communication-management = { path = "cda-plugin-communication-managem
 cda-sovd = { path = "cda-sovd" }
 cda-tracing = { path = "cda-tracing" }
 cda-health = { path = "cda-health" }
+cda-lifecycle = { path = "cda-lifecycle" }
 cda-storage = { path = "cda-storage" }
 cda-extra = { path = "cda-extra" }
 sovd-interfaces = { path = "cda-sovd-interfaces" }
