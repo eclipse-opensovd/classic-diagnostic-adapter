@@ -34,9 +34,10 @@ use crate::{
 pub(crate) type ConnectionResetReason = String;
 
 /// Runtime state for managing active gateway connections and ECU mappings.
-pub(crate) struct GatewayState<T> {
+pub(crate) struct GatewayState<'a, T> {
     pub doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>>,
-    pub ecus: Arc<HashMap<String, RwLock<T>>>,
+    pub ecus: &'a HashMap<String, RwLock<T>>,
+    pub connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     pub gateway_ecu_map: HashMap<u16, Vec<u16>>,
     pub connection_tasks: Arc<ConnectionTasks>,
 }
@@ -96,7 +97,7 @@ impl From<EcuError> for DiagServiceError {
 }
 
 #[tracing::instrument(
-    skip(transport, state, connectivity_handler),
+    skip(transport, state),
     fields(
         tester_ip = transport.tester_ip.clone(),
         port = transport.port,
@@ -110,8 +111,7 @@ impl From<EcuError> for DiagServiceError {
 pub(crate) async fn handle_gateway_connection<T>(
     discovered_gateway: DiscoveredGateway,
     transport: &DoipTransportConfig,
-    state: &GatewayState<T>,
-    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
+    state: &GatewayState<'_, T>,
 ) -> Result<u16, EcuError>
 where
     T: EcuAddresses + DoipComParams,
@@ -143,7 +143,7 @@ where
 
     // Build list of ECU names behind this gateway for notifications
     let mut ecu_names_for_gateway: Vec<String> = Vec::new();
-    for (name, ecu_lock) in state.ecus.iter() {
+    for (name, ecu_lock) in state.ecus {
         let ecu = ecu_lock.read().await;
         if ecu_ids.contains(&ecu.logical_address()) {
             ecu_names_for_gateway.push(name.clone());
@@ -182,7 +182,7 @@ where
         },
         ecus: ecu_ids.clone(),
         ecu_names: ecu_names_for_gateway.clone(),
-        connectivity_handler: Arc::clone(&connectivity_handler),
+        connectivity_handler: Arc::clone(&state.connectivity_handler),
     };
     let GatewayConnectionHandles { sender, receivers } =
         match connection_handler(gateway, Arc::clone(&state.connection_tasks)).await {
@@ -211,7 +211,8 @@ where
 
     // Notify connectivity handler that ECUs behind this gateway are now online.
     // This sets their state to Online so the pre-send variant detection guard works correctly.
-    connectivity_handler
+    state
+        .connectivity_handler
         .on_gateway_connected(&ecu_names_for_gateway)
         .await;
 
