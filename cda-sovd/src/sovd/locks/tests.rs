@@ -14,7 +14,7 @@
 use std::{
     sync::{
         Mutex as StdMutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime},
 };
@@ -29,18 +29,82 @@ use cda_interfaces::{
     },
     mock::MockUdsEcu,
 };
-use cda_plugin_security::{AuthApi, Claims, mock::TestSecurityPlugin};
+use cda_plugin_security::{
+    AuthApi,
+    mock::{ConfigurableTestClaims as TestClaims, TestSecurityPlugin},
+};
 use mockall::predicate::*;
 use tokio::{sync::Notify, task};
 
 use super::{
     cleanup::{run_cleanups, take_cleanups},
-    handlers::common::{run_acquisition_transaction, sovd_lock_response},
-    policy::scope_sort_key,
-    validation::{validate_active_locks, validate_defunct_fg_lock},
+    handlers::common::{run_acquisition_transaction, sovd_lock_response, validated_expiration},
+    policy::sort_lock_snapshots,
+    validation::validate_active_locks,
     *,
 };
 use crate::test_utils::axum_response_into;
+
+mod cleanup;
+mod handlers;
+mod lifecycle;
+mod policy;
+mod transactions;
+mod validation;
+
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
+const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn wait_until<F, Fut>(description: &str, mut condition: F)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let poll = async {
+        while !condition().await {
+            cda_interfaces::util::tokio_ext::sleep_for(POLL_INTERVAL).await;
+        }
+    };
+    assert!(
+        tokio::time::timeout(WAIT_TIMEOUT, poll).await.is_ok(),
+        "Timed out waiting until {description}"
+    );
+}
+
+async fn await_events(policy: &EventRecordingPolicy, count: usize) {
+    wait_until("lock lifecycle events are delivered", || async {
+        policy.events.lock().expect("Event mutex poisoned").len() >= count
+    })
+    .await;
+}
+
+async fn commit_pending_preemption(
+    locks: &Locks,
+    acquisition: AcquisitionGuard,
+    mut pending: PendingPreemption,
+    replacement: ActiveLock,
+) -> Vec<ActiveLock> {
+    let removed = locks
+        .store
+        .lock()
+        .await
+        .state
+        .commit_replacement(
+            &pending.root_lock_ids,
+            replacement,
+            &pending.broken_by,
+            pending.broken_at,
+        )
+        .expect("Preemption commit should succeed");
+    pending.disarm();
+    acquisition.finish().await;
+    let cleanups = {
+        let mut store = locks.store.lock().await;
+        take_cleanups(&mut store.cleanups, &removed)
+    };
+    run_cleanups(cleanups).await;
+    removed
+}
 
 impl Locks {
     async fn active_snapshots(&self) -> Vec<LockSnapshot> {
@@ -52,11 +116,7 @@ impl Locks {
             .active()
             .map(active_snapshot)
             .collect::<Vec<_>>();
-        snapshots.sort_by(|left, right| {
-            scope_sort_key(&left.scope)
-                .cmp(&scope_sort_key(&right.scope))
-                .then_with(|| left.id.cmp(&right.id))
-        });
+        sort_lock_snapshots(&mut snapshots);
         snapshots
     }
 
@@ -82,10 +142,6 @@ impl Locks {
             .is_some()
     }
 
-    async fn test_has_cleanup(&self, lock_id: &str) -> bool {
-        self.store.lock().await.cleanups.contains_key(lock_id)
-    }
-
     async fn test_reservation(&self) -> AcquisitionGuard {
         let transition_id = self.reserve_transition().await;
         AcquisitionGuard {
@@ -98,21 +154,6 @@ impl Locks {
 
 fn locks_with_policy<P: LockPriorityPolicy>(policy: Arc<P>) -> Locks {
     Locks::new_with_policy(policy)
-}
-
-struct TestClaims {
-    subject: String,
-    attributes: serde_json::Map<String, serde_json::Value>,
-}
-
-impl Claims for TestClaims {
-    fn sub(&self) -> &str {
-        &self.subject
-    }
-
-    fn attributes(&self) -> serde_json::Map<String, serde_json::Value> {
-        self.attributes.clone()
-    }
 }
 
 struct TestPolicy {
@@ -139,7 +180,11 @@ impl LockPriorityPolicy for TestPolicy {
 
 #[derive(Default)]
 struct EventRecordingPolicy {
-    decision: Option<LockPriorityDecision>,
+    events: StdMutex<Vec<LockLifecycleEvent>>,
+}
+
+#[derive(Default)]
+struct AbandonmentRecordingPolicy {
     events: StdMutex<Vec<LockLifecycleEvent>>,
 }
 
@@ -149,7 +194,27 @@ impl LockPriorityPolicy for EventRecordingPolicy {
         &self,
         _evaluation: &LockPriorityEvaluation,
     ) -> Result<LockPriorityDecision, LockPriorityError> {
-        Ok(self.decision.clone().unwrap_or(LockPriorityDecision::Allow))
+        Ok(LockPriorityDecision::Allow)
+    }
+
+    async fn on_lock_event(&self, event: &LockLifecycleEvent) {
+        self.events
+            .lock()
+            .expect("event mutex poisoned")
+            .push(event.clone());
+    }
+}
+
+#[async_trait::async_trait]
+impl LockPriorityPolicy for AbandonmentRecordingPolicy {
+    async fn evaluate(
+        &self,
+        _evaluation: &LockPriorityEvaluation,
+    ) -> Result<LockPriorityDecision, LockPriorityError> {
+        Ok(LockPriorityDecision::Preempt {
+            lock_ids: vec!["existing-lock".to_owned()],
+            broken_by: "priority-policy".to_owned(),
+        })
     }
 
     async fn on_lock_event(&self, event: &LockLifecycleEvent) {
@@ -174,6 +239,7 @@ impl LockPriorityPolicy for PanickingPolicy {
 
 struct BlockingPolicy {
     evaluations: AtomicUsize,
+    requests: StdMutex<Vec<LockPriorityEvaluation>>,
     started: Notify,
     release: Notify,
 }
@@ -229,7 +295,7 @@ impl LockPriorityPolicy for MetadataVerificationPolicy {
         &self,
         _evaluation: &LockPriorityEvaluation,
     ) -> Result<LockPriorityDecision, LockPriorityError> {
-        panic!("Metadata verification failure must prevent priority evaluation");
+        Ok(LockPriorityDecision::Allow)
     }
 }
 
@@ -237,9 +303,13 @@ impl LockPriorityPolicy for MetadataVerificationPolicy {
 impl LockPriorityPolicy for BlockingPolicy {
     async fn evaluate(
         &self,
-        _evaluation: &LockPriorityEvaluation,
+        evaluation: &LockPriorityEvaluation,
     ) -> Result<LockPriorityDecision, LockPriorityError> {
         self.evaluations.fetch_add(1, Ordering::SeqCst);
+        self.requests
+            .lock()
+            .expect("Policy evaluation mutex poisoned")
+            .push(evaluation.clone());
         self.started.notify_one();
         self.release.notified().await;
         Ok(LockPriorityDecision::Allow)
@@ -260,7 +330,7 @@ pub(crate) async fn insert_test_fg_lock(locks: &Locks, functional_group_name: &s
         expires_at: SystemTime::now()
             .checked_add(Duration::from_secs(3600))
             .expect("test expiration should be representable"),
-        parent_vehicle: None,
+        parent_vehicle_lock_id: None,
     };
     locks.test_insert_active(lock).await;
 }
@@ -279,7 +349,7 @@ pub(crate) async fn insert_test_ecu_lock(locks: &Locks, ecu_name: &str) {
         expires_at: SystemTime::now()
             .checked_add(Duration::from_secs(3600))
             .expect("test expiration should be representable"),
-        parent_vehicle: None,
+        parent_vehicle_lock_id: None,
     };
     locks.test_insert_active(lock).await;
 }
@@ -299,7 +369,7 @@ async fn insert_policy_test_lock(locks: &Locks, cleanup_count: Arc<AtomicUsize>)
         expires_at: SystemTime::now()
             .checked_add(Duration::from_secs(300))
             .expect("test expiration should be representable"),
-        parent_vehicle: None,
+        parent_vehicle_lock_id: None,
     };
     locks.test_insert_active(lock).await;
     locks
@@ -313,21 +383,71 @@ async fn insert_policy_test_lock(locks: &Locks, cleanup_count: Arc<AtomicUsize>)
     id
 }
 
-fn active_test_lock(subject: &str, exclusive: bool) -> ActiveLock {
-    ActiveLock {
-        id: "access-lock".to_owned(),
-        scope: ScopeKey::Ecu("ecu-a".to_owned()),
-        coverage: LockCoverage::new(["ecu-a".to_owned()]),
-        principal: LockPrincipal {
-            subject: subject.to_owned(),
-            claims: serde_json::Map::new(),
+fn test_lock(id: &str) -> TestLockBuilder {
+    TestLockBuilder {
+        lock: ActiveLock {
+            id: id.to_owned(),
+            scope: ScopeKey::Ecu("ecu-a".to_owned()),
+            coverage: LockCoverage::new(["ecu-a".to_owned()]),
+            principal: LockPrincipal {
+                subject: "test_user".to_owned(),
+                claims: serde_json::Map::new(),
+            },
+            metadata: serde_json::Map::new(),
+            exclusive: true,
+            expires_at: SystemTime::now()
+                .checked_add(Duration::from_secs(300))
+                .expect("test expiration should be representable"),
+            parent_vehicle_lock_id: None,
         },
-        metadata: serde_json::Map::new(),
-        exclusive,
-        expires_at: SystemTime::now()
-            .checked_add(Duration::from_secs(300))
-            .expect("test expiration should be representable"),
-        parent_vehicle: None,
+    }
+}
+
+struct TestLockBuilder {
+    lock: ActiveLock,
+}
+
+impl TestLockBuilder {
+    fn owner(mut self, subject: &str) -> Self {
+        self.lock.principal.subject = subject.to_owned();
+        self
+    }
+
+    fn exclusive(mut self, exclusive: bool) -> Self {
+        self.lock.exclusive = exclusive;
+        self
+    }
+
+    fn vehicle(mut self) -> Self {
+        self.lock.scope = ScopeKey::Vehicle;
+        self.lock.coverage = LockCoverage::vehicle();
+        self
+    }
+
+    fn ecu(mut self, name: &str) -> Self {
+        self.lock.scope = ScopeKey::Ecu(name.to_owned());
+        self.lock.coverage = LockCoverage::new([name.to_owned()]);
+        self
+    }
+
+    fn functional_group(mut self, name: &str, coverage: impl IntoIterator<Item = String>) -> Self {
+        self.lock.scope = ScopeKey::FunctionalGroup(name.to_owned());
+        self.lock.coverage = LockCoverage::new(coverage);
+        self
+    }
+
+    fn expires_at(mut self, expires_at: SystemTime) -> Self {
+        self.lock.expires_at = expires_at;
+        self
+    }
+
+    fn parent(mut self, lock_id: &str) -> Self {
+        self.lock.parent_vehicle_lock_id = Some(lock_id.to_owned());
+        self
+    }
+
+    fn build(self) -> ActiveLock {
+        self.lock
     }
 }
 
@@ -339,10 +459,3 @@ fn preemption_request() -> sovd_interfaces::locking::Request {
         metadata: serde_json::Map::new(),
     }
 }
-
-mod cleanup;
-mod handlers;
-mod lifecycle;
-mod policy;
-mod transactions;
-mod validation;

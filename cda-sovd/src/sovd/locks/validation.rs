@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -27,7 +27,7 @@ pub(super) fn validate_vehicle_children(
         preempted_roots.iter().any(|root| {
             lock.id == *root
                 || lock
-                    .parent_vehicle
+                    .parent_vehicle_lock_id
                     .as_ref()
                     .is_some_and(|parent| parent == root)
         })
@@ -120,20 +120,13 @@ async fn validate_ecu_access(
     })
 }
 
-pub(crate) async fn validate_defunct_fg_lock<T: UdsEcu>(
+pub(crate) fn validate_defunct_fg_lock_in_state(
     claims: &impl Claims,
-    functional_group_name: &str,
-    uds: &T,
-    locks: &Locks,
+    target_scope: &ScopeKey,
+    target_coverage: &LockCoverage,
+    state: &mut LockState,
     include_schema: bool,
 ) -> Result<(), ErrorWrapper> {
-    let target_coverage = LockCoverage::new(
-        uds.ecus_for_functional_group(functional_group_name, false)
-            .await,
-    );
-    let target_scope = ScopeKey::FunctionalGroup(functional_group_name.to_ascii_lowercase());
-    let mut store = locks.lock_idle().await;
-    let state = &mut store.state;
     if let Err(error) = state.expire_defunct(SystemTime::now()) {
         tracing::error!(%error, "Failed to expire defunct locks");
     }
@@ -142,8 +135,8 @@ pub(crate) async fn validate_defunct_fg_lock<T: UdsEcu>(
         .find(|lock| {
             lock.principal.subject == claims.sub()
                 && (lock.scope == ScopeKey::Vehicle
-                    || lock.scope == target_scope
-                    || lock.coverage.overlaps(&target_coverage))
+                    || &lock.scope == target_scope
+                    || lock.coverage.overlaps(target_coverage))
         })
         .cloned()
     {
@@ -163,9 +156,7 @@ pub(crate) async fn validate_fg_read<T: UdsEcu>(
     locks: &Locks,
     include_schema: bool,
 ) -> Result<(), ErrorWrapper> {
-    validate_defunct_fg_lock(claims, functional_group_name, uds, locks, include_schema).await?;
-
-    validate_active_fg_locks(
+    validate_fg_access(
         claims,
         functional_group_name,
         uds,
@@ -183,9 +174,7 @@ pub(crate) async fn validate_fg_write<T: UdsEcu>(
     locks: &Locks,
     include_schema: bool,
 ) -> Result<(), ErrorWrapper> {
-    validate_defunct_fg_lock(claims, functional_group_name, uds, locks, include_schema).await?;
-
-    validate_active_fg_locks(
+    validate_fg_access(
         claims,
         functional_group_name,
         uds,
@@ -196,7 +185,7 @@ pub(crate) async fn validate_fg_write<T: UdsEcu>(
     .await
 }
 
-async fn validate_active_fg_locks<T: UdsEcu>(
+async fn validate_fg_access<T: UdsEcu>(
     claims: &impl Claims,
     functional_group_name: &str,
     uds: &T,
@@ -209,7 +198,14 @@ async fn validate_active_fg_locks<T: UdsEcu>(
             .await,
     );
     let target_scope = ScopeKey::FunctionalGroup(functional_group_name.to_ascii_lowercase());
-    let store = locks.lock_idle().await;
+    let mut store = locks.lock_idle().await;
+    validate_defunct_fg_lock_in_state(
+        claims,
+        &target_scope,
+        &target_coverage,
+        &mut store.state,
+        include_schema,
+    )?;
     let state = &store.state;
     let now = SystemTime::now();
     validate_active_locks(
@@ -230,11 +226,14 @@ async fn validate_active_fg_locks<T: UdsEcu>(
 
 fn active_lock_is_effective(state: &LockState, lock: &ActiveLock, now: SystemTime) -> bool {
     lock.expires_at > now
-        && lock.parent_vehicle.as_deref().is_none_or(|parent_id| {
-            state
-                .active_by_id(parent_id)
-                .is_some_and(|parent| parent.expires_at > now)
-        })
+        && lock
+            .parent_vehicle_lock_id
+            .as_deref()
+            .is_none_or(|parent_id| {
+                state
+                    .active_by_id(parent_id)
+                    .is_some_and(|parent| parent.expires_at > now)
+            })
 }
 
 pub(super) fn validate_active_locks<'a>(

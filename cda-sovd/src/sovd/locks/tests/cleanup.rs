@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -11,73 +11,48 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use super::*;
-
-#[tokio::test]
-async fn child_lock_created_under_owned_vehicle_has_parent() {
-    let (mock_uds, ecu_name, locks) = setup_ecu_lock_test();
-    let vehicle = ActiveLock {
-        id: "vehicle".to_owned(),
-        scope: ScopeKey::Vehicle,
-        coverage: LockCoverage::vehicle(),
-        principal: LockPrincipal {
-            subject: "test_user".to_owned(),
-            claims: serde_json::Map::new(),
-        },
-        metadata: serde_json::Map::new(),
-        exclusive: true,
-        expires_at: SystemTime::now() + Duration::from_secs(300),
-        parent_vehicle: None,
-    };
-    locks.test_insert_active(vehicle).await;
-
-    let lock_id = create_ecu_lock(&mock_uds, &locks, &ecu_name, Duration::from_secs(60)).await;
-
-    assert_eq!(
-        locks
-            .store
-            .lock()
-            .await
-            .state
-            .active_by_id(&lock_id)
-            .and_then(|lock| lock.parent_vehicle.as_deref()),
-        Some("vehicle")
-    );
-}
-#[tokio::test]
-async fn test_ecu_lock_cleanup_calls_reset() {
-    let (mock_uds, ecu_name, locks) = setup_ecu_lock_test();
-    #[allow(
+#![cfg_attr(
+    nightly,
+    allow(
         unknown_lints,
         clippy::duration_suboptimal_units,
         reason = "Literal duration for test clarity. Lint not available in all toolchains"
-    )]
+    )
+)]
+
+use super::*;
+
+#[tokio::test]
+async fn test_ecu_lock_cleanup_calls_reset() {
+    let (mock_uds, ecu_name, locks, session_resets, security_resets) = setup_ecu_lock_test();
     let lock_id = create_ecu_lock(&mock_uds, &locks, &ecu_name, Duration::from_secs(60)).await;
 
     let delete_response = delete_handler(
         &locks,
-        LockTarget::Ecu,
         LockScope::Ecu {
             name: ecu_name.clone(),
         },
         &lock_id,
         &TestSecurityPlugin.claims(),
-        Some(&ecu_name),
         false,
     )
     .await;
 
     assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(session_resets.load(Ordering::SeqCst), 1);
+    assert_eq!(security_resets.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
 async fn test_ecu_lock_cleanup_timeout_cleans() {
-    let (mock_uds, ecu_name, locks) = setup_ecu_lock_test();
+    let (mock_uds, ecu_name, locks, _, _) = setup_ecu_lock_test();
     create_ecu_lock(&mock_uds, &locks, &ecu_name, Duration::from_secs(1)).await;
 
     assert!(locks.has_non_vehicle_locks().await);
-    cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(2)).await;
-    assert!(!locks.has_non_vehicle_locks().await);
+    wait_until("ECU lock expires", || async {
+        !locks.has_non_vehicle_locks().await
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -88,13 +63,11 @@ async fn test_functional_group_lock_cleanup_calls_reset_for_all_ecus() {
 
     let delete_response = delete_handler(
         &locks,
-        LockTarget::FunctionalGroup,
         LockScope::FunctionalGroup {
             name: fg_name.clone(),
         },
         &lock_id,
         &TestSecurityPlugin.claims(),
-        Some(&fg_name),
         false,
     )
     .await;
@@ -108,27 +81,22 @@ async fn test_functional_group_lock_cleanup_timeout_cleans() {
     create_functional_group_lock(&mock_uds, &locks, &fg_name, Duration::from_secs(1)).await;
 
     assert!(locks.has_non_vehicle_locks().await);
-    cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(2)).await;
-    assert!(!locks.has_non_vehicle_locks().await);
+    wait_until("functional group lock expires", || async {
+        !locks.has_non_vehicle_locks().await
+    })
+    .await;
 }
 
 #[tokio::test]
 async fn test_vehicle_lock_cleanup_calls_reset_for_all_ecus() {
     let (mock_uds, locks) = setup_vehicle_lock_test();
-    #[allow(
-        unknown_lints,
-        clippy::duration_suboptimal_units,
-        reason = "Literal duration for test clarity. Lint not available in all toolchains"
-    )]
     let lock_id = create_vehicle_lock(&mock_uds, &locks, Duration::from_secs(60)).await;
 
     let delete_response = delete_handler(
         &locks,
-        LockTarget::Vehicle,
         LockScope::Vehicle,
         &lock_id,
         &TestSecurityPlugin.claims(),
-        None,
         false,
     )
     .await;
@@ -142,12 +110,10 @@ async fn test_vehicle_lock_cleanup_timeout_cleans() {
     create_vehicle_lock(&mock_uds, &locks, Duration::from_secs(1)).await;
 
     assert!(locks.vehicle_lock_owner_sub().await.is_some());
-    cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(2)).await;
-    assert!(locks.vehicle_lock_owner_sub().await.is_none());
-}
-
-pub fn init_locks() -> Arc<Locks> {
-    Arc::new(Locks::new())
+    wait_until("vehicle lock expires", || async {
+        locks.vehicle_lock_owner_sub().await.is_none()
+    })
+    .await;
 }
 
 fn expect_ecu_lock_cleanup_multiple(uds_ecu: &mut MockUdsEcu, ecus: &Vec<String>) {
@@ -167,8 +133,18 @@ fn expect_ecu_lock_cleanup_multiple(uds_ecu: &mut MockUdsEcu, ecus: &Vec<String>
     }
 }
 
-fn setup_ecu_lock_test() -> (MockUdsEcu, String, Arc<Locks>) {
+pub(super) fn setup_ecu_lock_test() -> (
+    MockUdsEcu,
+    String,
+    Arc<Locks>,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+) {
     let mut mock_uds = MockUdsEcu::default();
+    let session_resets = Arc::new(AtomicUsize::new(0));
+    let security_resets = Arc::new(AtomicUsize::new(0));
+    let session_resets_for_clone = Arc::clone(&session_resets);
+    let security_resets_for_clone = Arc::clone(&security_resets);
     let ecu_name = "test_ecu".to_string();
     let tp_type = TesterPresentType::Ecu(ecu_name.clone());
     let ecu_name_clone = ecu_name.clone();
@@ -186,8 +162,12 @@ fn setup_ecu_lock_test() -> (MockUdsEcu, String, Arc<Locks>) {
             .returning(|_| Ok(()));
         let cleanup_tp_type = tp_type.clone();
         let cleanup_ecu_name = ecu_name_clone.clone();
+        let session_resets = Arc::clone(&session_resets_for_clone);
+        let security_resets = Arc::clone(&security_resets_for_clone);
         transaction.expect_clone().times(1).returning(move || {
             let mut cleanup = MockUdsEcu::default();
+            let session_resets = Arc::clone(&session_resets);
+            let security_resets = Arc::clone(&security_resets);
             cleanup
                 .expect_stop_tester_present()
                 .with(eq(cleanup_tp_type.clone()))
@@ -197,25 +177,31 @@ fn setup_ecu_lock_test() -> (MockUdsEcu, String, Arc<Locks>) {
                 .expect_reset_ecu_session()
                 .with(eq(cleanup_ecu_name.clone()), always())
                 .times(1)
-                .returning(|_, _| Ok(()));
+                .returning(move |_, _| {
+                    session_resets.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                });
             cleanup
                 .expect_reset_ecu_security_access()
                 .with(eq(cleanup_ecu_name.clone()), always())
                 .times(1)
-                .returning(|_, _| Ok(()));
+                .returning(move |_, _| {
+                    security_resets.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                });
             cleanup
         });
         transaction
     });
 
-    let locks = init_locks();
-    (mock_uds, ecu_name, locks)
+    let locks = Arc::new(Locks::new());
+    (mock_uds, ecu_name, locks, session_resets, security_resets)
 }
 
-async fn create_ecu_lock(
+pub(super) async fn create_ecu_lock(
     mock_uds: &MockUdsEcu,
     locks: &Arc<Locks>,
-    ecu_name: &String,
+    ecu_name: &str,
     expiration: Duration,
 ) -> String {
     let expiration = sovd_interfaces::locking::Request {
@@ -228,9 +214,9 @@ async fn create_ecu_lock(
     let (acquisition, pending, request) = locks
         .evaluate_acquisition(
             LockScope::Ecu {
-                name: ecu_name.clone(),
+                name: ecu_name.to_owned(),
             },
-            LockCoverage::new([ecu_name.clone()]),
+            LockCoverage::new([ecu_name.to_owned()]),
             &expiration,
             &claims,
         )
@@ -241,14 +227,11 @@ async fn create_ecu_lock(
     let response = post_handler(
         mock_uds,
         LockContext {
-            lock: LockTarget::Ecu,
             all_locks: locks,
             acquisition,
             pending,
-            converted_lock_ids: Vec::new(),
-            coverage: LockCoverage::new([ecu_name.clone()]),
+            coverage: LockCoverage::new([ecu_name.to_owned()]),
         },
-        Some(ecu_name),
         request,
         false,
         security_plugin,
@@ -293,14 +276,14 @@ fn setup_functional_group_lock_test() -> (MockUdsEcu, String, Arc<Locks>) {
         transaction
     });
 
-    let locks = init_locks();
+    let locks = Arc::new(Locks::new());
     (mock_uds, fg_name, locks)
 }
 
 async fn create_functional_group_lock(
     mock_uds: &MockUdsEcu,
     locks: &Arc<Locks>,
-    fg_name: &String,
+    fg_name: &str,
     expiration: Duration,
 ) -> String {
     let expiration = sovd_interfaces::locking::Request {
@@ -313,7 +296,7 @@ async fn create_functional_group_lock(
     let (acquisition, _, request) = locks
         .evaluate_acquisition(
             LockScope::FunctionalGroup {
-                name: fg_name.clone(),
+                name: fg_name.to_owned(),
             },
             LockCoverage::new(["ecu1".to_owned(), "ecu2".to_owned()]),
             &expiration,
@@ -326,14 +309,11 @@ async fn create_functional_group_lock(
     let response = post_handler(
         mock_uds,
         LockContext {
-            lock: LockTarget::FunctionalGroup,
             all_locks: locks,
             acquisition,
             pending: None,
-            converted_lock_ids: Vec::new(),
             coverage: LockCoverage::new(["ecu1".to_owned(), "ecu2".to_owned()]),
         },
-        Some(fg_name),
         request,
         false,
         security_plugin,
@@ -351,7 +331,7 @@ fn setup_vehicle_lock_test() -> (MockUdsEcu, Arc<Locks>) {
     setup_vehicle_lock_test_with_policy(Arc::new(cda_plugin_lock_priority::NoPreemptionPolicy))
 }
 
-fn setup_vehicle_lock_test_with_policy(
+pub(super) fn setup_vehicle_lock_test_with_policy(
     policy: Arc<dyn LockPriorityPolicy>,
 ) -> (MockUdsEcu, Arc<Locks>) {
     let mut mock_uds = MockUdsEcu::default();
@@ -383,7 +363,7 @@ async fn create_vehicle_lock(
     let (acquisition, pending, request) = locks
         .evaluate_acquisition(
             LockScope::Vehicle,
-            LockCoverage::default(),
+            LockCoverage::vehicle(),
             &expiration,
             &claims,
         )
@@ -394,14 +374,11 @@ async fn create_vehicle_lock(
     let response = post_handler(
         mock_uds,
         LockContext {
-            lock: LockTarget::Vehicle,
             all_locks: locks,
             acquisition,
             pending,
-            converted_lock_ids: Vec::new(),
             coverage: LockCoverage::vehicle(),
         },
-        None,
         request,
         false,
         security_plugin,
@@ -421,27 +398,8 @@ async fn creation_and_deletion_notify_registered_policy() {
     let (mock_uds, locks) =
         setup_vehicle_lock_test_with_policy(Arc::<EventRecordingPolicy>::clone(&policy));
 
-    #[allow(
-        unknown_lints,
-        clippy::duration_suboptimal_units,
-        reason = "Literal duration for test clarity. Lint not available in all toolchains"
-    )]
     let lock_id = create_vehicle_lock(&mock_uds, &locks, Duration::from_secs(60)).await;
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if !policy
-                .events
-                .lock()
-                .expect("event mutex poisoned")
-                .is_empty()
-            {
-                break;
-            }
-            task::yield_now().await;
-        }
-    })
-    .await
-    .expect("Created event should be delivered");
+    await_events(&policy, 1).await;
     {
         let events = policy.events.lock().expect("event mutex poisoned");
         assert_eq!(events.len(), 1);
@@ -461,7 +419,7 @@ async fn creation_and_deletion_notify_registered_policy() {
         metadata: serde_json::Map::new(),
         exclusive: true,
         expires_at: SystemTime::now() + Duration::from_secs(60),
-        parent_vehicle: Some(lock_id.clone()),
+        parent_vehicle_lock_id: Some(lock_id.clone()),
     };
     locks
         .store
@@ -473,26 +431,15 @@ async fn creation_and_deletion_notify_registered_policy() {
 
     let delete_response = delete_handler(
         &locks,
-        LockTarget::Vehicle,
         LockScope::Vehicle,
         &lock_id,
         &TestSecurityPlugin.claims(),
-        None,
         false,
     )
     .await;
     assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
 
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if policy.events.lock().expect("event mutex poisoned").len() >= 3 {
-                break;
-            }
-            task::yield_now().await;
-        }
-    })
-    .await
-    .expect("Released event should be delivered");
+    await_events(&policy, 3).await;
     let events = policy.events.lock().expect("event mutex poisoned");
     assert_eq!(events.len(), 3);
     assert!(matches!(

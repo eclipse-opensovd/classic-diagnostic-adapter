@@ -22,9 +22,9 @@ use super::{
 use crate::{
     openapi,
     sovd::{
-        lock_state::{self, ActiveLock, LockCoverage, ScopeKey},
+        lock_state::{self, ActiveLock, LockCoverage},
         locks::{
-            LockContext, LockPathParam, LockTarget, LockUpdateContext, delete_handler, get_handler,
+            LockContext, LockPathParam, LockUpdateContext, delete_handler, get_handler,
             get_id_handler, post_handler, put_handler, rollback_preemption, validate_vehicle_owner,
         },
     },
@@ -34,8 +34,8 @@ pub(crate) mod lock {
     use cda_interfaces::UdsEcu;
 
     use super::{
-        ApiError, Json, LockPathParam, LockScope, LockTarget, LockUpdateContext, Path, Query,
-        Response, Secured, State, TransformOperation, UseApi, WebserverFgState, WithRejection,
+        ApiError, Json, LockPathParam, LockScope, LockUpdateContext, Path, Query, Response,
+        Secured, State, TransformOperation, UseApi, WebserverFgState, WithRejection,
         delete_handler, get_id_handler, openapi, put_handler,
     };
 
@@ -48,13 +48,11 @@ pub(crate) mod lock {
         let claims = sec_plugin.as_auth_plugin().claims();
         delete_handler(
             &state.locks,
-            LockTarget::FunctionalGroup,
             LockScope::FunctionalGroup {
                 name: state.functional_group_name.clone(),
             },
             &lock,
             &claims,
-            Some(&state.functional_group_name),
             query.include_schema,
         )
         .await
@@ -81,14 +79,12 @@ pub(crate) mod lock {
         put_handler(
             LockUpdateContext {
                 all_locks: &state.locks,
-                lock: LockTarget::FunctionalGroup,
                 scope: LockScope::FunctionalGroup {
                     name: state.functional_group_name.clone(),
                 },
             },
             &lock,
             &claims,
-            Some(&state.functional_group_name),
             body,
             query.include_schema,
         )
@@ -110,12 +106,10 @@ pub(crate) mod lock {
     ) -> Response {
         get_id_handler(
             &state.locks,
-            LockTarget::FunctionalGroup,
             LockScope::FunctionalGroup {
                 name: state.functional_group_name.clone(),
             },
             &lock,
-            Some(&state.functional_group_name),
             query.include_schema,
         )
         .await
@@ -175,31 +169,25 @@ pub(crate) async fn post<T: UdsEcu + Clone>(
         }
         .into_response();
     }
-    let owned_ecu_lock_ids =
-        match select_same_owner_ecu_locks(&state.locks.open_locks().await, &coverage, claims.sub())
-        {
-            Ok(lock_ids) => lock_ids,
-            Err(error) => {
-                rollback_preemption(pending, &state.locks).await;
-                acquisition.finish().await;
-                return ErrorWrapper {
-                    error,
-                    include_schema: query.include_schema,
-                }
-                .into_response();
-            }
-        };
+    if let Err(error) =
+        validate_functional_group_overlap(&state.locks.open_locks().await, &coverage, claims.sub())
+    {
+        rollback_preemption(pending, &state.locks).await;
+        acquisition.finish().await;
+        return ErrorWrapper {
+            error,
+            include_schema: query.include_schema,
+        }
+        .into_response();
+    }
     post_handler(
         &state.uds,
         LockContext {
-            lock: LockTarget::FunctionalGroup,
             all_locks: &state.locks,
             acquisition,
             pending,
-            converted_lock_ids: owned_ecu_lock_ids,
             coverage,
         },
-        Some(&state.functional_group_name),
         request,
         query.include_schema,
         sec_plugin,
@@ -224,12 +212,10 @@ pub(crate) async fn get<T: UdsEcu + Clone>(
     let claims = sec_plugin.as_auth_plugin().claims();
     get_handler(
         &state.locks,
-        LockTarget::FunctionalGroup,
         LockScope::FunctionalGroup {
             name: state.functional_group_name.clone(),
         },
         &claims,
-        Some(&state.functional_group_name),
         query.include_schema,
     )
     .await
@@ -243,31 +229,23 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
         })
 }
 
-/// Selects open ECU locks whose coverage overlaps the functional group coverage.
-///
-/// Overlapping locks owned by the requesting subject are returned for
-/// conversion; an overlapping lock held by a different subject is a conflict.
-fn select_same_owner_ecu_locks(
+/// Rejects functional-group coverage that overlaps a lock held by another client.
+fn validate_functional_group_overlap(
     open_locks: &[ActiveLock],
     coverage: &LockCoverage,
     subject: &str,
-) -> Result<Vec<String>, ApiError> {
-    let mut owned_ecu_lock_ids = Vec::new();
-    for lock in open_locks {
-        let ScopeKey::Ecu(name) = &lock.scope else {
-            continue;
-        };
-        if lock.coverage.overlaps(coverage) {
-            if lock.principal.subject != subject {
-                return Err(ApiError::Conflict(format!(
-                    "ECU {name} is locked by different user. This prevents setting functional \
-                     group lock"
-                )));
-            }
-            owned_ecu_lock_ids.push(lock.id.clone());
-        }
+) -> Result<(), ApiError> {
+    if let Some(lock) = open_locks.iter().find(|lock| {
+        lock.parent_vehicle_lock_id.is_none()
+            && lock.coverage.overlaps(coverage)
+            && lock.principal.subject != subject
+    }) {
+        return Err(ApiError::Conflict(format!(
+            "Lock {} is owned by another client and overlaps the functional group",
+            lock.id
+        )));
     }
-    Ok(owned_ecu_lock_ids)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -277,6 +255,7 @@ mod tests {
     use cda_interfaces::lock_priority_api::LockPrincipal;
 
     use super::*;
+    use crate::sovd::lock_state::ScopeKey;
 
     fn ecu_lock(id: &str, ecu_name: &str, subject: &str) -> ActiveLock {
         ActiveLock {
@@ -292,19 +271,17 @@ mod tests {
             expires_at: SystemTime::now()
                 .checked_add(Duration::from_secs(300))
                 .expect("Test expiration should be representable"),
-            parent_vehicle: None,
+            parent_vehicle_lock_id: None,
         }
     }
 
     #[test]
-    fn owned_ecu_lock_with_different_casing_is_converted() {
+    fn owned_ecu_lock_with_different_casing_can_coexist() {
         let locks = vec![ecu_lock("owned-lock", "Engine_ECU", "owner")];
         let coverage = LockCoverage::new(["ENGINE_ecu".to_owned()]);
 
-        let converted = select_same_owner_ecu_locks(&locks, &coverage, "owner")
-            .expect("Owned overlapping ECU lock must be converted, not conflict");
-
-        assert_eq!(converted, ["owned-lock"]);
+        validate_functional_group_overlap(&locks, &coverage, "owner")
+            .expect("Owned overlapping ECU lock must coexist");
     }
 
     #[test]
@@ -312,7 +289,7 @@ mod tests {
         let locks = vec![ecu_lock("foreign-lock", "engine_ecu", "other")];
         let coverage = LockCoverage::new(["Engine_ECU".to_owned()]);
 
-        let error = select_same_owner_ecu_locks(&locks, &coverage, "owner")
+        let error = validate_functional_group_overlap(&locks, &coverage, "owner")
             .expect_err("Foreign overlapping ECU lock must conflict");
 
         assert!(matches!(error, ApiError::Conflict(_)));
@@ -323,9 +300,29 @@ mod tests {
         let locks = vec![ecu_lock("other-lock", "brake_ecu", "owner")];
         let coverage = LockCoverage::new(["engine_ecu".to_owned()]);
 
-        let converted = select_same_owner_ecu_locks(&locks, &coverage, "owner")
+        validate_functional_group_overlap(&locks, &coverage, "owner")
             .expect("Non-overlapping ECU lock must not conflict");
+    }
 
-        assert!(converted.is_empty());
+    #[test]
+    fn owned_overlapping_functional_lock_can_coexist() {
+        let mut lock = ecu_lock("owned-lock", "engine", "owner");
+        lock.scope = ScopeKey::FunctionalGroup("existing-group".to_owned());
+        let coverage = LockCoverage::new(["engine".to_owned()]);
+
+        validate_functional_group_overlap(&[lock], &coverage, "owner")
+            .expect("Owned overlapping functional lock must coexist");
+    }
+
+    #[test]
+    fn foreign_overlapping_functional_lock_conflicts() {
+        let mut lock = ecu_lock("foreign-lock", "engine", "other");
+        lock.scope = ScopeKey::FunctionalGroup("existing-group".to_owned());
+        let coverage = LockCoverage::new(["engine".to_owned()]);
+
+        assert!(matches!(
+            validate_functional_group_overlap(&[lock], &coverage, "owner"),
+            Err(ApiError::Conflict(_))
+        ));
     }
 }

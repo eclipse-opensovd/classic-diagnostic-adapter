@@ -70,7 +70,50 @@ async fn priority_policy_receives_claims_metadata_and_active_locks() {
     }
     pending.rollback();
     acquisition.finish().await;
-    assert!(locks.vehicle_lock_owner_sub().await.is_some());
+    assert_eq!(
+        locks.vehicle_lock_owner_sub().await.as_deref(),
+        Some("existing-client")
+    );
+}
+
+#[tokio::test]
+async fn rolled_back_preemption_notifies_policy_once() {
+    let policy = Arc::new(AbandonmentRecordingPolicy::default());
+    let locks = locks_with_policy(Arc::<AbandonmentRecordingPolicy>::clone(&policy));
+    insert_policy_test_lock(&locks, Arc::new(AtomicUsize::new(0))).await;
+
+    let (acquisition, pending, _) = locks
+        .evaluate_acquisition(
+            LockScope::Vehicle,
+            LockCoverage::vehicle(),
+            &preemption_request(),
+            &TestClaims {
+                subject: "priority-client".to_owned(),
+                attributes: serde_json::Map::new(),
+            },
+        )
+        .await
+        .expect("Preemption should be staged");
+    let pending = pending.expect("Pending preemption expected");
+    let evaluation_id = pending.evaluation_id.clone();
+    pending.rollback();
+    acquisition.finish().await;
+    wait_until("preemption abandonment is delivered", || async {
+        !policy
+            .events
+            .lock()
+            .expect("Event mutex poisoned")
+            .is_empty()
+    })
+    .await;
+
+    let events = policy.events.lock().expect("Event mutex poisoned");
+    assert!(matches!(
+        events.as_slice(),
+        [LockLifecycleEvent::PreemptionAbandoned {
+            evaluation_id: delivered_id
+        }] if delivered_id == &evaluation_id
+    ));
 }
 
 #[tokio::test]
@@ -193,13 +236,24 @@ async fn metadata_verification_runs_for_every_lock_scope() {
         acquisition.finish().await;
     }
 
+    let scopes = policy
+        .requests
+        .lock()
+        .expect("Metadata verification mutex poisoned")
+        .iter()
+        .map(|request| request.scope.clone())
+        .collect::<Vec<_>>();
     assert_eq!(
-        policy
-            .requests
-            .lock()
-            .expect("Metadata verification mutex poisoned")
-            .len(),
-        3
+        scopes,
+        [
+            LockScope::Vehicle,
+            LockScope::Ecu {
+                name: "ecu-a".to_owned(),
+            },
+            LockScope::FunctionalGroup {
+                name: "fg-a".to_owned(),
+            },
+        ]
     );
 }
 
@@ -210,9 +264,10 @@ async fn metadata_verification_runs_for_same_owner_post_renewal() {
         requests: StdMutex::new(Vec::new()),
     });
     let locks = locks_with_policy(Arc::<MetadataVerificationPolicy>::clone(&policy));
-    let mut existing = active_test_lock("priority-client", true);
-    existing.scope = ScopeKey::Vehicle;
-    existing.coverage = LockCoverage::vehicle();
+    let existing = test_lock("access-lock")
+        .owner("priority-client")
+        .vehicle()
+        .build();
     locks.test_insert_active(existing).await;
 
     let (acquisition, pending, _) = locks
@@ -345,14 +400,11 @@ async fn default_policy_preserves_normal_lock_conflict() {
     let response = post_handler(
         &MockUdsEcu::default(),
         LockContext {
-            lock: LockTarget::Vehicle,
             all_locks: &locks,
             acquisition,
             pending,
-            converted_lock_ids: Vec::new(),
             coverage: LockCoverage::default(),
         },
-        None,
         request,
         false,
         Box::new(TestSecurityPlugin),
@@ -386,7 +438,7 @@ async fn vehicle_policy_receives_all_open_locks_as_candidates() {
         expires_at: SystemTime::now()
             .checked_add(Duration::from_secs(300))
             .expect("test expiration should be representable"),
-        parent_vehicle: None,
+        parent_vehicle_lock_id: None,
     };
     locks.test_insert_active(unrelated).await;
     let request = sovd_interfaces::locking::Request {
@@ -425,7 +477,7 @@ async fn vehicle_policy_receives_all_open_locks_as_candidates() {
 }
 
 #[tokio::test]
-async fn same_owner_post_renew_never_invokes_priority_evaluation() {
+async fn same_owner_post_renew_invokes_priority_evaluation_without_candidates() {
     let policy = Arc::new(TestPolicy {
         decision: Some(LockPriorityDecision::Allow),
         evaluations: StdMutex::new(Vec::new()),
@@ -446,7 +498,7 @@ async fn same_owner_post_renew_never_invokes_priority_evaluation() {
         metadata: serde_json::Map::new(),
         exclusive: true,
         expires_at,
-        parent_vehicle: None,
+        parent_vehicle_lock_id: None,
     };
     let child = ActiveLock {
         id: "child-lock".to_owned(),
@@ -456,7 +508,7 @@ async fn same_owner_post_renew_never_invokes_priority_evaluation() {
         metadata: serde_json::Map::new(),
         exclusive: true,
         expires_at,
-        parent_vehicle: Some("vehicle-lock".to_owned()),
+        parent_vehicle_lock_id: Some("vehicle-lock".to_owned()),
     };
     {
         let mut store = locks.store.lock().await;
@@ -481,7 +533,66 @@ async fn same_owner_post_renew_never_invokes_priority_evaluation() {
     assert!(pending.is_none());
     acquisition.finish().await;
     let evaluations = policy.evaluations.lock().expect("Policy mutex poisoned");
-    assert!(evaluations.is_empty());
+    assert!(matches!(
+        evaluations.as_slice(),
+        [LockPriorityEvaluation {
+            operation: LockPriorityOperation::PostRenew { lock_id },
+            preemption_candidates,
+            ..
+        }] if lock_id == "vehicle-lock" && preemption_candidates.is_empty()
+    ));
+}
+
+#[tokio::test]
+async fn post_renew_rejects_preempt_decision_without_discarding_selected_lock() {
+    let policy = Arc::new(TestPolicy {
+        decision: Some(LockPriorityDecision::Preempt {
+            lock_ids: vec!["other-client-ecu-lock".to_owned()],
+            broken_by: "priority-policy".to_owned(),
+        }),
+        evaluations: StdMutex::new(Vec::new()),
+    });
+    let locks = locks_with_policy(Arc::<TestPolicy>::clone(&policy));
+    locks
+        .test_insert_active(
+            test_lock("other-client-ecu-lock")
+                .owner("other-client")
+                .build(),
+        )
+        .await;
+    locks
+        .test_insert_active(
+            test_lock("vehicle-lock")
+                .owner("priority-client")
+                .vehicle()
+                .build(),
+        )
+        .await;
+
+    let result = locks
+        .evaluate_acquisition(
+            LockScope::Vehicle,
+            LockCoverage::vehicle(),
+            &preemption_request(),
+            &TestClaims {
+                subject: "priority-client".to_owned(),
+                attributes: serde_json::Map::new(),
+            },
+        )
+        .await;
+
+    assert!(matches!(result, Err(ApiError::Conflict(_))));
+    assert!(locks.test_has_active("other-client-ecu-lock").await);
+    let evaluations = policy.evaluations.lock().expect("Policy mutex poisoned");
+    assert!(matches!(
+        evaluations.as_slice(),
+        [LockPriorityEvaluation {
+            operation: LockPriorityOperation::PostRenew { lock_id },
+            preemption_candidates,
+            ..
+        }] if lock_id == "vehicle-lock"
+            && preemption_candidates == &["other-client-ecu-lock".to_owned()]
+    ));
 }
 
 #[tokio::test]
@@ -565,13 +676,14 @@ async fn revisioned_policy_timeout_is_service_unavailable() {
 async fn stale_policy_decision_is_reevaluated_with_fresh_state() {
     let policy = Arc::new(BlockingPolicy {
         evaluations: AtomicUsize::new(0),
+        requests: StdMutex::new(Vec::new()),
         started: Notify::new(),
         release: Notify::new(),
     });
     let locks = Arc::new(locks_with_policy(Arc::<BlockingPolicy>::clone(&policy)));
     insert_test_ecu_lock(&locks, "ecu-a").await;
     let task_locks = Arc::clone(&locks);
-    let evaluation = task::spawn(async move {
+    let evaluation = cda_interfaces::spawn_named!("blocking-policy-evaluation", async move {
         task_locks
             .evaluate_acquisition(
                 LockScope::Vehicle,
@@ -593,7 +705,7 @@ async fn stale_policy_decision_is_reevaluated_with_fresh_state() {
             .delete("test-lock-id")
             .expect("Concurrent deletion should succeed");
         state
-            .insert_active(active_test_lock("other-client", true))
+            .insert_active(test_lock("access-lock").owner("other-client").build())
             .expect("Concurrent insertion should succeed");
     }
     policy.release.notify_one();
@@ -606,6 +718,18 @@ async fn stale_policy_decision_is_reevaluated_with_fresh_state() {
         .expect("Policy evaluation task should finish");
     assert!(result.is_ok());
     assert_eq!(policy.evaluations.load(Ordering::SeqCst), 2);
+    let requests = policy
+        .requests
+        .lock()
+        .expect("Policy evaluation mutex poisoned");
+    assert!(
+        requests
+            .get(1)
+            .expect("Second policy evaluation expected")
+            .active_locks
+            .iter()
+            .any(|lock| lock.principal.subject == "other-client")
+    );
 }
 
 #[tokio::test]
@@ -715,38 +839,11 @@ async fn committed_preemption_cleans_once_and_creates_defunct_lock() {
         .await
         .expect("policy evaluation must succeed");
     let pending = pending.expect("preemption must be staged");
-    let replacement = ActiveLock {
-        id: "replacement".to_owned(),
-        scope: ScopeKey::Vehicle,
-        coverage: LockCoverage::vehicle(),
-        principal: LockPrincipal {
-            subject: "priority-client".to_owned(),
-            claims: serde_json::Map::new(),
-        },
-        metadata: serde_json::Map::new(),
-        exclusive: true,
-        expires_at: SystemTime::now() + Duration::from_secs(300),
-        parent_vehicle: None,
-    };
-    let removed = locks
-        .store
-        .lock()
-        .await
-        .state
-        .commit_replacement(
-            &pending.root_lock_ids,
-            &[],
-            replacement,
-            &pending.broken_by,
-            pending.broken_at,
-        )
-        .unwrap();
-    acquisition.finish().await;
-    let cleanups = {
-        let mut store = locks.store.lock().await;
-        take_cleanups(&mut store.cleanups, &removed)
-    };
-    run_cleanups(cleanups).await;
+    let replacement = test_lock("replacement")
+        .owner("priority-client")
+        .vehicle()
+        .build();
+    commit_pending_preemption(&locks, acquisition, pending, replacement).await;
 
     assert_eq!(cleanup_count.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -786,7 +883,7 @@ async fn vehicle_preemption_advertises_and_selects_only_root() {
         metadata: serde_json::Map::new(),
         exclusive: true,
         expires_at,
-        parent_vehicle: None,
+        parent_vehicle_lock_id: None,
     };
     let child = ActiveLock {
         id: "child-lock".to_owned(),
@@ -796,7 +893,7 @@ async fn vehicle_preemption_advertises_and_selects_only_root() {
         metadata: serde_json::Map::new(),
         exclusive: true,
         expires_at,
-        parent_vehicle: Some("vehicle-lock".to_owned()),
+        parent_vehicle_lock_id: Some("vehicle-lock".to_owned()),
     };
     {
         let mut store = locks.store.lock().await;
@@ -835,33 +932,11 @@ async fn vehicle_preemption_advertises_and_selects_only_root() {
             .preemption_candidates,
         ["vehicle-lock"]
     );
-    let replacement = ActiveLock {
-        id: "replacement".to_owned(),
-        scope: ScopeKey::Vehicle,
-        coverage: LockCoverage::new(["ecu-a".to_owned()]),
-        principal: LockPrincipal {
-            subject: "priority-client".to_owned(),
-            claims: serde_json::Map::new(),
-        },
-        metadata: serde_json::Map::new(),
-        exclusive: true,
-        expires_at: SystemTime::now() + Duration::from_secs(300),
-        parent_vehicle: None,
-    };
-    locks
-        .store
-        .lock()
-        .await
-        .state
-        .commit_replacement(
-            &pending.root_lock_ids,
-            &[],
-            replacement,
-            &pending.broken_by,
-            pending.broken_at,
-        )
-        .expect("Replacement commit must succeed after canonicalization");
-    acquisition.finish().await;
+    let replacement = test_lock("replacement")
+        .owner("priority-client")
+        .vehicle()
+        .build();
+    commit_pending_preemption(&locks, acquisition, pending, replacement).await;
 
     let store = locks.store.lock().await;
     let state = &store.state;

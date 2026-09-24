@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! State machine used by the production lock manager.
+//! Lock state machine.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -31,6 +31,8 @@ pub(crate) enum ScopeKey {
     /// One functional group.
     FunctionalGroup(String),
 }
+
+pub(super) type LockId = String;
 
 impl From<&LockScope> for ScopeKey {
     fn from(scope: &LockScope) -> Self {
@@ -110,29 +112,31 @@ impl LockCoverage {
 /// Canonical active lock record.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ActiveLock {
-    pub(super) id: String,
+    pub(super) id: LockId,
     pub(super) scope: ScopeKey,
     pub(super) coverage: LockCoverage,
     pub(super) principal: LockPrincipal,
     pub(super) metadata: Map<String, Value>,
     pub(super) exclusive: bool,
     pub(super) expires_at: SystemTime,
-    pub(super) parent_vehicle: Option<String>,
+    pub(super) parent_vehicle_lock_id: Option<LockId>,
 }
 
 /// Historical lock record created by preemption.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct DefunctLock {
-    pub(super) id: String,
+    pub(super) id: LockId,
     pub(super) scope: ScopeKey,
     pub(super) coverage: LockCoverage,
     pub(super) principal: LockPrincipal,
     pub(super) metadata: Map<String, Value>,
     pub(super) exclusive: bool,
     pub(super) original_expires_at: SystemTime,
+    /// Informational wall-clock timestamp reported to clients, not used for scheduling.
     pub(super) broken_at: SystemTime,
+    /// Identity of the original preemptor, as returned by the priority policy.
     pub(super) broken_by: String,
-    pub(super) replacement_lock_id: String,
+    pub(super) replacement_lock_id: LockId,
     pub(super) replacement_holder: String,
 }
 
@@ -165,6 +169,8 @@ pub(super) enum StateError {
     CoverageConflict(String),
     #[error("State revision overflow")]
     RevisionOverflow,
+    #[error("Lock has expired")]
+    LockExpired,
     #[error("Lock renewal must extend the expiration deadline")]
     RenewalNotExtension,
     #[error("Lock state invariant violated: {0}")]
@@ -175,10 +181,10 @@ pub(super) enum StateError {
 #[derive(Clone, Debug, Default)]
 pub(super) struct LockState {
     revision: u64,
-    active_by_id: BTreeMap<String, ActiveLock>,
-    active_by_scope: BTreeMap<ScopeKey, String>,
-    defunct_by_id: BTreeMap<String, DefunctLock>,
-    children_by_vehicle: BTreeMap<String, BTreeSet<String>>,
+    active_by_id: BTreeMap<LockId, ActiveLock>,
+    active_by_scope: BTreeMap<ScopeKey, LockId>,
+    defunct_by_id: BTreeMap<LockId, DefunctLock>,
+    children_by_vehicle: BTreeMap<LockId, BTreeSet<LockId>>,
 }
 
 impl LockState {
@@ -226,7 +232,7 @@ impl LockState {
         child_ids: &[String],
     ) -> Result<(), StateError> {
         self.transaction(|state| {
-            if lock.scope != ScopeKey::Vehicle || lock.parent_vehicle.is_some() {
+            if lock.scope != ScopeKey::Vehicle || lock.parent_vehicle_lock_id.is_some() {
                 return Err(StateError::Invariant(
                     "Vehicle insertion requires a root vehicle lock".to_owned(),
                 ));
@@ -237,7 +243,7 @@ impl LockState {
                     .active_by_id
                     .get(child_id)
                     .ok_or_else(|| StateError::ActiveLockNotFound(child_id.clone()))?;
-                if child.scope == ScopeKey::Vehicle || child.parent_vehicle.is_some() {
+                if child.scope == ScopeKey::Vehicle || child.parent_vehicle_lock_id.is_some() {
                     return Err(StateError::Invariant(format!(
                         "Invalid vehicle child {child_id}"
                     )));
@@ -247,7 +253,7 @@ impl LockState {
             state.insert_active_uncommitted(lock)?;
             for child_id in children {
                 if let Some(child) = state.active_by_id.get_mut(&child_id) {
-                    child.parent_vehicle = Some(vehicle_id.clone());
+                    child.parent_vehicle_lock_id = Some(vehicle_id.clone());
                 }
                 state
                     .children_by_vehicle
@@ -264,14 +270,15 @@ impl LockState {
         &mut self,
         lock_id: &str,
         expires_at: SystemTime,
+        now: SystemTime,
     ) -> Result<(), StateError> {
         self.transaction(|state| {
             let lock = state
                 .active_by_id
                 .get_mut(lock_id)
                 .ok_or_else(|| StateError::ActiveLockNotFound(lock_id.to_owned()))?;
-            if lock.expires_at <= SystemTime::now() {
-                return Err(StateError::RenewalNotExtension);
+            if lock.expires_at <= now {
+                return Err(StateError::LockExpired);
             }
             if expires_at <= lock.expires_at {
                 return Err(StateError::RenewalNotExtension);
@@ -309,12 +316,10 @@ impl LockState {
         self.delete(lock_id).map(ExpirationStart::Expired)
     }
 
-    /// Atomically expands and preempts selected lock roots, converts owned roots,
-    /// and inserts the replacement lock.
+    /// Atomically expands and preempts selected lock roots and inserts the replacement lock.
     pub(super) fn commit_replacement(
         &mut self,
         preempted_ids: &[String],
-        converted_ids: &[String],
         replacement: ActiveLock,
         broken_by: &str,
         broken_at: SystemTime,
@@ -325,31 +330,12 @@ impl LockState {
             let replacement_scope = replacement.scope.clone();
             let replacement_subject = replacement.principal.subject.clone();
             let preempted_roots: BTreeSet<_> = preempted_ids.iter().cloned().collect();
-            let converted_roots: BTreeSet<_> = converted_ids.iter().cloned().collect();
             let preempted = state.expand_active_trees(preempted_ids)?;
-            let converted = state.expand_active_trees(converted_ids)?;
-            if preempted.iter().any(|id| converted.contains(id)) {
-                return Err(StateError::Invariant(
-                    "Lock selected for preemption and conversion".to_owned(),
-                ));
-            }
-            for id in &converted {
-                let lock = state
-                    .active_by_id
-                    .get(id)
-                    .ok_or_else(|| StateError::ActiveLockNotFound(id.clone()))?;
-                if lock.principal.subject != replacement_subject {
-                    return Err(StateError::Invariant(format!(
-                        "Converted lock {id} has a different owner"
-                    )));
-                }
-            }
             if state.id_exists(&replacement.id) {
                 return Err(StateError::DuplicateId(replacement.id.clone()));
             }
             if let Some(existing_id) = state.active_by_scope.get(&replacement.scope)
                 && !preempted.contains(existing_id)
-                && !converted.contains(existing_id)
             {
                 return Err(StateError::ReplacementScopeConflict);
             }
@@ -376,9 +362,6 @@ impl LockState {
                     removed.push(lock);
                 }
             }
-            for id in converted_roots {
-                removed.extend(state.remove_active_tree_uncommitted(&id));
-            }
             state.insert_active_uncommitted(replacement)?;
             if replacement_scope == ScopeKey::Vehicle {
                 let children = state
@@ -386,14 +369,14 @@ impl LockState {
                     .values()
                     .filter(|lock| {
                         lock.id != replacement_id
-                            && lock.parent_vehicle.is_none()
+                            && lock.parent_vehicle_lock_id.is_none()
                             && lock.principal.subject == replacement_subject
                     })
                     .map(|lock| lock.id.clone())
                     .collect::<Vec<_>>();
                 for child_id in children {
                     if let Some(child) = state.active_by_id.get_mut(&child_id) {
-                        child.parent_vehicle = Some(replacement_id.clone());
+                        child.parent_vehicle_lock_id = Some(replacement_id.clone());
                     }
                     state
                         .children_by_vehicle
@@ -498,7 +481,7 @@ impl LockState {
                     "Scope index does not reference lock {id}"
                 )));
             }
-            if let Some(parent_id) = &lock.parent_vehicle {
+            if let Some(parent_id) = &lock.parent_vehicle_lock_id {
                 let parent = self.active_by_id.get(parent_id).ok_or_else(|| {
                     StateError::Invariant(format!("Missing parent {parent_id} for lock {id}"))
                 })?;
@@ -541,7 +524,7 @@ impl LockState {
                 if self
                     .active_by_id
                     .get(child_id)
-                    .and_then(|child| child.parent_vehicle.as_ref())
+                    .and_then(|child| child.parent_vehicle_lock_id.as_ref())
                     != Some(parent_id)
                 {
                     return Err(StateError::Invariant(format!(
@@ -572,7 +555,7 @@ impl LockState {
         if self.active_by_scope.contains_key(&lock.scope) {
             return Err(StateError::DuplicateScope);
         }
-        if let Some(parent_id) = &lock.parent_vehicle {
+        if let Some(parent_id) = &lock.parent_vehicle_lock_id {
             let parent = self
                 .active_by_id
                 .get(parent_id)
@@ -599,8 +582,9 @@ impl LockState {
         }
         if let Some(conflicting) = self.active_by_id.values().find(|active| {
             active.coverage.overlaps(&lock.coverage)
-                && lock.parent_vehicle.as_ref() != Some(&active.id)
-                && active.parent_vehicle.as_ref() != Some(&lock.id)
+                && active.principal.subject != lock.principal.subject
+                && lock.parent_vehicle_lock_id.as_ref() != Some(&active.id)
+                && active.parent_vehicle_lock_id.as_ref() != Some(&lock.id)
                 && lock.scope != ScopeKey::Vehicle
         }) {
             return Err(StateError::CoverageConflict(conflicting.id.clone()));
@@ -640,7 +624,7 @@ impl LockState {
     fn remove_active_uncommitted(&mut self, lock_id: &str) -> Option<ActiveLock> {
         let lock = self.active_by_id.remove(lock_id)?;
         self.active_by_scope.remove(&lock.scope);
-        if let Some(parent_id) = &lock.parent_vehicle
+        if let Some(parent_id) = &lock.parent_vehicle_lock_id
             && let Some(children) = self.children_by_vehicle.get_mut(parent_id)
         {
             children.remove(lock_id);
@@ -685,7 +669,7 @@ mod tests {
         id: &str,
         scope: ScopeKey,
         coverage: &[&str],
-        parent_vehicle: Option<&str>,
+        parent_vehicle_lock_id: Option<&str>,
     ) -> ActiveLock {
         ActiveLock {
             id: id.to_owned(),
@@ -697,7 +681,7 @@ mod tests {
             expires_at: SystemTime::UNIX_EPOCH
                 .checked_add(Duration::from_secs(100))
                 .expect("Test expiration should fit"),
-            parent_vehicle: parent_vehicle.map(ToOwned::to_owned),
+            parent_vehicle_lock_id: parent_vehicle_lock_id.map(ToOwned::to_owned),
         }
     }
 
@@ -779,17 +763,43 @@ mod tests {
             .expect("Unrelated coverage should succeed");
         let revision = state.revision();
 
+        let mut powertrain = active_lock(
+            "powertrain",
+            ScopeKey::FunctionalGroup("powertrain".to_owned()),
+            &["engine", "transmission"],
+            None,
+        );
+        powertrain.principal = principal("other-owner");
         let error = state
+            .insert_active(powertrain)
+            .expect_err("Foreign overlapping coverage should fail");
+
+        assert_eq!(error, StateError::CoverageConflict("engine".to_owned()));
+        assert_eq!(state.revision(), revision);
+        assert_eq!(state.active().count(), 2);
+    }
+
+    #[test]
+    fn same_owner_overlapping_coverage_is_allowed() {
+        let mut state = LockState::default();
+        state
+            .insert_active(active_lock(
+                "engine",
+                ScopeKey::Ecu("engine".to_owned()),
+                &["engine"],
+                None,
+            ))
+            .expect("Initial insertion should succeed");
+
+        state
             .insert_active(active_lock(
                 "powertrain",
                 ScopeKey::FunctionalGroup("powertrain".to_owned()),
                 &["engine", "transmission"],
                 None,
             ))
-            .expect_err("Overlapping coverage should fail");
+            .expect("Same-owner overlapping coverage should succeed");
 
-        assert_eq!(error, StateError::CoverageConflict("engine".to_owned()));
-        assert_eq!(state.revision(), revision);
         assert_eq!(state.active().count(), 2);
     }
 
@@ -804,7 +814,8 @@ mod tests {
                 None,
             ))
             .expect("Insertion should succeed");
-        let old_expires_at = SystemTime::now()
+        let now = SystemTime::now();
+        let old_expires_at = now
             .checked_add(Duration::from_secs(100))
             .expect("Test expiration should fit");
         state
@@ -812,12 +823,12 @@ mod tests {
             .get_mut("ecu")
             .expect("Inserted lock should exist")
             .expires_at = old_expires_at;
-        let expires_at = SystemTime::now()
+        let expires_at = now
             .checked_add(Duration::from_secs(200))
             .expect("Test expiration should fit");
 
         state
-            .renew("ecu", expires_at)
+            .renew("ecu", expires_at, now)
             .expect("Renewal should succeed");
 
         assert!(matches!(
@@ -830,43 +841,33 @@ mod tests {
     }
 
     #[test]
-    fn conversion_consumes_old_expiration_as_stale() {
+    fn renewal_rejects_equal_or_shorter_deadline_without_mutation() {
         let mut state = LockState::default();
-        state
-            .insert_active(active_lock(
-                "ecu",
-                ScopeKey::Ecu("engine".to_owned()),
-                &["engine"],
-                None,
-            ))
-            .expect("Converted lock insertion should succeed");
-        state
-            .commit_replacement(
-                &[],
-                &["ecu".to_owned()],
-                active_lock(
-                    "group",
-                    ScopeKey::FunctionalGroup("powertrain".to_owned()),
-                    &["engine"],
-                    None,
-                ),
-                "owner",
-                SystemTime::UNIX_EPOCH,
-            )
-            .expect("Conversion should succeed");
+        let mut lock = active_lock("ecu", ScopeKey::Ecu("engine".to_owned()), &["engine"], None);
+        let now = SystemTime::now();
+        lock.expires_at = now
+            .checked_add(Duration::from_secs(300))
+            .expect("Test expiration should be representable");
+        let equal_deadline = lock.expires_at;
+        let shorter_deadline = lock
+            .expires_at
+            .checked_sub(Duration::from_secs(1))
+            .expect("Test expiration should be representable");
+        state.insert_active(lock).expect("Insertion should succeed");
+        let before = state.clone();
 
-        assert!(matches!(
-            state
-                .begin_expiration("ecu", SystemTime::UNIX_EPOCH + Duration::from_secs(100))
-                .expect("Consumed expiration should be stale"),
-            ExpirationStart::Stale
-        ));
-        assert!(state.active_by_id("group").is_some());
-        assert!(state.active_by_id("ecu").is_none());
+        for expires_at in [equal_deadline, shorter_deadline] {
+            assert_eq!(
+                state.renew("ecu", expires_at, now),
+                Err(StateError::RenewalNotExtension)
+            );
+            assert_eq!(state.revision(), before.revision());
+            assert_eq!(state.active_by_id("ecu"), before.active_by_id("ecu"));
+        }
     }
 
     #[test]
-    fn renewal_rejects_equal_or_shorter_deadline_without_mutation() {
+    fn renewal_distinguishes_expired_lock() {
         let mut state = LockState::default();
         state
             .insert_active(active_lock(
@@ -876,19 +877,11 @@ mod tests {
                 None,
             ))
             .expect("Insertion should succeed");
-        let before = state.clone();
 
-        for expires_at in [
-            SystemTime::UNIX_EPOCH + Duration::from_secs(100),
-            SystemTime::UNIX_EPOCH + Duration::from_secs(99),
-        ] {
-            assert_eq!(
-                state.renew("ecu", expires_at),
-                Err(StateError::RenewalNotExtension)
-            );
-            assert_eq!(state.revision(), before.revision());
-            assert_eq!(state.active_by_id("ecu"), before.active_by_id("ecu"));
-        }
+        assert_eq!(
+            state.renew("ecu", SystemTime::now(), SystemTime::now()),
+            Err(StateError::LockExpired)
+        );
     }
 
     #[test]
@@ -963,7 +956,6 @@ mod tests {
         state
             .commit_replacement(
                 &["old".to_owned()],
-                &[],
                 replacement,
                 "priority-app",
                 SystemTime::UNIX_EPOCH
@@ -997,7 +989,6 @@ mod tests {
         let error = state
             .commit_replacement(
                 &["old".to_owned(), "missing".to_owned()],
-                &[],
                 active_lock("new", ScopeKey::Ecu("engine".to_owned()), &["engine"], None),
                 "priority-app",
                 SystemTime::UNIX_EPOCH,
@@ -1027,7 +1018,6 @@ mod tests {
         state
             .commit_replacement(
                 &["old".to_owned()],
-                &[],
                 active_lock("new", ScopeKey::Ecu("engine".to_owned()), &["engine"], None),
                 "priority-app",
                 SystemTime::UNIX_EPOCH,
@@ -1078,7 +1068,6 @@ mod tests {
         let removed = state
             .commit_replacement(
                 &["z-vehicle".to_owned()],
-                &[],
                 replacement,
                 "new-owner",
                 SystemTime::now(),
@@ -1107,7 +1096,6 @@ mod tests {
         state
             .commit_replacement(
                 &["old".to_owned()],
-                &[],
                 active_lock("new", ScopeKey::Ecu("engine".to_owned()), &["engine"], None),
                 "priority-app",
                 SystemTime::UNIX_EPOCH,
@@ -1148,7 +1136,6 @@ mod tests {
         state
             .commit_replacement(
                 &["first".to_owned()],
-                &[],
                 second,
                 "second-owner",
                 SystemTime::UNIX_EPOCH,
@@ -1164,7 +1151,6 @@ mod tests {
         state
             .commit_replacement(
                 &["second".to_owned()],
-                &[],
                 third,
                 "third-owner",
                 SystemTime::UNIX_EPOCH,

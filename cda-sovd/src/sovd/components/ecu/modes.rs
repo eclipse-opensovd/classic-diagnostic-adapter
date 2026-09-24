@@ -40,7 +40,7 @@ use crate::{
     sovd::{
         WebserverEcuState, create_schema,
         error::{ApiError, ErrorWrapper, api_error_from_diag_response},
-        locks::{validate_ecu_read, validate_ecu_write},
+        locks::require_ecu_access,
     },
 };
 
@@ -54,11 +54,13 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
         ecu_name, locks, ..
     }): State<WebserverEcuState<T, U>>,
 ) -> Response {
-    let claims = security_plugin.as_auth_plugin().claims();
-    if let Err(response) = validate_ecu_read(&claims, &ecu_name, &locks, query.include_schema).await
-    {
-        return response.into_response();
-    }
+    require_ecu_access!(
+        read,
+        security_plugin,
+        &ecu_name,
+        &locks,
+        query.include_schema
+    );
     let schema = if query.include_schema {
         Some(create_schema!(sovd_modes::get::Response))
     } else {
@@ -137,10 +139,7 @@ async fn handle_mode_change<T: UdsEcu + Clone>(
     mode_id: &str,
     include_schema: bool,
 ) -> Response {
-    let claims = security_plugin.as_auth_plugin().claims();
-    if let Err(response) = validate_ecu_write(&claims, ecu_name, locks, include_schema).await {
-        return response.into_response();
-    }
+    require_ecu_access!(write, security_plugin, ecu_name, locks, include_schema);
     match uds
         .set_ecu_state(
             ecu_name,
@@ -190,10 +189,7 @@ async fn handle_mode_get<T: UdsEcu + Clone, R: schemars::JsonSchema + Serialize>
     include_schema: bool,
     create_response_type_callback: fn(value: String, schema: Option<Schema>) -> R,
 ) -> Response {
-    let claims = security_plugin.as_auth_plugin().claims();
-    if let Err(response) = validate_ecu_read(&claims, ecu_name, locks, include_schema).await {
-        return response.into_response();
-    }
+    require_ecu_access!(read, security_plugin, ecu_name, locks, include_schema);
     {
         let schema = if include_schema {
             Some(create_schema!(R))
@@ -246,12 +242,8 @@ pub(crate) mod session {
             ApiError,
         >,
     ) -> Response {
-        let claims = security_plugin.as_auth_plugin().claims();
         let include_schema = query.include_schema;
-        if let Err(response) = validate_ecu_write(&claims, &ecu_name, &locks, include_schema).await
-        {
-            return response.into_response();
-        }
+        require_ecu_access!(write, security_plugin, &ecu_name, &locks, include_schema);
         let schema = if include_schema {
             Some(create_schema!(
                 sovd_modes::security_and_session::put::Response<String>
@@ -461,16 +453,7 @@ pub(crate) mod security {
     ) -> Response {
         let include_schema = query.include_schema;
 
-        if let Err(response) = validate_ecu_write(
-            &security_plugin.as_auth_plugin().claims(),
-            &ecu_name,
-            &locks,
-            include_schema,
-        )
-        .await
-        {
-            return response.into_response();
-        }
+        require_ecu_access!(write, security_plugin, &ecu_name, &locks, include_schema);
 
         let level = level_from_value(&request_body.value);
         let key = request_body.key.map(|k| k.send_key);

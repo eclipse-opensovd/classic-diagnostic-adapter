@@ -24,6 +24,7 @@ use crate::sovd::{self, error::VendorErrorCode};
 pub(crate) fn lock_details_example() -> sovd_interfaces::locking::id::get::Response {
     sovd_interfaces::locking::id::get::Response {
         lock_expiration: "2025-01-01T00:00:00Z".to_owned(),
+        x_sovd2uds_isexclusive: true,
         x_sovd2uds_broken_by: None,
         x_sovd2uds_broken_at: None,
         x_sovd2uds_current_holder: None,
@@ -36,6 +37,7 @@ pub(crate) fn lock_created_example() -> sovd_interfaces::locking::post_put::Resp
         id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
         lock_expiration: None,
         owned: Some(true),
+        x_sovd2uds_isexclusive: true,
         x_sovd2uds_broken_by: None,
         x_sovd2uds_broken_at: None,
         x_sovd2uds_current_holder: None,
@@ -49,6 +51,7 @@ pub(crate) fn lock_list_example() -> sovd_interfaces::locking::get::Response {
             id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
             lock_expiration: Some("2025-01-01T00:00:00Z".to_owned()),
             owned: Some(true),
+            x_sovd2uds_isexclusive: true,
             x_sovd2uds_broken_by: None,
             x_sovd2uds_broken_at: None,
             x_sovd2uds_current_holder: None,

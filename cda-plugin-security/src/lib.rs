@@ -553,6 +553,25 @@ pub mod mock {
         }
     }
 
+    /// Test claims with a configurable subject and attributes.
+    #[derive(Clone, Debug, Default)]
+    pub struct ConfigurableTestClaims {
+        /// Subject returned by [`Claims::sub`].
+        pub subject: String,
+        /// Attributes returned by [`Claims::attributes`].
+        pub attributes: serde_json::Map<String, serde_json::Value>,
+    }
+
+    impl Claims for ConfigurableTestClaims {
+        fn sub(&self) -> &str {
+            &self.subject
+        }
+
+        fn attributes(&self) -> serde_json::Map<String, serde_json::Value> {
+            self.attributes.clone()
+        }
+    }
+
     impl AuthApi for TestSecurityPlugin {
         fn claims(&self) -> Box<&dyn Claims> {
             Box::new(&TestClaims)

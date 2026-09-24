@@ -47,6 +47,7 @@ mod test_helpers;
 pub use state_coordinator::EcuStateCoordinator;
 use types::{EcuDataTransfer, EcuIdentifier, TesterPresentTaskId};
 
+// todo: what timeout should we use to wait till the ecu is 'free'?
 const PERMIT_AQUISITION_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn request_permits(

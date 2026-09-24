@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use cda_interfaces::lock_priority_api::{LockLifecycleEvent, LockPriorityPolicy};
 use futures::FutureExt;
-use tokio::{sync::mpsc, task};
+use tokio::sync::mpsc;
 
 use super::Locks;
 
@@ -51,7 +51,7 @@ pub(super) fn spawn_lifecycle_worker(
     mut receiver: mpsc::Receiver<LifecycleDelivery>,
     timeout: std::time::Duration,
 ) {
-    task::spawn(async move {
+    cda_interfaces::spawn_named!("lock-lifecycle", async move {
         while let Some(delivery) = receiver.recv().await {
             deliver_lock_event(&delivery.policy, delivery.event, timeout).await;
         }

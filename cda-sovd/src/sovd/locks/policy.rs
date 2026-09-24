@@ -19,28 +19,31 @@ use cda_interfaces::lock_priority_api::{
 };
 use cda_plugin_security::Claims;
 use futures::FutureExt;
+use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 
 use super::{
     ActiveLock, ApiError, LockCoverage, Locks, ScopeKey, scope_from_key, validated_expiration,
 };
+use crate::sovd::locks::{LifecycleDelivery, TransitionId, TransitionReservation};
 
 pub(crate) struct PendingPreemption {
     pub(super) evaluation_id: String,
     pub(super) policy: Arc<dyn LockPriorityPolicy>,
+    lifecycle_sender: Sender<LifecycleDelivery>,
     pub(super) root_lock_ids: Vec<String>,
     pub(super) broken_by: String,
     pub(super) broken_at: SystemTime,
     armed: bool,
 }
 pub(crate) struct AcquisitionGuard {
-    pub(super) reservation: super::TransitionReservation,
+    pub(super) reservation: TransitionReservation,
     pub(super) evaluation_id: Option<String>,
     pub(super) policy: Arc<dyn LockPriorityPolicy>,
 }
 
 impl AcquisitionGuard {
-    pub(crate) fn transition_id(&self) -> super::TransitionId {
+    pub(crate) fn transition_id(&self) -> TransitionId {
         self.reservation.id()
     }
 
@@ -51,22 +54,32 @@ impl AcquisitionGuard {
 
 impl PendingPreemption {
     pub(super) fn rollback(mut self) {
-        tracing::warn!(evaluation_id = %self.evaluation_id, "Lock acquisition failed after preemption was approved");
-        self.armed = false;
+        self.abandon("Lock acquisition failed after preemption was approved");
     }
 
     pub(super) fn disarm(&mut self) {
         self.armed = false;
     }
+
+    fn abandon(&mut self, reason: &str) {
+        if !self.armed {
+            return;
+        }
+        tracing::warn!(evaluation_id = %self.evaluation_id, reason, "Preemption transaction was abandoned");
+        self.armed = false;
+        super::enqueue_lock_event(
+            &self.lifecycle_sender,
+            Arc::clone(&self.policy),
+            cda_interfaces::lock_priority_api::LockLifecycleEvent::PreemptionAbandoned {
+                evaluation_id: self.evaluation_id.clone(),
+            },
+        );
+    }
 }
 
 impl Drop for PendingPreemption {
     fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        tracing::warn!(evaluation_id = %self.evaluation_id, "Preemption transaction was abandoned");
-        self.armed = false;
+        self.abandon("Pending preemption dropped before commit");
     }
 }
 
@@ -136,15 +149,11 @@ impl Locks {
                 let store = self.lock_idle().await;
                 let state = &store.state;
                 let mut active_locks = state.active().map(active_snapshot).collect::<Vec<_>>();
-                active_locks.sort_by(|left, right| {
-                    scope_sort_key(&left.scope)
-                        .cmp(&scope_sort_key(&right.scope))
-                        .then_with(|| left.id.cmp(&right.id))
-                });
+                sort_lock_snapshots(&mut active_locks);
                 let candidates = state
                     .active()
                     .filter(|lock| {
-                        lock.parent_vehicle.is_none()
+                        lock.parent_vehicle_lock_id.is_none()
                             && lock.principal.subject != policy_request.principal.subject
                             && (lock.scope == ScopeKey::Vehicle
                                 || lock.coverage.overlaps(&coverage))
@@ -167,7 +176,7 @@ impl Locks {
                     operation,
                 )
             };
-            if candidates.is_empty() {
+            if candidates.is_empty() && matches!(&operation, LockPriorityOperation::Acquire) {
                 let reservation = self.reserve_transition().await;
                 let store = self.store.lock().await;
                 if store.state.revision() == revision && store.generation == generation {
@@ -184,11 +193,17 @@ impl Locks {
                 }
                 drop(store);
                 reservation.finish().await;
-                continue;
+                if stale_attempts < self.config.priority_policy_stale_retries {
+                    stale_attempts = stale_attempts.saturating_add(1);
+                    continue;
+                }
+                return Err(ApiError::Conflict(
+                    "Lock state changed during priority evaluation".to_owned(),
+                ));
             }
             let evaluation = LockPriorityEvaluation {
                 evaluation_id: evaluation_id.clone(),
-                operation,
+                operation: operation.clone(),
                 request: policy_request.clone(),
                 revision,
                 captured_at: SystemTime::now(),
@@ -213,6 +228,14 @@ impl Locks {
                 ApiError::InternalServerError(Some("Lock priority policy panicked".to_owned()))
             })?
             .map_err(map_policy_error)?;
+
+            if matches!(operation, LockPriorityOperation::PostRenew { .. })
+                && matches!(&decision, LockPriorityDecision::Preempt { .. })
+            {
+                return Err(ApiError::Conflict(
+                    "Lock policy cannot preempt locks during renewal".to_owned(),
+                ));
+            }
 
             let reservation = self.reserve_transition().await;
             let store = self.store.lock().await;
@@ -321,7 +344,7 @@ impl Locks {
         if let Err(error) =
             Self::validate_preemption_selection(request.break_lock, &lock_ids, candidates)
         {
-            drop(guard);
+            guard.finish().await;
             tracing::warn!(evaluation_id, "Policy selected an invalid preemption set");
             return Err(error);
         }
@@ -330,7 +353,7 @@ impl Locks {
             let state = &store.state;
             if state.revision() != revision {
                 drop(store);
-                drop(guard);
+                guard.finish().await;
                 tracing::warn!(
                     evaluation_id,
                     "Lock state changed before preemption staging"
@@ -346,7 +369,7 @@ impl Locks {
                 .filter(|id| {
                     state
                         .active_by_id(id)
-                        .and_then(|lock| lock.parent_vehicle.as_deref())
+                        .and_then(|lock| lock.parent_vehicle_lock_id.as_deref())
                         .is_none_or(|parent| !selected_ids.contains(parent))
                 })
                 .cloned()
@@ -356,6 +379,7 @@ impl Locks {
         let pending = PendingPreemption {
             evaluation_id: evaluation_id.to_owned(),
             policy: Arc::clone(&guard.policy),
+            lifecycle_sender: self.lifecycle_sender.clone(),
             root_lock_ids,
             broken_by,
             broken_at: SystemTime::now(),
@@ -379,8 +403,6 @@ impl Locks {
                 "Lock policy selected no locks to preempt".to_owned(),
             ));
         }
-        let candidate_ids: std::collections::HashSet<&str> =
-            candidates.iter().map(String::as_str).collect();
         let selected_ids: std::collections::HashSet<&str> =
             lock_ids.iter().map(String::as_str).collect();
         if selected_ids.len() != lock_ids.len() {
@@ -388,6 +410,8 @@ impl Locks {
                 "Lock policy selected a lock more than once".to_owned(),
             ));
         }
+        let candidate_ids: std::collections::HashSet<&str> =
+            candidates.iter().map(String::as_str).collect();
         if lock_ids
             .iter()
             .any(|id| !candidate_ids.contains(id.as_str()))
@@ -412,12 +436,20 @@ fn map_policy_error(error: LockPriorityError) -> ApiError {
     }
 }
 
-pub(super) fn scope_sort_key(scope: &LockScope) -> (u8, &str) {
+fn scope_sort_key(scope: &LockScope) -> (u8, &str) {
     match scope {
         LockScope::Vehicle => (0, ""),
         LockScope::Ecu { name } => (1, name),
         LockScope::FunctionalGroup { name } => (2, name),
     }
+}
+
+pub(super) fn sort_lock_snapshots(snapshots: &mut [LockSnapshot]) {
+    snapshots.sort_by(|left, right| {
+        scope_sort_key(&left.scope)
+            .cmp(&scope_sort_key(&right.scope))
+            .then_with(|| left.id.cmp(&right.id))
+    });
 }
 
 pub(super) fn active_snapshot(lock: &ActiveLock) -> LockSnapshot {
@@ -427,7 +459,7 @@ pub(super) fn active_snapshot(lock: &ActiveLock) -> LockSnapshot {
         principal: lock.principal.clone(),
         metadata: lock.metadata.clone(),
         exclusive: lock.exclusive,
-        parent_vehicle_lock_id: lock.parent_vehicle.clone(),
+        parent_vehicle_lock_id: lock.parent_vehicle_lock_id.clone(),
         expires_at: lock.expires_at,
     }
 }

@@ -195,12 +195,10 @@ pub enum LockLifecycleEvent {
         /// Identifiers of the locks that became defunct as part of this preemption.
         defunct_lock_ids: Vec<String>,
     },
-    /// Same-owner locks were converted into a replacement lock without becoming defunct.
-    Converted {
-        /// The newly active replacement lock.
-        replacement: LockSnapshot,
-        /// Identifiers of locks consumed by the conversion.
-        converted_lock_ids: Vec<String>,
+    /// A policy-approved preemption was abandoned before it committed.
+    PreemptionAbandoned {
+        /// Evaluation ID shared with the corresponding `evaluate` call.
+        evaluation_id: String,
     },
 }
 

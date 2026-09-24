@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -37,7 +37,7 @@ async fn expiration_holds_mutation_guard_until_cleanup_finishes() {
         metadata: serde_json::Map::new(),
         exclusive: true,
         expires_at: SystemTime::now() + Duration::from_millis(20),
-        parent_vehicle: None,
+        parent_vehicle_lock_id: None,
     };
     locks.test_insert_active(lock.clone()).await;
     let child = ActiveLock {
@@ -48,7 +48,7 @@ async fn expiration_holds_mutation_guard_until_cleanup_finishes() {
         metadata: serde_json::Map::new(),
         exclusive: true,
         expires_at: lock.expires_at + Duration::from_secs(30),
-        parent_vehicle: Some(lock.id.clone()),
+        parent_vehicle_lock_id: Some(lock.id.clone()),
     };
     locks.test_insert_active(child.clone()).await;
     let cleanup_started_task = Arc::clone(&cleanup_started);
@@ -89,23 +89,7 @@ async fn expiration_holds_mutation_guard_until_cleanup_finishes() {
         .await
         .expect("Mutation guard should be released after cleanup");
     drop(released_guard);
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if policy
-                .events
-                .lock()
-                .expect("Event mutex poisoned")
-                .iter()
-                .len()
-                == 2
-            {
-                break;
-            }
-            task::yield_now().await;
-        }
-    })
-    .await
-    .expect("Expired event should be delivered after cleanup");
+    await_events(&policy, 2).await;
     let events = policy.events.lock().expect("Event mutex poisoned");
     assert!(matches!(
         events.as_slice(),
@@ -125,7 +109,7 @@ async fn expiration_releases_transition_after_cleanup_panic() {
     let lock = ActiveLock {
         id: "panicking-cleanup".to_owned(),
         scope: ScopeKey::Vehicle,
-        coverage: LockCoverage::new(["ecu-a".to_owned()]),
+        coverage: LockCoverage::vehicle(),
         principal: LockPrincipal {
             subject: "owner".to_owned(),
             claims: serde_json::Map::new(),
@@ -133,7 +117,7 @@ async fn expiration_releases_transition_after_cleanup_panic() {
         metadata: serde_json::Map::new(),
         exclusive: true,
         expires_at: SystemTime::now() + Duration::from_millis(20),
-        parent_vehicle: None,
+        parent_vehicle_lock_id: None,
     };
     locks.test_insert_active(lock.clone()).await;
     locks

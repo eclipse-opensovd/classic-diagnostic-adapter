@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -21,23 +21,21 @@ use cda_plugin_security::SecurityPlugin;
 use uuid::Uuid;
 
 use super::{
-    ActiveLock, ApiError, LockCoverage, LockTarget, Locks, ScopeKey,
+    ActiveLock, ApiError, LockCoverage, Locks, ScopeKey,
     cleanup::{LockCleanupFnHelper, reset_ecu_session_and_security},
 };
 
 pub(super) async fn create_lock<T: UdsEcu + Clone>(
     uds: &T,
     request: LockRequest,
-    lock_type: LockTarget,
     locks: &Arc<Locks>,
-    entity_name: Option<&String>,
     coverage: LockCoverage,
     security_plugin: Box<dyn SecurityPlugin>,
 ) -> Result<(ActiveLock, LockCleanupFnHelper, Option<TesterPresentType>), ApiError> {
     let id = Uuid::new_v4().to_string();
     let principal = request.principal.clone();
-    let scope = lock_type.scope(entity_name)?;
-    let parent_vehicle = if scope == LockScope::Vehicle {
+    let scope = request.scope.clone();
+    let parent_vehicle_lock_id = if scope == LockScope::Vehicle {
         None
     } else {
         locks
@@ -49,11 +47,9 @@ pub(super) async fn create_lock<T: UdsEcu + Clone>(
             .filter(|lock| lock.principal.subject == principal.subject)
             .map(|lock| lock.id.clone())
     };
-    let (tester_present, cleanup_fn) = match lock_type {
-        LockTarget::Ecu => {
-            let ecu_name = entity_name
-                .ok_or_else(|| ApiError::BadRequest("No ECU name provided".to_owned()))?
-                .to_lowercase();
+    let (tester_present, cleanup_fn) = match &scope {
+        LockScope::Ecu { name } => {
+            let ecu_name = name.to_lowercase();
             let tp_type = TesterPresentType::Ecu(ecu_name.clone());
             let cleanup_tp_type = tp_type.clone();
             let uds = (*uds).clone();
@@ -73,12 +69,8 @@ pub(super) async fn create_lock<T: UdsEcu + Clone>(
             });
             (Some(tp_type), cleanup)
         }
-        LockTarget::FunctionalGroup => {
-            let functional_group_name = entity_name
-                .ok_or_else(|| {
-                    ApiError::BadRequest("No functional group name provided".to_owned())
-                })?
-                .to_lowercase();
+        LockScope::FunctionalGroup { name } => {
+            let functional_group_name = name.to_lowercase();
             let tp_type = TesterPresentType::Functional(functional_group_name.clone());
             let covered_ecus = coverage.covered_ecus();
             let cleanup_tp_type = tp_type.clone();
@@ -101,7 +93,7 @@ pub(super) async fn create_lock<T: UdsEcu + Clone>(
             });
             (Some(tp_type), cleanup)
         }
-        LockTarget::Vehicle => {
+        LockScope::Vehicle => {
             let uds = (*uds).clone();
             let cleanup = LockCleanupFnHelper::new(async move || {
                 let sec = &(security_plugin as DynamicPlugin);
@@ -121,7 +113,7 @@ pub(super) async fn create_lock<T: UdsEcu + Clone>(
             metadata: request.metadata,
             exclusive: request.exclusive,
             expires_at: request.expires_at,
-            parent_vehicle,
+            parent_vehicle_lock_id,
         },
         cleanup_fn,
         tester_present,

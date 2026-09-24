@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -11,11 +11,36 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use cda_interfaces::UdsEcu;
+
 use super::*;
+use crate::sovd::locks::validation::validate_defunct_fg_lock_in_state;
+
+async fn validate_defunct_fg_lock<T: UdsEcu>(
+    claims: &impl Claims,
+    functional_group_name: &str,
+    uds: &T,
+    locks: &Locks,
+    include_schema: bool,
+) -> Result<(), ErrorWrapper> {
+    let target_coverage = LockCoverage::new(
+        uds.ecus_for_functional_group(functional_group_name, false)
+            .await,
+    );
+    let target_scope = ScopeKey::FunctionalGroup(functional_group_name.to_ascii_lowercase());
+    let mut store = locks.lock_idle().await;
+    validate_defunct_fg_lock_in_state(
+        claims,
+        &target_scope,
+        &target_coverage,
+        &mut store.state,
+        include_schema,
+    )
+}
 
 #[test]
 fn vehicle_acquisition_rejects_foreign_child_as_locked() {
-    let active = [active_test_lock("other-client", true)];
+    let active = [test_lock("access-lock").owner("other-client").build()];
 
     assert!(matches!(
         validate_vehicle_children(&active, &[], "requesting-client"),
@@ -47,37 +72,52 @@ fn communication_access_matches_lock_matrix() {
         },
         Case {
             name: "owned non-exclusive write",
-            locks: vec![active_test_lock("caller", false)],
+            locks: vec![
+                test_lock("access-lock")
+                    .owner("caller")
+                    .exclusive(false)
+                    .build(),
+            ],
             write: true,
             expected: None,
         },
         Case {
             name: "foreign non-exclusive read",
-            locks: vec![active_test_lock("other", false)],
+            locks: vec![
+                test_lock("access-lock")
+                    .owner("other")
+                    .exclusive(false)
+                    .build(),
+            ],
             write: false,
             expected: None,
         },
         Case {
             name: "foreign non-exclusive write",
-            locks: vec![active_test_lock("other", false)],
+            locks: vec![
+                test_lock("access-lock")
+                    .owner("other")
+                    .exclusive(false)
+                    .build(),
+            ],
             write: true,
             expected: Some(StatusCode::LOCKED),
         },
         Case {
             name: "owned exclusive read",
-            locks: vec![active_test_lock("caller", true)],
+            locks: vec![test_lock("access-lock").owner("caller").build()],
             write: false,
             expected: None,
         },
         Case {
             name: "foreign exclusive read",
-            locks: vec![active_test_lock("other", true)],
+            locks: vec![test_lock("access-lock").owner("other").build()],
             write: false,
             expected: Some(StatusCode::LOCKED),
         },
         Case {
             name: "foreign exclusive write",
-            locks: vec![active_test_lock("other", true)],
+            locks: vec![test_lock("access-lock").owner("other").build()],
             write: true,
             expected: Some(StatusCode::LOCKED),
         },
@@ -92,19 +132,45 @@ fn communication_access_matches_lock_matrix() {
 
 #[test]
 fn ineffective_preemption_selections_are_locked() {
+    struct Case {
+        name: &'static str,
+        break_lock: bool,
+        lock_ids: Vec<String>,
+    }
+
     let candidates = vec!["candidate".to_owned()];
     let cases = [
-        (false, vec!["candidate".to_owned()]),
-        (true, Vec::new()),
-        (true, vec!["candidate".to_owned(), "candidate".to_owned()]),
-        (true, vec!["not-a-candidate".to_owned()]),
+        Case {
+            name: "breaking not requested",
+            break_lock: false,
+            lock_ids: vec!["candidate".to_owned()],
+        },
+        Case {
+            name: "empty selection",
+            break_lock: true,
+            lock_ids: Vec::new(),
+        },
+        Case {
+            name: "duplicate selection",
+            break_lock: true,
+            lock_ids: vec!["candidate".to_owned(), "candidate".to_owned()],
+        },
+        Case {
+            name: "unknown candidate",
+            break_lock: true,
+            lock_ids: vec!["not-a-candidate".to_owned()],
+        },
     ];
 
-    for (break_lock, lock_ids) in cases {
-        assert!(matches!(
-            Locks::validate_preemption_selection(break_lock, &lock_ids, &candidates),
-            Err(ApiError::Locked(_))
-        ));
+    for case in cases {
+        assert!(
+            matches!(
+                Locks::validate_preemption_selection(case.break_lock, &case.lock_ids, &candidates),
+                Err(ApiError::Locked(_))
+            ),
+            "{}",
+            case.name
+        );
     }
 }
 
@@ -119,8 +185,10 @@ async fn elapsed_locks_do_not_authorize_or_block_communication() {
         attributes: serde_json::Map::new(),
     };
     let locks = Locks::new();
-    let mut expired = active_test_lock("owner", true);
-    expired.expires_at = SystemTime::now() - Duration::from_secs(1);
+    let expired = test_lock("access-lock")
+        .owner("owner")
+        .expires_at(SystemTime::now() - Duration::from_secs(1))
+        .build();
     locks.test_insert_active(expired).await;
 
     assert_eq!(
@@ -149,12 +217,13 @@ async fn elapsed_locks_do_not_authorize_or_block_communication() {
         metadata: serde_json::Map::new(),
         exclusive: true,
         expires_at: SystemTime::now() - Duration::from_secs(1),
-        parent_vehicle: None,
+        parent_vehicle_lock_id: None,
     };
     locks.test_insert_active(vehicle).await;
-    let mut child = active_test_lock("owner", true);
-    child.id = "future-child".to_owned();
-    child.parent_vehicle = Some("expired-vehicle".to_owned());
+    let child = test_lock("future-child")
+        .owner("owner")
+        .parent("expired-vehicle")
+        .build();
     locks.test_insert_active(child).await;
 
     assert_eq!(
@@ -175,8 +244,10 @@ async fn elapsed_locks_do_not_authorize_or_block_communication() {
 #[tokio::test]
 async fn ecu_access_includes_functional_group_coverage() {
     let locks = Locks::new();
-    let mut lock = active_test_lock("other", true);
-    lock.scope = ScopeKey::FunctionalGroup("group-a".to_owned());
+    let lock = test_lock("access-lock")
+        .owner("other")
+        .functional_group("group-a", ["ecu-a".to_owned()])
+        .build();
     locks.test_insert_active(lock).await;
     let claims = TestClaims {
         subject: "caller".to_owned(),
@@ -198,11 +269,11 @@ async fn functional_group_access_includes_ecu_coverage() {
         .lock()
         .await
         .state
-        .insert_active(active_test_lock("other", true))
+        .insert_active(test_lock("access-lock").owner("other").build())
         .unwrap();
     let mut uds = MockUdsEcu::new();
     uds.expect_ecus_for_functional_group()
-        .times(2)
+        .times(1)
         .with(eq("group-a"), eq(false))
         .returning(|_, _| vec!["ecu-a".to_owned()]);
     let claims = TestClaims {
@@ -221,8 +292,7 @@ async fn functional_group_access_includes_ecu_coverage() {
 async fn fg_validation_rejects_defunct_overlapping_ecu_coverage() {
     let locks = Locks::new();
     insert_test_ecu_lock(&locks, "ecu-a").await;
-    let mut replacement = active_test_lock("other-client", true);
-    replacement.id = "replacement".to_owned();
+    let replacement = test_lock("replacement").owner("other-client").build();
     locks
         .store
         .lock()
@@ -230,7 +300,6 @@ async fn fg_validation_rejects_defunct_overlapping_ecu_coverage() {
         .state
         .commit_replacement(
             &["test-lock-id".to_owned()],
-            &[],
             replacement,
             "priority-app",
             SystemTime::now(),
@@ -241,7 +310,7 @@ async fn fg_validation_rejects_defunct_overlapping_ecu_coverage() {
         .with(eq("group-a"), eq(false))
         .return_once(|_, _| vec!["ecu-a".to_owned()]);
 
-    let result = validate_defunct_fg_lock(
+    let error = validate_defunct_fg_lock(
         &TestClaims {
             subject: "test_user".to_owned(),
             attributes: serde_json::Map::new(),
@@ -251,7 +320,8 @@ async fn fg_validation_rejects_defunct_overlapping_ecu_coverage() {
         &locks,
         false,
     )
-    .await;
+    .await
+    .expect_err("Defunct overlapping lock should reject access");
 
-    assert!(result.is_err());
+    assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
 }

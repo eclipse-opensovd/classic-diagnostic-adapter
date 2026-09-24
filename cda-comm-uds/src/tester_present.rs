@@ -45,7 +45,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         interval: std::time::Duration,
     ) -> JoinHandle<()> {
         tracing::debug!(
-            "Starting tester present on for {} with interval {:?}",
+            "Starting tester present for {} with interval {:?}",
             control_msg.ecu,
             interval
         );
