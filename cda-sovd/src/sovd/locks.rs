@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{fmt, option::Option, sync::Arc};
+use std::{option::Option, sync::Arc};
 
 use cda_interfaces::{
     HashMap, HashMapExtensions,
@@ -20,7 +20,7 @@ use cda_interfaces::{
 };
 use cda_plugin_security::Claims;
 use chrono::{DateTime, SecondsFormat, Utc};
-use tokio::sync::{Mutex, Notify, mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::{
     openapi,
@@ -59,6 +59,34 @@ pub(crate) use validation::{
     validate_ecu_read, validate_ecu_write, validate_fg_read, validate_fg_write,
     validate_vehicle_owner,
 };
+
+macro_rules! require_ecu_access {
+    (read, $plugin:expr, $ecu_name:expr, $locks:expr, $include_schema:expr $(,)?) => {
+        if let Err(response) = $crate::sovd::locks::validate_ecu_read(
+            &$plugin.as_auth_plugin().claims(),
+            $ecu_name,
+            $locks,
+            $include_schema,
+        )
+        .await
+        {
+            return ::axum::response::IntoResponse::into_response(response);
+        }
+    };
+    (write, $plugin:expr, $ecu_name:expr, $locks:expr, $include_schema:expr $(,)?) => {
+        if let Err(response) = $crate::sovd::locks::validate_ecu_write(
+            &$plugin.as_auth_plugin().claims(),
+            $ecu_name,
+            $locks,
+            $include_schema,
+        )
+        .await
+        {
+            return ::axum::response::IntoResponse::into_response(response);
+        }
+    };
+}
+pub(crate) use require_ecu_access;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LockUpdateError {
@@ -101,7 +129,7 @@ pub(super) struct LockStore {
 
 pub struct Locks {
     store: Arc<Mutex<LockStore>>,
-    transition_changed: Arc<Notify>,
+    transition_gate: Arc<Mutex<()>>,
     priority_policy: Arc<dyn LockPriorityPolicy>,
     lifecycle_sender: mpsc::Sender<LifecycleDelivery>,
     lifecycle_receiver: Mutex<Option<mpsc::Receiver<LifecycleDelivery>>>,
@@ -152,7 +180,7 @@ impl Locks {
                 transition: None,
                 next_transition_id: 0,
             })),
-            transition_changed: Arc::new(Notify::new()),
+            transition_gate: Arc::new(Mutex::new(())),
             priority_policy: policy,
             lifecycle_sender,
             lifecycle_receiver: Mutex::new(Some(lifecycle_receiver)),
@@ -258,54 +286,54 @@ impl Locks {
     }
 
     async fn reserve_transition(&self) -> TransitionReservation {
-        loop {
-            let notified = self.transition_changed.notified();
-            let mut store = self.store.lock().await;
-            if store.transition.is_none() {
-                store.next_transition_id = store.next_transition_id.saturating_add(1);
-                let id = store.next_transition_id;
-                store.transition = Some(id);
-                drop(store);
-                let (finish, finished) = oneshot::channel::<oneshot::Sender<()>>();
-                let store = Arc::clone(&self.store);
-                let changed = Arc::clone(&self.transition_changed);
-                tokio::spawn(async move {
-                    let acknowledge = finished.await.ok();
-                    let mut store = store.lock().await;
-                    if store.transition == Some(id) {
-                        store.transition = None;
-                        drop(store);
-                        changed.notify_waiters();
-                    }
-                    if let Some(acknowledge) = acknowledge {
-                        let _ = acknowledge.send(());
-                    }
-                });
-                return TransitionReservation {
-                    id,
-                    finish: Some(finish),
-                };
+        let transition_guard = Arc::clone(&self.transition_gate).lock_owned().await;
+        let mut store = self.store.lock().await;
+        store.next_transition_id = store.next_transition_id.saturating_add(1);
+        let id = store.next_transition_id;
+        store.transition = Some(id);
+        drop(store);
+        let (finish, finished) = oneshot::channel::<oneshot::Sender<()>>();
+        let store = Arc::clone(&self.store);
+        cda_interfaces::spawn_named!(&format!("lock-transition-release-{id}"), async move {
+            let _transition_guard = transition_guard;
+            let acknowledge = finished.await.ok();
+            let mut store = store.lock().await;
+            if store.transition == Some(id) {
+                store.transition = None;
             }
             drop(store);
-            notified.await;
+            if let Some(acknowledge) = acknowledge {
+                let _ = acknowledge.send(());
+            }
+        });
+        TransitionReservation {
+            id,
+            finish: Some(finish),
         }
     }
 
     async fn lock_idle(&self) -> tokio::sync::MutexGuard<'_, LockStore> {
-        loop {
-            let notified = self.transition_changed.notified();
-            let store = self.store.lock().await;
-            if store.transition.is_none() {
-                return store;
-            }
-            drop(store);
-            notified.await;
-        }
+        let transition_guard = self.transition_gate.lock().await;
+        let store = self.store.lock().await;
+        drop(transition_guard);
+        store
     }
 }
 
 fn map_state_error(error: &StateError) -> ApiError {
-    ApiError::InternalServerError(Some(error.to_string()))
+    match error {
+        StateError::RenewalNotExtension => ApiError::BadRequest(error.to_string()),
+        StateError::LockExpired
+        | StateError::DuplicateScope
+        | StateError::ReplacementScopeConflict
+        | StateError::CoverageConflict(_) => ApiError::Conflict(error.to_string()),
+        StateError::DuplicateId(_)
+        | StateError::ActiveLockNotFound(_)
+        | StateError::ParentNotFound(_)
+        | StateError::ParentNotVehicle(_)
+        | StateError::RevisionOverflow
+        | StateError::Invariant(_) => ApiError::InternalServerError(Some(error.to_string())),
+    }
 }
 
 fn scope_from_key(scope: &ScopeKey) -> LockScope {
@@ -325,6 +353,7 @@ impl DefunctLock {
                     .to_rfc3339_opts(SecondsFormat::Secs, true),
             ),
             owned: Some(self.principal.subject == claims.sub()),
+            x_sovd2uds_isexclusive: self.exclusive,
             x_sovd2uds_broken_by: Some(self.broken_by.clone()),
             x_sovd2uds_broken_at: Some(
                 DateTime::<Utc>::from(self.broken_at).to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -338,6 +367,7 @@ impl DefunctLock {
         sovd_interfaces::locking::id::get::Response {
             lock_expiration: DateTime::<Utc>::from(self.original_expires_at)
                 .to_rfc3339_opts(SecondsFormat::Secs, true),
+            x_sovd2uds_isexclusive: self.exclusive,
             x_sovd2uds_broken_by: Some(self.broken_by.clone()),
             x_sovd2uds_broken_at: Some(
                 DateTime::<Utc>::from(self.broken_at).to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -367,24 +397,6 @@ impl DefunctLock {
             message: "Client lock was broken".to_owned(),
             parameters,
         }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub enum LockTarget {
-    Vehicle,
-    Ecu,
-    FunctionalGroup,
-}
-
-impl fmt::Display for LockTarget {
-    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        let type_name = match self {
-            Self::Vehicle => "Vehicle",
-            Self::Ecu => "ECU",
-            Self::FunctionalGroup => "FunctionalGroup",
-        };
-        write!(formatter, "{type_name}")
     }
 }
 

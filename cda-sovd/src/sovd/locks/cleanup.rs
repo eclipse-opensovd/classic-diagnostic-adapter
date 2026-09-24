@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -11,12 +11,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{future::Future, pin::Pin, sync::Arc, time::SystemTime};
+use std::{pin::Pin, sync::Arc, time::SystemTime};
 
 use cda_interfaces::{DynamicPlugin, UdsEcu, lock_priority_api::LockLifecycleEvent};
 use futures::FutureExt;
 use tokio::{
-    task,
+    sync::OwnedMutexGuard,
     time::{Instant, sleep_until},
 };
 
@@ -52,30 +52,34 @@ impl LockCleanupFnHelper {
 }
 impl Locks {
     pub(super) fn expiration_target(lock: &ActiveLock) -> Result<Instant, ApiError> {
-        Self::expiration_target_at(lock.expires_at)
+        Self::expiration_target_at(lock.expires_at, SystemTime::now())
     }
 
-    pub(super) fn expiration_target_at(expires_at: SystemTime) -> Result<Instant, ApiError> {
+    pub(super) fn expiration_target_at(
+        expires_at: SystemTime,
+        now: SystemTime,
+    ) -> Result<Instant, ApiError> {
         let duration = expires_at
-            .duration_since(SystemTime::now())
+            .duration_since(now)
             .map_err(|_| ApiError::BadRequest("Expiration date is in the past".to_owned()))?;
         Instant::now()
             .checked_add(duration)
-            .ok_or_else(|| ApiError::InternalServerError(Some("Timeout is too large".to_owned())))
+            .ok_or_else(|| ApiError::BadRequest("Lock expiration is too large".to_owned()))
     }
 
     pub(super) async fn schedule_expiration(&self, lock: &ActiveLock, target: Instant) {
         self.ensure_lifecycle_worker().await;
         let store = Arc::clone(&self.store);
-        let transition_changed = Arc::clone(&self.transition_changed);
+        let transition_gate = Arc::clone(&self.transition_gate);
         let policy = Arc::clone(&self.priority_policy);
         let lifecycle_sender = self.lifecycle_sender.clone();
         let lock_id = lock.id.clone();
-        task::spawn(async move {
+        cda_interfaces::spawn_named!(&format!("lock-expiration-{lock_id}"), async move {
             let mut target = target;
-            let (removed, pending_cleanups, transition_id) = loop {
+            let (removed, pending_cleanups, transition_id, transition_guard) = loop {
                 sleep_until(target).await;
-                let transition_id = reserve_transition(&store, &transition_changed).await;
+                let (transition_id, transition_guard) =
+                    reserve_transition(&store, &transition_gate).await;
                 let outcome = {
                     let mut store = store.lock().await;
                     match store.state.begin_expiration(&lock_id, SystemTime::now()) {
@@ -100,13 +104,15 @@ impl Locks {
                     }
                 };
                 match outcome {
-                    Ok(Some((removed, cleanups))) => break (removed, cleanups, transition_id),
+                    Ok(Some((removed, cleanups))) => {
+                        break (removed, cleanups, transition_id, transition_guard);
+                    }
                     Ok(None) => {
-                        finish_transition(&store, &transition_changed, transition_id).await;
+                        finish_transition(&store, transition_id, transition_guard).await;
                         return;
                     }
                     Err(()) => {
-                        finish_transition(&store, &transition_changed, transition_id).await;
+                        finish_transition(&store, transition_id, transition_guard).await;
                     }
                 }
             };
@@ -117,7 +123,7 @@ impl Locks {
                 })
                 .collect();
             run_cleanups(pending_cleanups).await;
-            finish_transition(&store, &transition_changed, transition_id).await;
+            finish_transition(&store, transition_id, transition_guard).await;
             for event in events {
                 enqueue_lock_event(&lifecycle_sender, Arc::clone(&policy), event);
             }
@@ -131,14 +137,14 @@ impl Locks {
         let duration = expires_at
             .duration_since(SystemTime::now())
             .unwrap_or_default();
-        let target = Instant::now().checked_add(duration).ok_or_else(|| {
-            ApiError::InternalServerError(Some("Timeout is too large".to_owned()))
-        })?;
+        let target = Instant::now()
+            .checked_add(duration)
+            .ok_or_else(|| ApiError::BadRequest("Lock expiration is too large".to_owned()))?;
         let store = Arc::clone(&self.store);
-        let transition_changed = Arc::clone(&self.transition_changed);
-        task::spawn(async move {
+        let transition_gate = Arc::clone(&self.transition_gate);
+        cda_interfaces::spawn_named!("defunct-lock-expiration", async move {
             sleep_until(target).await;
-            let mut store = lock_idle(&store, &transition_changed).await;
+            let mut store = lock_idle(&store, &transition_gate).await;
             if let Err(error) = store.state.expire_defunct(SystemTime::now()) {
                 tracing::error!(%error, "Failed to expire defunct locks");
             }
@@ -149,12 +155,16 @@ impl Locks {
 
 pub(super) async fn run_cleanups(pending: Vec<LockCleanupFnHelper>) {
     for cleanup in pending {
-        if std::panic::AssertUnwindSafe(cleanup.call())
+        if let Err(panic) = std::panic::AssertUnwindSafe(cleanup.call())
             .catch_unwind()
             .await
-            .is_err()
         {
-            tracing::error!("Lock cleanup panicked");
+            let message = panic
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("Unknown panic payload");
+            tracing::error!(%message, "Lock cleanup panicked");
         }
     }
 }
@@ -171,48 +181,35 @@ pub(super) fn take_cleanups(
 
 async fn reserve_transition(
     store: &Arc<tokio::sync::Mutex<super::LockStore>>,
-    changed: &Arc<tokio::sync::Notify>,
-) -> super::TransitionId {
-    loop {
-        let notified = changed.notified();
-        let mut store = store.lock().await;
-        if store.transition.is_none() {
-            store.next_transition_id = store.next_transition_id.saturating_add(1);
-            let id = store.next_transition_id;
-            store.transition = Some(id);
-            return id;
-        }
-        drop(store);
-        notified.await;
-    }
+    transition_gate: &Arc<tokio::sync::Mutex<()>>,
+) -> (super::TransitionId, OwnedMutexGuard<()>) {
+    let transition_guard = Arc::clone(transition_gate).lock_owned().await;
+    let mut store = store.lock().await;
+    store.next_transition_id = store.next_transition_id.saturating_add(1);
+    let id = store.next_transition_id;
+    store.transition = Some(id);
+    (id, transition_guard)
 }
 
 async fn finish_transition(
     store: &Arc<tokio::sync::Mutex<super::LockStore>>,
-    changed: &Arc<tokio::sync::Notify>,
     transition_id: super::TransitionId,
+    _transition_guard: OwnedMutexGuard<()>,
 ) {
     let mut store = store.lock().await;
     if store.transition == Some(transition_id) {
         store.transition = None;
-        drop(store);
-        changed.notify_waiters();
     }
 }
 
 async fn lock_idle<'a>(
     store: &'a Arc<tokio::sync::Mutex<super::LockStore>>,
-    changed: &Arc<tokio::sync::Notify>,
+    transition_gate: &Arc<tokio::sync::Mutex<()>>,
 ) -> tokio::sync::MutexGuard<'a, super::LockStore> {
-    loop {
-        let notified = changed.notified();
-        let guard = store.lock().await;
-        if guard.transition.is_none() {
-            return guard;
-        }
-        drop(guard);
-        notified.await;
-    }
+    let transition_guard = transition_gate.lock().await;
+    let store = store.lock().await;
+    drop(transition_guard);
+    store
 }
 
 pub(super) async fn reset_ecu_session_and_security<T: UdsEcu>(

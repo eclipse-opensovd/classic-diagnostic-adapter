@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{collections::BTreeSet, option::Option, sync::Arc, time::SystemTime};
+use std::{option::Option, sync::Arc, time::SystemTime};
 
 use axum::{
     Json,
@@ -19,19 +19,19 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use cda_interfaces::{
-    TesterPresentType, UdsEcu,
+    TesterPresentType, UdsEcu, dlt_ctx,
     lock_priority_api::{
         LockLifecycleEvent, LockPriorityPolicy, LockRequest, LockScope, LockSnapshot,
     },
 };
 use cda_plugin_security::{Claims, SecurityPlugin};
 use chrono::{DateTime, SecondsFormat, Utc};
-use tokio::{sync::oneshot, task, time::Instant};
+use tokio::{sync::oneshot, time::Instant};
 
 use super::super::{
     AcquisitionGuard, ActiveLock, ApiError, DefunctLock, ErrorWrapper, LockCleanupFnHelper,
-    LockCoverage, LockState, LockTarget, Locks, PendingPreemption, ScopeKey, StateError,
-    active_snapshot, create_lock, map_state_error, rollback_preemption, validate_claim,
+    LockCoverage, LockState, Locks, PendingPreemption, ScopeKey, StateError, active_snapshot,
+    create_lock, map_state_error, rollback_preemption, validate_claim,
 };
 use crate::sovd::locks::cleanup::{run_cleanups, take_cleanups};
 
@@ -60,55 +60,29 @@ fn validated_expiration_duration(lock_expiration: u64) -> Result<SystemTime, Api
             "Lock expiration must be greater than zero".to_owned(),
         ));
     }
+    let seconds = i64::try_from(lock_expiration)
+        .map_err(|_| ApiError::BadRequest("Lock expiration is too large".to_owned()))?;
+    let duration = chrono::TimeDelta::try_seconds(seconds)
+        .ok_or_else(|| ApiError::BadRequest("Lock expiration is too large".to_owned()))?;
     let expiration = Utc::now()
-        .checked_add_signed(chrono::TimeDelta::seconds(
-            lock_expiration.try_into().unwrap_or(i64::MAX),
-        ))
-        .unwrap_or_else(Utc::now);
-    if expiration < Utc::now() {
-        return Err(ApiError::BadRequest(
-            "Expiration date is in the past".to_owned(),
-        ));
-    }
+        .checked_add_signed(duration)
+        .ok_or_else(|| ApiError::BadRequest("Lock expiration is too large".to_owned()))?;
     Ok(SystemTime::from(expiration))
 }
 
-impl LockTarget {
-    pub(in crate::sovd::locks) fn scope(
-        self,
-        entity_name: Option<&String>,
-    ) -> Result<LockScope, ApiError> {
-        match self {
-            Self::Vehicle => Ok(LockScope::Vehicle),
-            Self::Ecu => entity_name
-                .cloned()
-                .map(|name| LockScope::Ecu { name })
-                .ok_or_else(|| ApiError::BadRequest("No ECU name provided".to_owned())),
-            Self::FunctionalGroup => entity_name
-                .cloned()
-                .map(|name| LockScope::FunctionalGroup { name })
-                .ok_or_else(|| {
-                    ApiError::BadRequest("No functional group name provided".to_owned())
-                }),
-        }
-    }
-}
-
 #[tracing::instrument(
-    skip(locks, lock, claims),
+    skip(locks, claims),
     fields(
         lock_id,
-        lock_type = %lock,
-        entity_name = ?entity_name
+        ?scope,
+        dlt_context = dlt_ctx!("SOVD")
     )
 )]
 pub(crate) async fn delete_handler(
     locks: &Locks,
-    lock: LockTarget,
     scope: LockScope,
     lock_id: &str,
     claims: &impl Claims,
-    entity_name: Option<&String>,
     include_schema: bool,
 ) -> Response {
     tracing::info!("Attempting to delete lock");
@@ -180,7 +154,7 @@ pub(crate) async fn delete_handler(
     let sender = locks.lifecycle_sender.clone();
     let (completion_sender, completion_receiver) = oneshot::channel();
     // Keep cleanup and reservation release alive if the HTTP request is cancelled.
-    task::spawn(async move {
+    cda_interfaces::spawn_named!("lock-delete-cleanup", async move {
         run_cleanups(cleanups).await;
         reservation.finish().await;
         for event in events {
@@ -193,55 +167,40 @@ pub(crate) async fn delete_handler(
 }
 
 pub(crate) struct LockContext<'a> {
-    pub(crate) lock: LockTarget,
     pub(crate) all_locks: &'a Arc<Locks>,
     pub(crate) acquisition: AcquisitionGuard,
     pub(crate) pending: Option<PendingPreemption>,
-    pub(crate) converted_lock_ids: Vec<String>,
     pub(crate) coverage: LockCoverage,
 }
 
 pub(crate) struct LockUpdateContext<'a> {
     pub(crate) all_locks: &'a Locks,
-    pub(crate) lock: LockTarget,
     pub(crate) scope: LockScope,
 }
 
 fn commit_new_lock(
     state: &mut LockState,
-    converted_lock_ids: &[String],
     pending: Option<&PendingPreemption>,
     new_lock: &ActiveLock,
 ) -> Result<Vec<ActiveLock>, StateError> {
     if let Some(pending) = pending {
         state.commit_replacement(
             &pending.root_lock_ids,
-            converted_lock_ids,
             new_lock.clone(),
             &pending.broken_by,
             pending.broken_at,
         )
-    } else if converted_lock_ids.is_empty() {
-        if new_lock.scope == ScopeKey::Vehicle {
-            let child_ids = state
-                .active()
-                .filter(|lock| lock.principal.subject == new_lock.principal.subject)
-                .map(|lock| lock.id.clone())
-                .collect::<Vec<_>>();
-            state
-                .insert_vehicle(new_lock.clone(), &child_ids)
-                .map(|()| Vec::new())
-        } else {
-            state.insert_active(new_lock.clone()).map(|()| Vec::new())
-        }
+    } else if new_lock.scope == ScopeKey::Vehicle {
+        let child_ids = state
+            .active()
+            .filter(|lock| lock.principal.subject == new_lock.principal.subject)
+            .map(|lock| lock.id.clone())
+            .collect::<Vec<_>>();
+        state
+            .insert_vehicle(new_lock.clone(), &child_ids)
+            .map(|()| Vec::new())
     } else {
-        state.commit_replacement(
-            &[],
-            converted_lock_ids,
-            new_lock.clone(),
-            &new_lock.principal.subject,
-            SystemTime::now(),
-        )
+        state.insert_active(new_lock.clone()).map(|()| Vec::new())
     }
 }
 
@@ -255,7 +214,6 @@ pub(in crate::sovd::locks) async fn run_acquisition_transaction<T: UdsEcu>(
     locks: Arc<Locks>,
     acquisition: AcquisitionGuard,
     mut pending: Option<PendingPreemption>,
-    converted_lock_ids: Vec<String>,
     new_lock: ActiveLock,
     cleanup: LockCleanupFnHelper,
     tester_present: Option<TesterPresentType>,
@@ -279,33 +237,21 @@ pub(in crate::sovd::locks) async fn run_acquisition_transaction<T: UdsEcu>(
     } else {
         None
     };
-    let converted = converted_lock_ids;
-
     let committed = {
         let mut store = locks.store.lock().await;
         if store.transition == Some(acquisition.transition_id()) {
-            commit_new_lock(&mut store.state, &converted, pending.as_ref(), &new_lock).map(
-                |removed| {
-                    store.cleanups.insert(new_lock.id.clone(), cleanup);
-                    let converted_ids: BTreeSet<&str> =
-                        converted.iter().map(String::as_str).collect();
-                    let (converted_locks, preempted_locks): (Vec<_>, Vec<_>) = removed
-                        .into_iter()
-                        .partition(|lock| converted_ids.contains(lock.id.as_str()));
-                    for lock in &converted_locks {
-                        store.cleanups.remove(&lock.id);
-                    }
-                    let cleanups = take_cleanups(&mut store.cleanups, &preempted_locks);
-                    (converted_locks, preempted_locks, cleanups)
-                },
-            )
+            commit_new_lock(&mut store.state, pending.as_ref(), &new_lock).map(|preempted_locks| {
+                store.cleanups.insert(new_lock.id.clone(), cleanup);
+                let cleanups = take_cleanups(&mut store.cleanups, &preempted_locks);
+                (preempted_locks, cleanups)
+            })
         } else {
             Err(StateError::Invariant(
                 "Lock transition reservation was lost".to_owned(),
             ))
         }
     };
-    let (converted_locks, preempted_locks, cleanups) = match committed {
+    let (preempted_locks, cleanups) = match committed {
         Ok(committed) => committed,
         Err(error) => {
             tracing::error!(%error, "Preflighted lock acquisition failed to commit");
@@ -324,18 +270,6 @@ pub(in crate::sovd::locks) async fn run_acquisition_transaction<T: UdsEcu>(
     if let Some(pending) = &mut pending {
         pending.disarm();
     }
-    for lock in &converted_locks {
-        let tester_present = match &lock.scope {
-            ScopeKey::Ecu(name) => Some(TesterPresentType::Ecu(name.clone())),
-            ScopeKey::FunctionalGroup(name) => Some(TesterPresentType::Functional(name.clone())),
-            ScopeKey::Vehicle => None,
-        };
-        if let Some(tester_present) = tester_present
-            && let Err(error) = uds.stop_tester_present(tester_present).await
-        {
-            tracing::error!(%error, lock_id = %lock.id, "Failed to stop tester present for converted lock");
-        }
-    }
     run_cleanups(cleanups).await;
     for lock in &preempted_locks {
         if let Err(error) = locks.schedule_defunct_expiration(lock.expires_at) {
@@ -349,7 +283,6 @@ pub(in crate::sovd::locks) async fn run_acquisition_transaction<T: UdsEcu>(
         expiration_target,
         pending.as_ref(),
         &preempted_locks,
-        &converted_locks,
         evaluation_id,
         policy,
     )
@@ -357,22 +290,13 @@ pub(in crate::sovd::locks) async fn run_acquisition_transaction<T: UdsEcu>(
     Ok(new_lock.id)
 }
 
-/// Schedules the new lock's expiration and notifies the registered policy of the
-/// committed `Created`/`Preempted` transition. Split out of
-/// [`run_acquisition_transaction`] to keep that function within the workspace's
-/// maximum-lines lint.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "This one-use finalizer consumes distinct transaction outputs. Wrapping them in a \
-              struct would add an artificial type used only to satisfy the argument-count lint"
-)]
+/// Schedules expiration and emits lifecycle events for a committed acquisition.
 async fn finish_acquisition_transaction(
     locks: &Locks,
     new_lock: &ActiveLock,
     expiration_target: Instant,
     pending: Option<&PendingPreemption>,
     preempted: &[ActiveLock],
-    converted: &[ActiveLock],
     evaluation_id: Option<String>,
     policy: Arc<dyn LockPriorityPolicy>,
 ) {
@@ -387,14 +311,6 @@ async fn finish_acquisition_transaction(
                 defunct_lock_ids: preempted.iter().map(|lock| lock.id.clone()).collect(),
             },
         );
-    } else if !converted.is_empty() {
-        locks.notify_lock_event(
-            policy,
-            LockLifecycleEvent::Converted {
-                replacement: active_snapshot(new_lock),
-                converted_lock_ids: converted.iter().map(|lock| lock.id.clone()).collect(),
-            },
-        );
     } else {
         locks.notify_lock_event(
             policy,
@@ -407,33 +323,22 @@ async fn finish_acquisition_transaction(
 }
 
 #[tracing::instrument(
-    skip(uds, context, request, security_plugin),
+    skip(uds, context, security_plugin),
     fields(
-        lock_type = %context.lock,
-        entity_name = ?entity_name,
-        expires_at = ?request.expires_at
+        scope = ?request.scope,
+        expires_at = ?request.expires_at,
+        dlt_context = dlt_ctx!("SOVD")
     )
 )]
 pub(crate) async fn post_handler<T: UdsEcu + Clone>(
     uds: &T,
     context: LockContext<'_>,
-    entity_name: Option<&String>,
     request: LockRequest,
     include_schema: bool,
     security_plugin: Box<dyn SecurityPlugin>,
 ) -> Response {
     tracing::info!("Attempting to create lock");
-    let scope = match context.lock.scope(entity_name) {
-        Ok(scope) => scope,
-        Err(error) => {
-            return ErrorWrapper {
-                error,
-                include_schema,
-            }
-            .into_response();
-        }
-    };
-    let existing = context.all_locks.active_for_scope(&scope).await;
+    let existing = context.all_locks.active_for_scope(&request.scope).await;
     let existing_is_preempted = existing.as_ref().is_some_and(|lock| {
         context
             .pending
@@ -450,29 +355,17 @@ pub(crate) async fn post_handler<T: UdsEcu + Clone>(
         )
         .await;
     }
+    let exclusive = request.exclusive;
     let locks = Arc::clone(context.all_locks);
     let acquisition = context.acquisition;
     let pending = context.pending;
-    let converted_lock_ids = context.converted_lock_ids;
     let coverage = context.coverage;
-    let lock_type = context.lock;
-    let entity_name = entity_name.cloned();
     let uds = uds.clone();
     let (sender, receiver) = oneshot::channel();
     // Own transaction guards in a detached task so request cancellation cannot
     // interrupt commit, rollback, or reservation release.
-    task::spawn(async move {
-        let result = match create_lock(
-            &uds,
-            request,
-            lock_type,
-            &locks,
-            entity_name.as_ref(),
-            coverage,
-            security_plugin,
-        )
-        .await
-        {
+    cda_interfaces::spawn_named!("lock-acquisition", async move {
+        let result = match create_lock(&uds, request, &locks, coverage, security_plugin).await {
             Ok((new_lock, cleanup, tester_present)) => {
                 let expiration_target = match Locks::expiration_target(&new_lock) {
                     Ok(target) => target,
@@ -488,7 +381,6 @@ pub(crate) async fn post_handler<T: UdsEcu + Clone>(
                     locks,
                     acquisition,
                     pending,
-                    converted_lock_ids,
                     new_lock,
                     cleanup,
                     tester_present,
@@ -511,7 +403,7 @@ pub(crate) async fn post_handler<T: UdsEcu + Clone>(
     }) {
         Ok(lock_id) => (
             StatusCode::CREATED,
-            Json(sovd_lock_response(&lock_id, include_schema)),
+            Json(sovd_lock_response(&lock_id, exclusive, include_schema)),
         )
             .into_response(),
         Err(error) => ErrorWrapper {
@@ -530,11 +422,7 @@ async fn renew_existing_lock(
     subject: &str,
 ) -> Response {
     let pending = context.pending.take();
-    let error = if !context.converted_lock_ids.is_empty() {
-        Some(ApiError::Conflict(
-            "Cannot renew a lock while converting child locks".to_owned(),
-        ))
-    } else if existing.principal.subject != subject {
+    let error = if existing.principal.subject != subject {
         Some(ApiError::Locked(
             "Lock is owned by another client".to_owned(),
         ))
@@ -564,6 +452,7 @@ async fn renew_existing_lock(
     context.acquisition.finish().await;
     match result {
         Ok(lock) => {
+            let exclusive = lock.exclusive;
             context.all_locks.notify_lock_event(
                 policy,
                 LockLifecycleEvent::Renewed {
@@ -573,7 +462,7 @@ async fn renew_existing_lock(
             );
             (
                 StatusCode::CREATED,
-                Json(sovd_lock_response(&existing_id, include_schema)),
+                Json(sovd_lock_response(&existing_id, exclusive, include_schema)),
             )
                 .into_response()
         }
@@ -589,16 +478,15 @@ async fn renew_existing_lock(
     skip(context, claims, expiration),
     fields(
         lock_id,
-        lock_type = %context.lock,
-        entity_name = ?entity_name,
-        lock_expiration = %expiration.lock_expiration
+        scope = ?context.scope,
+        lock_expiration = %expiration.lock_expiration,
+        dlt_context = dlt_ctx!("SOVD")
     )
 )]
 pub(crate) async fn put_handler(
     context: LockUpdateContext<'_>,
     lock_id: &str,
     claims: &impl Claims,
-    entity_name: Option<&String>,
     expiration: sovd_interfaces::locking::UpdateRequest,
     include_schema: bool,
 ) -> Response {
@@ -691,20 +579,15 @@ async fn renew_lock(
     expires_at: SystemTime,
     active: ActiveLock,
 ) -> Result<LockSnapshot, ApiError> {
-    Locks::expiration_target_at(expires_at)?;
+    let now = SystemTime::now();
+    Locks::expiration_target_at(expires_at, now)?;
     locks
         .store
         .lock()
         .await
         .state
-        .renew(lock_id, expires_at)
-        .map_err(|error| {
-            if error == StateError::RenewalNotExtension {
-                ApiError::BadRequest(error.to_string())
-            } else {
-                map_state_error(&error)
-            }
-        })?;
+        .renew(lock_id, expires_at, now)
+        .map_err(|error| map_state_error(&error))?;
     let renewed = ActiveLock {
         expires_at,
         ..active
@@ -713,18 +596,13 @@ async fn renew_lock(
 }
 
 #[tracing::instrument(
-    skip(all_locks, lock, claims),
-    fields(
-        lock_type = %lock,
-        entity_name = ?entity_name
-    )
+    skip(all_locks, claims),
+    fields(?scope, dlt_context = dlt_ctx!("SOVD"))
 )]
 pub(crate) async fn get_handler(
     all_locks: &Locks,
-    lock: LockTarget,
     scope: LockScope,
     claims: &impl Claims,
-    entity_name: Option<&str>,
     include_schema: bool,
 ) -> Response {
     tracing::info!("Getting locks");
@@ -752,19 +630,17 @@ pub(crate) async fn get_handler(
 }
 
 #[tracing::instrument(
-    skip(all_locks, lock),
+    skip(all_locks),
     fields(
         lock_id = %lock_id,
-        lock_type = %lock,
-        entity_name = ?entity_name
+        ?scope,
+        dlt_context = dlt_ctx!("SOVD")
     )
 )]
 pub(crate) async fn get_id_handler(
     all_locks: &Locks,
-    lock: LockTarget,
     scope: LockScope,
     lock_id: &String,
-    entity_name: Option<&String>,
     include_schema: bool,
 ) -> Response {
     tracing::info!("Getting active lock by ID");
@@ -796,11 +672,12 @@ pub(crate) async fn get_id_handler(
     }
 }
 
-fn sovd_lock(id: &str) -> sovd_interfaces::locking::Lock {
+fn sovd_lock(id: &str, exclusive: bool) -> sovd_interfaces::locking::Lock {
     sovd_interfaces::locking::Lock {
         id: id.to_owned(),
         lock_expiration: None,
         owned: Some(true),
+        x_sovd2uds_isexclusive: exclusive,
         x_sovd2uds_broken_by: None,
         x_sovd2uds_broken_at: None,
         x_sovd2uds_current_holder: None,
@@ -810,9 +687,10 @@ fn sovd_lock(id: &str) -> sovd_interfaces::locking::Lock {
 
 pub(in crate::sovd::locks) fn sovd_lock_response(
     id: &str,
+    exclusive: bool,
     include_schema: bool,
 ) -> sovd_interfaces::locking::Lock {
-    let mut response = sovd_lock(id);
+    let mut response = sovd_lock(id, exclusive);
     response.schema = include_schema
         .then(|| crate::sovd::create_schema!(sovd_interfaces::locking::post_put::Response));
     response
@@ -823,7 +701,7 @@ fn lock_details_schema(include_schema: bool) -> Option<schemars::Schema> {
 }
 
 fn active_to_sovd(lock: &ActiveLock, claims: &impl Claims) -> sovd_interfaces::locking::Lock {
-    let mut response = sovd_lock(&lock.id);
+    let mut response = sovd_lock(&lock.id, lock.exclusive);
     response.lock_expiration =
         Some(DateTime::<Utc>::from(lock.expires_at).to_rfc3339_opts(SecondsFormat::Secs, true));
     response.owned = Some(lock.principal.subject == claims.sub());
@@ -847,6 +725,7 @@ fn active_details(lock: &ActiveLock) -> sovd_interfaces::locking::id::get::Respo
     sovd_interfaces::locking::id::get::Response {
         lock_expiration: DateTime::<Utc>::from(lock.expires_at)
             .to_rfc3339_opts(SecondsFormat::Secs, true),
+        x_sovd2uds_isexclusive: lock.exclusive,
         x_sovd2uds_broken_by: None,
         x_sovd2uds_broken_at: None,
         x_sovd2uds_current_holder: None,

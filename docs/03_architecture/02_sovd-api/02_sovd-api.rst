@@ -805,8 +805,8 @@ Locks
 
     **Response fields (GET /locks/{id})**
 
-    ``lock_expiration`` (ISO 8601 string). For defunct locks: additionally
-    ``x_sovd2uds_broken_by`` (string), ``x_sovd2uds_broken_at`` (ISO 8601 string), and
+    ``lock_expiration`` (ISO 8601 string) and ``x_sovd2uds_isexclusive`` (boolean). For defunct
+    locks: additionally ``x_sovd2uds_broken_by`` (string), ``x_sovd2uds_broken_at`` (ISO 8601 string), and
     ``x_sovd2uds_current_holder`` (string, the identity of the current lock holder).
 
 

@@ -19,7 +19,7 @@ use super::{
     ApiError, DynamicPlugin, ErrorWrapper, FileManager, IntoResponse, Json, Query, Response, State,
     StatusCode, TransformOperation, UdsEcu, WebserverEcuState, WithRejection,
 };
-use crate::sovd::{self, create_schema};
+use crate::sovd::{self, create_schema, locks::require_ecu_access};
 
 pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
@@ -34,13 +34,13 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
         ..
     }): State<WebserverEcuState<T, U>>,
 ) -> Response {
-    let claims = security_plugin.as_auth_plugin().claims();
-    if let Err(response) =
-        crate::sovd::locks::validate_ecu_read(&claims, &ecu_name, &locks, query.include_schema)
-            .await
-    {
-        return response.into_response();
-    }
+    require_ecu_access!(
+        read,
+        security_plugin,
+        &ecu_name,
+        &locks,
+        query.include_schema
+    );
     {
         let schema = if query.include_schema {
             Some(create_schema!(
@@ -127,6 +127,7 @@ pub(crate) mod diag_service {
             components::ecu::{DiagServicePathParam, data_request},
             create_schema,
             error::{ApiError, ErrorWrapper},
+            locks::require_ecu_access,
         },
     };
 
@@ -212,13 +213,7 @@ pub(crate) mod diag_service {
     ) -> Response {
         let include_schema = query.include_schema;
         if query.include_sdgs {
-            let claims = security_plugin.as_auth_plugin().claims();
-            if let Err(response) =
-                crate::sovd::locks::validate_ecu_read(&claims, &ecu_name, &locks, include_schema)
-                    .await
-            {
-                return response.into_response();
-            }
+            require_ecu_access!(read, security_plugin, &ecu_name, &locks, include_schema);
             get_sdgs_handler::<T>(diag_service, &ecu_name, &uds, include_schema).await
         } else {
             if diag_service.contains('/') {
@@ -328,7 +323,7 @@ pub(crate) mod diag_service {
 
         use crate::{
             openapi,
-            sovd::{WebserverEcuState, docs, error::ApiError},
+            sovd::{WebserverEcuState, docs, error::ApiError, locks::require_ecu_access},
         };
 
         openapi::aide_helper::gen_path_param!(DataDocsPathParam service String);
@@ -343,16 +338,7 @@ pub(crate) mod diag_service {
                 ..
             }): State<WebserverEcuState<T, U>>,
         ) -> Response {
-            if let Err(response) = crate::sovd::locks::validate_ecu_read(
-                &security_plugin.as_auth_plugin().claims(),
-                &ecu_name,
-                &locks,
-                false,
-            )
-            .await
-            {
-                return response.into_response();
-            }
+            require_ecu_access!(read, security_plugin, &ecu_name, &locks, false);
             let security_plugin: DynamicPlugin = security_plugin;
 
             // Verify the data service exists

@@ -28,6 +28,7 @@ use sovd_interfaces::components::ecu::configurations as sovd_configurations;
 use crate::sovd::{
     IntoSovd, WebserverEcuState, create_schema,
     error::{ApiError, ErrorWrapper},
+    locks::require_ecu_access,
 };
 
 pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
@@ -43,13 +44,13 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
         ApiError,
     >,
 ) -> Response {
-    let claims = security_plugin.as_auth_plugin().claims();
-    if let Err(response) =
-        crate::sovd::locks::validate_ecu_read(&claims, &ecu_name, &locks, query.include_schema)
-            .await
-    {
-        return response.into_response();
-    }
+    require_ecu_access!(
+        read,
+        security_plugin,
+        &ecu_name,
+        &locks,
+        query.include_schema
+    );
     let schema = if query.include_schema {
         Some(create_schema!(sovd_configurations::get::Response))
     } else {
@@ -213,7 +214,7 @@ pub(crate) mod diag_service {
 
         use crate::{
             openapi,
-            sovd::{WebserverEcuState, docs, error::ApiError},
+            sovd::{WebserverEcuState, docs, error::ApiError, locks::require_ecu_access},
         };
 
         openapi::aide_helper::gen_path_param!(ConfigDocsPathParam service String);
@@ -228,16 +229,7 @@ pub(crate) mod diag_service {
                 ..
             }): State<WebserverEcuState<T, U>>,
         ) -> Response {
-            if let Err(response) = crate::sovd::locks::validate_ecu_read(
-                &security_plugin.as_auth_plugin().claims(),
-                &ecu_name,
-                &locks,
-                false,
-            )
-            .await
-            {
-                return response.into_response();
-            }
+            require_ecu_access!(read, security_plugin, &ecu_name, &locks, false);
             let security_plugin: DynamicPlugin = security_plugin;
 
             // Verify the configuration service exists

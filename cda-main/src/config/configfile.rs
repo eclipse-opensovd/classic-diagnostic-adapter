@@ -308,25 +308,7 @@ impl ConfigSanity for Configuration {
         self.validate_transport_presence()?;
         self.validate_can_mappings()?;
         self.validate_transport_overrides()?;
-
-        if self.locks.priority_policy_timeout_ms == 0 {
-            return Err(ConfigSanityError::InvalidValue {
-                field: "locks.priority_policy_timeout_ms".to_owned(),
-                reason: "Value must be greater than zero".to_owned(),
-            });
-        }
-        if self.locks.priority_lifecycle_timeout_ms == 0 {
-            return Err(ConfigSanityError::InvalidValue {
-                field: "locks.priority_lifecycle_timeout_ms".to_owned(),
-                reason: "Value must be greater than zero".to_owned(),
-            });
-        }
-        if self.locks.priority_lifecycle_queue_capacity == 0 {
-            return Err(ConfigSanityError::InvalidValue {
-                field: "locks.priority_lifecycle_queue_capacity".to_owned(),
-                reason: "Value must be greater than zero".to_owned(),
-            });
-        }
+        self.locks.validate_sanity()?;
         // Add more checks for Configuration fields here if needed
         Ok(())
     }
@@ -377,7 +359,7 @@ nack_number_of_retries.name = "CP_TEST"
 description_database = "teapot"
 
 [locks]
-lock_exclusivity_policy = "NON_EXCLUSIVE_BY_DEFAULT"
+lock_exclusivity_policy = "non_exclusive_by_default"
 priority_policy_timeout_ms = 750
 priority_policy_stale_retries = 2
 priority_lifecycle_timeout_ms = 500

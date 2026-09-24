@@ -38,7 +38,7 @@ use crate::{
         IntoSovd, WebserverEcuState, create_schema,
         error::{ApiError, ErrorWrapper, api_error_from_diag_response},
         faults::faults::FaultStatus,
-        locks::{validate_ecu_read, validate_ecu_write},
+        locks::require_ecu_access,
         remove_descriptions_recursive,
     },
 };
@@ -84,11 +84,13 @@ pub(crate) async fn get<T: UdsEcu + Send + Sync + Clone, U: FileManager + Send +
     }): State<WebserverEcuState<T, U>>,
     WithRejection(QsQuery(query), _): WithRejection<QsQuery<GetFaultQuery>, ApiError>,
 ) -> Response {
-    let claims = security_plugin.as_auth_plugin().claims();
-    if let Err(response) = validate_ecu_read(&claims, &ecu_name, &locks, query.include_schema).await
-    {
-        return response.into_response();
-    }
+    require_ecu_access!(
+        read,
+        security_plugin,
+        &ecu_name,
+        &locks,
+        query.include_schema
+    );
     let dtcs = match uds
         .ecu_dtc_by_mask(
             &ecu_name,
@@ -154,10 +156,7 @@ pub(crate) async fn delete<
     }): State<WebserverEcuState<T, U>>,
     WithRejection(QsQuery(query), _): WithRejection<QsQuery<DeleteFaultQuery>, ApiError>,
 ) -> Response {
-    let claims = security_plugin.claims();
-    if let Err(validation_failure) = validate_ecu_write(&claims, &ecu_name, &locks, false).await {
-        return validation_failure.into_response();
-    }
+    require_ecu_access!(write, security_plugin, &ecu_name, &locks, false);
 
     match if let Some(ref scope) = query.scope {
         uds.delete_dtcs_scoped(&ecu_name, &(security_plugin as DynamicPlugin), scope)
@@ -341,12 +340,13 @@ pub(crate) mod id {
             ..
         }): State<WebserverEcuState<T, U>>,
     ) -> Response {
-        let claims = security_plugin.as_auth_plugin().claims();
-        if let Err(response) =
-            validate_ecu_read(&claims, &ecu_name, &locks, query.include_schema).await
-        {
-            return response.into_response();
-        }
+        require_ecu_access!(
+            read,
+            security_plugin,
+            &ecu_name,
+            &locks,
+            query.include_schema
+        );
         match uds
             .ecu_dtc_extended(
                 &ecu_name,
@@ -398,11 +398,7 @@ pub(crate) mod id {
         }): State<WebserverEcuState<T, U>>,
         WithRejection(QsQuery(query), _): WithRejection<QsQuery<DeleteFaultQuery>, ApiError>,
     ) -> Response {
-        let claims = security_plugin.claims();
-        if let Err(validation_failure) = validate_ecu_write(&claims, &ecu_name, &locks, false).await
-        {
-            return validation_failure.into_response();
-        }
+        require_ecu_access!(write, security_plugin, &ecu_name, &locks, false);
 
         if query.scope.is_some() {
             return ApiError::BadRequest(

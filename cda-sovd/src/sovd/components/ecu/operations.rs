@@ -26,6 +26,7 @@ use sovd_interfaces::components::ecu::operations::OperationCollectionItem;
 use crate::sovd::{
     WebserverEcuState, create_schema,
     error::{ApiError, ErrorWrapper},
+    locks::require_ecu_access,
 };
 
 pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
@@ -41,16 +42,13 @@ pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
         ..
     }): State<WebserverEcuState<T, U>>,
 ) -> Response {
-    if let Err(response) = crate::sovd::locks::validate_ecu_read(
-        &security_plugin.as_auth_plugin().claims(),
+    require_ecu_access!(
+        read,
+        security_plugin,
         &ecu_name,
         &locks,
-        query.include_schema,
-    )
-    .await
-    {
-        return response.into_response();
-    }
+        query.include_schema
+    );
     let security_plugin: DynamicPlugin = security_plugin;
     match uds
         .get_components_operations_info(&ecu_name, &security_plugin)
@@ -124,7 +122,7 @@ pub(crate) mod comparams {
         use crate::sovd::{
             IntoSovd, WebserverEcuState, acquire_communication_activity, create_schema,
             error::{ApiError, ErrorWrapper},
-            locks,
+            locks::require_ecu_access,
         };
 
         fn parse_exec_uuid(id: &str, include_schema: bool) -> Result<Uuid, ErrorWrapper> {
@@ -147,16 +145,13 @@ pub(crate) mod comparams {
                 ..
             }): State<WebserverEcuState<T, U>>,
         ) -> Response {
-            if let Err(response) = crate::sovd::locks::validate_ecu_read(
-                &security_plugin.as_auth_plugin().claims(),
+            require_ecu_access!(
+                read,
+                security_plugin,
                 &ecu_name,
                 &locks,
-                query.include_schema,
-            )
-            .await
-            {
-                return response.into_response();
-            }
+                query.include_schema
+            );
             handler_read(comparam_executions, query.include_schema).await
         }
 
@@ -191,12 +186,13 @@ pub(crate) mod comparams {
             OriginalUri(uri): OriginalUri,
             request_body: Option<Json<sovd_comparams::executions::update::Request>>,
         ) -> Response {
-            let claims = security_plugin.as_auth_plugin().claims();
-            if let Err(response) =
-                locks::validate_ecu_write(&claims, &ecu_name, &locks, query.include_schema).await
-            {
-                return response.into_response();
-            }
+            require_ecu_access!(
+                write,
+                security_plugin,
+                &ecu_name,
+                &locks,
+                query.include_schema
+            );
             let path = format!("http://{host}{uri}");
             let body = if let Some(Json(body)) = request_body {
                 Some(body)
@@ -338,16 +334,7 @@ pub(crate) mod comparams {
                 }): State<WebserverEcuState<T, U>>,
             ) -> Response {
                 let include_schema = query.include_schema;
-                if let Err(response) = crate::sovd::locks::validate_ecu_read(
-                    &security_plugin.as_auth_plugin().claims(),
-                    &ecu_name,
-                    &locks,
-                    include_schema,
-                )
-                .await
-                {
-                    return response.into_response();
-                }
+                require_ecu_access!(read, security_plugin, &ecu_name, &locks, include_schema);
                 let id = match parse_exec_uuid(&id, include_schema) {
                     Ok(v) => v,
                     Err(e) => return e.into_response(),
@@ -441,12 +428,7 @@ pub(crate) mod comparams {
                     ..
                 }): State<WebserverEcuState<T, U>>,
             ) -> Response {
-                let claims = security_plugin.as_auth_plugin().claims();
-                if let Err(response) =
-                    locks::validate_ecu_write(&claims, &ecu_name, &locks, false).await
-                {
-                    return response.into_response();
-                }
+                require_ecu_access!(write, security_plugin, &ecu_name, &locks, false);
                 let id = match parse_exec_uuid(&id, false) {
                     Ok(v) => v,
                     Err(e) => return e.into_response(),
@@ -497,12 +479,7 @@ pub(crate) mod comparams {
                 >,
             ) -> Response {
                 let include_schema = query.include_schema;
-                let claims = security_plugin.as_auth_plugin().claims();
-                if let Err(response) =
-                    locks::validate_ecu_write(&claims, &ecu_name, &locks, include_schema).await
-                {
-                    return response.into_response();
-                }
+                require_ecu_access!(write, security_plugin, &ecu_name, &locks, include_schema);
                 let id = match parse_exec_uuid(&id, include_schema) {
                     Ok(v) => v,
                     Err(e) => return e.into_response(),
@@ -578,6 +555,8 @@ pub(crate) mod service {
     use axum::extract::{Path, Query, State};
     use axum_extra::extract::WithRejection;
 
+    use crate::sovd::locks::require_ecu_access;
+
     /// `GET /operations/{service}` - get operation details or SDGs
     // [[ dimpl~sovd-api-component-operations-sdgsd, GET /operations/{service} SDG handler ]]
     pub(crate) async fn get<
@@ -605,16 +584,7 @@ pub(crate) mod service {
         use axum::response::IntoResponse as _;
 
         let include_schema = query.include_schema;
-        if let Err(response) = crate::sovd::locks::validate_ecu_read(
-            &security_plugin.as_auth_plugin().claims(),
-            &ecu_name,
-            &locks,
-            include_schema,
-        )
-        .await
-        {
-            return response.into_response();
-        }
+        require_ecu_access!(read, security_plugin, &ecu_name, &locks, include_schema);
         if query.include_sdgs {
             return get_sdgs_handler::<T>(service, &ecu_name, &uds, include_schema).await;
         }
@@ -775,6 +745,7 @@ pub(crate) mod service {
                 WebserverEcuState,
                 docs::{self, operations::OperationDocsMeta},
                 error::ApiError,
+                locks::require_ecu_access,
             },
         };
 
@@ -790,16 +761,7 @@ pub(crate) mod service {
                 ..
             }): State<WebserverEcuState<T, U>>,
         ) -> Response {
-            if let Err(response) = crate::sovd::locks::validate_ecu_read(
-                &security_plugin.as_auth_plugin().claims(),
-                &ecu_name,
-                &locks,
-                false,
-            )
-            .await
-            {
-                return response.into_response();
-            }
+            require_ecu_access!(read, security_plugin, &ecu_name, &locks, false);
             let security_plugin: DynamicPlugin = security_plugin;
 
             let ops_info = match uds
@@ -904,7 +866,7 @@ pub(crate) mod service {
                 create_response_schema, create_schema,
                 error::{ApiError, ErrorWrapper, VendorErrorCode},
                 field_parse_errors_to_json, finalize_execution, guard_execution,
-                locks::{self, validate_ecu_read, validate_ecu_write},
+                locks::require_ecu_access,
             },
         };
 
@@ -935,16 +897,13 @@ pub(crate) mod service {
                 ..
             }): State<WebserverEcuState<T, U>>,
         ) -> Response {
-            if let Err(response) = validate_ecu_read(
-                &security_plugin.as_auth_plugin().claims(),
+            require_ecu_access!(
+                read,
+                security_plugin,
                 &ecu_name,
                 &locks,
-                query.include_schema,
-            )
-            .await
-            {
-                return response.into_response();
-            }
+                query.include_schema
+            );
             let schema = if query.include_schema {
                 Some(create_schema!(sovd_interfaces::Items<OperationIdItem>))
             } else {
@@ -998,12 +957,13 @@ pub(crate) mod service {
             headers: HeaderMap,
             body: Bytes,
         ) -> Response {
-            let claims = security_plugin.as_auth_plugin().claims();
-            if let Err(response) =
-                locks::validate_ecu_write(&claims, &ecu_name, &locks, query.include_schema).await
-            {
-                return response.into_response();
-            }
+            require_ecu_access!(
+                write,
+                security_plugin,
+                &ecu_name,
+                &locks,
+                query.include_schema
+            );
             let ctx = OperationWriteContext::new(
                 service_executions,
                 communication_activities,
@@ -1776,7 +1736,7 @@ pub(crate) mod service {
 
         pub(crate) mod id {
             use super::*;
-            use crate::sovd::locks;
+            use crate::sovd::locks::require_ecu_access;
 
             #[derive(serde::Deserialize, schemars::JsonSchema)]
             pub(crate) struct ServiceAndIdPathParam {
@@ -1843,12 +1803,7 @@ pub(crate) mod service {
                 }): State<WebserverEcuState<T, U>>,
             ) -> Response {
                 let include_schema = query.include_schema;
-                let claims = security_plugin.as_auth_plugin().claims();
-                if let Err(response) =
-                    validate_ecu_write(&claims, &ecu_name, &locks, include_schema).await
-                {
-                    return response.into_response();
-                }
+                require_ecu_access!(write, security_plugin, &ecu_name, &locks, include_schema);
                 let exec_id = match parse_exec_uuid(&id, include_schema) {
                     Ok(v) => v,
                     Err(e) => return e.into_response(),
@@ -1974,12 +1929,7 @@ pub(crate) mod service {
                 }): State<WebserverEcuState<T, U>>,
             ) -> Response {
                 let include_schema = query.include_schema;
-                let claims = security_plugin.as_auth_plugin().claims();
-                if let Err(response) =
-                    locks::validate_ecu_write(&claims, &ecu_name, &locks, include_schema).await
-                {
-                    return response.into_response();
-                }
+                require_ecu_access!(write, security_plugin, &ecu_name, &locks, include_schema);
                 let exec_id = match parse_exec_uuid(&id, include_schema) {
                     Ok(v) => v,
                     Err(e) => return e.into_response(),

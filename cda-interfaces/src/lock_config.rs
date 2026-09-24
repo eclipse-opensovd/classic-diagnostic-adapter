@@ -13,27 +13,18 @@
 
 //! Vendor-neutral lock priority configuration.
 
-use std::str::FromStr;
+use serde::{Deserialize, Serialize};
 
-use serde::{Deserialize, Deserializer, Serialize};
-use strum_macros::EnumString;
+use crate::config::{ConfigSanity, ConfigSanityError};
 
 /// Default behavior when a lock request omits its exclusivity field.
-#[derive(Clone, Copy, Debug, Serialize, EnumString, schemars::JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, schemars::JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-#[strum(ascii_case_insensitive, serialize_all = "snake_case")]
 pub enum LockExclusivityPolicy {
     /// Omitted exclusivity means an exclusive lock.
     ExclusiveByDefault,
     /// Omitted exclusivity means a non-exclusive lock.
     NonExclusiveByDefault,
-}
-
-impl<'de> Deserialize<'de> for LockExclusivityPolicy {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = String::deserialize(deserializer)?;
-        Self::from_str(&value).map_err(serde::de::Error::custom)
-    }
 }
 
 /// Lock priority behavior and limits.
@@ -52,6 +43,35 @@ pub struct LockConfig {
     /// Number of lifecycle events buffered for ordered best-effort delivery.
     #[serde(default = "default_priority_lifecycle_queue_capacity")]
     pub priority_lifecycle_queue_capacity: usize,
+}
+
+impl ConfigSanity for LockConfig {
+    fn validate_sanity(&self) -> Result<(), ConfigSanityError> {
+        for (field, value) in [
+            (
+                "locks.priority_policy_timeout_ms",
+                self.priority_policy_timeout_ms,
+            ),
+            (
+                "locks.priority_lifecycle_timeout_ms",
+                self.priority_lifecycle_timeout_ms,
+            ),
+        ] {
+            if value == 0 {
+                return Err(ConfigSanityError::InvalidValue {
+                    field: field.to_owned(),
+                    reason: "Value must be greater than zero".to_owned(),
+                });
+            }
+        }
+        if self.priority_lifecycle_queue_capacity == 0 {
+            return Err(ConfigSanityError::InvalidValue {
+                field: "locks.priority_lifecycle_queue_capacity".to_owned(),
+                reason: "Value must be greater than zero".to_owned(),
+            });
+        }
+        Ok(())
+    }
 }
 
 const fn default_priority_policy_stale_retries() -> u32 {
@@ -94,15 +114,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exclusivity_policy_value_is_case_insensitive() {
+    fn exclusivity_policy_value_deserializes() {
         let config: LockConfig = serde_json::from_value(serde_json::json!({
-            "lock_exclusivity_policy": "ExClUsIvE_bY_dEfAuLt",
+            "lock_exclusivity_policy": "exclusive_by_default",
             "priority_policy_timeout_ms": 1,
             "priority_policy_stale_retries": 1,
             "priority_lifecycle_timeout_ms": 1,
             "priority_lifecycle_queue_capacity": 1
         }))
-        .expect("mixed-case policy value should deserialize");
+        .expect("policy value should deserialize");
 
         assert_eq!(
             config.lock_exclusivity_policy,

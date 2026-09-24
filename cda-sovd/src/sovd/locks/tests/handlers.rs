@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -12,6 +12,104 @@
  */
 
 use super::*;
+
+#[test]
+fn oversized_lock_expiration_is_rejected_as_bad_request() {
+    let request = sovd_interfaces::locking::Request {
+        lock_expiration: 9_223_372_036_854_776,
+        break_lock: false,
+        x_sovd2uds_isexclusive: None,
+        metadata: serde_json::Map::new(),
+    };
+
+    assert!(matches!(
+        validated_expiration(&request),
+        Err(ApiError::BadRequest(_))
+    ));
+}
+
+#[tokio::test]
+async fn child_lock_created_under_owned_vehicle_has_parent() {
+    let (mock_uds, ecu_name, locks, _, _) = super::cleanup::setup_ecu_lock_test();
+    let vehicle = test_lock("vehicle").owner("test_user").vehicle().build();
+    locks.test_insert_active(vehicle).await;
+
+    let lock_id =
+        super::cleanup::create_ecu_lock(&mock_uds, &locks, &ecu_name, Duration::from_secs(60))
+            .await;
+
+    assert_eq!(
+        locks
+            .store
+            .lock()
+            .await
+            .state
+            .active_by_id(&lock_id)
+            .and_then(|lock| lock.parent_vehicle_lock_id.as_deref()),
+        Some("vehicle")
+    );
+    let response = delete_handler(
+        &locks,
+        LockScope::Ecu { name: ecu_name },
+        &lock_id,
+        &TestSecurityPlugin.claims(),
+        false,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn post_handler_commits_policy_preemption_end_to_end() {
+    let policy = Arc::new(TestPolicy {
+        decision: Some(LockPriorityDecision::Preempt {
+            lock_ids: vec!["existing-lock".to_owned()],
+            broken_by: "priority-app".to_owned(),
+        }),
+        evaluations: StdMutex::new(Vec::new()),
+    });
+    let (uds, locks) =
+        super::cleanup::setup_vehicle_lock_test_with_policy(Arc::<TestPolicy>::clone(&policy));
+    let cleanup_count = Arc::new(AtomicUsize::new(0));
+    insert_policy_test_lock(&locks, Arc::clone(&cleanup_count)).await;
+    let claims = TestClaims {
+        subject: "priority-client".to_owned(),
+        attributes: serde_json::Map::new(),
+    };
+    let (acquisition, pending, request) = locks
+        .evaluate_acquisition(
+            LockScope::Vehicle,
+            LockCoverage::vehicle(),
+            &preemption_request(),
+            &claims,
+        )
+        .await
+        .expect("Policy preemption should be staged");
+
+    let response = post_handler(
+        &uds,
+        LockContext {
+            all_locks: &locks,
+            acquisition,
+            pending,
+            coverage: LockCoverage::vehicle(),
+        },
+        request,
+        false,
+        Box::new(TestSecurityPlugin),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let response: sovd_interfaces::locking::post_put::Response = axum_response_into(response)
+        .await
+        .expect("Created lock response should decode");
+    assert!(response.x_sovd2uds_isexclusive);
+    assert_eq!(cleanup_count.load(Ordering::SeqCst), 1);
+    let store = locks.store.lock().await;
+    assert!(store.state.active_by_id(&response.id).is_some());
+    assert!(store.state.defunct_by_id("existing-lock").is_some());
+}
 
 #[tokio::test]
 async fn defunct_lock_remains_visible_and_reports_lock_broken() {
@@ -43,48 +141,19 @@ async fn defunct_lock_remains_visible_and_reports_lock_broken() {
         .await
         .expect("policy evaluation must succeed");
     let pending = pending.expect("preemption must be staged");
-    let replacement = ActiveLock {
-        id: "replacement".to_owned(),
-        scope: ScopeKey::Vehicle,
-        coverage: LockCoverage::vehicle(),
-        principal: LockPrincipal {
-            subject: "priority-client".to_owned(),
-            claims: serde_json::Map::new(),
-        },
-        metadata: serde_json::Map::new(),
-        exclusive: true,
-        expires_at: SystemTime::now() + Duration::from_secs(300),
-        parent_vehicle: None,
-    };
-    let removed = locks
-        .store
-        .lock()
-        .await
-        .state
-        .commit_replacement(
-            &pending.root_lock_ids,
-            &[],
-            replacement,
-            &pending.broken_by,
-            pending.broken_at,
-        )
-        .unwrap();
-    acquisition.finish().await;
-    let cleanups = {
-        let mut store = locks.store.lock().await;
-        take_cleanups(&mut store.cleanups, &removed)
-    };
-    run_cleanups(cleanups).await;
+    let replacement = test_lock("replacement")
+        .owner("priority-client")
+        .vehicle()
+        .build();
+    commit_pending_preemption(&locks, acquisition, pending, replacement).await;
 
     let response = get_handler(
         &locks,
-        LockTarget::Vehicle,
         LockScope::Vehicle,
         &TestClaims {
             subject: "existing-client".to_owned(),
             attributes: serde_json::Map::new(),
         },
-        None,
         false,
     )
     .await;
@@ -130,42 +199,12 @@ async fn defunct_lock_remains_visible_and_reports_lock_broken() {
     );
 }
 
-#[test]
-fn defunct_current_holder_remains_after_replacement_removal() {
-    let mut state = LockState::default();
-    let mut preempted = active_test_lock("old-owner", true);
-    preempted.id = "preempted".to_owned();
-    state.insert_active(preempted).unwrap();
-    let mut replacement = active_test_lock("new-owner", true);
-    replacement.id = "replacement".to_owned();
-    state
-        .commit_replacement(
-            &["preempted".to_owned()],
-            &[],
-            replacement,
-            "priority-app",
-            SystemTime::now(),
-        )
-        .unwrap();
-    let defunct = state
-        .defunct_by_id("preempted")
-        .expect("Victim should remain defunct")
-        .clone();
-    assert_eq!(state.current_holder(&defunct), "new-owner");
-
-    state.delete("replacement").unwrap();
-
-    assert_eq!(state.current_holder(&defunct), "new-owner");
-}
-
 #[tokio::test]
 async fn defunct_put_validates_owner_before_reporting_broken_lock() {
     let locks = Locks::new();
-    let mut preempted = active_test_lock("old-owner", true);
-    preempted.id = "preempted".to_owned();
+    let preempted = test_lock("preempted").owner("old-owner").build();
     locks.test_insert_active(preempted).await;
-    let mut replacement = active_test_lock("new-owner", true);
-    replacement.id = "replacement".to_owned();
+    let replacement = test_lock("replacement").owner("new-owner").build();
     locks
         .store
         .lock()
@@ -173,7 +212,6 @@ async fn defunct_put_validates_owner_before_reporting_broken_lock() {
         .state
         .commit_replacement(
             &["preempted".to_owned()],
-            &[],
             replacement,
             "priority-app",
             SystemTime::now(),
@@ -183,7 +221,6 @@ async fn defunct_put_validates_owner_before_reporting_broken_lock() {
     let response = put_handler(
         LockUpdateContext {
             all_locks: &locks,
-            lock: LockTarget::Ecu,
             scope: LockScope::Ecu {
                 name: "ecu-a".to_owned(),
             },
@@ -193,7 +230,6 @@ async fn defunct_put_validates_owner_before_reporting_broken_lock() {
             subject: "unrelated-client".to_owned(),
             attributes: serde_json::Map::new(),
         },
-        None,
         sovd_interfaces::locking::UpdateRequest {
             lock_expiration: 600,
         },
@@ -216,8 +252,7 @@ async fn defunct_put_validates_owner_before_reporting_broken_lock() {
 #[tokio::test]
 async fn put_preserves_lock_identity_metadata_and_exclusivity() {
     let locks = Locks::new();
-    let mut active = active_test_lock("owner", false);
-    active.id = "renewed".to_owned();
+    let mut active = test_lock("renewed").owner("owner").exclusive(false).build();
     active
         .principal
         .claims
@@ -231,7 +266,6 @@ async fn put_preserves_lock_identity_metadata_and_exclusivity() {
     let response = put_handler(
         LockUpdateContext {
             all_locks: &locks,
-            lock: LockTarget::Ecu,
             scope: LockScope::Ecu {
                 name: "ecu-a".to_owned(),
             },
@@ -241,7 +275,6 @@ async fn put_preserves_lock_identity_metadata_and_exclusivity() {
             subject: "owner".to_owned(),
             attributes: serde_json::Map::new(),
         },
-        None,
         sovd_interfaces::locking::UpdateRequest {
             lock_expiration: 600,
         },
@@ -264,13 +297,15 @@ async fn put_preserves_lock_identity_metadata_and_exclusivity() {
 #[tokio::test]
 async fn get_handlers_prune_expired_defunct_records() {
     let locks = Locks::new();
-    let mut preempted = active_test_lock("old-owner", true);
-    preempted.id = "expired-preempted".to_owned();
-    preempted.expires_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+    let preempted = test_lock("expired-preempted")
+        .owner("old-owner")
+        .expires_at(SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+        .build();
     locks.test_insert_active(preempted).await;
-    let mut replacement = active_test_lock("new-owner", true);
-    replacement.id = "replacement".to_owned();
-    replacement.expires_at = SystemTime::now() + Duration::from_secs(300);
+    let replacement = test_lock("replacement")
+        .owner("new-owner")
+        .expires_at(SystemTime::now() + Duration::from_secs(300))
+        .build();
     locks
         .store
         .lock()
@@ -278,7 +313,6 @@ async fn get_handlers_prune_expired_defunct_records() {
         .state
         .commit_replacement(
             &["expired-preempted".to_owned()],
-            &[],
             replacement,
             "priority-app",
             SystemTime::UNIX_EPOCH,
@@ -287,7 +321,6 @@ async fn get_handlers_prune_expired_defunct_records() {
 
     let list = get_handler(
         &locks,
-        LockTarget::Ecu,
         LockScope::Ecu {
             name: "ecu-a".to_owned(),
         },
@@ -295,7 +328,6 @@ async fn get_handlers_prune_expired_defunct_records() {
             subject: "old-owner".to_owned(),
             attributes: serde_json::Map::new(),
         },
-        Some("ecu-a"),
         false,
     )
     .await;
@@ -311,12 +343,10 @@ async fn get_handlers_prune_expired_defunct_records() {
     let expired_id = "expired-preempted".to_owned();
     let response = get_id_handler(
         &locks,
-        LockTarget::Ecu,
         LockScope::Ecu {
             name: "ecu-a".to_owned(),
         },
         &expired_id,
-        None,
         false,
     )
     .await;
@@ -334,12 +364,10 @@ async fn lock_get_responses_include_schema_when_requested() {
 
     let list = get_handler(
         &locks,
-        LockTarget::Ecu,
         LockScope::Ecu {
             name: "ecu-a".to_owned(),
         },
         &claims,
-        Some("ecu-a"),
         true,
     )
     .await;
@@ -350,12 +378,10 @@ async fn lock_get_responses_include_schema_when_requested() {
 
     let details = get_id_handler(
         &locks,
-        LockTarget::Ecu,
         LockScope::Ecu {
             name: "ecu-a".to_owned(),
         },
         &"test-lock-id".to_owned(),
-        None,
         true,
     )
     .await;
@@ -370,12 +396,10 @@ async fn lock_errors_include_schema_when_requested() {
     let locks = Locks::new();
     let response = get_id_handler(
         &locks,
-        LockTarget::Ecu,
         LockScope::Ecu {
             name: "ecu-a".to_owned(),
         },
         &"missing".to_owned(),
-        None,
         true,
     )
     .await;
@@ -387,7 +411,9 @@ async fn lock_errors_include_schema_when_requested() {
 }
 
 #[test]
-fn lock_create_response_includes_schema_when_requested() {
-    assert!(sovd_lock_response("lock-id", true).schema.is_some());
-    assert!(sovd_lock_response("lock-id", false).schema.is_none());
+fn lock_create_response_includes_exclusivity_and_requested_schema() {
+    let response = sovd_lock_response("lock-id", false, true);
+    assert!(!response.x_sovd2uds_isexclusive);
+    assert!(response.schema.is_some());
+    assert!(sovd_lock_response("lock-id", true, false).schema.is_none());
 }

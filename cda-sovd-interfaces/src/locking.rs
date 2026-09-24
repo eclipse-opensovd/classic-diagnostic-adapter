@@ -23,23 +23,29 @@ pub const MAX_METADATA_SIZE: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Lock {
+    /// Unique lock identifier.
     pub id: String,
 
+    /// Absolute lock expiration timestamp in ISO 8601 format.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lock_expiration: Option<String>,
 
-    /// If true, the SOVD client which performed the request owns the
-    /// lock. The value is always false if the entity is not locked
+    /// Whether the requesting SOVD client owns the lock.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owned: Option<bool>,
+    /// Whether the lock excludes read communication by other clients.
+    pub x_sovd2uds_isexclusive: bool,
+    /// Identity of the original preemptor for a defunct lock.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub x_sovd2uds_broken_by: Option<String>,
+    /// Timestamp at which the lock was preempted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub x_sovd2uds_broken_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     /// Subject of the replacement lock holder, when that replacement still exists.
     /// This field is absent after the replacement lock is removed.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub x_sovd2uds_current_holder: Option<String>,
+    /// Inline response schema when requested.
     #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<schemars::Schema>,
@@ -174,6 +180,7 @@ pub mod id {
         #[schemars(rename = "LockResponse")]
         pub struct Response {
             pub lock_expiration: String,
+            pub x_sovd2uds_isexclusive: bool,
             #[serde(skip_serializing_if = "Option::is_none")]
             pub x_sovd2uds_broken_by: Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]

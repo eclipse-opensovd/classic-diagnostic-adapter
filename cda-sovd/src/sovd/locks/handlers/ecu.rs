@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -22,9 +22,9 @@ use cda_interfaces::{UdsEcu, file_manager::FileManager, lock_priority_api::LockS
 use cda_plugin_security::Secured;
 
 use super::super::{
-    ApiError, ErrorWrapper, LockContext, LockCoverage, LockPathParam, LockTarget,
-    LockUpdateContext, ScopeKey, delete_handler, get_handler, get_id_handler, post_handler,
-    put_handler, rollback_preemption, validate_vehicle_owner,
+    ApiError, ErrorWrapper, LockContext, LockCoverage, LockPathParam, LockUpdateContext, ScopeKey,
+    delete_handler, get_handler, get_id_handler, post_handler, put_handler, rollback_preemption,
+    validate_vehicle_owner,
 };
 use crate::{
     openapi,
@@ -33,8 +33,8 @@ use crate::{
 
 pub(crate) mod lock {
     use super::{
-        ApiError, FileManager, Json, LockPathParam, LockScope, LockTarget, LockUpdateContext, Path,
-        Query, Response, Secured, State, TransformOperation, UdsEcu, UseApi, WebserverEcuState,
+        ApiError, FileManager, Json, LockPathParam, LockScope, LockUpdateContext, Path, Query,
+        Response, Secured, State, TransformOperation, UdsEcu, UseApi, WebserverEcuState,
         WithRejection, delete_handler, get_id_handler, put_handler,
     };
     use crate::openapi;
@@ -50,13 +50,11 @@ pub(crate) mod lock {
 
         delete_handler(
             &locks,
-            LockTarget::Ecu,
             LockScope::Ecu {
                 name: ecu_name.clone(),
             },
             &lock,
             &claims,
-            Some(&ecu_name),
             query.include_schema,
         )
         .await
@@ -85,14 +83,12 @@ pub(crate) mod lock {
         put_handler(
             LockUpdateContext {
                 all_locks: &locks,
-                lock: LockTarget::Ecu,
                 scope: LockScope::Ecu {
                     name: ecu_name.clone(),
                 },
             },
             &lock,
             &claims,
-            Some(&ecu_name),
             body,
             query.include_schema,
         )
@@ -116,12 +112,10 @@ pub(crate) mod lock {
     ) -> Response {
         get_id_handler(
             &locks,
-            LockTarget::Ecu,
             LockScope::Ecu {
                 name: ecu_name.clone(),
             },
             &lock,
-            Some(&ecu_name),
             query.include_schema,
         )
         .await
@@ -194,14 +188,11 @@ pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
     post_handler(
         &uds,
         LockContext {
-            lock: LockTarget::Ecu,
             all_locks: &locks,
             acquisition,
             pending,
-            converted_lock_ids: Vec::new(),
             coverage: LockCoverage::new([ecu_name.clone()]),
         },
-        Some(&ecu_name),
         request,
         query.include_schema,
         sec_plugin,
@@ -239,12 +230,10 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
     let claims = sec_plugin.as_auth_plugin().claims();
     get_handler(
         &locks,
-        LockTarget::Ecu,
         LockScope::Ecu {
             name: ecu_name.clone(),
         },
         &claims,
-        Some(&ecu_name),
         query.include_schema,
     )
     .await

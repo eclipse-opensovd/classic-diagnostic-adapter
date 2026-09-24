@@ -20,7 +20,7 @@ use http::{HeaderMap, header};
 use super::{ApiError, DynamicPlugin, ErrorWrapper, IntoResponse, StatusCode, TransformOperation};
 use crate::{
     openapi,
-    sovd::{WebserverEcuState, get_octet_stream_payload, locks},
+    sovd::{WebserverEcuState, get_octet_stream_payload, locks::require_ecu_access},
 };
 
 pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
@@ -34,10 +34,7 @@ pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
     }): State<WebserverEcuState<T, U>>,
     body: Bytes,
 ) -> Response {
-    let claims = security_plugin.as_auth_plugin().claims();
-    if let Err(response) = locks::validate_ecu_write(&claims, &ecu_name, &locks, false).await {
-        return response.into_response();
-    }
+    require_ecu_access!(write, security_plugin, &ecu_name, &locks, false);
 
     match headers.get(header::ACCEPT) {
         Some(v) if v == mime::APPLICATION_OCTET_STREAM.essence_str() => (Some(v), false),

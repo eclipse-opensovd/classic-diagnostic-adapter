@@ -35,7 +35,7 @@ use crate::{
         create_response_schema, create_schema,
         error::{ApiError, ErrorWrapper, api_error_from_diag_response},
         field_parse_errors_to_json, get_payload_data,
-        locks::{Locks, validate_ecu_read, validate_ecu_write},
+        locks::{Locks, require_ecu_access},
     },
 };
 
@@ -404,14 +404,10 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
     include_schema: bool,
 ) -> Response {
     let (security_plugin, locks, is_write) = authorization;
-    let claims = security_plugin.as_auth_plugin().claims();
-    let validation = if is_write {
-        validate_ecu_write(&claims, ecu_name, locks, include_schema).await
+    if is_write {
+        require_ecu_access!(write, security_plugin, ecu_name, locks, include_schema);
     } else {
-        validate_ecu_read(&claims, ecu_name, locks, include_schema).await
-    };
-    if let Err(response) = validation {
-        return response.into_response();
+        require_ecu_access!(read, security_plugin, ecu_name, locks, include_schema);
     }
 
     let parsed = match parse_data_request(&headers, body, include_schema) {
