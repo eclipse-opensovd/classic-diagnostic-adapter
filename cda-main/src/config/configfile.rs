@@ -140,6 +140,9 @@ pub struct ServerConfig {
     /// When set, the server binds only to this Unix socket and `address`/`port`
     /// are silently ignored - the two transports are mutually exclusive, with
     /// the Unix socket taking priority.
+    ///
+    /// The parent directory of this path must already exist; binding fails
+    /// with an error if it does not.
     #[serde(default)]
     pub unix_socket: Option<String>,
 }
