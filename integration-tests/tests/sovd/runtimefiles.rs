@@ -113,7 +113,8 @@ async fn runtimefiles_requires_lock() -> Result<(), TestingError> {
     );
     let upload_url = format!(
         "http://{}:{}/vehicle/v15/{RUNTIMEFILES_NEXTUPDATE}",
-        runtime.config.server.address, runtime.config.server.port
+        runtime.config.server.address(),
+        runtime.config.server.port()
     );
     let upload_response = client
         .post(&upload_url)
@@ -198,7 +199,8 @@ async fn runtimefiles_execution_responses_follow_operation_standard() -> Result<
     let execution_id = response_to_t::<OperationIdItem>(&response)?.id;
     let expected_location = format!(
         "http://{}:{}/vehicle/v15/{RUNTIMEFILES_UPDATE_EXECUTIONS}/{execution_id}",
-        runtime.config.server.address, runtime.config.server.port
+        runtime.config.server.address(),
+        runtime.config.server.port()
     );
     assert_eq!(
         response
@@ -298,7 +300,8 @@ async fn runtimefiles_bulk_data_responses_follow_standard() -> Result<(), Testin
         .expect("upload response must identify the created file");
     let expected_location = format!(
         "http://{}:{}/vehicle/v15/{RUNTIMEFILES_NEXTUPDATE}/{first_id}",
-        runtime.config.server.address, runtime.config.server.port
+        runtime.config.server.address(),
+        runtime.config.server.port()
     );
     assert_eq!(
         location.as_ref().and_then(|value| value.to_str().ok()),
@@ -473,7 +476,8 @@ async fn runtimefiles_post_delete_forbidden_on_current_and_backup() -> Result<()
     );
     let current_url = format!(
         "http://{}:{}/vehicle/v15/{RUNTIMEFILES_CURRENT}",
-        runtime.config.server.address, runtime.config.server.port
+        runtime.config.server.address(),
+        runtime.config.server.port()
     );
     let response = client
         .post(&current_url)
@@ -505,7 +509,8 @@ async fn runtimefiles_post_delete_forbidden_on_current_and_backup() -> Result<()
     );
     let backup_url = format!(
         "http://{}:{}/vehicle/v15/{RUNTIMEFILES_BACKUP}",
-        runtime.config.server.address, runtime.config.server.port
+        runtime.config.server.address(),
+        runtime.config.server.port()
     );
     let response = client
         .post(&backup_url)
@@ -809,7 +814,8 @@ async fn runtimefiles_upload_multiple_files() -> Result<(), TestingError> {
 
     let upload_url = format!(
         "http://{}:{}/vehicle/v15/{RUNTIMEFILES_NEXTUPDATE}",
-        runtime.config.server.address, runtime.config.server.port
+        runtime.config.server.address(),
+        runtime.config.server.port()
     );
     let response = client
         .post(&upload_url)
@@ -1245,7 +1251,8 @@ async fn upload_mdd(config: &Configuration, auth: &http::HeaderMap) -> reqwest::
     );
     let upload_url = format!(
         "http://{}:{}/vehicle/v15/{RUNTIMEFILES_NEXTUPDATE}",
-        config.server.address, config.server.port
+        config.server.address(),
+        config.server.port()
     );
     client
         .post(&upload_url)
@@ -1279,7 +1286,8 @@ async fn upload_mdd_by_name(
     );
     let upload_url = format!(
         "http://{}:{}/vehicle/v15/{RUNTIMEFILES_NEXTUPDATE}",
-        config.server.address, config.server.port
+        config.server.address(),
+        config.server.port()
     );
     client
         .post(&upload_url)
@@ -1313,7 +1321,8 @@ async fn upload_mdd_with_filename(
     );
     let upload_url = format!(
         "http://{}:{}/vehicle/v15/{RUNTIMEFILES_NEXTUPDATE}",
-        config.server.address, config.server.port
+        config.server.address(),
+        config.server.port()
     );
     client
         .post(&upload_url)
@@ -1344,7 +1353,8 @@ async fn upload_mdd_raw(
         .clone();
     let upload_url = format!(
         "http://{}:{}/vehicle/v15/{RUNTIMEFILES_NEXTUPDATE}",
-        config.server.address, config.server.port
+        config.server.address(),
+        config.server.port()
     );
     let mut request = reqwest::Client::new()
         .post(&upload_url)
@@ -1585,7 +1595,8 @@ async fn wait_for_execution_completion(
         .ok_or_else(|| TestingError::SetupError("Authorization header missing".to_owned()))?;
     let url = format!(
         "http://{}:{}/vehicle/v15/{RUNTIMEFILES_CURRENT}",
-        config.server.address, config.server.port
+        config.server.address(),
+        config.server.port()
     );
     let client = reqwest::Client::new();
     loop {
@@ -1781,7 +1792,8 @@ async fn assert_ecu_routes_after_apply(
     // by replace_routes on the vehicle route handle.
     let health_url = format!(
         "http://{}:{}/health/ready",
-        config.server.address, config.server.port
+        config.server.address(),
+        config.server.port()
     );
     let health_response = reqwest::Client::new()
         .get(&health_url)
@@ -2131,7 +2143,8 @@ async fn runtimefiles_only_lock_holder_can_mutate() -> Result<(), TestingError> 
     );
     let upload_url = format!(
         "http://{}:{}/vehicle/v15/{RUNTIMEFILES_NEXTUPDATE}",
-        runtime.config.server.address, runtime.config.server.port
+        runtime.config.server.address(),
+        runtime.config.server.port()
     );
     let upload_response = client
         .post(&upload_url)

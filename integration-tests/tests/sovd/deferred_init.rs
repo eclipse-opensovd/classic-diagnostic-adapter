@@ -152,7 +152,8 @@ fn retry_after_seconds(response: &reqwest::Response) -> Option<u64> {
 fn base_url(runtime: &crate::util::runtime::TestRuntime) -> String {
     format!(
         "http://{}:{}",
-        runtime.config.server.address, runtime.config.server.port
+        runtime.config.server.address(),
+        runtime.config.server.port()
     )
 }
 

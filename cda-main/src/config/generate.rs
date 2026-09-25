@@ -67,9 +67,9 @@ fn reference_config_instance() -> Configuration {
         ..config.functional_description
     };
 
-    // Example value so the optional `server.unix_socket` field appears
-    // (commented out) in the generated reference config.
-    config.server.unix_socket = Some("/run/cda.sock".to_owned());
+    // `server` defaults to the `Tcp` transport already (see `ServerTransport::default`),
+    // so no extra example value is needed here. The `unix_socket` alternative is
+    // documented on the `ServerTransport::UnixSocket` variant's doc comments.
 
     // We're defining a partial toml here, because we want the default config only to contain
     // a few examples. The full object is build during parsing with figment.
@@ -457,6 +457,22 @@ fn walk_schema(
     prefix: &str,
 ) -> BTreeMap<String, String> {
     let resolved = resolve_ref(node, defs);
+
+    // Internally-tagged enums (e.g. `#[serde(tag = "...")]`) are rendered by
+    // schemars as `oneOf`/`anyOf` compositions of per-variant object schemas
+    // instead of a single `properties` object. Walk each variant and merge
+    // their descriptions under the same prefix, so fields nested in a tagged
+    // enum still get their doc comments picked up.
+    if let Some(variants) = resolved
+        .get("oneOf")
+        .or_else(|| resolved.get("anyOf"))
+        .and_then(|v| v.as_array())
+    {
+        return variants
+            .iter()
+            .flat_map(|variant| walk_schema(variant, defs, prefix))
+            .collect();
+    }
 
     resolved
         .get("properties")
