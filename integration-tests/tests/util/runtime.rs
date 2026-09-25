@@ -863,6 +863,18 @@ async fn mark_cda_stopped() {
     *RUNNING_CDA_COMMUNICATION.lock().await = None;
 }
 
+/// (Re)starts `container`, creating it first if it does not exist yet.
+///
+/// `docker compose restart` only works on containers that were already
+/// created by a previous `up`. If the process-wide runtime was initialized
+/// with [`CdaStartup::Deferred`] (only `ecu-sim` brought up), the `cda`
+/// container never exists, and `restart` has nothing to restart - it fails
+/// (or no-ops) instead of starting CDA, leaving every later test that
+/// expects a running CDA to time out waiting for it.
+///
+/// `up -d --force-recreate` creates the container if missing and
+/// unconditionally recreates it otherwise, so it also picks up the
+/// freshly rewritten bind-mounted config on an actual restart.
 fn docker_compose_restart(container: &str) -> Result<(), TestingError> {
     let test_container_dir = test_container_dir()?;
     let mut cmd = std::process::Command::new("docker");
@@ -871,8 +883,12 @@ fn docker_compose_restart(container: &str) -> Result<(), TestingError> {
         append_coverage_compose_files(&mut cmd);
     }
     let status = cmd
-        .arg("restart")
+        .arg("up")
+        .arg("-d")
         .arg("--no-deps")
+        .arg("--force-recreate")
+        .env("DOCKER_BUILDKIT", "1")
+        .env("COMPOSE_PROFILES", compose_profiles())
         .arg(container)
         .current_dir(&test_container_dir)
         .status()
