@@ -157,4 +157,9 @@ COPY --from=builder /tmp/opensovd-cda /app/opensovd-cda
 RUN mkdir -p /app/odx /app/coverage
 
 COPY --chmod=755 testcontainer/cda/entrypoint.sh /app/entrypoint.sh
+
+# `/health/ready` answers 204 once loading has finished, 503 while starting.
+HEALTHCHECK --interval=1s --timeout=5s --start-period=30s --retries=30 \
+    CMD curl -fsS http://localhost:20002/health/ready || exit 1
+
 ENTRYPOINT ["/app/entrypoint.sh"]

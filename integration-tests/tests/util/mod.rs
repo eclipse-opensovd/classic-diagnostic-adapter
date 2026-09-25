@@ -17,6 +17,7 @@ use thiserror::Error;
 pub(crate) mod ecusim;
 pub(crate) mod http;
 pub(crate) mod runtime;
+pub(crate) mod test_containers;
 
 #[derive(Error, Debug)]
 pub enum TestingError {

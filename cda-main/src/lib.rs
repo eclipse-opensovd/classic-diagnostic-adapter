@@ -98,9 +98,10 @@ pub struct AppArgs {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// Directory with diagnostic databases to load, if none have been loaded into storage before.
+    /// Directory with diagnostic databases to load, if none have
+    /// been loaded into storage before via the Update plugin.
     #[arg(short = 'd', long)]
-    pub seed_databases_dir: Option<String>,
+    pub databases_dir: Option<String>,
 
     #[arg(short, long)]
     pub tester_address: Option<String>,
@@ -174,8 +175,8 @@ impl AppArgs {
         )
     )]
     pub fn update_config(self, config: &mut Configuration) {
-        if let Some(seed_databases_dir) = self.seed_databases_dir {
-            config.database.seed_dir = seed_databases_dir;
+        if let Some(databases_dir) = self.databases_dir {
+            config.database.dir = databases_dir;
         }
         if let Some(exit_no_database_loaded) = self.exit_no_database_loaded {
             config.database.exit_no_database_loaded = exit_no_database_loaded;
@@ -330,9 +331,6 @@ where
     };
     tracing::info!("Starting CDA - version {}", cda_version());
 
-    // Done as first initialization step, since the application will not function without storage.
-    let storage = initialize_storage_with_retries(&config).await?;
-
     let webserver_state = init_webserver(
         &config,
         setup.pre_load,
@@ -342,6 +340,10 @@ where
     .await?;
 
     tracing::debug!("Webserver is running. Loading SOVD routes...");
+
+    // After the webserver, so health is served while waiting for the storage.
+    // Before loading, so nothing reads from storage that is not recovered yet.
+    let storage = initialize_storage(&config).await?;
 
     let vehicle_data =
         match load_vehicle_data::<SP>(&config, webserver_state.health_state.as_ref(), &storage)
@@ -567,7 +569,7 @@ pub async fn load_vehicle_data<S: SecurityPlugin>(
     storage: &LocalStorage,
 ) -> Result<VehicleData<S>, AppError> {
     let mdd_paths: Vec<PathBuf> = {
-        let paths = resolve_mdd_paths(storage, &config.database.seed_dir).await;
+        let paths = resolve_mdd_paths(storage, &config.database.dir).await;
         if paths.is_empty() && config.database.exit_no_database_loaded {
             return Err(AppError::InitializationFailed(
                 "No MDD files found".to_string(),
@@ -1041,51 +1043,44 @@ pub fn setup_tracing(config: &Configuration) -> Result<TracingGuards, TracingSet
     })
 }
 
-/// Retry initializing the Storage, as for example the partition
-/// may not yet be available on which we want to store the files.
-async fn initialize_storage_with_retries(
-    config: &Configuration,
-) -> Result<Arc<LocalStorage>, AppError> {
-    let retry_delay =
-        Duration::from_millis(config.runtime_update_config.storage_dir_load_retry_delay_ms);
+/// Opens the storage, retrying while its directory does not exist yet, e.g.
+/// because the storage is not mounted yet.
+///
+/// Opening recovers an interrupted transaction, so that must not happen before
+/// the storage is there: there would be nothing to recover, and the storage
+/// would later be used in an indeterminate state.
+///
+/// # Errors
+/// Returns [`AppError::InitializationFailed`] if the storage directory does not
+/// appear within the retry budget, or opening fails otherwise, e.g. because
+/// recovery fails.
+async fn initialize_storage(config: &Configuration) -> Result<Arc<LocalStorage>, AppError> {
+    let storage_dir = &config.runtime_update_config.storage_dir;
+    let delay = Duration::from_millis(config.runtime_update_config.storage_dir_load_retry_delay_ms);
     let attempts = config.runtime_update_config.storage_dir_load_retry_attempts;
 
-    let storage = (async || {
-        LocalStorage::new(&config.runtime_update_config.storage_dir)
-    })
-    .retry(
-        backon::ConstantBuilder::new()
-            .with_delay(retry_delay)
-            .with_max_times(attempts),
-    )
-    .when(|error| match error {
-        StorageError::Io(_)
-        | StorageError::Other(_)
-        | StorageError::TransactionBusy
-        | StorageError::TransactionConflict(_)
-        // following errors don't make much sense here, but retry just in case
-        | StorageError::CollectionNotFound(_)
-        | StorageError::KeyNotFound(_)
-        => true,
-
-        | StorageError::Corruption(_)
-        | StorageError::NoSpaceLeft(_)
-        | StorageError::PermissionDenied(_) => {
-            tracing::debug!("Encountered irrecoverable error while initializing storage. Not retrying.");
-            false
-        }
-    })
-    .notify(|error, delay: Duration| {
-        tracing::warn!(
-            "Failed to initialize storage. Retrying in {delay:?}. Error was: {error}"
-        );
-    })
-    .await
-    .map_err(|source| {
-        AppError::InitializationFailed(format!(
-            "Failed to initialize storage. Not retrying. Error was: {source}"
-        ))
-    })?;
+    let storage = (async || LocalStorage::new(storage_dir))
+        .retry(
+            backon::ConstantBuilder::new()
+                .with_delay(delay)
+                .with_max_times(attempts),
+        )
+        .when(|error| {
+            matches!(error, StorageError::Io(e) if e.kind() == std::io::ErrorKind::NotFound)
+        })
+        .notify(|error, delay: Duration| {
+            tracing::warn!(
+                storage_dir = %storage_dir,
+                error = %error,
+                "Storage not available, retrying in {delay:?}"
+            );
+        })
+        .await
+        .map_err(|e| {
+            AppError::InitializationFailed(format!(
+                "Failed to open storage {storage_dir}: {e}"
+            ))
+        })?;
 
     Ok(Arc::new(storage))
 }
@@ -1142,7 +1137,7 @@ mod webserver_lifecycle_tests {
         config.server.port = available_port();
         config.doip.tester_address = "127.0.0.1".to_owned();
         config.doip.gateway_port = available_port();
-        config.database.seed_dir = database_dir.path().to_string_lossy().into_owned();
+        config.database.dir = database_dir.path().to_string_lossy().into_owned();
         config.database.exit_no_database_loaded = false;
         config.runtime_update_config.storage_dir =
             storage_dir.path().to_string_lossy().into_owned();
@@ -1170,5 +1165,55 @@ mod webserver_lifecycle_tests {
 
         task.abort();
         task.await.expect_err("CDA task must be cancelled");
+    }
+}
+
+#[cfg(test)]
+mod storage_init_tests {
+    use super::*;
+
+    fn config_for(storage_dir: &Path, attempts: usize) -> Configuration {
+        let mut config = Configuration::default();
+        config.runtime_update_config.storage_dir = storage_dir.to_string_lossy().into_owned();
+        config.runtime_update_config.storage_dir_load_retry_attempts = attempts;
+        config.runtime_update_config.storage_dir_load_retry_delay_ms = 10;
+        config
+    }
+
+    #[tokio::test]
+    async fn recovers_storage_that_appears_after_startup() {
+        let mount_point = tempfile::tempdir().unwrap();
+        let storage_dir = mount_point.path().join("cda");
+        let config = config_for(&storage_dir, 100);
+
+        // Mounted late, carrying leftovers of an interrupted transaction.
+        let mount = {
+            let storage_dir = storage_dir.clone();
+            tokio::spawn(async move {
+                cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(50)).await;
+                let staging = storage_dir.join("journal").join("staging");
+                std::fs::create_dir_all(&staging).unwrap();
+                std::fs::write(staging.join("orphan.tmp"), b"partial").unwrap();
+            })
+        };
+
+        let storage = initialize_storage(&config).await;
+        mount.await.unwrap();
+
+        assert!(storage.is_ok());
+        assert!(
+            !storage_dir.join("journal/staging/orphan.tmp").exists(),
+            "recovery must run on the storage once it is present"
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_that_never_appears_fails_startup() {
+        let mount_point = tempfile::tempdir().unwrap();
+        let config = config_for(&mount_point.path().join("cda"), 2);
+
+        let storage = initialize_storage(&config).await;
+
+        assert!(matches!(storage, Err(AppError::InitializationFailed(_))));
     }
 }

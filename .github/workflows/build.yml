@@ -181,6 +181,9 @@ jobs:
       - name: Run integration tests with Docker coverage
         env:
           CACHE_REGISTRY: ghcr.io/${{ github.repository }}
+          # Lets testcontainers-based tests use the image built above.
+          CDA_TEST_IMAGE_NAME: ghcr.io/${{ github.repository }}/opensovd-cda
+          CDA_TEST_IMAGE_TAG: coverage
           CDA_INTEGRATION_TEST_COVERAGE: "true"
         run: cargo test --locked -p integration-tests --features integration-tests -- --show-output
       - name: Install lcov
@@ -289,6 +292,9 @@ jobs:
       - name: Run CAN integration tests
         env:
           CACHE_REGISTRY: ghcr.io/${{ github.repository }}
+          # Lets testcontainers-based tests use the image built above.
+          CDA_TEST_IMAGE_NAME: ghcr.io/${{ github.repository }}/opensovd-cda
+          CDA_TEST_IMAGE_TAG: coverage
           CDA_INTEGRATION_TEST_USE_CAN: "true"
           CDA_INTEGRATION_TEST_COVERAGE: "true"
         # Run serially: the CAN transport is timing-sensitive (per-transaction
@@ -385,6 +391,9 @@ jobs:
       - name: Run mixed integration tests
         env:
           CACHE_REGISTRY: ghcr.io/${{ github.repository }}
+          # Lets testcontainers-based tests use the image built above.
+          CDA_TEST_IMAGE_NAME: ghcr.io/${{ github.repository }}/opensovd-cda
+          CDA_TEST_IMAGE_TAG: coverage
           CDA_INTEGRATION_TEST_USE_MIXED: "true"
           CDA_INTEGRATION_TEST_COVERAGE: "true"
         run: cargo test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1

@@ -460,6 +460,9 @@
 
 # Diagnostic database loading and naming settings.
 [database]
+# Directory to load diagnostic databases from, if none have
+# been loaded into storage before via the Update plugin.
+# dir = "."
 # If true, the application will exit if no database could be loaded.
 # exit_no_database_loaded = false
 # If true, when variant detection fails to find a matching variant,
@@ -481,8 +484,6 @@
 # attempting a lookup with this flag set against a multi-protocol database
 # returns `DiagServiceError::InvalidDatabase`.
 # ignore_protocol = false
-# Directory to load the databases from, if none have been loaded into storage before.
-# seed_dir = "."
 
 # Holds configuration for diagnostic service naming conventions.
 #
@@ -791,14 +792,14 @@
 
 # Configuration for update plugin, i.e. storage paths
 [runtime_update_config]
-# When `true` and the `DiagnosticDatabase` storage collection is empty,
-# seed it from `database.path` on first startup by copying all `.mdd` files.
-# Default: `false`.
-# init_storage_from_database_path = false
 # Value of the Retry-After header (in seconds) sent when the service is
 # temporarily unavailable due to a busy transaction.
 # retry_after_seconds = 1
-# Directory where the updatable database is stored.
+# Directory where the updatable database is stored. Must exist: the CDA
+# waits for it to appear and never creates it.
+# If the CDA can start before the storage is mounted, point this to a
+# directory on the storage rather than its mount point, so that the wait
+# can tell an unmounted storage from an empty one.
 # storage_dir = "."
 # How many times to try loading the storage directory,
 # if it is unavailable.
