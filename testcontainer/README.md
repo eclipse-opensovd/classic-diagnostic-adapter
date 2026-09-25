@@ -16,7 +16,15 @@ SPDX-License-Identifier: Apache-2.0
 NOTE: Implemented services in the odx are not fully tested yet with the CDA,
 and for some there are open issues to make them work.
 
-## Test using docker compose
+This directory holds the images the integration tests run: the CDA (`cda/`), the ECU
+simulator (`ecu-sim/`) and socketcand for CAN (`socketcand/`), plus the test databases
+(`odx/`). The tests in `integration-tests/` start them with `testcontainers`, see the
+integration test section of the [README](../README.md#integration-tests).
+
+## Try the CDA using docker compose
+
+`docker-compose.yml` starts the ECU simulator and the CDA over DoIP for manual use; the
+integration tests do not use it.
 
 ### Prerequisites
 

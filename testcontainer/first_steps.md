@@ -20,21 +20,7 @@ This guide walks you through running the CDA locally using Docker and making you
 - Docker and Docker Compose
 - `curl` and `jq`
 
-## Step 1: Run the Integration Tests Once
-
-The integration tests generate the `testcontainer/cda-test-config.toml` file that the Docker setup depends on. Run them at least once before proceeding:
-
-```sh
-cargo test --package integration-tests --features integration-tests
-```
-
-After the tests complete, verify the config file exists:
-
-```sh
-ls testcontainer/cda-test-config.toml
-```
-
-## Step 2: Start the CDA with Docker Compose
+## Step 1: Start the CDA with Docker Compose
 
 ```sh
 cd testcontainer/
@@ -43,6 +29,8 @@ docker compose build
 docker compose up
 ```
 
+The CDA runs with its default configuration, which serves FLXC1000, FLXCNG1000 and FSNR2000.
+
 The CDA is ready when you see it respond to the health endpoint:
 
 ```sh
@@ -50,7 +38,7 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:20002/health/ready
 # Expected: 204
 ```
 
-## Step 3: Authorize and Store the Token
+## Step 2: Authorize and Store the Token
 
 All protected endpoints require a Bearer token. Obtain one and store it in a shell variable:
 
@@ -61,7 +49,7 @@ TOKEN=$(curl -s -X POST http://localhost:20002/vehicle/v15/authorize \
   | jq -r '.access_token')
 ```
 
-## Step 4: Discover Available Components
+## Step 3: Discover Available Components
 
 ```sh
 curl -s http://localhost:20002/vehicle/v15/components \
@@ -80,7 +68,7 @@ Example response:
 }
 ```
 
-## Step 5: Read Data from an ECU
+## Step 4: Read Data from an ECU
 
 List all available data identifiers for a component:
 
@@ -121,7 +109,7 @@ curl -s http://localhost:20002/vehicle/v15/components/flxc1000/data/FluxCapacito
 }
 ```
 
-## Step 6: Read Faults
+## Step 5: Read Faults
 
 ```sh
 curl -s http://localhost:20002/vehicle/v15/components/flxc1000/faults \
@@ -136,24 +124,19 @@ This returns all DTCs stored in the ECU's fault memory, including their status f
 docker compose down
 ```
 
-## Local CAN Setup (Optional)
+## CAN Integration Tests (Optional)
 
-The CAN integration suites run against a virtual CAN bus. To prepare one
-locally (requires root and the `vcan` kernel module):
+The CAN and mixed integration suites need the `vcan` kernel module on the Docker host
+(not available on Docker Desktop for macOS); each test environment creates its own `vcan0`
+inside its socketcand container:
 
 ```sh
 sudo modprobe vcan
-sudo ip link add dev vcan0 type vcan
-sudo ip link set up vcan0
-```
 
-The pure-CAN and mixed suites are then run with:
-
-```sh
 CDA_INTEGRATION_TEST_USE_CAN=true cargo test --locked -p integration-tests \
-  --features can-integration-tests --test integration_tests -- --test-threads=1
+  --features can-integration-tests --test integration_tests
 CDA_INTEGRATION_TEST_USE_MIXED=true cargo test --locked -p integration-tests \
-  --features can-integration-tests --test integration_tests -- --test-threads=1
+  --features can-integration-tests --test integration_tests
 ```
 
 ## Quick API Access

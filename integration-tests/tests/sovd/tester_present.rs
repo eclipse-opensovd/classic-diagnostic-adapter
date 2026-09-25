@@ -24,7 +24,7 @@ use crate::{
     util::{
         TestingError, ecusim,
         http::{auth_header, extract_field_from_json, response_to_json, send_cda_request},
-        runtime::{setup_integration_test, wait_for_ecus_online},
+        test_env::{setup_integration_test, wait_for_ecus_online},
     },
 };
 
@@ -42,7 +42,7 @@ const TESTER_PRESENT_FRAME: &str = "3e80";
 /// to be missing despite an active lock.
 #[tokio::test]
 async fn tester_present_sent_while_ecu_lock_held() -> Result<(), TestingError> {
-    let (runtime, _exclusive) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     wait_for_ecus_online(&runtime.config).await?;
     let auth = auth_header(&runtime.config, None).await?;
 
@@ -106,7 +106,7 @@ async fn tester_present_sent_while_ecu_lock_held() -> Result<(), TestingError> {
 /// as long as the lock is held.
 #[tokio::test]
 async fn tester_present_sent_after_programming_session_switch() -> Result<(), TestingError> {
-    let (runtime, _exclusive) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     wait_for_ecus_online(&runtime.config).await?;
     let auth = auth_header(&runtime.config, None).await?;
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
@@ -221,7 +221,7 @@ async fn tester_present_sent_after_programming_session_switch() -> Result<(), Te
 /// connection is re-established, which is the bug this test aims to reproduce.
 #[tokio::test]
 async fn tester_present_sent_after_doip_reconnection() -> Result<(), TestingError> {
-    let (runtime, _exclusive) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     wait_for_ecus_online(&runtime.config).await?;
     let auth = auth_header(&runtime.config, None).await?;
 
@@ -319,7 +319,7 @@ async fn tester_present_sent_after_doip_reconnection() -> Result<(), TestingErro
 /// 2. TP resumes after the reconnect.
 #[tokio::test]
 async fn tester_present_resumes_after_network_disconnect() -> Result<(), TestingError> {
-    let (runtime, _exclusive) = setup_integration_test(true).await?;
+    let runtime = setup_integration_test().await?;
     wait_for_ecus_online(&runtime.config).await?;
     let auth = auth_header(&runtime.config, None).await?;
 

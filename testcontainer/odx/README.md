@@ -30,7 +30,7 @@ TMCC3000, HOVR4000 and JGWT5000 are generated with minimal communication paramet
 is deliberately set to an invalid value (`0xDEAD`) so that integration tests can
 verify that the CDA's per-ECU config override with `precedence = "Config"` takes
 priority over the database value. The correct gateway addresses are supplied via the
-test configuration file (`cda-test-config.toml`).
+test configuration (`integration-tests/tests/util/config.rs`).
 
 ### Required TOML configuration
 
@@ -76,5 +76,5 @@ precedence = "Config"
 The `precedence = "Config"` setting ensures the config value overrides the invalid
 `0xDEAD` gateway address in the MDD. The remaining com-params (timeouts, retry
 policies, tester-present settings, etc.) use `precedence = "Database"` and fall back
-to their defaults when not found in the DB — see `cda-test-config.toml` for the full
-configuration.
+to their defaults when not found in the DB — see `integration-tests/tests/util/config.rs`
+for the full configuration.
