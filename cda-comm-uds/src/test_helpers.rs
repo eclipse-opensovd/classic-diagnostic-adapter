@@ -544,7 +544,11 @@ impl ComponentInfos for TestEcuDb {
         unimplemented!()
     }
 
-    fn is_io_control_service(&self, _service_name: &str, _security_plugin: &DynamicPlugin) -> bool {
+    fn get_io_control_service(
+        &self,
+        _service_name: &str,
+        _security_plugin: &DynamicPlugin,
+    ) -> Result<DiagComm, DiagServiceError> {
         unimplemented!()
     }
 

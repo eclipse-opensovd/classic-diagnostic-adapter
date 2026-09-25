@@ -309,6 +309,16 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
 
     /// Aborts all running tester-present tasks and saves their types so the
     /// lifecycle initialization can restart them after communication is re-enabled.
+    ///
+    /// Running tasks are keyed per ECU, so a functional group shows up once per
+    /// member. Types are de-duplicated on insert, leaving one `Functional` entry
+    /// per group, because [`UdsTesterPresent::start_tester_present`]
+    /// re-enumerates the whole group from it.
+    ///
+    /// The new types are merged into the existing snapshot rather than
+    /// replacing it. A restart still waiting for its activation to reach
+    /// `Enabled` has started no tasks, so the types it was going to restore
+    /// exist only in the snapshot.
     pub(crate) async fn snapshot_and_abort_tester_present(&self) {
         self.abort_pending_snapshot_restart().await;
 
@@ -321,11 +331,6 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             let _ = handle.await;
         }
 
-        // Merge into the snapshot rather than replacing it. A restart that was
-        // still waiting for its activation to reach `Enabled` has started no
-        // tasks, so the types it was going to restore exist only in the
-        // snapshot. Replacing here would drop them for good and tester present
-        // would never come back.
         let mut snapshot = self.tester_present_snapshot.lock().await;
         for type_ in running {
             if !snapshot.contains(&type_) {
@@ -344,19 +349,12 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     /// [`UdsManager::snapshot_and_abort_tester_present`], once the activation
     /// that triggered this initialization has reached `Enabled`.
     ///
-    /// The restart cannot run inline, because `initialize` runs while the
-    /// lifecycle is still `Enabling`. A tester-present task sends on its first
-    /// interval tick, which fires immediately; that send would be refused as
-    /// not-ready and would request an activation on top of the one already in
-    /// flight.
-    ///
-    /// The snapshot may hold a functional-group entry per member ECU. The
-    /// duplicates are collapsed here, because
-    /// [`UdsTesterPresent::start_tester_present`] re-enumerates the whole group
-    /// from a single `Functional` entry.
+    /// The restart waits for the in-flight activation to publish `Enabled`
+    /// rather than requesting another activation. It keeps the snapshot when
+    /// that activation ends in any other state, so a later activation can retry
+    /// the restart. After restoration, the active tasks become the record of
+    /// tester-present state and the snapshot is cleared.
     pub(crate) async fn restart_tester_present_snapshot(&self) {
-        // Read, do not take. The activation can still end without reaching
-        // `Enabled`, and the snapshot has to survive that for the next one.
         let snapshot = self.tester_present_snapshot.lock().await.clone();
         if snapshot.is_empty() {
             return;
@@ -366,21 +364,13 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
 
         let uds = self.clone();
         let task = cda_interfaces::spawn_named!("tester-present-snapshot-restart", async move {
-            // Deliberately not `require_communication_ready`: that requests an
-            // activation, and this restart belongs to one that is already in
-            // flight. Wait for that one to publish `Enabled` instead, then let
-            // the normal send path acquire its own guard for every message.
             let guard = loop {
                 match uds.communication_access.acquire() {
                     Ok(guard) => break guard,
-                    // The activation this restart belongs to is still running.
                     Err(CommunicationError::Enabling) => {
                         cda_interfaces::util::tokio_ext::sleep_for(SNAPSHOT_RESTART_POLL_INTERVAL)
                             .await;
                     }
-                    // Any other state means it ended without reaching
-                    // `Enabled`. Leave the snapshot in place so the next
-                    // `initialize` can restore it.
                     Err(e) => {
                         tracing::debug!(
                             error = %e,
@@ -392,12 +382,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 }
             };
 
-            let mut started = Vec::with_capacity(snapshot.len());
             for type_ in snapshot {
-                if started.contains(&type_) {
-                    continue;
-                }
-                started.push(type_.clone());
                 if let Err(e) = uds.start_tester_present_tasks(type_.clone()).await {
                     tracing::warn!(
                         ?type_,
@@ -408,9 +393,6 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             }
             drop(guard);
 
-            // Restored. The running tasks are the record of what is active from
-            // here on, and `snapshot_and_abort_tester_present` recaptures them
-            // from there.
             uds.tester_present_snapshot.lock().await.clear();
         });
         *self.tester_present_restart_task.lock().await = Some(task);

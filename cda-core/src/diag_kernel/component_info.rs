@@ -13,7 +13,7 @@
 
 use cda_database::datatypes;
 use cda_interfaces::{
-    ComponentInfos, DiagServiceError, DynamicPlugin, HashMap, HashSet,
+    ComponentInfos, DiagComm, DiagCommType, DiagServiceError, DynamicPlugin, HashMap, HashSet,
     datatypes::{
         ComponentConfigurationsInfo, ComponentDataInfo, ComponentOperationsInfo,
         DiagnosticServiceAffixPosition, RoutineSubfunctions,
@@ -244,15 +244,22 @@ impl<S: SecurityPlugin> ComponentInfos for EcuManager<S> {
         Ok(subfunction_flags_from_services(&all_rc_services))
     }
 
-    /// Returns whether an `InputOutputControlByIdentifier` (SID 0x2F) service resolving to
-    /// `service_name` is defined for the current ECU variant.
+    /// Returns the operation [`DiagComm`] for the `InputOutputControlByIdentifier` (SID 0x2F)
+    /// service resolving to `service_name` on the current ECU variant.
     ///
     /// A candidate matches when its short name, after trimming the naming-convention affixes
     /// configured for SID 0x2F (mirroring how [`Self::get_routine_subfunctions`] resolves
     /// routine names via `trim_routine_name`), equals `service_name`. This is tried first,
     /// falling back to an exact short-name match for ECUs with no IO Control affix configured.
-    fn is_io_control_service(&self, service_name: &str, security_plugin: &DynamicPlugin) -> bool {
-        !self
+    ///
+    /// # Errors
+    /// Returns `Err(DiagServiceError::NotFound)` if no matching IO Control service is defined.
+    fn get_io_control_service(
+        &self,
+        service_name: &str,
+        security_plugin: &DynamicPlugin,
+    ) -> Result<DiagComm, DiagServiceError> {
+        let found = !self
             .get_services_from_variant_and_parent_refs(|service| {
                 service
                     .request_id()
@@ -272,7 +279,20 @@ impl<S: SecurityPlugin> ComponentInfos for EcuManager<S> {
                         })
                     })
             })
-            .is_empty()
+            .is_empty();
+
+        if !found {
+            return Err(DiagServiceError::NotFound(format!(
+                "No InputOutputControlByIdentifier service found for '{service_name}'"
+            )));
+        }
+
+        Ok(DiagComm {
+            name: service_name.to_owned(),
+            type_: DiagCommType::Operations,
+            lookup_name: Some(service_name.to_owned()),
+            subfunction_id: None,
+        })
     }
 
     /// Returns all `RoutineControl` (SID 0x31) services for the functional group,

@@ -768,15 +768,22 @@ pub trait ComponentInfos: Send + Sync + 'static {
         security_plugin: &DynamicPlugin,
     ) -> Result<RoutineSubfunctions, DiagServiceError>;
 
-    /// Returns whether an `InputOutputControlByIdentifier` (SID 0x2F) service resolving to
-    /// `service_name` is defined for the current ECU variant, following the same
+    /// Returns the operation [`DiagComm`] for the `InputOutputControlByIdentifier` (SID 0x2F)
+    /// service resolving to `service_name` on the current ECU variant, following the same
     /// naming-convention affix resolution as `get_routine_subfunctions` (falling back to an
     /// exact short-name match).
     ///
     /// Used to resolve an operation-id to its underlying UDS service type independently of
     /// [`ComponentInfos::get_routine_subfunctions`], so IO Control operations are identified
     /// directly rather than inferred from the absence of a `RoutineControl` service.
-    fn is_io_control_service(&self, service_name: &str, security_plugin: &DynamicPlugin) -> bool;
+    ///
+    /// # Errors
+    /// Returns `Err(DiagServiceError::NotFound)` if no matching IO Control service is defined.
+    fn get_io_control_service(
+        &self,
+        service_name: &str,
+        security_plugin: &DynamicPlugin,
+    ) -> Result<DiagComm, DiagServiceError>;
 
     /// Retrieve all `RoutineControl` (SID 0x31) operations for a specific functional group,
     /// with flags indicating available subfunctions (Stop/RequestResults).
