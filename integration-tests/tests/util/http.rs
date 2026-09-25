@@ -275,10 +275,10 @@ impl Response {
     }
 }
 
-/// Sends a request over a Unix domain socket connection using a real HTTP
-/// client (`hyperlocal` on top of `hyper-util`), so the tests exercise a
-/// spec-compliant client the same way a real consumer of the Unix socket
-/// transport (e.g. `opensovd-gateway`) would.
+/// Sends a request over a Unix domain socket connection using `reqwest`
+/// (the same HTTP client used throughout these integration tests), so the
+/// tests exercise a spec-compliant client the same way a real consumer of
+/// the Unix socket transport (e.g. `opensovd-gateway`) would.
 ///
 /// # Errors
 /// Returns [`TestingError`] if the socket can't be reached, the response
@@ -291,32 +291,25 @@ pub(crate) async fn send_unix_socket_request(
     method: Method,
     data: Option<&str>,
 ) -> Result<Response, TestingError> {
-    use http_body_util::{BodyExt, Full};
-    use hyper_util::{client::legacy::Client, rt::TokioExecutor};
-    use hyperlocal::UnixConnector;
-
-    let client: Client<UnixConnector, Full<bytes::Bytes>> =
-        Client::builder(TokioExecutor::new()).build(UnixConnector);
-    let uri: http::Uri = hyperlocal::Uri::new(socket_path, endpoint).into();
+    let client = reqwest::Client::builder()
+        .unix_socket(socket_path)
+        .build()
+        .map_err(|e| {
+            TestingError::ProcessFailed(format!("Failed to build unix socket client: {e}"))
+        })?;
 
     let body = data.unwrap_or_default().to_owned();
-    let mut request_builder = http::Request::builder()
-        .method(method)
-        .uri(uri)
-        .header(http::header::HOST, "localhost");
+    let mut request_builder = client.request(method, format!("http://localhost{endpoint}"));
     if !body.is_empty() {
         request_builder = request_builder
             .header(
                 reqwest::header::CONTENT_TYPE,
                 mime::APPLICATION_JSON.essence_str(),
             )
-            .header(http::header::CONTENT_LENGTH, body.len());
+            .body(body);
     }
-    let request = request_builder
-        .body(Full::new(bytes::Bytes::from(body)))
-        .map_err(|e| TestingError::ProcessFailed(format!("Failed to build request: {e}")))?;
 
-    let response = client.request(request).await.map_err(|e| {
+    let response = request_builder.send().await.map_err(|e| {
         TestingError::ProcessFailed(format!(
             "Failed to send request over unix socket {socket_path}: {e}"
         ))
@@ -325,11 +318,9 @@ pub(crate) async fn send_unix_socket_request(
     let status = response.status();
     let header_map = response.headers().clone();
     let body_bytes = response
-        .into_body()
-        .collect()
+        .bytes()
         .await
-        .map_err(|e| TestingError::ProcessFailed(format!("Failed to read response body: {e}")))?
-        .to_bytes();
+        .map_err(|e| TestingError::ProcessFailed(format!("Failed to read response body: {e}")))?;
     let body = if body_bytes.is_empty() {
         None
     } else {

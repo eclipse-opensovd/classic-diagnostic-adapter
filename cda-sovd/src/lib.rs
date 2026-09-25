@@ -114,41 +114,47 @@ where
     let trim_trailing_slash_middleware = NormalizePathLayer::trim_trailing_slash();
     let service_with_middleware = middleware.layer(trim_trailing_slash_middleware.layer(service));
 
-    let webserver_task = if let Some(socket_path) = config.unix_socket {
-        #[cfg(unix)]
-        {
-            remove_stale_unix_socket(&socket_path)?;
-            let listener = UnixListener::bind(&socket_path).map_err(|e| {
+    let serve_future: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> =
+        if let Some(socket_path) = config.unix_socket {
+            #[cfg(unix)]
+            {
+                remove_stale_unix_socket(&socket_path)?;
+                let listener = UnixListener::bind(&socket_path).map_err(|e| {
+                    DoipGatewaySetupError::ServerError(format!(
+                        "Failed to bind to unix socket {socket_path}: {e}"
+                    ))
+                })?;
+                tracing::info!("SOVD HTTP server listening on unix socket {socket_path}");
+                Box::pin(async move {
+                    let _ =
+                        axum::serve(listener, tower::make::Shared::new(service_with_middleware))
+                            .with_graceful_shutdown(shutdown_signal)
+                            .await;
+                })
+            }
+            #[cfg(not(unix))]
+            {
+                return Err(DoipGatewaySetupError::ServerError(format!(
+                    "Unix domain sockets are not supported on this platform (requested path: \
+                     {socket_path})"
+                )));
+            }
+        } else {
+            let listen_address = format!("{}:{}", config.host, config.port);
+            let listener = TcpListener::bind(&listen_address).await.map_err(|e| {
                 DoipGatewaySetupError::ServerError(format!(
-                    "Failed to bind to unix socket {socket_path}: {e}"
+                    "Failed to bind to {listen_address}: {e}"
                 ))
             })?;
-            tracing::info!("SOVD HTTP server listening on unix socket {socket_path}");
-            cda_interfaces::spawn_named!("webserver", async move {
+            tracing::info!("SOVD HTTP server listening on {listen_address}");
+            Box::pin(async move {
                 let _ = axum::serve(listener, tower::make::Shared::new(service_with_middleware))
                     .with_graceful_shutdown(shutdown_signal)
                     .await;
             })
-        }
-        #[cfg(not(unix))]
-        {
-            return Err(DoipGatewaySetupError::ServerError(format!(
-                "Unix domain sockets are not supported on this platform (requested path: \
-                 {socket_path})"
-            )));
-        }
-    } else {
-        let listen_address = format!("{}:{}", config.host, config.port);
-        let listener = TcpListener::bind(&listen_address).await.map_err(|e| {
-            DoipGatewaySetupError::ServerError(format!("Failed to bind to {listen_address}: {e}"))
-        })?;
-        tracing::info!("SOVD HTTP server listening on {listen_address}");
-        cda_interfaces::spawn_named!("webserver", async move {
-            let _ = axum::serve(listener, tower::make::Shared::new(service_with_middleware))
-                .with_graceful_shutdown(shutdown_signal)
-                .await;
-        })
-    };
+        };
+
+    let webserver_task = cda_interfaces::spawn_named!("webserver", serve_future);
 
     Ok((dynamic_router, webserver_task))
 }
@@ -395,27 +401,28 @@ mod webserver_bind_tests {
     use std::time::Duration;
 
     use futures::FutureExt;
-    use http_body_util::Empty;
-    use hyper_util::{client::legacy::Client, rt::TokioExecutor};
-    use hyperlocal::UnixConnector;
 
     use super::*;
 
-    /// Sends a GET request over a Unix domain socket using a real HTTP
-    /// client (`hyperlocal` on top of `hyper-util`) and returns the response
-    /// status code. Used instead of parsing raw bytes off a `UnixStream`, so
-    /// the tests exercise a spec-compliant HTTP client the same way a real
-    /// consumer of the Unix socket transport would.
+    /// Sends a GET request over a Unix domain socket using `reqwest` (the
+    /// same HTTP client used elsewhere in this crate and in the integration
+    /// tests) and returns the response status code. Used instead of parsing
+    /// raw bytes off a `UnixStream`, so the tests exercise a spec-compliant
+    /// HTTP client the same way a real consumer of the Unix socket transport
+    /// would.
     async fn get_over_unix_socket(socket_path: &str, path: &str) -> http::StatusCode {
-        let client: Client<UnixConnector, Empty<bytes::Bytes>> =
-            Client::builder(TokioExecutor::new()).build(UnixConnector);
-        let uri: http::Uri = hyperlocal::Uri::new(socket_path, path).into();
+        let client = reqwest::Client::builder()
+            .unix_socket(socket_path)
+            .build()
+            .expect("failed to build unix socket client");
 
         let response = client
-            .get(uri)
+            .get(format!("http://localhost{path}"))
+            .send()
             .await
             .expect("failed to send request over unix socket");
-        response.status()
+        http::StatusCode::from_u16(response.status().as_u16())
+            .expect("response returned an invalid status code")
     }
 
     fn shutdown_channel() -> (
@@ -428,6 +435,21 @@ mod webserver_bind_tests {
         }
         .shared();
         (tx, signal)
+    }
+
+    /// Creates a temp directory and a `WebServerConfig` pointing its
+    /// `unix_socket` at a socket file inside it, with an unused TCP
+    /// `host`/`port` for tests that don't care about TCP. The returned
+    /// `TempDir` must be kept alive for as long as the socket path is used.
+    fn temp_socket_config() -> (tempfile::TempDir, String, WebServerConfig) {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let socket_path = dir.path().join("cda.sock").to_string_lossy().to_string();
+        let config = WebServerConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            unix_socket: Some(socket_path.clone()),
+        };
+        (dir, socket_path, config)
     }
 
     /// Asserts that `socket_path` is reachable (a request gets routed through
@@ -454,14 +476,7 @@ mod webserver_bind_tests {
     /// [[ test~sovd-api-http-server-unix-socket-bind, Binds the server to a unix domain socket and reaches it, test ]]
     #[tokio::test]
     async fn launch_webserver_binds_unix_socket() {
-        let dir = tempfile::tempdir().expect("failed to create temp dir");
-        let socket_path = dir.path().join("cda.sock").to_string_lossy().to_string();
-
-        let config = WebServerConfig {
-            host: "127.0.0.1".to_owned(),
-            port: 0,
-            unix_socket: Some(socket_path.clone()),
-        };
+        let (_dir, socket_path, config) = temp_socket_config();
         let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
         let (_dynamic_router, webserver_task) = launch_webserver(config, shutdown_signal)
@@ -474,8 +489,7 @@ mod webserver_bind_tests {
     /// [[ test~sovd-api-http-server-unix-socket-priority, Unix domain socket takes priority over TCP host/port, test ]]
     #[tokio::test]
     async fn launch_webserver_unix_socket_takes_priority_over_tcp() {
-        let dir = tempfile::tempdir().expect("failed to create temp dir");
-        let socket_path = dir.path().join("cda.sock").to_string_lossy().to_string();
+        let (_dir, socket_path, mut config) = temp_socket_config();
 
         // Deliberately bind the TCP host/port too, to confirm it's ignored.
         let tcp_listener = TcpListener::bind("127.0.0.1:0")
@@ -483,12 +497,8 @@ mod webserver_bind_tests {
             .expect("failed to reserve a tcp port");
         let tcp_port = tcp_listener.local_addr().unwrap().port();
         drop(tcp_listener);
+        config.port = tcp_port;
 
-        let config = WebServerConfig {
-            host: "127.0.0.1".to_owned(),
-            port: tcp_port,
-            unix_socket: Some(socket_path.clone()),
-        };
         let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
         let (_dynamic_router, webserver_task) = launch_webserver(config, shutdown_signal)
@@ -509,17 +519,11 @@ mod webserver_bind_tests {
     /// [[ test~sovd-api-http-server-unix-socket-stale-cleanup, Removes a stale unix socket file left by an unclean shutdown before binding, test ]]
     #[tokio::test]
     async fn launch_webserver_removes_stale_unix_socket_file() {
-        let dir = tempfile::tempdir().expect("failed to create temp dir");
-        let socket_path = dir.path().join("cda.sock").to_string_lossy().to_string();
+        let (_dir, socket_path, config) = temp_socket_config();
 
         // Simulate a leftover socket file from a previous unclean shutdown.
         std::fs::write(&socket_path, b"stale").expect("failed to create stale socket file");
 
-        let config = WebServerConfig {
-            host: "127.0.0.1".to_owned(),
-            port: 0,
-            unix_socket: Some(socket_path.clone()),
-        };
         let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
         let (_dynamic_router, webserver_task) = launch_webserver(config, shutdown_signal)
@@ -532,17 +536,11 @@ mod webserver_bind_tests {
     /// [[ test~sovd-api-http-server-unix-socket-stale-cleanup-failure, Fails cleanly when a stale unix socket path can't be removed, test ]]
     #[tokio::test]
     async fn launch_webserver_fails_if_stale_socket_cannot_be_removed() {
-        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let (_dir, socket_path, config) = temp_socket_config();
         // A directory can't be removed with `remove_file`, so binding must fail
         // with a clear error instead of silently misbehaving.
-        let socket_path = dir.path().join("cda.sock");
         std::fs::create_dir(&socket_path).expect("failed to create directory");
 
-        let config = WebServerConfig {
-            host: "127.0.0.1".to_owned(),
-            port: 0,
-            unix_socket: Some(socket_path.to_string_lossy().to_string()),
-        };
         let (_shutdown_tx, shutdown_signal) = shutdown_channel();
 
         let result = launch_webserver(config, shutdown_signal).await;
