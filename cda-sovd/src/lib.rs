@@ -49,13 +49,11 @@ pub(crate) mod sovd;
 pub const SWAGGER_UI_ROUTE: &str = "/swagger-ui";
 pub const OPENAPI_JSON_ROUTE: &str = "/openapi.json";
 #[derive(Clone)]
-pub struct WebServerConfig {
-    pub host: String,
-    pub port: u16,
-    /// When set, the server binds to this Unix domain socket path instead of
-    /// `host`/`port`. Takes priority silently over the TCP settings when
-    /// present - the two are not combined.
-    pub unix_socket: Option<String>,
+pub enum WebServerConfig {
+    /// Bind to this host/port over TCP.
+    Tcp { host: String, port: u16 },
+    /// Bind to this Unix domain socket path instead of TCP.
+    UnixSocket { path: String },
 }
 
 /// Static configuration for vehicle SOVD routes.
@@ -85,14 +83,7 @@ pub struct VehicleResources<T, M> {
 /// Will return `Err` in case that the webserver couldn't be launched.
 /// This can be caused due to invalid config, ports or addresses already being in use.
 ///
-#[tracing::instrument(
-    skip(config, shutdown_signal),
-    fields(
-        host = %config.host,
-        port = %config.port,
-        unix_socket = config.unix_socket.as_deref().unwrap_or(""),
-    )
-)]
+#[tracing::instrument(skip(config, shutdown_signal))]
 pub async fn launch_webserver<F>(
     config: WebServerConfig,
     shutdown_signal: F,
@@ -114,8 +105,8 @@ where
     let trim_trailing_slash_middleware = NormalizePathLayer::trim_trailing_slash();
     let service_with_middleware = middleware.layer(trim_trailing_slash_middleware.layer(service));
 
-    let serve_future: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> =
-        if let Some(socket_path) = config.unix_socket {
+    let serve_future: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = match config {
+        WebServerConfig::UnixSocket { path: socket_path } => {
             #[cfg(unix)]
             {
                 remove_stale_unix_socket(&socket_path)?;
@@ -139,8 +130,9 @@ where
                      {socket_path})"
                 )));
             }
-        } else {
-            let listen_address = format!("{}:{}", config.host, config.port);
+        }
+        WebServerConfig::Tcp { host, port } => {
+            let listen_address = format!("{host}:{port}");
             let listener = TcpListener::bind(&listen_address).await.map_err(|e| {
                 DoipGatewaySetupError::ServerError(format!(
                     "Failed to bind to {listen_address}: {e}"
@@ -152,7 +144,8 @@ where
                     .with_graceful_shutdown(shutdown_signal)
                     .await;
             })
-        };
+        }
+    };
 
     let webserver_task = cda_interfaces::spawn_named!("webserver", serve_future);
 
@@ -437,17 +430,14 @@ mod webserver_bind_tests {
         (tx, signal)
     }
 
-    /// Creates a temp directory and a `WebServerConfig` pointing its
-    /// `unix_socket` at a socket file inside it, with an unused TCP
-    /// `host`/`port` for tests that don't care about TCP. The returned
-    /// `TempDir` must be kept alive for as long as the socket path is used.
+    /// Creates a temp directory and a `WebServerConfig::UnixSocket` pointing
+    /// at a socket file inside it. The returned `TempDir` must be kept alive
+    /// for as long as the socket path is used.
     fn temp_socket_config() -> (tempfile::TempDir, String, WebServerConfig) {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let socket_path = dir.path().join("cda.sock").to_string_lossy().to_string();
-        let config = WebServerConfig {
-            host: "127.0.0.1".to_owned(),
-            port: 0,
-            unix_socket: Some(socket_path.clone()),
+        let config = WebServerConfig::UnixSocket {
+            path: socket_path.clone(),
         };
         (dir, socket_path, config)
     }
@@ -486,34 +476,38 @@ mod webserver_bind_tests {
         assert_reachable_then_shutdown(&socket_path, shutdown_tx, webserver_task).await;
     }
 
-    /// [[ test~sovd-api-http-server-unix-socket-priority, Unix domain socket takes priority over TCP host/port, test ]]
+    /// [[ test~sovd-api-http-server-tcp-bind, Binds the server to a TCP host/port and reaches it, test ]]
     #[tokio::test]
-    async fn launch_webserver_unix_socket_takes_priority_over_tcp() {
-        let (_dir, socket_path, mut config) = temp_socket_config();
-
-        // Deliberately bind the TCP host/port too, to confirm it's ignored.
+    async fn launch_webserver_binds_tcp() {
         let tcp_listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("failed to reserve a tcp port");
         let tcp_port = tcp_listener.local_addr().unwrap().port();
         drop(tcp_listener);
-        config.port = tcp_port;
 
+        let config = WebServerConfig::Tcp {
+            host: "127.0.0.1".to_owned(),
+            port: tcp_port,
+        };
         let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
         let (_dynamic_router, webserver_task) = launch_webserver(config, shutdown_signal)
             .await
-            .expect("failed to launch webserver");
+            .expect("failed to launch webserver on tcp");
 
-        // The TCP port must remain free, proving TCP was never bound (the
-        // unix socket reachability itself is checked below).
-        let retry_listener = TcpListener::bind(("127.0.0.1", tcp_port)).await;
-        assert!(
-            retry_listener.is_ok(),
-            "TCP port should not have been bound when unix_socket is set"
-        );
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("http://127.0.0.1:{tcp_port}/"))
+            .send()
+            .await
+            .expect("failed to send request over tcp");
+        assert_eq!(response.status().as_u16(), http::StatusCode::NOT_FOUND);
 
-        assert_reachable_then_shutdown(&socket_path, shutdown_tx, webserver_task).await;
+        let _ = shutdown_tx.send(());
+        tokio::time::timeout(Duration::from_secs(5), webserver_task)
+            .await
+            .expect("webserver task didn't shut down in time")
+            .expect("webserver task panicked");
     }
 
     /// [[ test~sovd-api-http-server-unix-socket-stale-cleanup, Removes a stale unix socket file left by an unclean shutdown before binding, test ]]

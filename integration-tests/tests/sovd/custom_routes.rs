@@ -17,7 +17,7 @@ use aide::axum::{ApiRouter, routing};
 use axum::{Json, http::StatusCode};
 use cda_sovd::dynamic_router::DynamicRouter;
 use futures::FutureExt;
-use opensovd_cda_lib::{cda_version, config::configfile::ServerConfig};
+use opensovd_cda_lib::{cda_version, config::configfile::ServerTransport};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 
@@ -130,10 +130,9 @@ async fn test_custom_demo_endpoint() {
     let host = host();
     let test_port = find_available_tcp_port(&host).expect("Failed to find available port");
 
-    let webserver_config = cda_sovd::WebServerConfig {
+    let webserver_config = cda_sovd::WebServerConfig::Tcp {
         host: host.clone(),
         port: test_port,
-        unix_socket: None,
     };
 
     let (shutdown_tx, shutdown_signal) = shutdown_channel();
@@ -166,7 +165,7 @@ async fn test_custom_demo_endpoint() {
         .await;
 
     let url = reqwest::Url::parse(&format!("http://{host}:{test_port}/test")).expect("Invalid URL");
-    wait_for_cda_online(&ServerConfig {
+    wait_for_cda_online(&ServerTransport::Tcp {
         address: host,
         port: test_port,
         unix_socket: None,
@@ -207,10 +206,8 @@ async fn test_custom_demo_endpoint_over_unix_socket() {
         .to_string_lossy()
         .to_string();
 
-    let webserver_config = cda_sovd::WebServerConfig {
-        host: host(),
-        port: 0,
-        unix_socket: Some(socket_path.clone()),
+    let webserver_config = cda_sovd::WebServerConfig::UnixSocket {
+        path: socket_path.clone(),
     };
 
     let (shutdown_tx, shutdown_signal) = shutdown_channel();

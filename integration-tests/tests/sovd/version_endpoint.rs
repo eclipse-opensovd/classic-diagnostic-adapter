@@ -46,8 +46,8 @@ fn assert_version_response(json: &serde_json::Value) {
 #[tokio::test]
 async fn test_version_endpoint() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-    let host = &runtime.config.server.address;
-    let port = runtime.config.server.port;
+    let host = runtime.config.server.address();
+    let port = runtime.config.server.port();
 
     // Test app-scoped version endpoint
     let app_url = reqwest::Url::parse(&format!(
