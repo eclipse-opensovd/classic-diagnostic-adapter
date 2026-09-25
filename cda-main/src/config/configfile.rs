@@ -74,7 +74,7 @@ impl StrictConfig {
 #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct Configuration {
     /// SOVD HTTP server bind settings.
-    pub server: ServerConfig,
+    pub server: ServerTransport,
     /// `DoIP` (Diagnostics over IP) transport layer settings.
     pub doip: DoipConfig,
     /// Optional CAN bus transport configuration.
@@ -129,18 +129,144 @@ pub struct EcuConfig {
 }
 
 /// SOVD HTTP server bind configuration.
+///
+/// `transport` selects which of the two mutually exclusive variants below is
+/// active. Each variant also captures the other transport's field(s),
+/// unused for binding, purely so `ConfigSanity` can reject a config that
+/// explicitly configures both (e.g. `transport = "unix_socket"` with a
+/// non-default `address`/`port` also present).
 #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
-pub struct ServerConfig {
-    /// IP address the server listens on.
-    pub address: String,
-    /// TCP port the server listens on.
-    pub port: u16,
+#[serde(tag = "transport", rename_all = "snake_case")]
+pub enum ServerTransport {
+    /// Bind to this IP address and TCP port.
+    Tcp {
+        /// IP address the server listens on.
+        address: String,
+        /// TCP port the server listens on.
+        port: u16,
+        // Not used when `transport = "tcp"`; only present so a config that
+        // also sets this alongside `transport = "tcp"` can be rejected by
+        // `ConfigSanity`. Deliberately not a doc comment: this field should
+        // not appear as documented/user-facing in the generated reference
+        // config.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unix_socket: Option<String>,
+    },
+    /// Bind to a Unix domain socket instead of TCP.
+    UnixSocket {
+        /// Path to the Unix domain socket to bind the server to, e.g.
+        /// `/run/cda.sock`.
+        ///
+        /// The parent directory of this path must already exist; binding
+        /// fails with an error if it does not.
+        unix_socket: String,
+        // Not used when `transport = "unix_socket"`; only present so a
+        // config that also sets this alongside `transport = "unix_socket"`
+        // can be rejected by `ConfigSanity`. Deliberately not a doc comment:
+        // see `Tcp::unix_socket` above.
+        #[serde(default = "default_server_address")]
+        address: String,
+        // See `address` above.
+        #[serde(default = "default_server_port")]
+        port: u16,
+    },
 }
-impl Default for ServerConfig {
+
+pub(crate) fn default_server_address() -> String {
+    "0.0.0.0".to_owned()
+}
+
+pub(crate) fn default_server_port() -> u16 {
+    20002
+}
+
+impl Default for ServerTransport {
     fn default() -> Self {
-        Self {
-            address: "0.0.0.0".to_owned(),
-            port: 20002,
+        Self::Tcp {
+            address: default_server_address(),
+            port: default_server_port(),
+            unix_socket: None,
+        }
+    }
+}
+
+impl ConfigSanity for ServerTransport {
+    fn validate_sanity(&self) -> Result<(), ConfigSanityError> {
+        fn validate_address_port(address: &str, port: u16) -> Result<(), ConfigSanityError> {
+            address
+                .parse::<std::net::IpAddr>()
+                .map_err(|_| ConfigSanityError::InvalidValue {
+                    field: "server.address".to_owned(),
+                    reason: format!("{address} is neither a valid IPv4 nor IPv6 address"),
+                })?;
+            if port == 0 {
+                return Err(ConfigSanityError::InvalidValue {
+                    field: "server.port".to_owned(),
+                    reason: "Port must be greater than 0".to_owned(),
+                });
+            }
+            Ok(())
+        }
+
+        match self {
+            Self::Tcp {
+                address,
+                port,
+                unix_socket,
+            } => {
+                validate_address_port(address, *port)?;
+                if unix_socket.is_some() {
+                    return Err(ConfigSanityError::InvalidValue {
+                        field: "server".to_owned(),
+                        reason: "transport = \"tcp\" but unix_socket is also set; remove one"
+                            .to_owned(),
+                    });
+                }
+                Ok(())
+            }
+            Self::UnixSocket {
+                unix_socket,
+                address,
+                port,
+            } => {
+                if unix_socket.trim().is_empty() {
+                    return Err(ConfigSanityError::InvalidValue {
+                        field: "server.unix_socket".to_owned(),
+                        reason: "Path must not be empty".to_owned(),
+                    });
+                }
+                if address != &default_server_address() || *port != default_server_port() {
+                    return Err(ConfigSanityError::InvalidValue {
+                        field: "server".to_owned(),
+                        reason: "transport = \"unix_socket\" but a non-default address/port is \
+                                 also set; remove one"
+                            .to_owned(),
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl ServerTransport {
+    /// The configured TCP address, regardless of which transport is active.
+    /// When `transport = "unix_socket"`, this is the (unused-for-binding)
+    /// address captured alongside it - see the variant's doc comment.
+    #[must_use]
+    pub fn address(&self) -> &str {
+        match self {
+            Self::Tcp { address, .. } | Self::UnixSocket { address, .. } => address,
+        }
+    }
+
+    /// The configured TCP port, regardless of which transport is active.
+    /// When `transport = "unix_socket"`, this is the (unused-for-binding)
+    /// port captured alongside it - see the variant's doc comment.
+    #[must_use]
+    pub fn port(&self) -> u16 {
+        match self {
+            Self::Tcp { port, .. } | Self::UnixSocket { port, .. } => *port,
         }
     }
 }
@@ -150,7 +276,7 @@ impl Default for Configuration {
         Configuration {
             database: DatabaseConfig::default(),
             flash_files_path: ".".to_owned(),
-            server: ServerConfig::default(),
+            server: ServerTransport::default(),
             #[cfg(feature = "health")]
             health: cda_health::config::HealthConfig::default(),
             doip: DoipConfig {
@@ -301,6 +427,7 @@ impl ConfigSanity for Configuration {
     fn validate_sanity(&self) -> Result<(), ConfigSanityError> {
         self.database.naming_convention.validate_sanity()?;
         self.doip.validate_sanity()?;
+        self.server.validate_sanity()?;
         self.validate_transport_presence()?;
         self.validate_can_mappings()?;
         self.validate_transport_overrides()?;
@@ -412,6 +539,93 @@ description_database = "teapot"
                 DiagnosticServiceAffixPosition::Prefix,
                 vec!["Control_".to_string()]
             ))
+        );
+        Ok(())
+    }
+
+    /// `server` defaults to the `Tcp` transport, keeping today's TCP-only
+    /// behavior unchanged when `transport` is absent from the TOML file.
+    #[tokio::test]
+    async fn load_config_toml_server_unix_socket_defaults_to_none()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config_str = r#"
+[server]
+address = "127.0.0.1"
+port = 12345
+"#;
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract()?;
+        assert!(matches!(
+            config.server,
+            ServerTransport::Tcp { ref address, port, unix_socket: None }
+                if address == "127.0.0.1" && port == 12345
+        ));
+        config.server.validate_sanity()?;
+        Ok(())
+    }
+
+    /// `server.transport = "unix_socket"` selects the Unix domain socket
+    /// variant.
+    #[tokio::test]
+    async fn load_config_toml_server_unix_socket() -> Result<(), Box<dyn std::error::Error>> {
+        let config_str = r#"
+[server]
+transport = "unix_socket"
+unix_socket = "/run/cda.sock"
+"#;
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract()?;
+        assert!(matches!(
+            config.server,
+            ServerTransport::UnixSocket { ref unix_socket, .. } if unix_socket == "/run/cda.sock"
+        ));
+        config.server.validate_sanity()?;
+        Ok(())
+    }
+
+    /// Setting `unix_socket` alongside `transport = "tcp"` still parses (the
+    /// field is captured but unused for binding), but `validate_sanity`
+    /// rejects the conflicting combination.
+    #[tokio::test]
+    async fn load_config_toml_server_rejects_unix_socket_with_tcp_transport()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config_str = r#"
+[server]
+transport = "tcp"
+address = "127.0.0.1"
+port = 12345
+unix_socket = "/run/cda.sock"
+"#;
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract()?;
+        assert!(
+            config.server.validate_sanity().is_err(),
+            "expected validate_sanity to reject unix_socket set alongside transport = \"tcp\""
+        );
+        Ok(())
+    }
+
+    /// Setting a non-default `address`/`port` alongside `transport =
+    /// "unix_socket"` is rejected by `validate_sanity`.
+    #[tokio::test]
+    async fn load_config_toml_server_rejects_tcp_fields_with_unix_socket_transport()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config_str = r#"
+[server]
+transport = "unix_socket"
+unix_socket = "/run/cda.sock"
+address = "127.0.0.1"
+"#;
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract()?;
+        assert!(
+            config.server.validate_sanity().is_err(),
+            "expected validate_sanity to reject a non-default address set alongside transport = \
+             \"unix_socket\""
         );
         Ok(())
     }

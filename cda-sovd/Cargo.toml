@@ -108,3 +108,6 @@ cda-interfaces = { workspace = true, features = ["test-utils"] }
 cda-plugin-communication-management = { workspace = true, features = ["test-utils"] }
 cda-plugin-security = { workspace = true, features = ["test-utils"] }
 mockall = { workspace = true }
+futures = { workspace = true }
+tempfile = { workspace = true }
+reqwest = { workspace = true }

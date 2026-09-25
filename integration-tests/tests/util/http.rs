@@ -173,7 +173,11 @@ pub(crate) async fn send_cda_request(
     headers: Option<&HeaderMap>,
     query_params: Option<&QueryParams>,
 ) -> Result<Response, TestingError> {
-    let base_url = format!("http://{}:{}", config.server.address, config.server.port);
+    let base_url = format!(
+        "http://{}:{}",
+        config.server.address(),
+        config.server.port()
+    );
     let url_params = query_params
         .unwrap_or(&QueryParams::default())
         .to_query_string();
@@ -273,4 +277,73 @@ impl Response {
     pub(crate) fn header(&self, name: http::header::HeaderName) -> Option<&http::HeaderValue> {
         self.header_map.get(name)
     }
+}
+
+/// Sends a request over a Unix domain socket connection using `reqwest`
+/// (the same HTTP client used throughout these integration tests), so the
+/// tests exercise a spec-compliant client the same way a real consumer of
+/// the Unix socket transport (e.g. `opensovd-gateway`) would.
+///
+/// # Errors
+/// Returns [`TestingError`] if the socket can't be reached, the response
+/// can't be read, or the status doesn't match `expected_status`.
+#[cfg(unix)]
+pub(crate) async fn send_unix_socket_request(
+    socket_path: &str,
+    endpoint: &str,
+    expected_status: StatusCode,
+    method: Method,
+    data: Option<&str>,
+) -> Result<Response, TestingError> {
+    let client = reqwest::Client::builder()
+        .unix_socket(socket_path)
+        .build()
+        .map_err(|e| {
+            TestingError::ProcessFailed(format!("Failed to build unix socket client: {e}"))
+        })?;
+
+    let body = data.unwrap_or_default().to_owned();
+    let mut request_builder = client.request(method, format!("http://localhost{endpoint}"));
+    if !body.is_empty() {
+        request_builder = request_builder
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                mime::APPLICATION_JSON.essence_str(),
+            )
+            .body(body);
+    }
+
+    let response = request_builder.send().await.map_err(|e| {
+        TestingError::ProcessFailed(format!(
+            "Failed to send request over unix socket {socket_path}: {e}"
+        ))
+    })?;
+
+    let status = response.status();
+    let header_map = response.headers().clone();
+    let body_bytes = response
+        .bytes()
+        .await
+        .map_err(|e| TestingError::ProcessFailed(format!("Failed to read response body: {e}")))?;
+    let body = if body_bytes.is_empty() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&body_bytes).into_owned())
+    };
+
+    if status != expected_status {
+        return Err(TestingError::UnexpectedResponse {
+            expected: expected_status,
+            actual: status,
+            body,
+            message: "Expected status does not match".to_owned(),
+            url: format!("unix://{socket_path}{endpoint}"),
+        });
+    }
+
+    Ok(Response {
+        status,
+        body,
+        header_map,
+    })
 }

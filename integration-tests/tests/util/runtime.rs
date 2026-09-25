@@ -33,7 +33,8 @@ use futures::FutureExt;
 use http::{Method, StatusCode};
 use opensovd_cda_lib::config::configfile::{
     CanAddressingMode, CanConfig, CanEcuMapping, Configuration, DatabaseConfig, EcuComParams,
-    EcuConfig, RuntimeUpdateConfig, ServerConfig, StrictConfig, TransportOverride, TransportType,
+    EcuConfig, RuntimeUpdateConfig, ServerTransport, StrictConfig, TransportOverride,
+    TransportType,
 };
 use sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response as NetworkStructureResponse;
 use tokio::sync::{Mutex, MutexGuard, OnceCell};
@@ -278,9 +279,10 @@ fn base_test_config(
     ecu: HashMap<String, EcuConfig>,
 ) -> Result<Configuration, TestingError> {
     Ok(Configuration {
-        server: opensovd_cda_lib::config::configfile::ServerConfig {
+        server: ServerTransport::Tcp {
             address: host.clone(),
             port: cda_port,
+            unix_socket: None,
         },
         doip: opensovd_cda_lib::config::configfile::DoipConfig {
             tester_address: host,
@@ -648,11 +650,14 @@ fn write_config_toml(
     // Overwrite some values back to the default, so they match
     // with the docker file.
     // The values in the config are the externally mapped ports and paths.
-    config.server.port = 20002;
+    config.server = ServerTransport::Tcp {
+        address: "0.0.0.0".to_owned(),
+        port: 20002,
+        unix_socket: None,
+    };
     config.doip.gateway_port = 13400;
     config.functional_description.description_database = "functional_groups".into();
 
-    "0.0.0.0".clone_into(&mut config.server.address);
     "/app/odx".clone_into(&mut config.database.seed_dir);
 
     // The socketcand daemon runs in its own service, reachable by service name
@@ -845,8 +850,8 @@ async fn stop_shared_cda() {
 
 /// One-shot readiness probe: whether a CDA is serving right now, as opposed to
 /// [`wait_for_cda_online`]'s polling.
-async fn cda_is_online(cfg: &ServerConfig) -> bool {
-    let url = format!("http://{}:{}/health/ready", cfg.address, cfg.port);
+async fn cda_is_online(cfg: &ServerTransport) -> bool {
+    let url = format!("http://{}:{}/health/ready", cfg.address(), cfg.port());
     reqwest::Client::new()
         .get(url)
         .timeout(Duration::from_secs(2))
@@ -983,8 +988,8 @@ async fn wait_for_ecu_sim_ready(host: &str, sim_control_port: u16) -> Result<(),
     wait_for_http_ready_with_timeout(url, "ECU sim", None, Duration::from_secs(10)).await
 }
 
-pub(crate) async fn wait_for_cda_online(cfg: &ServerConfig) -> Result<(), TestingError> {
-    let url = format!("http://{}:{}/health/ready", cfg.address, cfg.port);
+pub(crate) async fn wait_for_cda_online(cfg: &ServerTransport) -> Result<(), TestingError> {
+    let url = format!("http://{}:{}/health/ready", cfg.address(), cfg.port());
     wait_for_http_ready(url, "CDA", Some(http::StatusCode::NO_CONTENT)).await
 }
 

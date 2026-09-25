@@ -15,15 +15,60 @@
 # Optional CAN bus transport configuration.
 # When enabled, the adapter can communicate with ECUs over CAN bus.
 # [can]
+# Whether the built-in `TesterPresent` probe heads the discovery
+# probe sequence; with `false`, `probe_fallbacks` must be non-empty
+# and is used verbatim.
+# See `response_timeout_ms` for why the serde default is needed.
 # default_probes = true
+# Optional explicit ECU CAN ID mappings.
+# If not provided, CAN IDs will be read from the MDD COM parameters.
 # ecu_mappings = []
+# CAN interface name (e.g., "vxcan0", "can0")
 # interface = "vcan0"
+# Interval of the functional-broadcast `TesterPresent` keep-alive in
+# milliseconds; `0` (the default) disables it, keeping a resident
+# on-board CDA from interfering with network management - sleeping
+# ECUs are recovered by rediscovery on wake. External testers should
+# set an interval (e.g. 2000) to hold ECUs awake for the session.
+# See `response_timeout_ms` for why the serde default is needed.
 # keepalive_interval_ms = 0
+# Optional fallback probe payloads used after the default `TesterPresent` probe
+# (or, with `default_probes = false`, the complete probe sequence).
+#
+# This is useful for ECUs that do not answer `TesterPresent` during discovery,
+# but do respond to another lightweight diagnostic request.
 # probe_fallbacks = []
+# Extra rounds through the probe sequence when an ECU did not answer,
+# self-healing transiently lost exchanges (e.g. bus arbitration during
+# startup) inside the transport instead of surfacing a spurious offline
+# to the UDS layer. `0` probes each ECU exactly once per discovery.
+# See `response_timeout_ms` for why the serde default is needed.
 # probe_retries = 0
+# Delay between probe retry rounds in milliseconds.
+# See `response_timeout_ms` for why the serde default is needed.
 # probe_retry_delay_ms = 100
+# Timeout for probing ECUs during discovery in milliseconds.
+# See `response_timeout_ms` for why the serde default is needed.
 # probe_timeout_ms = 100
+# Timeout for waiting for a response in milliseconds.
+#
+# The serde default is needed (unlike for other config types) because
+# `[can]` is an optional section: the figment defaults tree carries no
+# values below it, so omitted fields must default at deserialization
+# time. The canonical values live in the `Default` impl.
 # response_timeout_ms = 5000
+# Per-ECU transport override.
+#
+# Keys are ECU names (case-insensitive), values are the transport to use.
+# ECUs not listed here default to `DoIP` when a `DoIP` gateway is available,
+# falling back to CAN otherwise.
+#
+# Example (TOML):
+# ```toml
+# [[can.transport_overrides]]
+# ecu_name = "MyCanOnlyEcu"
+# transport = "can"
+# ```
 # transport_overrides = []
 
 # Defines the Communication parameters which are used in CAN bus communication
@@ -816,6 +861,7 @@
 # address = "0.0.0.0"
 # TCP port the server listens on.
 # port = 20002
+# transport = "tcp"
 
 # Strict-mode validation flags.
 [strict]

@@ -123,6 +123,11 @@ pub struct AppArgs {
     #[arg(long)]
     pub listen_port: Option<u16>,
 
+    /// Path to a Unix domain socket to bind the server to. Takes priority over
+    /// `listen_address`/`listen_port` when set.
+    #[arg(long)]
+    pub unix_socket: Option<String>,
+
     #[arg(short, long)]
     pub flash_files_path: Option<String>,
 
@@ -198,12 +203,35 @@ impl AppArgs {
         if let Some(protocol_name) = self.protocol_name {
             config.doip.protocol_name = protocol_name;
         }
-        if let Some(listen_address) = self.listen_address {
-            config.server.address = listen_address;
+        if self.listen_address.is_some() || self.listen_port.is_some() || self.unix_socket.is_some()
+        {
+            use crate::config::configfile::ServerTransport;
+
+            config.server = if let Some(unix_socket) = self.unix_socket {
+                // `--unix-socket` takes priority over `--listen-address`/`--listen-port`,
+                // matching the config file's documented priority.
+                ServerTransport::UnixSocket {
+                    unix_socket,
+                    address: crate::config::configfile::default_server_address(),
+                    port: crate::config::configfile::default_server_port(),
+                }
+            } else {
+                let mut address = config.server.address().to_owned();
+                let mut port = config.server.port();
+                if let Some(listen_address) = self.listen_address {
+                    address = listen_address;
+                }
+                if let Some(listen_port) = self.listen_port {
+                    port = listen_port;
+                }
+                ServerTransport::Tcp {
+                    address,
+                    port,
+                    unix_socket: None,
+                }
+            };
         }
-        if let Some(listen_port) = self.listen_port {
-            config.server.port = listen_port;
-        }
+
         if let Some(file_logging) = self.file_logging {
             config.logging.log_file_config.enabled = file_logging;
         }
@@ -460,9 +488,16 @@ async fn init_webserver(
         )));
     }
 
-    let webserver_config = cda_sovd::WebServerConfig {
-        host: config.server.address.clone(),
-        port: config.server.port,
+    let webserver_config = match config.server.clone() {
+        crate::config::configfile::ServerTransport::Tcp { address, port, .. } => {
+            cda_sovd::WebServerConfig::Tcp {
+                host: address,
+                port,
+            }
+        }
+        crate::config::configfile::ServerTransport::UnixSocket { unix_socket, .. } => {
+            cda_sovd::WebServerConfig::UnixSocket { path: unix_socket }
+        }
     };
 
     let clonable_shutdown_signal = shutdown_signal
@@ -1099,6 +1134,41 @@ pub fn cda_version() -> &'static str {
 }
 
 #[cfg(test)]
+mod cli_args_tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn unix_socket_flag_updates_server_config() {
+        let args = AppArgs::parse_from(["cda", "--unix-socket", "/run/cda.sock"]);
+        let mut config = crate::config::configfile::Configuration::default();
+        args.update_config(&mut config);
+
+        assert!(matches!(
+            config.server,
+            crate::config::configfile::ServerTransport::UnixSocket { ref unix_socket, .. }
+                if unix_socket == "/run/cda.sock"
+        ));
+    }
+
+    #[test]
+    fn without_unix_socket_flag_server_config_unix_socket_stays_none() {
+        let args = AppArgs::parse_from(["cda"]);
+        let mut config = crate::config::configfile::Configuration::default();
+        args.update_config(&mut config);
+
+        assert!(matches!(
+            config.server,
+            crate::config::configfile::ServerTransport::Tcp {
+                unix_socket: None,
+                ..
+            }
+        ));
+    }
+}
+
+#[cfg(test)]
 mod webserver_lifecycle_tests {
     use super::*;
 
@@ -1139,7 +1209,11 @@ mod webserver_lifecycle_tests {
         let database_dir = tempfile::tempdir().expect("Create empty database directory");
         let storage_dir = tempfile::tempdir().expect("Create empty storage directory");
         let mut config = Configuration::default();
-        config.server.port = available_port();
+        config.server = crate::config::configfile::ServerTransport::Tcp {
+            address: "0.0.0.0".to_owned(),
+            port: available_port(),
+            unix_socket: None,
+        };
         config.doip.tester_address = "127.0.0.1".to_owned();
         config.doip.gateway_port = available_port();
         config.database.seed_dir = database_dir.path().to_string_lossy().into_owned();
