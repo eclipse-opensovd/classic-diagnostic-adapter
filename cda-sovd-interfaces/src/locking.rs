@@ -34,16 +34,26 @@ pub struct Lock {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owned: Option<bool>,
     /// Whether the lock excludes read communication by other clients.
+    #[serde(rename = "x-sovd2uds-isexclusive")]
     pub x_sovd2uds_isexclusive: bool,
     /// Identity of the original preemptor for a defunct lock.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "x-sovd2uds-broken-by",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub x_sovd2uds_broken_by: Option<String>,
     /// Timestamp at which the lock was preempted.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "x-sovd2uds-broken-at",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub x_sovd2uds_broken_at: Option<String>,
     /// Subject of the replacement lock holder, when that replacement still exists.
     /// This field is absent after the replacement lock is removed.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "x-sovd2uds-current-holder",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub x_sovd2uds_current_holder: Option<String>,
     /// Inline response schema when requested.
     #[schemars(skip)]
@@ -57,7 +67,7 @@ pub struct Request {
     pub lock_expiration: u64,
     #[serde(default)]
     pub break_lock: bool,
-    #[serde(default)]
+    #[serde(default, rename = "x-sovd2uds-isexclusive")]
     pub x_sovd2uds_isexclusive: Option<bool>,
     #[serde(flatten)]
     pub metadata: Map<String, Value>,
@@ -79,8 +89,8 @@ impl<'de> Deserialize<'de> for Request {
                 set_once(&mut lock_expiration, value, "lock_expiration")?;
             } else if key.eq_ignore_ascii_case("break_lock") {
                 set_once(&mut break_lock, value, "break_lock")?;
-            } else if key.eq_ignore_ascii_case("x_sovd2uds_isexclusive") {
-                set_once(&mut is_exclusive, value, "x_sovd2uds_isexclusive")?;
+            } else if key.eq_ignore_ascii_case("x-sovd2uds-isexclusive") {
+                set_once(&mut is_exclusive, value, "x-sovd2uds-isexclusive")?;
             } else {
                 metadata.insert(key, value);
             }
@@ -180,12 +190,24 @@ pub mod id {
         #[schemars(rename = "LockResponse")]
         pub struct Response {
             pub lock_expiration: String,
+            /// Whether the requesting SOVD client owns the lock.
+            pub owned: bool,
+            #[serde(rename = "x-sovd2uds-isexclusive")]
             pub x_sovd2uds_isexclusive: bool,
-            #[serde(skip_serializing_if = "Option::is_none")]
+            #[serde(
+                rename = "x-sovd2uds-broken-by",
+                skip_serializing_if = "Option::is_none"
+            )]
             pub x_sovd2uds_broken_by: Option<String>,
-            #[serde(skip_serializing_if = "Option::is_none")]
+            #[serde(
+                rename = "x-sovd2uds-broken-at",
+                skip_serializing_if = "Option::is_none"
+            )]
             pub x_sovd2uds_broken_at: Option<String>,
-            #[serde(skip_serializing_if = "Option::is_none")]
+            #[serde(
+                rename = "x-sovd2uds-current-holder",
+                skip_serializing_if = "Option::is_none"
+            )]
             /// Subject of the replacement lock holder, when that replacement still exists.
             /// This field is absent after the replacement lock is removed.
             pub x_sovd2uds_current_holder: Option<String>,
@@ -205,7 +227,7 @@ mod tests {
         let request: Request = serde_json::from_value(serde_json::json!({
             "LOCK_EXPIRATION": 60,
             "Break_Lock": true,
-            "X_SOVD2UDS_IsExclusive": false,
+            "X-SOVD2UDS-IsExclusive": false,
             "VendorKey": {"MixedCase": "VaLuE"}
         }))
         .expect("Request should deserialize");
@@ -217,6 +239,68 @@ mod tests {
             request.metadata.get("VendorKey"),
             Some(&serde_json::json!({"MixedCase": "VaLuE"}))
         );
+    }
+
+    #[test]
+    fn lock_extension_fields_use_canonical_wire_names() {
+        let lock = Lock {
+            id: "lock-id".to_owned(),
+            lock_expiration: Some("2026-01-01T00:00:00Z".to_owned()),
+            owned: Some(true),
+            x_sovd2uds_isexclusive: true,
+            x_sovd2uds_broken_by: Some("priority-client".to_owned()),
+            x_sovd2uds_broken_at: Some("2025-01-01T00:00:00Z".to_owned()),
+            x_sovd2uds_current_holder: Some("replacement-client".to_owned()),
+            schema: None,
+        };
+        let value = serde_json::to_value(lock).expect("Lock should serialize");
+
+        for field in [
+            "x-sovd2uds-isexclusive",
+            "x-sovd2uds-broken-by",
+            "x-sovd2uds-broken-at",
+            "x-sovd2uds-current-holder",
+        ] {
+            assert!(value.get(field).is_some(), "Missing field {field}");
+        }
+        assert!(
+            value
+                .as_object()
+                .is_some_and(|fields| fields.keys().all(|field| !field.starts_with("x_sovd2uds")))
+        );
+    }
+
+    #[test]
+    fn request_schema_uses_canonical_extension_name() {
+        let schema = serde_json::to_value(schemars::schema_for!(Request))
+            .expect("Request schema should serialize");
+        let properties = schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("Request schema should have properties");
+
+        assert!(properties.contains_key("x-sovd2uds-isexclusive"));
+        assert!(!properties.contains_key("x_sovd2uds_isexclusive"));
+
+        for schema in [
+            serde_json::to_value(schemars::schema_for!(Lock))
+                .expect("Lock schema should serialize"),
+            serde_json::to_value(schemars::schema_for!(id::get::Response))
+                .expect("Lock detail schema should serialize"),
+        ] {
+            let properties = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .expect("Lock response schema should have properties");
+            for field in [
+                "x-sovd2uds-isexclusive",
+                "x-sovd2uds-broken-by",
+                "x-sovd2uds-broken-at",
+                "x-sovd2uds-current-holder",
+            ] {
+                assert!(properties.contains_key(field), "Missing field {field}");
+            }
+        }
     }
 
     #[test]
@@ -284,8 +368,8 @@ mod tests {
         for field in [
             "break_lock",
             "BREAK_LOCK",
-            "x_sovd2uds_isexclusive",
-            "X_SOVD2UDS_ISEXCLUSIVE",
+            "x-sovd2uds-isexclusive",
+            "X-SOVD2UDS-ISEXCLUSIVE",
             "vendor_metadata",
         ] {
             let mut request = Map::new();

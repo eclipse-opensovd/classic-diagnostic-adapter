@@ -807,7 +807,7 @@
 
 # Lock priority behavior and limits.
 [locks]
-# Default used when `x_sovd2uds_isexclusive` is omitted.
+# Default used when `x-sovd2uds-isexclusive` is omitted.
 # lock_exclusivity_policy = "exclusive_by_default"
 # Number of lifecycle events buffered for ordered best-effort delivery.
 # priority_lifecycle_queue_capacity = 256

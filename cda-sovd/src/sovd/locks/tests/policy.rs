@@ -69,7 +69,7 @@ async fn priority_policy_receives_claims_metadata_and_active_locks() {
         assert_eq!(evaluation.active_locks.len(), 1);
     }
     pending.rollback();
-    acquisition.finish().await;
+    acquisition.finish();
     assert_eq!(
         locks.vehicle_lock_owner_sub().await.as_deref(),
         Some("existing-client")
@@ -97,7 +97,7 @@ async fn rolled_back_preemption_notifies_policy_once() {
     let pending = pending.expect("Pending preemption expected");
     let evaluation_id = pending.evaluation_id.clone();
     pending.rollback();
-    acquisition.finish().await;
+    acquisition.finish();
     wait_until("preemption abandonment is delivered", || async {
         !policy
             .events
@@ -143,7 +143,7 @@ async fn ecu_and_fg_scope_acquisition_never_invokes_priority_evaluation() {
         .await
         .expect("ECU-scope acquisition must succeed without invoking the policy");
     assert!(pending.is_none());
-    ecu_acquisition.finish().await;
+    ecu_acquisition.finish();
 
     let (acquisition, pending, _) = locks
         .evaluate_acquisition(
@@ -157,7 +157,7 @@ async fn ecu_and_fg_scope_acquisition_never_invokes_priority_evaluation() {
         .await
         .expect("Functional-group-scope acquisition must succeed without invoking the policy");
     assert!(pending.is_none());
-    acquisition.finish().await;
+    acquisition.finish();
 
     let evaluations = policy
         .evaluations
@@ -233,7 +233,7 @@ async fn metadata_verification_runs_for_every_lock_scope() {
             .await
             .expect("Valid metadata should be accepted");
         assert!(pending.is_none());
-        acquisition.finish().await;
+        acquisition.finish();
     }
 
     let scopes = policy
@@ -284,7 +284,7 @@ async fn metadata_verification_runs_for_same_owner_post_renewal() {
         .expect("Valid renewal metadata should be accepted");
 
     assert!(pending.is_none());
-    acquisition.finish().await;
+    acquisition.finish();
     assert_eq!(
         policy
             .requests
@@ -305,7 +305,7 @@ async fn metadata_verification_rejection_preserves_lock_state() {
     });
     let locks = locks_with_policy(policy);
     insert_policy_test_lock(&locks, Arc::new(AtomicUsize::new(0))).await;
-    let revision = locks.store.lock().await.state.revision();
+    let revision = locks.core.read_store(|store| store.state.revision()).await;
 
     let result = locks
         .evaluate_acquisition(
@@ -323,7 +323,10 @@ async fn metadata_verification_rejection_preserves_lock_state() {
         panic!("Invalid metadata should be rejected");
     };
     assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
-    assert_eq!(locks.store.lock().await.state.revision(), revision);
+    assert_eq!(
+        locks.core.read_store(|store| store.state.revision()).await,
+        revision
+    );
     assert_eq!(locks.active_snapshots().await.len(), 1);
 }
 
@@ -406,6 +409,7 @@ async fn default_policy_preserves_normal_lock_conflict() {
             coverage: LockCoverage::default(),
         },
         request,
+        "/vehicle/v15/locks",
         false,
         Box::new(TestSecurityPlugin),
     )
@@ -462,7 +466,7 @@ async fn vehicle_policy_receives_all_open_locks_as_candidates() {
         .expect("policy evaluation must succeed");
 
     assert!(pending.is_none());
-    acquisition.finish().await;
+    acquisition.finish();
     let evaluations = policy
         .evaluations
         .lock()
@@ -510,12 +514,12 @@ async fn same_owner_post_renew_invokes_priority_evaluation_without_candidates() 
         expires_at,
         parent_vehicle_lock_id: Some("vehicle-lock".to_owned()),
     };
-    {
-        let mut store = locks.store.lock().await;
-        let state = &mut store.state;
-        state.insert_active(vehicle).unwrap();
-        state.insert_active(child).unwrap();
-    }
+    locks
+        .test_mutate_store(|store| {
+            store.state.insert_active(vehicle).unwrap();
+            store.state.insert_active(child).unwrap();
+        })
+        .await;
 
     let (acquisition, pending, _request) = locks
         .evaluate_acquisition(
@@ -531,7 +535,7 @@ async fn same_owner_post_renew_invokes_priority_evaluation_without_candidates() 
         .expect("Policy evaluation should succeed");
 
     assert!(pending.is_none());
-    acquisition.finish().await;
+    acquisition.finish();
     let evaluations = policy.evaluations.lock().expect("Policy mutex poisoned");
     assert!(matches!(
         evaluations.as_slice(),
@@ -698,16 +702,18 @@ async fn stale_policy_decision_is_reevaluated_with_fresh_state() {
     });
 
     policy.started.notified().await;
-    {
-        let mut store = locks.store.lock().await;
-        let state = &mut store.state;
-        state
-            .delete("test-lock-id")
-            .expect("Concurrent deletion should succeed");
-        state
-            .insert_active(test_lock("access-lock").owner("other-client").build())
-            .expect("Concurrent insertion should succeed");
-    }
+    locks
+        .test_mutate_store(|store| {
+            store
+                .state
+                .delete("test-lock-id")
+                .expect("Concurrent deletion should succeed");
+            store
+                .state
+                .insert_active(test_lock("access-lock").owner("other-client").build())
+                .expect("Concurrent insertion should succeed");
+        })
+        .await;
     policy.release.notify_one();
 
     policy.started.notified().await;
@@ -736,7 +742,7 @@ async fn stale_policy_decision_is_reevaluated_with_fresh_state() {
 async fn revisioned_policy_panic_is_internal_error_and_preserves_state() {
     let locks = Locks::new_with_policy(Arc::new(PanickingPolicy));
     insert_test_ecu_lock(&locks, "ecu-a").await;
-    let revision = locks.store.lock().await.state.revision();
+    let revision = locks.core.read_store(|store| store.state.revision()).await;
 
     let result = locks
         .evaluate_acquisition(
@@ -757,10 +763,13 @@ async fn revisioned_policy_panic_is_internal_error_and_preserves_state() {
         error.into_response().status(),
         StatusCode::INTERNAL_SERVER_ERROR
     );
-    let store = locks.store.lock().await;
-    let state = &store.state;
-    assert_eq!(state.revision(), revision);
-    assert!(state.active_by_id("test-lock-id").is_some());
+    locks
+        .core
+        .read_store(|store| {
+            assert_eq!(store.state.revision(), revision);
+            assert!(store.state.active_by_id("test-lock-id").is_some());
+        })
+        .await;
 }
 
 #[tokio::test]
@@ -804,7 +813,7 @@ async fn preemption_requires_break_lock() {
         )
         .await;
 
-    assert!(matches!(result, Err(ApiError::Locked(_))));
+    assert!(matches!(result, Err(ApiError::LockPriorityDenied { .. })));
     assert!(locks.vehicle_lock_owner_sub().await.is_some());
 }
 
@@ -843,7 +852,7 @@ async fn committed_preemption_cleans_once_and_creates_defunct_lock() {
         .owner("priority-client")
         .vehicle()
         .build();
-    commit_pending_preemption(&locks, acquisition, pending, replacement).await;
+    commit_pending_preemption(acquisition, pending, replacement).await;
 
     assert_eq!(cleanup_count.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -895,12 +904,12 @@ async fn vehicle_preemption_advertises_and_selects_only_root() {
         expires_at,
         parent_vehicle_lock_id: Some("vehicle-lock".to_owned()),
     };
-    {
-        let mut store = locks.store.lock().await;
-        let state = &mut store.state;
-        state.insert_active(vehicle).unwrap();
-        state.insert_active(child).unwrap();
-    }
+    locks
+        .test_mutate_store(|store| {
+            store.state.insert_active(vehicle).unwrap();
+            store.state.insert_active(child).unwrap();
+        })
+        .await;
     let request = sovd_interfaces::locking::Request {
         lock_expiration: 60,
         break_lock: true,
@@ -936,13 +945,16 @@ async fn vehicle_preemption_advertises_and_selects_only_root() {
         .owner("priority-client")
         .vehicle()
         .build();
-    commit_pending_preemption(&locks, acquisition, pending, replacement).await;
+    commit_pending_preemption(acquisition, pending, replacement).await;
 
-    let store = locks.store.lock().await;
-    let state = &store.state;
-    assert!(state.active_by_id("replacement").is_some());
-    assert!(state.active_by_id("vehicle-lock").is_none());
-    assert!(state.active_by_id("child-lock").is_none());
-    assert!(state.defunct_by_id("vehicle-lock").is_some());
-    assert!(state.defunct_by_id("child-lock").is_some());
+    locks
+        .core
+        .read_store(|store| {
+            assert!(store.state.active_by_id("replacement").is_some());
+            assert!(store.state.active_by_id("vehicle-lock").is_none());
+            assert!(store.state.active_by_id("child-lock").is_none());
+            assert!(store.state.defunct_by_id("vehicle-lock").is_some());
+            assert!(store.state.defunct_by_id("child-lock").is_some());
+        })
+        .await;
 }

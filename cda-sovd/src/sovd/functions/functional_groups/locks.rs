@@ -12,6 +12,7 @@
  */
 
 use aide::{UseApi, transform::TransformOperation};
+use axum::extract::OriginalUri;
 use cda_interfaces::{UdsEcu, lock_priority_api::LockScope};
 use cda_plugin_security::Secured;
 
@@ -100,16 +101,18 @@ pub(crate) mod lock {
 
     pub(crate) async fn get<T: UdsEcu + Clone>(
         Path(LockPathParam { lock }): Path<LockPathParam>,
-        UseApi(_sec_plugin, _): UseApi<Secured, ()>,
+        UseApi(sec_plugin, _): UseApi<Secured, ()>,
         State(state): State<WebserverFgState<T>>,
         Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
     ) -> Response {
+        let claims = sec_plugin.as_auth_plugin().claims();
         get_id_handler(
             &state.locks,
             LockScope::FunctionalGroup {
                 name: state.functional_group_name.clone(),
             },
             &lock,
+            &claims,
             query.include_schema,
         )
         .await
@@ -130,6 +133,7 @@ pub(crate) async fn post<T: UdsEcu + Clone>(
     UseApi(Secured(sec_plugin), _): UseApi<Secured, ()>,
     State(state): State<WebserverFgState<T>>,
     Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
+    OriginalUri(uri): OriginalUri,
     WithRejection(Json(body), _): WithRejection<Json<sovd_interfaces::locking::Request>, ApiError>,
 ) -> Response {
     let claims = sec_plugin.as_ref().as_auth_plugin().claims();
@@ -162,7 +166,7 @@ pub(crate) async fn post<T: UdsEcu + Clone>(
     };
     if let Err(error) = validate_vehicle_owner(&state.locks, &claims).await {
         rollback_preemption(pending, &state.locks).await;
-        acquisition.finish().await;
+        acquisition.finish();
         return ErrorWrapper {
             error,
             include_schema: query.include_schema,
@@ -173,7 +177,7 @@ pub(crate) async fn post<T: UdsEcu + Clone>(
         validate_functional_group_overlap(&state.locks.open_locks().await, &coverage, claims.sub())
     {
         rollback_preemption(pending, &state.locks).await;
-        acquisition.finish().await;
+        acquisition.finish();
         return ErrorWrapper {
             error,
             include_schema: query.include_schema,
@@ -189,6 +193,7 @@ pub(crate) async fn post<T: UdsEcu + Clone>(
             coverage,
         },
         request,
+        uri.path(),
         query.include_schema,
         sec_plugin,
     )
@@ -197,9 +202,16 @@ pub(crate) async fn post<T: UdsEcu + Clone>(
 
 pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
     op.description("Create a functional group lock")
+        .response_with::<200, Json<sovd_interfaces::locking::post_put::Response>, _>(|res| {
+            res.example(openapi::lock_created_example()).description(
+                "Existing caller-owned lock renewed for compatibility. Use PUT on the lock \
+                 resource to modify its expiration.",
+            )
+        })
         .response_with::<201, Json<sovd_interfaces::locking::post_put::Response>, _>(|res| {
             res.example(openapi::lock_created_example())
                 .description("Functional group lock created successfully.")
+                .with(openapi::lock_created_response)
         })
         .with(openapi::lock_not_owned)
 }

@@ -988,7 +988,7 @@ Locks
          - boolean (optional, default ``false``)
          - Whether an existing lock shall be broken/preempted. See
            :need:`arch~sovd-api-lock-priority`.
-       * - ``x_sovd2uds_isexclusive``
+       * - ``x-sovd2uds-isexclusive``
          - boolean (optional, default: configurable)
          - Selects exclusive or non-exclusive enforcement mode. See
            :need:`arch~sovd-api-lock-exclusivity-policy`.
@@ -1000,18 +1000,24 @@ Locks
 
     ``id`` (UUID string), ``owned`` (boolean, always ``true`` for the creating client).
 
+    A POST that creates a lock returns HTTP 201 and a relative ``Location`` header for the new
+    lock resource. For compatibility with existing CDA clients, POST by the owner of the active
+    lock renews that lock and returns HTTP 200 with its representation and no ``Location`` header.
+    This does not create an independent lock resource. Clients should use PUT on
+    ``/locks/{lock-id}`` to modify an existing lock's expiration; successful PUT returns HTTP 204.
+
     **Response fields (GET /locks/{id})**
 
-    ``lock_expiration`` (ISO 8601 string) and ``x_sovd2uds_isexclusive`` (boolean). For defunct
-    locks: additionally ``x_sovd2uds_broken_by`` (string), ``x_sovd2uds_broken_at`` (ISO 8601 string), and
-    ``x_sovd2uds_current_holder`` (string, the identity of the current lock holder).
+    ``lock_expiration`` (ISO 8601 string) and ``x-sovd2uds-isexclusive`` (boolean). For defunct
+    locks: additionally ``x-sovd2uds-broken-by`` (string), ``x-sovd2uds-broken-at`` (ISO 8601 string), and
+    ``x-sovd2uds-current-holder`` (string, the identity of the current lock holder).
 
 
 .. arch:: Lock Exclusivity
     :id: arch~sovd-api-lock-exclusivity
     :status: draft
 
-    The ``x_sovd2uds_isexclusive`` boolean from the POST/PUT request body is stored as a field on the
+    The ``x-sovd2uds-isexclusive`` boolean from the POST/PUT request body is stored as a field on the
     lock object. If the request body omits the field, the value determined by the
     configured ``lock_exclusivity_policy`` is substituted before storing it (see
     :need:`arch~sovd-api-lock-exclusivity-policy`). When a request arrives at a
@@ -1025,7 +1031,7 @@ Locks
     :status: draft
 
     The configured ``lock_exclusivity_policy`` selects the value substituted for
-    ``x_sovd2uds_isexclusive`` whenever a lock POST or PUT request body omits that field,
+    ``x-sovd2uds-isexclusive`` whenever a lock POST or PUT request body omits that field,
     before the resulting value is stored on the lock object (see
     :need:`arch~sovd-api-lock-exclusivity`):
 
@@ -1038,7 +1044,7 @@ Locks
     Being enum-typed, this configuration option is designed to accommodate additional
     exclusivity policies in the future without changing its name or structure.
 
-    Requests that explicitly include ``x_sovd2uds_isexclusive`` bypass the substitution
+    Requests that explicitly include ``x-sovd2uds-isexclusive`` bypass the substitution
     and use the provided value unchanged.
 
 
@@ -1208,7 +1214,7 @@ Locks
 
     - ``granted: bool`` -- whether the requesting client has sufficient priority to preempt
     - ``broken_by: String`` -- the identity string to record in the defunct lock's
-      ``x_sovd2uds_broken_by`` field (typically the requesting client's JWT ``sub``, but
+      ``x-sovd2uds-broken-by`` field (typically the requesting client's JWT ``sub``, but
       the exact value is determined by the plugin)
 
     If ``granted`` is ``true``, the existing lock is transitioned to defunct state (see
@@ -1234,8 +1240,8 @@ Locks
        its own expiration task and cleanup function.
 
     ``GET /locks`` returns both the active lock and any defunct locks for the entity.
-    Defunct lock entries carry ``x_sovd2uds_broken_by``, ``x_sovd2uds_broken_at``, and
-    ``x_sovd2uds_current_holder`` in addition to the standard fields.
+    Defunct lock entries carry ``x-sovd2uds-broken-by``, ``x-sovd2uds-broken-at``, and
+    ``x-sovd2uds-current-holder`` in addition to the standard fields.
 
 
 .. arch:: HTTP 409 for Preempted Clients

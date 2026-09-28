@@ -30,7 +30,7 @@ pub enum LockExclusivityPolicy {
 /// Lock priority behavior and limits.
 #[derive(Clone, Debug, Deserialize, Serialize, schemars::JsonSchema, PartialEq, Eq)]
 pub struct LockConfig {
-    /// Default used when `x_sovd2uds_isexclusive` is omitted.
+    /// Default used when `x-sovd2uds-isexclusive` is omitted.
     pub lock_exclusivity_policy: LockExclusivityPolicy,
     /// Maximum duration of one vendor priority-policy evaluation.
     pub priority_policy_timeout_ms: u64,

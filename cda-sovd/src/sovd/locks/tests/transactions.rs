@@ -55,10 +55,18 @@ async fn failed_acquisition_stops_only_new_tester_present_and_preserves_old_lock
     .await;
 
     assert!(result.is_err());
-    let store = locks.store.lock().await;
-    let state = &store.state;
-    assert!(state.active_by_id("test-lock-id").is_some());
-    assert!(state.active_by_id("conflicting-replacement").is_none());
+    locks
+        .core
+        .read_store(|store| {
+            assert!(store.state.active_by_id("test-lock-id").is_some());
+            assert!(
+                store
+                    .state
+                    .active_by_id("conflicting-replacement")
+                    .is_none()
+            );
+        })
+        .await;
 }
 
 #[tokio::test]
@@ -91,12 +99,9 @@ async fn pre_existing_exact_tester_present_is_not_started_or_stopped_on_failure(
     assert!(result.is_err());
     assert!(
         locks
-            .store
-            .lock()
+            .core
+            .read_store(|store| store.state.active_by_id("test-lock-id").is_some())
             .await
-            .state
-            .active_by_id("test-lock-id")
-            .is_some()
     );
 }
 
@@ -131,8 +136,11 @@ async fn tester_present_start_failure_preserves_existing_state_without_stop() {
     .await;
 
     assert!(result.is_err());
-    let store = locks.store.lock().await;
-    let state = &store.state;
-    assert!(state.active_by_id("test-lock-id").is_some());
-    assert!(state.active_by_id("failed-start").is_none());
+    locks
+        .core
+        .read_store(|store| {
+            assert!(store.state.active_by_id("test-lock-id").is_some());
+            assert!(store.state.active_by_id("failed-start").is_none());
+        })
+        .await;
 }

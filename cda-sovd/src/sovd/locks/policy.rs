@@ -13,9 +13,12 @@
 
 use std::{option::Option, sync::Arc, time::SystemTime};
 
-use cda_interfaces::lock_priority_api::{
-    LockPrincipal, LockPriorityDecision, LockPriorityError, LockPriorityEvaluation,
-    LockPriorityOperation, LockPriorityPolicy, LockRequest, LockScope, LockSnapshot,
+use cda_interfaces::{
+    HashMap,
+    lock_priority_api::{
+        LockPrincipal, LockPriorityDecision, LockPriorityError, LockPriorityEvaluation,
+        LockPriorityOperation, LockPriorityPolicy, LockRequest, LockScope, LockSnapshot,
+    },
 };
 use cda_plugin_security::Claims;
 use futures::FutureExt;
@@ -25,7 +28,7 @@ use uuid::Uuid;
 use super::{
     ActiveLock, ApiError, LockCoverage, Locks, ScopeKey, scope_from_key, validated_expiration,
 };
-use crate::sovd::locks::{LifecycleDelivery, TransitionId, TransitionReservation};
+use crate::sovd::locks::{LifecycleDelivery, TransitionReservation};
 
 pub(crate) struct PendingPreemption {
     pub(super) evaluation_id: String,
@@ -43,12 +46,8 @@ pub(crate) struct AcquisitionGuard {
 }
 
 impl AcquisitionGuard {
-    pub(crate) fn transition_id(&self) -> TransitionId {
-        self.reservation.id()
-    }
-
-    pub(crate) async fn finish(self) {
-        self.reservation.finish().await;
+    pub(crate) fn finish(self) {
+        self.reservation.finish();
     }
 }
 
@@ -131,7 +130,7 @@ impl Locks {
         self.verify_policy_metadata(&policy, &policy_request)
             .await?;
         if !is_vehicle_scope {
-            let reservation = self.reserve_transition().await;
+            let reservation = self.core.reserve_transition().await;
             return Ok((
                 AcquisitionGuard {
                     reservation,
@@ -145,40 +144,42 @@ impl Locks {
         let evaluation_id = Uuid::new_v4().to_string();
         let mut stale_attempts = 0;
         loop {
-            let (revision, generation, active_locks, candidates, operation) = {
-                let store = self.lock_idle().await;
-                let state = &store.state;
-                let mut active_locks = state.active().map(active_snapshot).collect::<Vec<_>>();
-                sort_lock_snapshots(&mut active_locks);
-                let candidates = state
-                    .active()
-                    .filter(|lock| {
-                        lock.parent_vehicle_lock_id.is_none()
-                            && lock.principal.subject != policy_request.principal.subject
-                            && (lock.scope == ScopeKey::Vehicle
-                                || lock.coverage.overlaps(&coverage))
-                    })
-                    .map(|lock| lock.id.clone())
-                    .collect::<Vec<_>>();
-                let operation = state
-                    .active_for_scope(&ScopeKey::from(&scope))
-                    .filter(|lock| lock.principal.subject == policy_request.principal.subject)
-                    .map_or(LockPriorityOperation::Acquire, |lock| {
-                        LockPriorityOperation::PostRenew {
-                            lock_id: lock.id.clone(),
-                        }
-                    });
-                (
-                    state.revision(),
-                    store.generation,
-                    active_locks,
-                    candidates,
-                    operation,
-                )
-            };
+            let (revision, generation, active_locks, candidates, operation) = self
+                .core
+                .read_store(|store| {
+                    let state = &store.state;
+                    let mut active_locks = state.active().map(active_snapshot).collect::<Vec<_>>();
+                    sort_lock_snapshots(&mut active_locks);
+                    let candidates = state
+                        .active()
+                        .filter(|lock| {
+                            lock.parent_vehicle_lock_id.is_none()
+                                && lock.principal.subject != policy_request.principal.subject
+                                && (lock.scope == ScopeKey::Vehicle
+                                    || lock.coverage.overlaps(&coverage))
+                        })
+                        .map(|lock| lock.id.clone())
+                        .collect::<Vec<_>>();
+                    let operation = state
+                        .active_for_scope(&ScopeKey::from(&scope))
+                        .filter(|lock| lock.principal.subject == policy_request.principal.subject)
+                        .map_or(LockPriorityOperation::Acquire, |lock| {
+                            LockPriorityOperation::PostRenew {
+                                lock_id: lock.id.clone(),
+                            }
+                        });
+                    (
+                        state.revision(),
+                        store.generation,
+                        active_locks,
+                        candidates,
+                        operation,
+                    )
+                })
+                .await;
             if candidates.is_empty() && matches!(&operation, LockPriorityOperation::Acquire) {
-                let reservation = self.reserve_transition().await;
-                let store = self.store.lock().await;
+                let reservation = self.core.reserve_transition().await;
+                let store = reservation.write_store().await;
                 if store.state.revision() == revision && store.generation == generation {
                     drop(store);
                     return Ok((
@@ -192,7 +193,7 @@ impl Locks {
                     ));
                 }
                 drop(store);
-                reservation.finish().await;
+                reservation.finish();
                 if stale_attempts < self.config.priority_policy_stale_retries {
                     stale_attempts = stale_attempts.saturating_add(1);
                     continue;
@@ -237,11 +238,11 @@ impl Locks {
                 ));
             }
 
-            let reservation = self.reserve_transition().await;
-            let store = self.store.lock().await;
+            let reservation = self.core.reserve_transition().await;
+            let store = reservation.write_store().await;
             if store.state.revision() != revision || store.generation != generation {
                 drop(store);
-                reservation.finish().await;
+                reservation.finish();
                 if stale_attempts < self.config.priority_policy_stale_retries {
                     stale_attempts = stale_attempts.saturating_add(1);
                     continue;
@@ -344,16 +345,16 @@ impl Locks {
         if let Err(error) =
             Self::validate_preemption_selection(request.break_lock, &lock_ids, candidates)
         {
-            guard.finish().await;
+            guard.finish();
             tracing::warn!(evaluation_id, "Policy selected an invalid preemption set");
             return Err(error);
         }
         let root_lock_ids = {
-            let store = self.store.lock().await;
+            let store = guard.reservation.write_store().await;
             let state = &store.state;
             if state.revision() != revision {
                 drop(store);
-                guard.finish().await;
+                guard.finish();
                 tracing::warn!(
                     evaluation_id,
                     "Lock state changed before preemption staging"
@@ -394,20 +395,20 @@ impl Locks {
         candidates: &[String],
     ) -> Result<(), ApiError> {
         if !break_lock {
-            return Err(ApiError::Locked(
-                "Lock preemption requires break_lock=true".to_owned(),
+            return Err(lock_priority_denied(
+                "Lock preemption requires break_lock=true",
             ));
         }
         if lock_ids.is_empty() {
-            return Err(ApiError::Locked(
-                "Lock policy selected no locks to preempt".to_owned(),
+            return Err(lock_priority_denied(
+                "Lock policy selected no locks to preempt",
             ));
         }
         let selected_ids: std::collections::HashSet<&str> =
             lock_ids.iter().map(String::as_str).collect();
         if selected_ids.len() != lock_ids.len() {
-            return Err(ApiError::Locked(
-                "Lock policy selected a lock more than once".to_owned(),
+            return Err(lock_priority_denied(
+                "Lock policy selected a lock more than once",
             ));
         }
         let candidate_ids: std::collections::HashSet<&str> =
@@ -416,13 +417,21 @@ impl Locks {
             .iter()
             .any(|id| !candidate_ids.contains(id.as_str()))
         {
-            return Err(ApiError::Locked(
-                "Lock policy selected an invalid preemption candidate".to_owned(),
+            return Err(lock_priority_denied(
+                "Lock policy selected an invalid preemption candidate",
             ));
         }
         Ok(())
     }
 }
+
+fn lock_priority_denied(message: &str) -> ApiError {
+    ApiError::LockPriorityDenied {
+        message: message.to_owned(),
+        parameters: HashMap::default(),
+    }
+}
+
 fn map_policy_error(error: LockPriorityError) -> ApiError {
     match error {
         LockPriorityError::InvalidContext(message) => ApiError::BadRequest(message),

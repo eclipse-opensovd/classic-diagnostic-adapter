@@ -114,6 +114,13 @@ async fn lock_unlock() -> Result<(), TestingError> {
             .await;
             let create_first_json = response_to_json(&create_first)?;
             let lock_id = extract_field_from_json::<String>(&create_first_json, "id")?;
+            let expected_location = format!("/vehicle/v15/{endpoint}/{lock_id}");
+            assert_eq!(
+                create_first
+                    .header(http::header::LOCATION)
+                    .and_then(|value| value.to_str().ok()),
+                Some(expected_location.as_str())
+            );
 
             let expiration_first =
                 lock_expiration(&runtime.config, &auth, endpoint, &lock_id).await?;
@@ -123,13 +130,19 @@ async fn lock_unlock() -> Result<(), TestingError> {
             let create_second = create_lock(
                 default_timeout(),
                 endpoint,
-                StatusCode::CREATED,
+                StatusCode::OK,
                 &runtime.config,
                 &auth,
             )
             .await;
 
             let create_second_json = response_to_json(&create_second)?;
+            assert_eq!(
+                create_second
+                    .header(http::header::LOCATION)
+                    .and_then(|value| value.to_str().ok()),
+                None
+            );
             let expiration_second =
                 lock_expiration(&runtime.config, &auth, endpoint, &lock_id).await?;
 
@@ -583,7 +596,7 @@ async fn vehicle_lock_exclusivity_controls_foreign_communication() -> Result<(),
             &owner,
             &serde_json::json!({
                 "lock_expiration": default_timeout().as_secs(),
-                "x_sovd2uds_isexclusive": false,
+                "x-sovd2uds-isexclusive": false,
             }),
         )
         .await,
@@ -625,7 +638,7 @@ async fn vehicle_lock_exclusivity_controls_foreign_communication() -> Result<(),
             &owner,
             &serde_json::json!({
                 "lock_expiration": default_timeout().as_secs(),
-                "x_sovd2uds_isexclusive": true,
+                "x-sovd2uds-isexclusive": true,
             }),
         )
         .await,

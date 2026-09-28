@@ -12,10 +12,14 @@
  */
 
 use aide::{
-    openapi::{Contact, License, MediaType, SchemaObject, Server, Tag},
-    transform::{TransformOpenApi, TransformOperation, TransformPathItem},
+    openapi::{
+        Contact, Header, HeaderStyle, License, MediaType, ParameterSchemaOrContent, ReferenceOr,
+        SchemaObject, Server, Tag,
+    },
+    transform::{TransformOpenApi, TransformOperation, TransformPathItem, TransformResponse},
 };
 use axum::Json;
+use indexmap::IndexMap;
 use schemars::JsonSchema;
 use sovd_interfaces::error::ApiErrorResponse;
 
@@ -24,6 +28,7 @@ use crate::sovd::{self, error::VendorErrorCode};
 pub(crate) fn lock_details_example() -> sovd_interfaces::locking::id::get::Response {
     sovd_interfaces::locking::id::get::Response {
         lock_expiration: "2025-01-01T00:00:00Z".to_owned(),
+        owned: true,
         x_sovd2uds_isexclusive: true,
         x_sovd2uds_broken_by: None,
         x_sovd2uds_broken_at: None,
@@ -43,6 +48,31 @@ pub(crate) fn lock_created_example() -> sovd_interfaces::locking::post_put::Resp
         x_sovd2uds_current_holder: None,
         schema: None,
     }
+}
+
+pub(crate) fn lock_created_response<T>(
+    mut response: TransformResponse<'_, T>,
+) -> TransformResponse<'_, T> {
+    response.inner().headers.insert(
+        "Location".to_owned(),
+        ReferenceOr::Item(Header {
+            description: Some("URI of the created lock resource.".to_owned()),
+            style: HeaderStyle::Simple,
+            required: true,
+            deprecated: None,
+            format: ParameterSchemaOrContent::Schema(SchemaObject {
+                json_schema: schemars::json_schema!({ "type": "string", "format": "uri-reference" }),
+                external_docs: None,
+                example: Some(serde_json::json!(
+                    "/vehicle/v15/locks/550e8400-e29b-41d4-a716-446655440000"
+                )),
+            }),
+            example: None,
+            examples: IndexMap::default(),
+            extensions: IndexMap::default(),
+        }),
+    );
+    response
 }
 
 pub(crate) fn lock_list_example() -> sovd_interfaces::locking::get::Response {
@@ -305,7 +335,10 @@ pub(crate) fn lock_responses(op: TransformOperation) -> TransformOperation {
         )
     })
     .response_with::<423, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
-        res.description("Locked: Another client holds an incompatible lock.")
+        res.description(
+            "Locked: Another client holds an incompatible lock, or the vendor-specific lock \
+             priority policy denied acquisition.",
+        )
     })
     .response_with::<503, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
         res.description("Service Unavailable: Lock state cannot currently be evaluated.")

@@ -28,14 +28,18 @@ async fn validate_defunct_fg_lock<T: UdsEcu>(
             .await,
     );
     let target_scope = ScopeKey::FunctionalGroup(functional_group_name.to_ascii_lowercase());
-    let mut store = locks.lock_idle().await;
-    validate_defunct_fg_lock_in_state(
-        claims,
-        &target_scope,
-        &target_coverage,
-        &mut store.state,
-        include_schema,
-    )
+    locks
+        .core
+        .read_store(|store| {
+            validate_defunct_fg_lock_in_state(
+                claims,
+                &target_scope,
+                &target_coverage,
+                &store.state,
+                include_schema,
+            )
+        })
+        .await
 }
 
 #[test]
@@ -131,7 +135,7 @@ fn communication_access_matches_lock_matrix() {
 }
 
 #[test]
-fn ineffective_preemption_selections_are_locked() {
+fn ineffective_preemption_selections_are_priority_denied() {
     struct Case {
         name: &'static str,
         break_lock: bool,
@@ -166,7 +170,7 @@ fn ineffective_preemption_selections_are_locked() {
         assert!(
             matches!(
                 Locks::validate_preemption_selection(case.break_lock, &case.lock_ids, &candidates),
-                Err(ApiError::Locked(_))
+                Err(ApiError::LockPriorityDenied { .. })
             ),
             "{}",
             case.name
@@ -265,12 +269,13 @@ async fn ecu_access_includes_functional_group_coverage() {
 async fn functional_group_access_includes_ecu_coverage() {
     let locks = Locks::new();
     locks
-        .store
-        .lock()
-        .await
-        .state
-        .insert_active(test_lock("access-lock").owner("other").build())
-        .unwrap();
+        .test_mutate_store(|store| {
+            store
+                .state
+                .insert_active(test_lock("access-lock").owner("other").build())
+                .unwrap();
+        })
+        .await;
     let mut uds = MockUdsEcu::new();
     uds.expect_ecus_for_functional_group()
         .times(1)
@@ -294,17 +299,18 @@ async fn fg_validation_rejects_defunct_overlapping_ecu_coverage() {
     insert_test_ecu_lock(&locks, "ecu-a").await;
     let replacement = test_lock("replacement").owner("other-client").build();
     locks
-        .store
-        .lock()
-        .await
-        .state
-        .commit_replacement(
-            &["test-lock-id".to_owned()],
-            replacement,
-            "priority-app",
-            SystemTime::now(),
-        )
-        .expect("Preemption should succeed");
+        .test_mutate_store(|store| {
+            store
+                .state
+                .commit_replacement(
+                    &["test-lock-id".to_owned()],
+                    replacement,
+                    "priority-app",
+                    SystemTime::now(),
+                )
+                .expect("Preemption should succeed");
+        })
+        .await;
     let mut uds = MockUdsEcu::new();
     uds.expect_ecus_for_functional_group()
         .with(eq("group-a"), eq(false))
@@ -324,4 +330,51 @@ async fn fg_validation_rejects_defunct_overlapping_ecu_coverage() {
     .expect_err("Defunct overlapping lock should reject access");
 
     assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn defunct_lock_rejects_reads_with_conflict_for_nonexclusive_replacement() {
+    let locks = Locks::new();
+    locks
+        .test_insert_active(test_lock("preempted").owner("original-owner").build())
+        .await;
+    locks
+        .test_mutate_store(|store| {
+            store
+                .state
+                .commit_replacement(
+                    &["preempted".to_owned()],
+                    test_lock("replacement")
+                        .owner("replacement-owner")
+                        .exclusive(false)
+                        .build(),
+                    "priority-client",
+                    SystemTime::now(),
+                )
+                .expect("Replacement should be committed");
+        })
+        .await;
+
+    let response = validate_ecu_read(
+        &TestClaims {
+            subject: "original-owner".to_owned(),
+            attributes: serde_json::Map::new(),
+        },
+        "ecu-a",
+        &locks,
+        false,
+    )
+    .await
+    .expect_err("Defunct lock must reject read access")
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let error: sovd_interfaces::error::ApiErrorResponse<crate::sovd::error::VendorErrorCode> =
+        crate::test_utils::axum_response_into(response)
+            .await
+            .expect("Broken-lock response should decode");
+    assert_eq!(
+        error.error_code,
+        sovd_interfaces::error::ErrorCode::LockBroken
+    );
 }

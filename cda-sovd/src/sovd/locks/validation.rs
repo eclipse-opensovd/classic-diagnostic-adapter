@@ -48,29 +48,32 @@ pub(crate) async fn validate_defunct_lock(
     locks: &Locks,
     include_schema: bool,
 ) -> Result<(), ErrorWrapper> {
-    let mut store = locks.lock_idle().await;
-    let state = &mut store.state;
-    if let Err(error) = state.expire_defunct(SystemTime::now()) {
-        tracing::error!(%error, "Failed to expire defunct locks");
-    }
     let key = ScopeKey::Ecu(ecu_name.to_ascii_lowercase());
-    if let Some(lock) = state
-        .defunct()
-        .find(|lock| {
-            lock.principal.subject == claims.sub()
-                && (lock.scope == ScopeKey::Vehicle
-                    || lock.scope == key
-                    || lock.coverage.contains_ecu(ecu_name))
+    let now = SystemTime::now();
+    locks
+        .core
+        .read_store(|store| {
+            let state = &store.state;
+            if let Some(lock) = state
+                .defunct()
+                .find(|lock| {
+                    lock.original_expires_at > now
+                        && lock.principal.subject == claims.sub()
+                        && (lock.scope == ScopeKey::Vehicle
+                            || lock.scope == key
+                            || lock.coverage.contains_ecu(ecu_name))
+                })
+                .cloned()
+            {
+                let current_holder = state.current_holder(&lock).to_owned();
+                return Err(ErrorWrapper {
+                    error: lock.broken_error(&current_holder),
+                    include_schema,
+                });
+            }
+            Ok(())
         })
-        .cloned()
-    {
-        let current_holder = state.current_holder(&lock).to_owned();
-        return Err(ErrorWrapper {
-            error: lock.broken_error(&current_holder),
-            include_schema,
-        });
-    }
-    Ok(())
+        .await
 }
 
 pub(crate) async fn validate_ecu_read(
@@ -100,40 +103,43 @@ async fn validate_ecu_access(
 ) -> Result<(), ErrorWrapper> {
     validate_defunct_lock(claims, ecu_name, locks, include_schema).await?;
 
-    let store = locks.lock_idle().await;
-    let state = &store.state;
     let now = SystemTime::now();
     let target_scope = ScopeKey::Ecu(ecu_name.to_ascii_lowercase());
-    validate_active_locks(
-        claims.sub(),
-        state.active().filter(|lock| {
-            active_lock_is_effective(state, lock, now)
-                && (lock.scope == ScopeKey::Vehicle
-                    || lock.scope == target_scope
-                    || lock.coverage.contains_ecu(ecu_name))
-        }),
-        write,
-    )
-    .map_err(|error| ErrorWrapper {
-        error,
-        include_schema,
-    })
+    locks
+        .core
+        .read_store(|store| {
+            let state = &store.state;
+            validate_active_locks(
+                claims.sub(),
+                state.active().filter(|lock| {
+                    active_lock_is_effective(state, lock, now)
+                        && (lock.scope == ScopeKey::Vehicle
+                            || lock.scope == target_scope
+                            || lock.coverage.contains_ecu(ecu_name))
+                }),
+                write,
+            )
+            .map_err(|error| ErrorWrapper {
+                error,
+                include_schema,
+            })
+        })
+        .await
 }
 
 pub(crate) fn validate_defunct_fg_lock_in_state(
     claims: &impl Claims,
     target_scope: &ScopeKey,
     target_coverage: &LockCoverage,
-    state: &mut LockState,
+    state: &LockState,
     include_schema: bool,
 ) -> Result<(), ErrorWrapper> {
-    if let Err(error) = state.expire_defunct(SystemTime::now()) {
-        tracing::error!(%error, "Failed to expire defunct locks");
-    }
+    let now = SystemTime::now();
     if let Some(lock) = state
         .defunct()
         .find(|lock| {
-            lock.principal.subject == claims.sub()
+            lock.original_expires_at > now
+                && lock.principal.subject == claims.sub()
                 && (lock.scope == ScopeKey::Vehicle
                     || &lock.scope == target_scope
                     || lock.coverage.overlaps(target_coverage))
@@ -198,30 +204,34 @@ async fn validate_fg_access<T: UdsEcu>(
             .await,
     );
     let target_scope = ScopeKey::FunctionalGroup(functional_group_name.to_ascii_lowercase());
-    let mut store = locks.lock_idle().await;
-    validate_defunct_fg_lock_in_state(
-        claims,
-        &target_scope,
-        &target_coverage,
-        &mut store.state,
-        include_schema,
-    )?;
-    let state = &store.state;
     let now = SystemTime::now();
-    validate_active_locks(
-        claims.sub(),
-        state.active().filter(|lock| {
-            active_lock_is_effective(state, lock, now)
-                && (lock.scope == ScopeKey::Vehicle
-                    || lock.scope == target_scope
-                    || lock.coverage.overlaps(&target_coverage))
-        }),
-        write,
-    )
-    .map_err(|error| ErrorWrapper {
-        error,
-        include_schema,
-    })
+    locks
+        .core
+        .read_store(|store| {
+            let state = &store.state;
+            validate_defunct_fg_lock_in_state(
+                claims,
+                &target_scope,
+                &target_coverage,
+                state,
+                include_schema,
+            )?;
+            validate_active_locks(
+                claims.sub(),
+                state.active().filter(|lock| {
+                    active_lock_is_effective(state, lock, now)
+                        && (lock.scope == ScopeKey::Vehicle
+                            || lock.scope == target_scope
+                            || lock.coverage.overlaps(&target_coverage))
+                }),
+                write,
+            )
+            .map_err(|error| ErrorWrapper {
+                error,
+                include_schema,
+            })
+        })
+        .await
 }
 
 fn active_lock_is_effective(state: &LockState, lock: &ActiveLock, now: SystemTime) -> bool {
@@ -243,7 +253,9 @@ pub(super) fn validate_active_locks<'a>(
 ) -> Result<(), ApiError> {
     let active_locks = active_locks.collect::<Vec<_>>();
     if write && active_locks.is_empty() {
-        return Err(ApiError::Conflict("Required lock is missing".to_owned()));
+        return Err(ApiError::LockRequired(
+            "Required lock is missing".to_owned(),
+        ));
     }
     if active_locks
         .iter()

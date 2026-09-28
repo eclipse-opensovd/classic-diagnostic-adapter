@@ -19,6 +19,25 @@ fn locks_can_be_constructed_without_tokio_runtime() {
 }
 
 #[tokio::test]
+async fn dropped_transition_reservation_releases_gate() {
+    let locks = Locks::new();
+    let reservation = locks.core.reserve_transition().await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), locks.core.reserve_transition(),)
+            .await
+            .is_err()
+    );
+    locks.core.read_store(|_| ()).await;
+
+    drop(reservation);
+    let next_reservation =
+        tokio::time::timeout(Duration::from_secs(1), locks.core.reserve_transition())
+            .await
+            .expect("Dropped reservation must release transition gate");
+    drop(next_reservation);
+}
+
+#[tokio::test]
 async fn expiration_holds_mutation_guard_until_cleanup_finishes() {
     let policy = Arc::new(EventRecordingPolicy::default());
     let locks = Arc::new(Locks::new_with_policy(Arc::<EventRecordingPolicy>::clone(
@@ -71,7 +90,7 @@ async fn expiration_holds_mutation_guard_until_cleanup_finishes() {
         .expect("Expiration cleanup should start");
     assert!(!locks.test_has_active(&lock.id).await);
     assert!(
-        tokio::time::timeout(Duration::from_millis(20), locks.lock_idle())
+        tokio::time::timeout(Duration::from_millis(20), locks.core.reserve_transition())
             .await
             .is_err(),
         "Mutation guard must remain held during expiration cleanup"
@@ -85,10 +104,11 @@ async fn expiration_holds_mutation_guard_until_cleanup_finishes() {
     );
 
     release_cleanup.notify_one();
-    let released_guard = tokio::time::timeout(Duration::from_secs(1), locks.lock_idle())
-        .await
-        .expect("Mutation guard should be released after cleanup");
-    drop(released_guard);
+    let released_reservation =
+        tokio::time::timeout(Duration::from_secs(1), locks.core.reserve_transition())
+            .await
+            .expect("Mutation guard should be released after cleanup");
+    drop(released_reservation);
     await_events(&policy, 2).await;
     let events = policy.events.lock().expect("Event mutex poisoned");
     assert!(matches!(
@@ -137,8 +157,8 @@ async fn expiration_releases_transition_after_cleanup_panic() {
     })
     .await
     .expect("Lock should expire despite cleanup panic");
-    let guard = tokio::time::timeout(Duration::from_secs(1), locks.lock_idle())
+    let reservation = tokio::time::timeout(Duration::from_secs(1), locks.core.reserve_transition())
         .await
         .expect("Cleanup panic must not retain transition reservation");
-    drop(guard);
+    drop(reservation);
 }

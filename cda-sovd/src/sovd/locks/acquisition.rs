@@ -39,13 +39,15 @@ pub(super) async fn create_lock<T: UdsEcu + Clone>(
         None
     } else {
         locks
-            .store
-            .lock()
+            .core
+            .read_store(|store| {
+                store
+                    .state
+                    .active_for_scope(&ScopeKey::Vehicle)
+                    .filter(|lock| lock.principal.subject == principal.subject)
+                    .map(|lock| lock.id.clone())
+            })
             .await
-            .state
-            .active_for_scope(&ScopeKey::Vehicle)
-            .filter(|lock| lock.principal.subject == principal.subject)
-            .map(|lock| lock.id.clone())
     };
     let (tester_present, cleanup_fn) = match &scope {
         LockScope::Ecu { name } => {

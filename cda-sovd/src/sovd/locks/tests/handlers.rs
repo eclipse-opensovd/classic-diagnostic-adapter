@@ -38,16 +38,16 @@ async fn child_lock_created_under_owned_vehicle_has_parent() {
         super::cleanup::create_ecu_lock(&mock_uds, &locks, &ecu_name, Duration::from_secs(60))
             .await;
 
-    assert_eq!(
-        locks
-            .store
-            .lock()
-            .await
-            .state
-            .active_by_id(&lock_id)
-            .and_then(|lock| lock.parent_vehicle_lock_id.as_deref()),
-        Some("vehicle")
-    );
+    let parent = locks
+        .core
+        .read_store(|store| {
+            store
+                .state
+                .active_by_id(&lock_id)
+                .and_then(|lock| lock.parent_vehicle_lock_id.clone())
+        })
+        .await;
+    assert_eq!(parent.as_deref(), Some("vehicle"));
     let response = delete_handler(
         &locks,
         LockScope::Ecu { name: ecu_name },
@@ -95,20 +95,104 @@ async fn post_handler_commits_policy_preemption_end_to_end() {
             coverage: LockCoverage::vehicle(),
         },
         request,
+        "/vehicle/v15/locks",
         false,
         Box::new(TestSecurityPlugin),
     )
     .await;
 
     assert_eq!(response.status(), StatusCode::CREATED);
+    let location = response
+        .headers()
+        .get(axum::http::header::LOCATION)
+        .expect("Created lock response should include Location")
+        .to_str()
+        .expect("Location should be a valid header value")
+        .to_owned();
     let response: sovd_interfaces::locking::post_put::Response = axum_response_into(response)
         .await
         .expect("Created lock response should decode");
+    assert_eq!(location, format!("/vehicle/v15/locks/{}", response.id));
     assert!(response.x_sovd2uds_isexclusive);
     assert_eq!(cleanup_count.load(Ordering::SeqCst), 1);
-    let store = locks.store.lock().await;
-    assert!(store.state.active_by_id(&response.id).is_some());
-    assert!(store.state.defunct_by_id("existing-lock").is_some());
+    locks
+        .core
+        .read_store(|store| {
+            assert!(store.state.active_by_id(&response.id).is_some());
+            assert!(store.state.defunct_by_id("existing-lock").is_some());
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn same_owner_post_renewal_returns_ok_without_location() {
+    let locks = Arc::new(Locks::new());
+    let original_expiration = SystemTime::now()
+        .checked_add(Duration::from_secs(300))
+        .expect("Test expiration should be representable");
+    locks
+        .test_insert_active(
+            test_lock("existing-lock")
+                .expires_at(original_expiration)
+                .build(),
+        )
+        .await;
+    let claims = TestSecurityPlugin.claims();
+    let request = sovd_interfaces::locking::Request {
+        lock_expiration: 600,
+        break_lock: false,
+        x_sovd2uds_isexclusive: None,
+        metadata: serde_json::Map::new(),
+    };
+    let (acquisition, pending, request) = locks
+        .evaluate_acquisition(
+            LockScope::Ecu {
+                name: "ecu-a".to_owned(),
+            },
+            LockCoverage::new(["ecu-a".to_owned()]),
+            &request,
+            &claims,
+        )
+        .await
+        .expect("Same-owner renewal should be accepted");
+    let expected_expiration = request.expires_at;
+
+    let response = post_handler(
+        &MockUdsEcu::default(),
+        LockContext {
+            all_locks: &locks,
+            acquisition,
+            pending,
+            coverage: LockCoverage::new(["ecu-a".to_owned()]),
+        },
+        request,
+        "/vehicle/v15/components/ecu-a/locks",
+        false,
+        Box::new(TestSecurityPlugin),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .is_none()
+    );
+    let response: sovd_interfaces::locking::post_put::Response = axum_response_into(response)
+        .await
+        .expect("Renewed lock response should decode");
+    assert_eq!(response.id, "existing-lock");
+    let expiration = locks
+        .core
+        .read_store(|store| {
+            store
+                .state
+                .active_by_id("existing-lock")
+                .map(|lock| lock.expires_at)
+        })
+        .await;
+    assert_eq!(expiration, Some(expected_expiration));
 }
 
 #[tokio::test]
@@ -145,7 +229,7 @@ async fn defunct_lock_remains_visible_and_reports_lock_broken() {
         .owner("priority-client")
         .vehicle()
         .build();
-    commit_pending_preemption(&locks, acquisition, pending, replacement).await;
+    commit_pending_preemption(acquisition, pending, replacement).await;
 
     let response = get_handler(
         &locks,
@@ -206,17 +290,18 @@ async fn defunct_put_validates_owner_before_reporting_broken_lock() {
     locks.test_insert_active(preempted).await;
     let replacement = test_lock("replacement").owner("new-owner").build();
     locks
-        .store
-        .lock()
-        .await
-        .state
-        .commit_replacement(
-            &["preempted".to_owned()],
-            replacement,
-            "priority-app",
-            SystemTime::now(),
-        )
-        .unwrap();
+        .test_mutate_store(|store| {
+            store
+                .state
+                .commit_replacement(
+                    &["preempted".to_owned()],
+                    replacement,
+                    "priority-app",
+                    SystemTime::now(),
+                )
+                .unwrap();
+        })
+        .await;
 
     let response = put_handler(
         LockUpdateContext {
@@ -283,10 +368,10 @@ async fn put_preserves_lock_identity_metadata_and_exclusivity() {
     .await;
 
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    let store = locks.store.lock().await;
-    let state = &store.state;
-    let renewed = state
-        .active_by_id("renewed")
+    let renewed = locks
+        .core
+        .read_store(|store| store.state.active_by_id("renewed").cloned())
+        .await
         .expect("Lock should remain active");
     assert_eq!(renewed.principal, original.principal);
     assert_eq!(renewed.metadata, original.metadata);
@@ -295,7 +380,7 @@ async fn put_preserves_lock_identity_metadata_and_exclusivity() {
 }
 
 #[tokio::test]
-async fn get_handlers_prune_expired_defunct_records() {
+async fn get_handlers_hide_expired_defunct_records() {
     let locks = Locks::new();
     let preempted = test_lock("expired-preempted")
         .owner("old-owner")
@@ -307,17 +392,18 @@ async fn get_handlers_prune_expired_defunct_records() {
         .expires_at(SystemTime::now() + Duration::from_secs(300))
         .build();
     locks
-        .store
-        .lock()
-        .await
-        .state
-        .commit_replacement(
-            &["expired-preempted".to_owned()],
-            replacement,
-            "priority-app",
-            SystemTime::UNIX_EPOCH,
-        )
-        .unwrap();
+        .test_mutate_store(|store| {
+            store
+                .state
+                .commit_replacement(
+                    &["expired-preempted".to_owned()],
+                    replacement,
+                    "priority-app",
+                    SystemTime::UNIX_EPOCH,
+                )
+                .unwrap();
+        })
+        .await;
 
     let list = get_handler(
         &locks,
@@ -347,6 +433,10 @@ async fn get_handlers_prune_expired_defunct_records() {
             name: "ecu-a".to_owned(),
         },
         &expired_id,
+        &TestClaims {
+            subject: "old-owner".to_owned(),
+            attributes: serde_json::Map::new(),
+        },
         false,
     )
     .await;
@@ -382,6 +472,7 @@ async fn lock_get_responses_include_schema_when_requested() {
             name: "ecu-a".to_owned(),
         },
         &"test-lock-id".to_owned(),
+        &claims,
         true,
     )
     .await;
@@ -400,6 +491,10 @@ async fn lock_errors_include_schema_when_requested() {
             name: "ecu-a".to_owned(),
         },
         &"missing".to_owned(),
+        &TestClaims {
+            subject: "test_user".to_owned(),
+            attributes: serde_json::Map::new(),
+        },
         true,
     )
     .await;
@@ -408,6 +503,75 @@ async fn lock_errors_include_schema_when_requested() {
             .await
             .expect("Lock error should decode");
     assert!(error.schema.is_some());
+}
+
+#[tokio::test]
+async fn lock_details_report_ownership_relative_to_requesting_client() {
+    let locks = Locks::new();
+    locks
+        .test_insert_active(test_lock("active").owner("original-owner").build())
+        .await;
+
+    for (subject, expected_owned) in [("original-owner", true), ("other-client", false)] {
+        let response = get_id_handler(
+            &locks,
+            LockScope::Ecu {
+                name: "ecu-a".to_owned(),
+            },
+            &"active".to_owned(),
+            &TestClaims {
+                subject: subject.to_owned(),
+                attributes: serde_json::Map::new(),
+            },
+            false,
+        )
+        .await;
+        let details: sovd_interfaces::locking::id::get::Response = axum_response_into(response)
+            .await
+            .expect("Active lock details should decode");
+        assert_eq!(details.owned, expected_owned);
+    }
+}
+
+#[tokio::test]
+async fn defunct_lock_details_remain_owned_by_original_client() {
+    let locks = Locks::new();
+    locks
+        .test_insert_active(test_lock("preempted").owner("original-owner").build())
+        .await;
+    locks
+        .test_mutate_store(|store| {
+            store
+                .state
+                .commit_replacement(
+                    &["preempted".to_owned()],
+                    test_lock("replacement").owner("replacement-owner").build(),
+                    "priority-app",
+                    SystemTime::now(),
+                )
+                .expect("Replacement should be committed");
+        })
+        .await;
+
+    for (subject, expected_owned) in [("original-owner", true), ("replacement-owner", false)] {
+        let response = get_id_handler(
+            &locks,
+            LockScope::Ecu {
+                name: "ecu-a".to_owned(),
+            },
+            &"preempted".to_owned(),
+            &TestClaims {
+                subject: subject.to_owned(),
+                attributes: serde_json::Map::new(),
+            },
+            false,
+        )
+        .await;
+        let details: sovd_interfaces::locking::id::get::Response = axum_response_into(response)
+            .await
+            .expect("Defunct lock details should decode");
+        assert_eq!(details.owned, expected_owned);
+    }
 }
 
 #[test]

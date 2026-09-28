@@ -14,7 +14,7 @@
 use aide::{UseApi, transform::TransformOperation};
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{OriginalUri, Path, Query, State},
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
@@ -96,14 +96,16 @@ pub(crate) mod lock {
 
     pub(crate) async fn get<T: UdsEcu + Clone>(
         Path(lock): Path<LockPathParam>,
-        UseApi(_sec_plugin, _): UseApi<Secured, ()>,
+        UseApi(sec_plugin, _): UseApi<Secured, ()>,
         State(state): State<WebserverState<T>>,
         Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
     ) -> Response {
+        let claims = sec_plugin.as_auth_plugin().claims();
         get_id_handler(
             &state.locks,
             LockScope::Vehicle,
             &lock,
+            &claims,
             query.include_schema,
         )
         .await
@@ -125,6 +127,7 @@ pub(crate) async fn post<T: UdsEcu + Clone>(
     UseApi(Secured(sec_plugin), _): UseApi<Secured, ()>,
     State(state): State<WebserverState<T>>,
     Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
+    OriginalUri(uri): OriginalUri,
     WithRejection(Json(body), _): WithRejection<Json<sovd_interfaces::locking::Request>, ApiError>,
 ) -> Response {
     let claims = sec_plugin.as_auth_plugin().claims();
@@ -148,7 +151,7 @@ pub(crate) async fn post<T: UdsEcu + Clone>(
         .map_or(&[][..], |pending| pending.root_lock_ids.as_slice());
     if let Err(error) = validate_vehicle_children(&active, preempted_roots, claims.sub()) {
         rollback_preemption(pending, &state.locks).await;
-        acquisition.finish().await;
+        acquisition.finish();
         return ErrorWrapper {
             error,
             include_schema: query.include_schema,
@@ -164,6 +167,7 @@ pub(crate) async fn post<T: UdsEcu + Clone>(
             coverage: LockCoverage::vehicle(),
         },
         request,
+        uri.path(),
         query.include_schema,
         sec_plugin,
     )
@@ -173,9 +177,16 @@ pub(crate) async fn post<T: UdsEcu + Clone>(
 pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
     openapi::lock_responses(op)
         .description("Create a vehicle lock")
+        .response_with::<200, Json<sovd_interfaces::locking::post_put::Response>, _>(|res| {
+            res.example(openapi::lock_created_example()).description(
+                "Existing caller-owned lock renewed for compatibility. Use PUT on the lock \
+                 resource to modify its expiration.",
+            )
+        })
         .response_with::<201, Json<sovd_interfaces::locking::post_put::Response>, _>(|res| {
             res.example(openapi::lock_created_example())
                 .description("Lock created successfully.")
+                .with(openapi::lock_created_response)
         })
         .with(openapi::lock_not_owned)
 }

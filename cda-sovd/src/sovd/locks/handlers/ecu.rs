@@ -14,7 +14,7 @@
 use aide::{UseApi, axum::IntoApiResponse, transform::TransformOperation};
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{OriginalUri, Path, Query, State},
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
@@ -104,18 +104,20 @@ pub(crate) mod lock {
 
     pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
         Path(lock): Path<LockPathParam>,
-        UseApi(_sec_plugin, _): UseApi<Secured, ()>,
+        UseApi(sec_plugin, _): UseApi<Secured, ()>,
         State(WebserverEcuState {
             ecu_name, locks, ..
         }): State<WebserverEcuState<T, U>>,
         Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
     ) -> Response {
+        let claims = sec_plugin.as_auth_plugin().claims();
         get_id_handler(
             &locks,
             LockScope::Ecu {
                 name: ecu_name.clone(),
             },
             &lock,
+            &claims,
             query.include_schema,
         )
         .await
@@ -140,6 +142,7 @@ pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
         ..
     }): State<WebserverEcuState<T, U>>,
     Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
+    OriginalUri(uri): OriginalUri,
     WithRejection(Json(body), _): WithRejection<Json<sovd_interfaces::locking::Request>, ApiError>,
 ) -> impl IntoApiResponse {
     let claims = sec_plugin.as_auth_plugin().claims();
@@ -165,7 +168,7 @@ pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
     };
     if let Err(error) = validate_vehicle_owner(&locks, &claims).await {
         rollback_preemption(pending, &locks).await;
-        acquisition.finish().await;
+        acquisition.finish();
         return ErrorWrapper {
             error,
             include_schema: query.include_schema,
@@ -177,7 +180,7 @@ pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
         matches!(lock.scope, ScopeKey::FunctionalGroup(_)) && lock.coverage.contains_ecu(&ecu_name)
     }) {
         rollback_preemption(pending, &locks).await;
-        acquisition.finish().await;
+        acquisition.finish();
         return ErrorWrapper {
             error: ApiError::Conflict("functional lock prevents setting ecu lock".to_owned()),
             include_schema: query.include_schema,
@@ -194,6 +197,7 @@ pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
             coverage: LockCoverage::new([ecu_name.clone()]),
         },
         request,
+        uri.path(),
         query.include_schema,
         sec_plugin,
     )
@@ -202,9 +206,16 @@ pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
 
 pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
     op.description("Create a lock for an ECU")
+            .response_with::<200, Json<sovd_interfaces::locking::post_put::Response>, _>(|res| {
+                res.example(openapi::lock_created_example()).description(
+                    "Existing caller-owned lock renewed for compatibility. Use PUT on the lock \
+                     resource to modify its expiration.",
+                )
+            })
             .response_with::<201, Json<sovd_interfaces::locking::post_put::Response>, _>(|res| {
                 res.example(openapi::lock_created_example())
                 .description("Lock created successfully.")
+                .with(openapi::lock_created_response)
             })
             .response_with::<
                 403,

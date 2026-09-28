@@ -233,6 +233,7 @@ pub(super) async fn create_ecu_lock(
             coverage: LockCoverage::new([ecu_name.to_owned()]),
         },
         request,
+        "/vehicle/v15/components/test_ecu/locks",
         false,
         security_plugin,
     )
@@ -315,6 +316,7 @@ async fn create_functional_group_lock(
             coverage: LockCoverage::new(["ecu1".to_owned(), "ecu2".to_owned()]),
         },
         request,
+        "/vehicle/v15/functions/functionalgroups/test_fg/locks",
         false,
         security_plugin,
     )
@@ -380,6 +382,7 @@ async fn create_vehicle_lock(
             coverage: LockCoverage::vehicle(),
         },
         request,
+        "/vehicle/v15/locks",
         false,
         security_plugin,
     )
@@ -422,12 +425,13 @@ async fn creation_and_deletion_notify_registered_policy() {
         parent_vehicle_lock_id: Some(lock_id.clone()),
     };
     locks
-        .store
-        .lock()
-        .await
-        .state
-        .insert_active(child.clone())
-        .expect("Vehicle child insertion should succeed");
+        .test_mutate_store(|store| {
+            store
+                .state
+                .insert_active(child.clone())
+                .expect("Vehicle child insertion should succeed");
+        })
+        .await;
 
     let delete_response = delete_handler(
         &locks,

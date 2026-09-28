@@ -20,7 +20,7 @@ use cda_interfaces::{
 };
 use cda_plugin_security::Claims;
 use chrono::{DateTime, SecondsFormat, Utc};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc};
 
 use crate::{
     openapi,
@@ -96,40 +96,70 @@ pub enum LockUpdateError {
     FunctionalGroupLocksHeld,
 }
 
-type TransitionId = u64;
-
-pub(super) struct TransitionReservation {
-    id: TransitionId,
-    finish: Option<oneshot::Sender<oneshot::Sender<()>>>,
-}
-
-impl TransitionReservation {
-    pub(super) fn id(&self) -> TransitionId {
-        self.id
-    }
-
-    pub(super) async fn finish(mut self) {
-        let Some(finish) = self.finish.take() else {
-            return;
-        };
-        let (acknowledge, acknowledged) = oneshot::channel();
-        if finish.send(acknowledge).is_ok() {
-            let _ = acknowledged.await;
-        }
-    }
-}
-
 pub(super) struct LockStore {
     state: LockState,
     cleanups: HashMap<String, LockCleanupFnHelper>,
     generation: u64,
-    transition: Option<TransitionId>,
-    next_transition_id: TransitionId,
 }
 
+mod lock_core {
+    use std::sync::Arc;
+
+    use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, RwLockWriteGuard};
+
+    use super::LockStore;
+
+    /// Coordinates concurrent reads with serialized lock-state transitions.
+    ///
+    /// Reads may run while a transition performs asynchronous work, but writes
+    /// require a [`TransitionReservation`] issued by the same core.
+    #[derive(Clone)]
+    pub(super) struct LockCore {
+        store: Arc<RwLock<LockStore>>,
+        transition_gate: Arc<Mutex<()>>,
+    }
+
+    impl LockCore {
+        pub(super) fn new(store: LockStore) -> Self {
+            Self {
+                store: Arc::new(RwLock::new(store)),
+                transition_gate: Arc::new(Mutex::new(())),
+            }
+        }
+
+        pub(super) async fn reserve_transition(&self) -> TransitionReservation {
+            TransitionReservation {
+                store: Arc::clone(&self.store),
+                _gate: Arc::clone(&self.transition_gate).lock_owned().await,
+            }
+        }
+
+        pub(super) async fn read_store<T>(&self, read: impl FnOnce(&LockStore) -> T) -> T {
+            let store = self.store.read().await;
+            read(&store)
+        }
+    }
+
+    pub(super) struct TransitionReservation {
+        store: Arc<RwLock<LockStore>>,
+        _gate: OwnedMutexGuard<()>,
+    }
+
+    impl TransitionReservation {
+        pub(super) async fn write_store(&self) -> RwLockWriteGuard<'_, LockStore> {
+            self.store.write().await
+        }
+
+        pub(super) fn finish(self) {
+            drop(self);
+        }
+    }
+}
+
+use lock_core::{LockCore, TransitionReservation};
+
 pub struct Locks {
-    store: Arc<Mutex<LockStore>>,
-    transition_gate: Arc<Mutex<()>>,
+    core: LockCore,
     priority_policy: Arc<dyn LockPriorityPolicy>,
     lifecycle_sender: mpsc::Sender<LifecycleDelivery>,
     lifecycle_receiver: Mutex<Option<mpsc::Receiver<LifecycleDelivery>>>,
@@ -173,14 +203,11 @@ impl Locks {
         let (lifecycle_sender, lifecycle_receiver) =
             mpsc::channel(config.priority_lifecycle_queue_capacity.max(1));
         Self {
-            store: Arc::new(Mutex::new(LockStore {
+            core: LockCore::new(LockStore {
                 state: LockState::default(),
                 cleanups: HashMap::new(),
                 generation: 0,
-                transition: None,
-                next_transition_id: 0,
-            })),
-            transition_gate: Arc::new(Mutex::new(())),
+            }),
             priority_policy: policy,
             lifecycle_sender,
             lifecycle_receiver: Mutex::new(Some(lifecycle_receiver)),
@@ -189,30 +216,30 @@ impl Locks {
     }
 
     async fn current_holder(&self, lock: &DefunctLock) -> String {
-        self.store
-            .lock()
+        self.core
+            .read_store(|store| store.state.current_holder(lock).to_owned())
             .await
-            .state
-            .current_holder(lock)
-            .to_owned()
     }
 
     async fn defunct_by_id(&self, lock_id: &str, scope: &LockScope) -> Option<DefunctLock> {
-        let store = self.store.lock().await;
-        store
-            .state
-            .defunct_by_id(lock_id)
-            .filter(|lock| lock.scope == ScopeKey::from(scope))
-            .cloned()
+        self.core
+            .read_store(|store| {
+                store
+                    .state
+                    .defunct_by_id(lock_id)
+                    .filter(|lock| lock.scope == ScopeKey::from(scope))
+                    .cloned()
+            })
+            .await
     }
 
     async fn delete_defunct(
-        &self,
         lock_id: &str,
         scope: &LockScope,
         claims: &impl Claims,
+        reservation: &TransitionReservation,
     ) -> Result<bool, ApiError> {
-        let mut store = self.store.lock().await;
+        let mut store = reservation.write_store().await;
         let state = &mut store.state;
         let Some(lock) = state.defunct_by_id(lock_id) else {
             return Ok(false);
@@ -236,7 +263,8 @@ impl Locks {
     /// # Errors
     /// Returns an error if any ECU or functional-group lock is currently held.
     pub async fn prepare_runtime_update(&self) -> Result<(), LockUpdateError> {
-        let mut store = self.lock_idle().await;
+        let reservation = self.core.reserve_transition().await;
+        let mut store = reservation.write_store().await;
         if store
             .state
             .active()
@@ -256,67 +284,42 @@ impl Locks {
     }
 
     pub(crate) async fn vehicle_lock_owner_sub(&self) -> Option<String> {
-        self.store
-            .lock()
+        self.core
+            .read_store(|store| {
+                store
+                    .state
+                    .active_for_scope(&ScopeKey::Vehicle)
+                    .map(|lock| lock.principal.subject.clone())
+            })
             .await
-            .state
-            .active_for_scope(&ScopeKey::Vehicle)
-            .map(|lock| lock.principal.subject.clone())
     }
 
     pub(crate) async fn has_non_vehicle_locks(&self) -> bool {
-        self.lock_idle()
+        self.core
+            .read_store(|store| {
+                store
+                    .state
+                    .active()
+                    .any(|lock| lock.scope != ScopeKey::Vehicle)
+            })
             .await
-            .state
-            .active()
-            .any(|lock| lock.scope != ScopeKey::Vehicle)
     }
 
     async fn active_for_scope(&self, scope: &LockScope) -> Option<ActiveLock> {
-        self.store
-            .lock()
+        self.core
+            .read_store(|store| {
+                store
+                    .state
+                    .active_for_scope(&ScopeKey::from(scope))
+                    .cloned()
+            })
             .await
-            .state
-            .active_for_scope(&ScopeKey::from(scope))
-            .cloned()
     }
 
     pub(crate) async fn open_locks(&self) -> Vec<ActiveLock> {
-        self.store.lock().await.state.active().cloned().collect()
-    }
-
-    async fn reserve_transition(&self) -> TransitionReservation {
-        let transition_guard = Arc::clone(&self.transition_gate).lock_owned().await;
-        let mut store = self.store.lock().await;
-        store.next_transition_id = store.next_transition_id.saturating_add(1);
-        let id = store.next_transition_id;
-        store.transition = Some(id);
-        drop(store);
-        let (finish, finished) = oneshot::channel::<oneshot::Sender<()>>();
-        let store = Arc::clone(&self.store);
-        cda_interfaces::spawn_named!(&format!("lock-transition-release-{id}"), async move {
-            let _transition_guard = transition_guard;
-            let acknowledge = finished.await.ok();
-            let mut store = store.lock().await;
-            if store.transition == Some(id) {
-                store.transition = None;
-            }
-            drop(store);
-            if let Some(acknowledge) = acknowledge {
-                let _ = acknowledge.send(());
-            }
-        });
-        TransitionReservation {
-            id,
-            finish: Some(finish),
-        }
-    }
-
-    async fn lock_idle(&self) -> tokio::sync::MutexGuard<'_, LockStore> {
-        let transition_guard = self.transition_gate.lock().await;
-        let store = self.store.lock().await;
-        drop(transition_guard);
-        store
+        self.core
+            .read_store(|store| store.state.active().cloned().collect())
+            .await
     }
 }
 
@@ -363,10 +366,11 @@ impl DefunctLock {
         }
     }
 
-    fn details(&self) -> sovd_interfaces::locking::id::get::Response {
+    fn details(&self, claims: &impl Claims) -> sovd_interfaces::locking::id::get::Response {
         sovd_interfaces::locking::id::get::Response {
             lock_expiration: DateTime::<Utc>::from(self.original_expires_at)
                 .to_rfc3339_opts(SecondsFormat::Secs, true),
+            owned: self.principal.subject == claims.sub(),
             x_sovd2uds_isexclusive: self.exclusive,
             x_sovd2uds_broken_by: Some(self.broken_by.clone()),
             x_sovd2uds_broken_at: Some(

@@ -51,6 +51,8 @@ pub enum ApiError {
     InternalServerError(Option<String>),
     #[error("Conflict: {0}")]
     Conflict(String),
+    #[error("Required lock is missing: {0}")]
+    LockRequired(String),
     #[error("Locked: {0}")]
     Locked(String),
     #[error("Lock priority policy denied acquisition: {message}")]
@@ -106,10 +108,19 @@ impl ApiError {
                 Some(VendorErrorCode::BadRequest),
             ),
             ApiError::Forbidden(_) => (ErrorCode::InsufficientAccessRights, None),
+            ApiError::LockRequired(_) => (
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::LockRequired),
+            ),
+            ApiError::Locked(_) => (
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::LockOwnedByAnotherClient),
+            ),
+            ApiError::LockPriorityDenied { .. } => (
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::LockPriorityDenied),
+            ),
             ApiError::LockBroken { .. } => (ErrorCode::LockBroken, None),
-            ApiError::Locked(_) | ApiError::LockPriorityDenied { .. } => {
-                (ErrorCode::PreconditionsNotFulfilled, None)
-            }
             ApiError::InvalidParameter { .. } => (
                 ErrorCode::VendorSpecific,
                 Some(VendorErrorCode::InvalidParameter),
@@ -255,6 +266,10 @@ pub enum VendorErrorCode {
     StorageTransactionBusy,
     /// The provided data was not valid.
     InvalidData,
+    /// A communication request requires a lock that the client does not hold.
+    LockRequired,
+    /// A lock owned by another client prevents the requested operation.
+    LockOwnedByAnotherClient,
     /// A lock acquisition was denied by the configured priority policy.
     LockPriorityDenied,
     /// A severe error occurred that needs further investigation, safe operation is still possible
@@ -319,11 +334,18 @@ impl IntoResponse for ErrorWrapper {
                 None,
                 None,
             ),
+            ApiError::LockRequired(message) => (
+                StatusCode::CONFLICT,
+                message,
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::LockRequired),
+                None,
+            ),
             ApiError::Locked(message) => (
                 StatusCode::LOCKED,
                 message,
-                ErrorCode::PreconditionsNotFulfilled,
-                None,
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::LockOwnedByAnotherClient),
                 None,
             ),
             ApiError::LockPriorityDenied {
@@ -332,7 +354,7 @@ impl IntoResponse for ErrorWrapper {
             } => (
                 StatusCode::LOCKED,
                 message,
-                ErrorCode::PreconditionsNotFulfilled,
+                ErrorCode::VendorSpecific,
                 Some(VendorErrorCode::LockPriorityDenied),
                 Some(parameters),
             ),
@@ -570,6 +592,7 @@ mod tests {
         let body: sovd_interfaces::error::ApiErrorResponse<VendorErrorCode> =
             axum_response_into(response).await.expect("Valid body");
         assert!(body.schema.is_some());
+        assert_eq!(body.error_code, ErrorCode::VendorSpecific);
         assert_eq!(body.vendor_code, Some(VendorErrorCode::LockPriorityDenied));
     }
 
@@ -588,11 +611,12 @@ mod tests {
         let body: sovd_interfaces::error::ApiErrorResponse<VendorErrorCode> =
             axum_response_into(response).await.expect("Valid body");
         assert!(body.schema.is_none());
+        assert_eq!(body.error_code, ErrorCode::VendorSpecific);
         assert_eq!(body.vendor_code, Some(VendorErrorCode::LockPriorityDenied));
     }
 
     #[tokio::test]
-    async fn ordinary_lock_conflict_uses_locked_status() {
+    async fn ordinary_lock_conflict_uses_lock_owner_vendor_code() {
         let response = ErrorWrapper {
             error: ApiError::Locked("Lock is owned by another client".to_owned()),
             include_schema: false,
@@ -602,24 +626,48 @@ mod tests {
         assert_eq!(response.status(), StatusCode::LOCKED);
         let body: sovd_interfaces::error::ApiErrorResponse<VendorErrorCode> =
             axum_response_into(response).await.expect("Valid body");
-        assert_eq!(body.error_code, ErrorCode::PreconditionsNotFulfilled);
+        assert_eq!(body.error_code, ErrorCode::VendorSpecific);
+        assert_eq!(
+            body.vendor_code,
+            Some(VendorErrorCode::LockOwnedByAnotherClient)
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_required_lock_uses_lock_required_vendor_code() {
+        let response = ErrorWrapper {
+            error: ApiError::LockRequired("Required lock is missing".to_owned()),
+            include_schema: false,
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: sovd_interfaces::error::ApiErrorResponse<VendorErrorCode> =
+            axum_response_into(response).await.expect("Valid body");
+        assert_eq!(body.error_code, ErrorCode::VendorSpecific);
+        assert_eq!(body.vendor_code, Some(VendorErrorCode::LockRequired));
     }
 
     #[test]
     fn error_and_vendor_code_maps_lock_and_service_errors() {
         let cases = [
             (
+                ApiError::LockRequired("Required".to_owned()),
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::LockRequired),
+            ),
+            (
                 ApiError::Locked("Locked".to_owned()),
-                ErrorCode::PreconditionsNotFulfilled,
-                None,
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::LockOwnedByAnotherClient),
             ),
             (
                 ApiError::LockPriorityDenied {
                     message: "Denied".to_owned(),
                     parameters: HashMap::default(),
                 },
-                ErrorCode::PreconditionsNotFulfilled,
-                None,
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::LockPriorityDenied),
             ),
             (
                 ApiError::LockBroken {

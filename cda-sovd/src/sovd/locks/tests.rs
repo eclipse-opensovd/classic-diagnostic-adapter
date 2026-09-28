@@ -79,29 +79,26 @@ async fn await_events(policy: &EventRecordingPolicy, count: usize) {
 }
 
 async fn commit_pending_preemption(
-    locks: &Locks,
     acquisition: AcquisitionGuard,
     mut pending: PendingPreemption,
     replacement: ActiveLock,
 ) -> Vec<ActiveLock> {
-    let removed = locks
-        .store
-        .lock()
-        .await
-        .state
-        .commit_replacement(
-            &pending.root_lock_ids,
-            replacement,
-            &pending.broken_by,
-            pending.broken_at,
-        )
-        .expect("Preemption commit should succeed");
-    pending.disarm();
-    acquisition.finish().await;
-    let cleanups = {
-        let mut store = locks.store.lock().await;
-        take_cleanups(&mut store.cleanups, &removed)
+    let (removed, cleanups) = {
+        let mut store = acquisition.reservation.write_store().await;
+        let removed = store
+            .state
+            .commit_replacement(
+                &pending.root_lock_ids,
+                replacement,
+                &pending.broken_by,
+                pending.broken_at,
+            )
+            .expect("Preemption commit should succeed");
+        let cleanups = take_cleanups(&mut store.cleanups, &removed);
+        (removed, cleanups)
     };
+    pending.disarm();
+    acquisition.finish();
     run_cleanups(cleanups).await;
     removed
 }
@@ -109,43 +106,52 @@ async fn commit_pending_preemption(
 impl Locks {
     async fn active_snapshots(&self) -> Vec<LockSnapshot> {
         let mut snapshots = self
-            .store
-            .lock()
-            .await
-            .state
-            .active()
-            .map(active_snapshot)
-            .collect::<Vec<_>>();
+            .core
+            .read_store(|store| {
+                store
+                    .state
+                    .active()
+                    .map(active_snapshot)
+                    .collect::<Vec<_>>()
+            })
+            .await;
         sort_lock_snapshots(&mut snapshots);
         snapshots
     }
 
+    async fn test_mutate_store<T>(&self, mutate: impl FnOnce(&mut LockStore) -> T) -> T {
+        let reservation = self.core.reserve_transition().await;
+        let mut store = reservation.write_store().await;
+        mutate(&mut store)
+    }
+
     async fn test_insert_active(&self, lock: ActiveLock) {
-        self.store
-            .lock()
-            .await
-            .state
-            .insert_active(lock)
-            .expect("Test lock insertion should succeed");
+        self.test_mutate_store(|store| {
+            store
+                .state
+                .insert_active(lock)
+                .expect("Test lock insertion should succeed");
+        })
+        .await;
     }
 
     async fn test_insert_cleanup(&self, lock_id: String, cleanup: LockCleanupFnHelper) {
-        self.store.lock().await.cleanups.insert(lock_id, cleanup);
+        self.test_mutate_store(|store| {
+            store.cleanups.insert(lock_id, cleanup);
+        })
+        .await;
     }
 
     async fn test_has_active(&self, lock_id: &str) -> bool {
-        self.store
-            .lock()
+        self.core
+            .read_store(|store| store.state.active_by_id(lock_id).is_some())
             .await
-            .state
-            .active_by_id(lock_id)
-            .is_some()
     }
 
     async fn test_reservation(&self) -> AcquisitionGuard {
-        let transition_id = self.reserve_transition().await;
+        let reservation = self.core.reserve_transition().await;
         AcquisitionGuard {
-            reservation: transition_id,
+            reservation,
             evaluation_id: None,
             policy: Arc::clone(&self.priority_policy),
         }
