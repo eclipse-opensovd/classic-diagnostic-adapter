@@ -33,6 +33,10 @@ const ECU_SIM_NAME: &str = "flxc1000";
 /// Tester Present frame: SID 0x3E with suppressPositiveResponse bit set (0x80)
 const TESTER_PRESENT_FRAME: &str = "3e80";
 
+/// Tester Present frame: SID 0x3E with the suppressPositiveResponse bit cleared
+/// (0x00), i.e. a positive response is expected.
+const TESTER_PRESENT_FRAME_RESPOND: &str = "3e00";
+
 /// Verifies that Tester Present frames (0x3E 0x80) are sent to the ECU while
 /// an ECU lock is held.
 ///
@@ -398,6 +402,130 @@ async fn tester_present_resumes_after_network_disconnect() -> Result<(), Testing
         "Expected at least one Tester Present frame ({TESTER_PRESENT_FRAME}) to be sent after \
          network-level DoIP disconnect while ECU lock is held, but none were found in 5s of \
          recording after reconnection.\nRecorded frames: {post_reconnect_frames:?}",
+    );
+
+    Ok(())
+}
+
+/// Verifies that the tester-present request honours the ECU communication
+/// parameters, exercising both resolution paths in a single run:
+///
+/// * FLXC1000 carries `CP_TesterPresentMessage` and `CP_TesterPresentReqResp`
+///   (`ReqResp = 0`) in its MDD, so the request suppresses the positive
+///   response (`3e80`) - the database-provided path.
+/// * FSNR2000 omits those com-params, so the CDA falls back to its configured
+///   defaults (positive response expected, `3e00`) - the fallback path.
+#[tokio::test]
+async fn tester_present_honours_com_params_with_db_and_fallback() -> Result<(), TestingError> {
+    const FALLBACK_ECU_SIM_NAME: &str = "fsnr2000";
+
+    let (runtime, _exclusive) = setup_integration_test(true).await?;
+    wait_for_ecus_online(&runtime.config).await?;
+    let auth = auth_header(&runtime.config, None).await?;
+
+    let fallback_lock_endpoint = format!("{}/locks", sovd::ECU_FSNR2000_ENDPOINT);
+
+    // Record both ECUs before locking so the very first frame is captured.
+    ecusim::start_recording(&runtime.ecu_sim, ECU_SIM_NAME)
+        .await
+        .expect("failed to start DB-provided ECU sim recording");
+    ecusim::start_recording(&runtime.ecu_sim, FALLBACK_ECU_SIM_NAME)
+        .await
+        .expect("failed to start fallback ECU sim recording");
+
+    // Locking an ECU starts periodic Tester Present for it.
+    let db_lock = create_lock(
+        Duration::from_secs(100),
+        ECU_LOCK_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let db_lock_id = extract_field_from_json::<String>(&response_to_json(&db_lock)?, "id")?;
+
+    let fallback_lock = create_lock(
+        Duration::from_secs(100),
+        &fallback_lock_endpoint,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let fallback_lock_id =
+        extract_field_from_json::<String>(&response_to_json(&fallback_lock)?, "id")?;
+
+    // Default TP interval is 2 seconds; 5 seconds yields multiple frames.
+    cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(5)).await;
+
+    let db_frames = ecusim::stop_and_clear_recording(&runtime.ecu_sim, ECU_SIM_NAME)
+        .await
+        .expect("failed to stop DB-provided ECU sim recording");
+    let fallback_frames = ecusim::stop_and_clear_recording(&runtime.ecu_sim, FALLBACK_ECU_SIM_NAME)
+        .await
+        .expect("failed to stop fallback ECU sim recording");
+
+    // Cleanup: release both locks regardless of the assertion outcome.
+    let _ = lock_operation(
+        ECU_LOCK_ENDPOINT,
+        Some(&db_lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+    let _ = lock_operation(
+        &fallback_lock_endpoint,
+        Some(&fallback_lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    // DB-provided ECU: MDD com-params suppress the positive response (3e80) and
+    // never request one (3e00).
+    let db_suppress = db_frames
+        .iter()
+        .filter(|frame| frame.eq_ignore_ascii_case(TESTER_PRESENT_FRAME))
+        .count();
+    let db_respond = db_frames
+        .iter()
+        .filter(|frame| frame.eq_ignore_ascii_case(TESTER_PRESENT_FRAME_RESPOND))
+        .count();
+    assert!(
+        db_suppress > 0,
+        "Expected the DB-provided ECU to send the configured Tester Present frame \
+         ({TESTER_PRESENT_FRAME}), but none were found.\nRecorded frames: {db_frames:?}",
+    );
+    assert_eq!(
+        db_respond, 0,
+        "DB-provided ECU must not request a positive response ({TESTER_PRESENT_FRAME_RESPOND}); \
+         the MDD com-param was ignored.\nRecorded frames: {db_frames:?}",
+    );
+
+    // Fallback ECU: no MDD com-params, so the CDA default expects a positive
+    // response (3e00) and never suppresses it (3e80).
+    let fallback_respond = fallback_frames
+        .iter()
+        .filter(|frame| frame.eq_ignore_ascii_case(TESTER_PRESENT_FRAME_RESPOND))
+        .count();
+    let fallback_suppress = fallback_frames
+        .iter()
+        .filter(|frame| frame.eq_ignore_ascii_case(TESTER_PRESENT_FRAME))
+        .count();
+    assert!(
+        fallback_respond > 0,
+        "Expected the fallback ECU to send the default Tester Present frame \
+         ({TESTER_PRESENT_FRAME_RESPOND}), but none were found.\nRecorded frames: \
+         {fallback_frames:?}",
+    );
+    assert_eq!(
+        fallback_suppress, 0,
+        "Fallback ECU must use the default (positive response expected), not suppress \
+         ({TESTER_PRESENT_FRAME}).\nRecorded frames: {fallback_frames:?}",
     );
 
     Ok(())
