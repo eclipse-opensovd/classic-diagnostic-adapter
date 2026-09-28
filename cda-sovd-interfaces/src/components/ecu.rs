@@ -189,7 +189,79 @@ pub mod data {
 
     pub mod get {
         use super::ComponentData;
+
         pub type Response = ComponentData;
+
+        /// Query parameters for `GET /data`.
+        #[derive(serde::Deserialize, schemars::JsonSchema)]
+        pub struct Query {
+            #[serde(rename = "include-schema", default)]
+            pub include_schema: bool,
+            /// Optional list of categories. When present, only data resources whose
+            /// `category` is one of the given values are returned.
+            ///
+            /// Per ISO 17978-3 (§6.2.7, §7.9.3) this is an array query parameter serialized
+            /// in `OpenAPI` `form` style with `explode=true`, i.e. multiple categories are
+            /// passed by repeating the parameter:
+            /// `?categories=identData&categories=currentData`.
+            ///
+            /// Matching is case-insensitive: incoming request URIs (including the query
+            /// string) are lowercased by CDA's request normalization middleware before
+            /// reaching this handler, so category names must be compared case-insensitively
+            /// against the (potentially mixed-case) `category` values produced by
+            /// `category_mapping`/`default_category`.
+            #[serde(default)]
+            pub categories: Option<Vec<String>>,
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::Query;
+
+            #[test]
+            fn deserializes_single_category() {
+                let q: Query = serde_qs::from_str("categories=identData").unwrap();
+                assert_eq!(q.categories, Some(vec!["identData".to_owned()]));
+            }
+
+            #[test]
+            fn deserializes_repeated_categories() {
+                let q: Query =
+                    serde_qs::from_str("categories=identData&categories=currentData").unwrap();
+                assert_eq!(
+                    q.categories,
+                    Some(vec!["identData".to_owned(), "currentData".to_owned()])
+                );
+            }
+
+            #[test]
+            fn deserializes_without_categories() {
+                let q: Query = serde_qs::from_str("include-schema=true").unwrap();
+                assert!(q.include_schema);
+                assert_eq!(q.categories, None);
+            }
+        }
+    }
+}
+
+pub mod data_categories {
+    /// A single entry of the `/data-categories` response.
+    /// Spec ISO 17978-3 Section 7.9.2.1 (`DataCategoryInformation`).
+    #[derive(serde::Deserialize, serde::Serialize, Debug, schemars::JsonSchema)]
+    pub struct DataCategoryInformation {
+        /// The category name, e.g. `identData`, `currentData`, `storedData`, `sysInfo`, or a
+        /// custom `x-<ext>-...` category.
+        pub item: String,
+        /// Optional identifier for translating the category name. CDA does not currently
+        /// support translation, so this is always omitted.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub category_translation_id: Option<String>,
+    }
+
+    pub mod get {
+        use super::DataCategoryInformation;
+
+        pub type Response = crate::Items<DataCategoryInformation>;
         pub type Query = crate::IncludeSchemaQuery;
     }
 }
