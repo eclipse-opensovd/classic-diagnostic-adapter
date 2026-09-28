@@ -40,6 +40,7 @@ use crate::{
 
 pub(crate) mod configurations;
 pub(crate) mod data;
+pub(crate) mod data_categories;
 pub(crate) mod faults;
 pub(crate) mod genericservice;
 pub(crate) mod modes;

@@ -329,6 +329,11 @@ where
         }
     };
     tracing::info!("Starting CDA - version {}", cda_version());
+    // Emitted here rather than in `validate_sanity`, which runs before tracing is set up.
+    config
+        .database
+        .naming_convention
+        .warn_on_non_standard_categories();
 
     // Done as first initialization step, since the application will not function without storage.
     let storage = initialize_storage_with_retries(&config).await?;
