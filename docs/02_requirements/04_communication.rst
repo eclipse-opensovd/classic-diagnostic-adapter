@@ -787,8 +787,8 @@ Tester Present
 
     **Message Format and Timing**
 
-    - The CDA shall send ``CP_TesterPresentMessage`` (default: ``[0x3E, 0x00]``) as the
-      tester present message.
+    - The CDA shall send the ECU-specific ``CP_TesterPresentMessage`` resolved from that
+      ECU's communication parameters (default: ``[0x3E, 0x00]``).
     - When ``CP_TesterPresentReqResp`` is set to "No response expected" (0), the CDA shall
       set the suppress-positive-response bit (sub-function ``0x80``) and shall not wait
       for a UDS-level response.
