@@ -716,11 +716,11 @@ Tester Present
 
     .. note::
 
-        The current implementation uses only ``CP_TesterPresentTime`` at runtime. All other
-        COM parameters are loaded from the database but are not yet evaluated. The
-        implementation currently hardcodes the message as ``[0x3E, 0x80]`` (suppress
-        positive response), uses fixed periodic sending, and always generates tester present
-        when a lock is held.
+      The runtime resolves ``CP_TesterPresentTime``, ``CP_TesterPresentMessage``, and
+      ``CP_TesterPresentReqResp`` per ECU. Messages shorter than a service ID and
+      sub-function fall back to ``[0x3E, 0x00]``; ``CP_TesterPresentReqResp`` controls
+      suppress-response bit ``0x80``. Other tester present COM parameters remain unused;
+      sending is fixed-periodic and lock-driven.
 
     .. uml::
         :caption: Tester Present -- Component Lock

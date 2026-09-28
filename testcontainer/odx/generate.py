@@ -175,6 +175,8 @@ def add_base_variant(
     functional_address: int,
     database: Database,
     sdgs: list[SpecialDataGroup] | None = None,
+    tester_present_message: str | None = None,
+    tester_present_req_resp: str | None = None,
 ):
     ecu_name = dlc.short_name
     doc_frags = dlc.odx_id.doc_fragments
@@ -187,6 +189,8 @@ def add_base_variant(
             functional_address=functional_address,
             gateway_address=gateway_address,
             database=database,
+            tester_present_message=tester_present_message,
+            tester_present_req_resp=tester_present_req_resp,
         ),
         variant_type=DiagLayerType.BASE_VARIANT,
         parent_refs=[
@@ -262,6 +266,8 @@ def generate_for_ecu(
     gateway_address: int,
     functional_address: int,
     variants: list[tuple[str, int]],
+    tester_present_message: str | None = None,
+    tester_present_req_resp: str | None = None,
 ):
     print(f"Generating for {ecu_name}")
     database = Database()
@@ -295,6 +301,8 @@ def generate_for_ecu(
         gateway_address=gateway_address,
         functional_address=functional_address,
         database=database,
+        tester_present_message=tester_present_message,
+        tester_present_req_resp=tester_present_req_resp,
     )
 
     for variant_name, identification_pattern in variants:
@@ -430,6 +438,11 @@ generate_for_ecu(
     gateway_address=0x1000,
     functional_address=0xFFFF,
     variants=[("Boot_Variant", 0xFF0000), ("App_0101", 0x000101)],
+    # FLXC1000 carries the tester-present com-params in its MDD (DB-provided
+    # path). ReqResp=0 => suppress positive response (3E 80). Other ECUs omit
+    # these and fall back to the CDA config defaults.
+    tester_present_message="3E00",
+    tester_present_req_resp="0",
 )
 
 # mirror a use-case, where for different markets different hardware revisions

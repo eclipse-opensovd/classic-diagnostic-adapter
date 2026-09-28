@@ -24,11 +24,11 @@ pub trait UdsComParams: Send + Sync + 'static {
     #[must_use]
     fn tester_present_addr_mode(self) -> AddressingMode;
     #[must_use]
-    fn tester_present_response_expected(self) -> bool;
+    fn tester_present_response_expected(&self) -> bool;
     #[must_use]
     fn tester_present_send_type(self) -> TesterPresentSendType;
     #[must_use]
-    fn tester_present_message(self) -> Vec<u8>;
+    fn tester_present_message(&self) -> Vec<u8>;
     #[must_use]
     fn tester_present_exp_pos_resp(self) -> Vec<u8>;
     #[must_use]
