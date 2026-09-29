@@ -13,6 +13,7 @@ from helper import (
     find_dop_by_shortname,
     find_dtc_dop,
     functional_class_ref,
+    matching_request_parameter,
     matching_request_parameter_subfunction,
     ref,
     sid_parameter_pr,
@@ -277,12 +278,79 @@ def add_dtc_read_by_mask_service(
     )
 
 
+def add_dtc_read_development_fault_memory_by_mask_service(
+    dlr: DiagLayerRaw,
+    name: str,
+    subfunction: int,
+    description: str,
+    dtc_record_dop: OdxLinkRef,
+):
+    """Add the development fault memory DTC read service for UDS subfunction 0x17."""
+    request = Request(
+        odx_id=derived_id(dlr, f"RQ.RQ_{name}"),
+        short_name=f"RQ_{name}",
+        parameters=NamedItemList(
+            [
+                sid_parameter_rq(0x19),
+                subfunction_rq(subfunction, "SubFunction"),
+                *dtc_status_parameters(dlr, 2),
+                ValueParameter(
+                    short_name="MemorySelection",
+                    semantic="DATA",
+                    byte_position=3,
+                    dop_ref=ref(find_dop_by_shortname(dlr, "IDENTICAL_UINT_8")),
+                ),
+            ],
+        ),
+    )
+    dlr.requests.append(request)
+
+    response = Response(
+        response_type=ResponseType.POSITIVE,
+        odx_id=derived_id(dlr, f"PR.PR_{name}"),
+        short_name=f"PR_{name}",
+        parameters=NamedItemList(
+            [
+                sid_parameter_pr(0x19 + 0x40),
+                matching_request_parameter_subfunction("SubFunction"),
+                *dtc_status_parameters(dlr, 2),
+                matching_request_parameter(
+                    "MemorySelection",
+                    semantic="DATA",
+                    byte_length=1,
+                    byte_position=3,
+                    request_byte_position=3,
+                ),
+                ValueParameter(
+                    short_name="DTCAndStatusRecord",
+                    semantic="DATA",
+                    byte_position=4,
+                    dop_ref=dtc_record_dop,
+                ),
+            ]
+        ),
+    )
+    dlr.positive_responses.append(response)
+
+    dlr.diag_comms_raw.append(
+        DiagService(
+            odx_id=derived_id(dlr, f"DC.{name}"),
+            short_name=name,
+            long_name=description,
+            functional_class_refs=[functional_class_ref(dlr, "FaultMem")],
+            request_ref=ref(request),
+            pos_response_refs=[ref(response)],
+        )
+    )
+
+
 def add_dtc_read_snapshots_by_dtc_number_service(
     dlr: DiagLayerRaw,
     name: str,
     subfunction: int,
     description: str,
     dtc_record_dop: OdxLinkRef,
+    user_memory: bool = False,
 ):
     """
     Adds the service for DTC Reading (0x19) with Snapshot Data.
@@ -295,9 +363,10 @@ def add_dtc_read_snapshots_by_dtc_number_service(
         dtc_record_dop: OdxLinkRef for the DTC record,
     """
 
+    memory_suffix = "UserMemory" if user_memory else ""
     dtc_snapshot_record_dop = texttable_int_str_dop(
         dlr,
-        "DtcSnapshotRecordDop",
+        f"DtcSnapshotRecordDop{memory_suffix}",
         [
             (16, "First Occurence"),
             (32, "Last Occurence"),
@@ -311,7 +380,7 @@ def add_dtc_read_snapshots_by_dtc_number_service(
     # Currently CDA expects a String type for this field
     dtc_snapshot_record_number_dop = texttable_int_str_dop(
         dlr,
-        "DTCSnapshotRecordNumberDop",
+        f"DTCSnapshotRecordNumberDop{memory_suffix}",
         [(i, f"{i:02X}") for i in range(256)],
     )
     dlr.diag_data_dictionary_spec.data_object_props.append(dtc_snapshot_record_number_dop)
@@ -327,8 +396,8 @@ def add_dtc_read_snapshots_by_dtc_number_service(
 
     # Structure DOP for a single Snapshot entry (DID + Data)
     dtc_snapshot_record_did_entry_structure = Structure(
-        odx_id=derived_id(dlr, "STRUCT.DTCSnapshotRecordDidEntry"),
-        short_name="DTCSnapshotRecordDidEntry",
+        odx_id=derived_id(dlr, f"STRUCT.DTCSnapshotRecordDidEntry{memory_suffix}"),
+        short_name=f"DTCSnapshotRecordDidEntry{memory_suffix}",
         parameters=NamedItemList(
             [
                 ValueParameter(
@@ -350,8 +419,8 @@ def add_dtc_read_snapshots_by_dtc_number_service(
 
     # Dynamic Field for actual data (Number of DIDs + Variable number of DIDs with their data)
     dtc_snapshot_record_entries = DynamicLengthField(
-        odx_id=derived_id(dlr, "DYN_FIELD.DTCSnapshotRecordEntries"),
-        short_name="DTCSnapshotRecordEntries",
+        odx_id=derived_id(dlr, f"DYN_FIELD.DTCSnapshotRecordEntries{memory_suffix}"),
+        short_name=f"DTCSnapshotRecordEntries{memory_suffix}",
         structure_ref=ref(dtc_snapshot_record_did_entry_structure.odx_id),
         offset=1,  # count byte is at offset 0, items start at offset 1
         determine_number_of_items=DetermineNumberOfItems(
@@ -365,8 +434,8 @@ def add_dtc_read_snapshots_by_dtc_number_service(
     # Structure DOP for a complete DTC Snapshot Record (Rec Number + Number of DIDs + Data Entries)
     # Layout: [RecordNumber(1)][NumberOfIdentifiers(1)][DID(2)][DID data(4)]...[DID[2]][DID data(4)]
     dtc_snapshot_record_structure = Structure(
-        odx_id=derived_id(dlr, "STRUCT.DTCSnapshotRecord"),
-        short_name="DTCSnapshotRecord",
+        odx_id=derived_id(dlr, f"STRUCT.DTCSnapshotRecord{memory_suffix}"),
+        short_name=f"DTCSnapshotRecord{memory_suffix}",
         parameters=NamedItemList(
             [
                 ValueParameter(
@@ -393,8 +462,8 @@ def add_dtc_read_snapshots_by_dtc_number_service(
     dlr.diag_data_dictionary_spec.structures.append(dtc_snapshot_record_structure)
 
     dtc_snapshot_end_of_pdu = EndOfPduField(
-        odx_id=derived_id(dlr, "EndOfPdu.DTCSnapshotRecords"),
-        short_name="DTCSnapshotRecords",
+        odx_id=derived_id(dlr, f"EndOfPdu.DTCSnapshotRecords{memory_suffix}"),
+        short_name=f"DTCSnapshotRecords{memory_suffix}",
         structure_ref=ref(dtc_snapshot_record_structure.odx_id),
     )
     dlr.diag_data_dictionary_spec.end_of_pdu_fields.append(dtc_snapshot_end_of_pdu)
@@ -411,13 +480,30 @@ def add_dtc_read_snapshots_by_dtc_number_service(
                     semantic="DATA",
                     byte_position=2,
                     bit_position=0,
-                    dop_ref=ref(find_dtc_dop(dlr, "RecordDataType")),
+                    dop_ref=ref(
+                        find_dtc_dop(
+                            dlr,
+                            "UserMemoryRecordDataType" if user_memory else "RecordDataType",
+                        )
+                    ),
                 ),
                 ValueParameter(
                     short_name="DTCSnapshotRecordNr",
                     semantic="DATA",
                     byte_position=5,
-                    dop_ref=ref(find_dop_by_shortname(dlr, "DtcSnapshotRecordDop")),
+                    dop_ref=ref(dtc_snapshot_record_dop),
+                ),
+                *(
+                    [
+                        ValueParameter(
+                            short_name="MemorySelection",
+                            semantic="DATA",
+                            byte_position=6,
+                            dop_ref=ref(find_dop_by_shortname(dlr, "IDENTICAL_UINT_8")),
+                        )
+                    ]
+                    if user_memory
+                    else []
                 ),
             ]
         ),
@@ -432,16 +518,29 @@ def add_dtc_read_snapshots_by_dtc_number_service(
             [
                 sid_parameter_pr(0x19 + 0x40),
                 matching_request_parameter_subfunction("SubFunction"),
+                *(
+                    [
+                        matching_request_parameter(
+                            "MemorySelection",
+                            semantic="DATA",
+                            byte_length=1,
+                            byte_position=2,
+                            request_byte_position=6,
+                        )
+                    ]
+                    if user_memory
+                    else []
+                ),
                 ValueParameter(
                     short_name="DTCAndStatusRecord",
                     semantic="DATA",
-                    byte_position=2,
+                    byte_position=3 if user_memory else 2,
                     dop_ref=dtc_record_dop,
                 ),
                 ValueParameter(
                     short_name="DTCSnapshotRecords",
                     semantic="DATA",
-                    byte_position=6,
+                    byte_position=7 if user_memory else 6,
                     dop_ref=ref(dtc_snapshot_end_of_pdu),
                 ),
             ]
@@ -461,12 +560,31 @@ def add_dtc_read_snapshots_by_dtc_number_service(
     )
 
 
+def add_dtc_read_user_memory_snapshots_by_dtc_number_service(
+    dlr: DiagLayerRaw,
+    name: str,
+    subfunction: int,
+    description: str,
+    dtc_record_dop: OdxLinkRef,
+):
+    """Add the user-memory snapshot service (UDS subfunction 0x18)."""
+    add_dtc_read_snapshots_by_dtc_number_service(
+        dlr,
+        name,
+        subfunction,
+        description,
+        dtc_record_dop,
+        user_memory=True,
+    )
+
+
 def add_dtc_read_ext_data_by_dtc_number_service(
     dlr: DiagLayerRaw,
     name: str,
     subfunction: int,
     description: str,
     dtc_record_dop: OdxLinkRef,
+    user_memory: bool = False,
 ):
     """
     Adds the service for DTC Reading (0x19) with Extended Data.
@@ -479,9 +597,10 @@ def add_dtc_read_ext_data_by_dtc_number_service(
         dtc_record_dop: OdxLinkRef for the DTC record,
     """
 
+    memory_suffix = "UserMemory" if user_memory else ""
     dtc_req_ext_data_record_number_dop = texttable_int_str_dop(
         dlr,
-        "DtcReqExtDataRecordNrDop",
+        f"DtcReqExtDataRecordNrDop{memory_suffix}",
         [
             (16, "First Occurence"),
             (32, "Last Occurence"),
@@ -496,7 +615,7 @@ def add_dtc_read_ext_data_by_dtc_number_service(
     # Currently CDA expects a String type for this field
     dtc_ext_data_record_number_dop = texttable_int_str_dop(
         dlr,
-        "DTCExtDataRecordNumberDop",
+        f"DTCExtDataRecordNumberDop{memory_suffix}",
         [(i, f"{i:02X}") for i in range(256)],
     )
     dlr.diag_data_dictionary_spec.data_object_props.append(dtc_ext_data_record_number_dop)
@@ -509,8 +628,8 @@ def add_dtc_read_ext_data_by_dtc_number_service(
 
     # Structure for the default Mux case, holding the uint32 data field.
     dtc_ext_data_default_case_structure = Structure(
-        odx_id=derived_id(dlr, "STRUCT.DTCExtDataRecordDataStruct"),
-        short_name="DTCExtDataRecordDataStruct",
+        odx_id=derived_id(dlr, f"STRUCT.DTCExtDataRecordDataStruct{memory_suffix}"),
+        short_name=f"DTCExtDataRecordDataStruct{memory_suffix}",
         parameters=NamedItemList(
             [
                 ValueParameter(
@@ -527,8 +646,8 @@ def add_dtc_read_ext_data_by_dtc_number_service(
     # Multiplexer wrapping the data bytes.
     # Only the default case structure is defined to act as test example
     dtc_ext_data_mux = Multiplexer(
-        odx_id=derived_id(dlr, "MUX.DTCExtDataRecordMux"),
-        short_name="DTCExtDataRecordMux",
+        odx_id=derived_id(dlr, f"MUX.DTCExtDataRecordMux{memory_suffix}"),
+        short_name=f"DTCExtDataRecordMux{memory_suffix}",
         byte_position=1,
         switch_key=MultiplexerSwitchKey(
             byte_position=0,
@@ -544,8 +663,8 @@ def add_dtc_read_ext_data_by_dtc_number_service(
     # Structure DOP for a single DTC Extended Data record
     # Layout: [RecordNumber(1)] [Data(4)]
     dtc_ext_data_record_structure = Structure(
-        odx_id=derived_id(dlr, "STRUCT.DTCExtDataRecord"),
-        short_name="DTCExtDataRecord",
+        odx_id=derived_id(dlr, f"STRUCT.DTCExtDataRecord{memory_suffix}"),
+        short_name=f"DTCExtDataRecord{memory_suffix}",
         parameters=NamedItemList(
             [
                 ValueParameter(
@@ -566,8 +685,8 @@ def add_dtc_read_ext_data_by_dtc_number_service(
     dlr.diag_data_dictionary_spec.structures.append(dtc_ext_data_record_structure)
 
     dtc_ext_data_end_of_pdu = EndOfPduField(
-        odx_id=derived_id(dlr, "EndOfPdu.DTCExtDataRecord"),
-        short_name="DTCExtDataRecord",
+        odx_id=derived_id(dlr, f"EndOfPdu.DTCExtDataRecord{memory_suffix}"),
+        short_name=f"DTCExtDataRecord{memory_suffix}",
         structure_ref=ref(dtc_ext_data_record_structure.odx_id),
     )
     dlr.diag_data_dictionary_spec.end_of_pdu_fields.append(dtc_ext_data_end_of_pdu)
@@ -584,13 +703,30 @@ def add_dtc_read_ext_data_by_dtc_number_service(
                     semantic="DATA",
                     byte_position=2,
                     bit_position=0,
-                    dop_ref=ref(find_dtc_dop(dlr, "RecordDataType")),
+                    dop_ref=ref(
+                        find_dtc_dop(
+                            dlr,
+                            "UserMemoryRecordDataType" if user_memory else "RecordDataType",
+                        )
+                    ),
                 ),
                 ValueParameter(
                     short_name="DTCExtDataRecordNr",
                     semantic="DATA",
                     byte_position=5,
-                    dop_ref=ref(find_dop_by_shortname(dlr, "DtcReqExtDataRecordNrDop")),
+                    dop_ref=ref(dtc_req_ext_data_record_number_dop),
+                ),
+                *(
+                    [
+                        ValueParameter(
+                            short_name="MemorySelection",
+                            semantic="DATA",
+                            byte_position=6,
+                            dop_ref=ref(find_dop_by_shortname(dlr, "IDENTICAL_UINT_8")),
+                        )
+                    ]
+                    if user_memory
+                    else []
                 ),
             ]
         ),
@@ -605,16 +741,29 @@ def add_dtc_read_ext_data_by_dtc_number_service(
             [
                 sid_parameter_pr(0x19 + 0x40),
                 matching_request_parameter_subfunction("SubFunction"),
+                *(
+                    [
+                        matching_request_parameter(
+                            "MemorySelection",
+                            semantic="DATA",
+                            byte_length=1,
+                            byte_position=2,
+                            request_byte_position=6,
+                        )
+                    ]
+                    if user_memory
+                    else []
+                ),
                 ValueParameter(
                     short_name="DTCAndStatusRecord",
                     semantic="DATA",
-                    byte_position=2,
+                    byte_position=3 if user_memory else 2,
                     dop_ref=dtc_record_dop,
                 ),
                 ValueParameter(
                     short_name="DTCExtDataRecords",
                     semantic="DATA",
-                    byte_position=6,
+                    byte_position=7 if user_memory else 6,
                     dop_ref=ref(dtc_ext_data_end_of_pdu),
                 ),
             ]
@@ -634,13 +783,35 @@ def add_dtc_read_ext_data_by_dtc_number_service(
     )
 
 
+def add_dtc_read_user_memory_ext_data_by_dtc_number_service(
+    dlr: DiagLayerRaw,
+    name: str,
+    subfunction: int,
+    description: str,
+    dtc_record_dop: OdxLinkRef,
+):
+    """Add the user-memory extended-data service (UDS subfunction 0x19)."""
+    add_dtc_read_ext_data_by_dtc_number_service(
+        dlr,
+        name,
+        subfunction,
+        description,
+        dtc_record_dop,
+        user_memory=True,
+    )
+
+
 def add_dtc_read_services(dlr: DiagLayerRaw):
     """
     Add DTC Read (0x19) services to the diagnostic layer.
 
     Implements the following subfunctions:
     - 0x02: ReportDTCByStatusMask
-    - 0x06: ReportDTCByDtcNumber
+    - 0x04: ReportDTCSnapshotRecordByDtcNumber
+    - 0x06: ReportDTCExtDataRecordByDtcNumber
+    - 0x17: ReportUserMemoryDTCByStatusMask
+    - 0x18: ReportUserMemoryDTCSnapshotRecordByDtcNumber
+    - 0x19: ReportUserMemoryDTCExtDataRecordByDtcNumber
     """
 
     true_false_dop = texttable_int_str_dop(
@@ -746,6 +917,57 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
     )
     dlr.diag_data_dictionary_spec.end_of_pdu_fields.append(dtc_end_of_pdu)
 
+    # User-memory DTC pool for the 0x17 user-memory read service.
+    development_fault_memory_dtc_dop = DtcDop(
+        odx_id=derived_id(dlr, "DOP.UserMemoryRecordDataType"),
+        short_name="UserMemoryRecordDataType",
+        compu_method=CompuMethod(
+            category=CompuCategory.IDENTICAL,
+            physical_type=DataType.A_UINT32,
+            internal_type=DataType.A_UINT32,
+        ),
+        physical_type=PhysicalType(base_data_type=DataType.A_UINT32),
+        diag_coded_type=StandardLengthType(
+            bit_length=24,
+            base_data_type=DataType.A_UINT32,
+        ),
+        dtcs_raw=[
+            DiagnosticTroubleCode(
+                odx_id=derived_id(dlr, "DTC.UserMemoryCode1"),
+                short_name="UserMemoryCode1",
+                trouble_code=0x01E245,  # 123461
+                text=Text(
+                    text="User Memory DTC Code 1",
+                ),
+            )
+        ],
+    )
+    dlr.diag_data_dictionary_spec.dtc_dops.append(development_fault_memory_dtc_dop)
+
+    development_fault_memory_dtc_record_structure = Structure(
+        odx_id=derived_id(dlr, "STRUCT.UserMemoryDTCRecord"),
+        short_name="UserMemoryDTCRecord",
+        parameters=NamedItemList(
+            [
+                ValueParameter(
+                    short_name="UserMemoryDTCRecord",
+                    semantic="DATA",
+                    byte_position=0,
+                    dop_ref=ref(development_fault_memory_dtc_dop.odx_id),
+                ),
+                *dtc_status_parameters(dlr, 3),
+            ],
+        ),
+    )
+    dlr.diag_data_dictionary_spec.structures.append(development_fault_memory_dtc_record_structure)
+
+    development_fault_memory_dtc_end_of_pdu = EndOfPduField(
+        odx_id=derived_id(dlr, "EndOfPdu.UserMemoryDTCRecords"),
+        short_name="UserMemoryDTCRecords",
+        structure_ref=ref(development_fault_memory_dtc_record_structure.odx_id),
+    )
+    dlr.diag_data_dictionary_spec.end_of_pdu_fields.append(development_fault_memory_dtc_end_of_pdu)
+
     # 19 02 -  Report DTC By Status Mask
     add_dtc_read_by_mask_service(
         dlr,
@@ -771,6 +993,33 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
         0x06,
         "Report DTC Extended Data Record By DTC Number",
         ref(dtc_record_structure.odx_id),
+    )
+
+    # 19 17 - Report Development Fault Memory DTC By Status Mask
+    add_dtc_read_development_fault_memory_by_mask_service(
+        dlr,
+        "Development_Fault_Memory_ReportDTCByStatusMask",
+        0x17,
+        "Report Development Fault Memory DTC By Status Mask",
+        ref(development_fault_memory_dtc_end_of_pdu.odx_id),
+    )
+
+    # 19 18 - Report Development Fault Memory DTC Snapshot Record By DTC Number
+    add_dtc_read_user_memory_snapshots_by_dtc_number_service(
+        dlr,
+        "Development_Fault_Memory_ReportDTCSnapshotRecordByDtcNumber",
+        0x18,
+        "Report Development Fault Memory DTC Snapshot Record By DTC Number",
+        ref(development_fault_memory_dtc_record_structure.odx_id),
+    )
+
+    # 19 19 - Report Development Fault Memory DTC Extended Data Record By DTC Number
+    add_dtc_read_user_memory_ext_data_by_dtc_number_service(
+        dlr,
+        "Development_Fault_Memory_ReportDTCExtDataRecordByDtcNumber",
+        0x19,
+        "Report Development Fault Memory DTC Extended Data Record By DTC Number",
+        ref(development_fault_memory_dtc_record_structure.odx_id),
     )
 
 

@@ -94,6 +94,22 @@ fun RequestsData.addDtcRequests() {
         ack(response.asByteArray)
     }
 
+    request("19 17 []", "Development_Fault_Memory_ReportDTCByStatusMask") {
+        val buffer = ByteBuffer.wrap(this.message, 2, this.message.size - 2)
+        val request = DTCStatusMask.parse(buffer)
+        val memorySelector = buffer.get()
+        val faults = ecu.dtcFaults(FaultMemory.Development).values.filter { it.status.matches(request) }
+
+        val response =
+            DevelopmentFaultMemReportDTCByStatusMaskResponse(
+                // Status Availability Mask with all bits set to true, meaning all bit are supported by this ECU
+                availabilityStatusMask = AllAvailableStatusMask,
+                memorySelector = memorySelector,
+                records = faults.map { it.toDTCAndStatusRecord() },
+            )
+        ack(response.asByteArray)
+    }
+
     request("19 04 []", "ReadDTCInformation_ReportDTCSnapshotRecordByDTCNbr") {
         val request = ReadDtcDTCWithSnapshotRecordByDTCNbrRequest.parse(messagePayload())
 
@@ -103,6 +119,25 @@ fun RequestsData.addDtcRequests() {
         } else {
             val response =
                 ReadDtcDTCWithSnapshotRecordByDTCNbrResponse(
+                    dtc = fault.id,
+                    status = fault.status,
+                    parameters = fault.snapshots,
+                )
+            ack(response.asByteArray)
+        }
+    }
+
+    request("19 18 []", "Development_Fault_Memory_ReportDTCSnapshotRecordByDTCNbr") {
+        val buffer = ByteBuffer.wrap(this.message, 2, this.message.size - 2)
+        val request = DevelopmentFaultMemReportDTCSnapshotRecordByDTCNbrRequest.parse(buffer)
+
+        val fault = ecu.dtcFaults(FaultMemory.Development)[request.dtc]
+        if (fault == null) {
+            nrc(NrcError.RequestOutOfRange)
+        } else {
+            val response =
+                DevelopmentFaultMemReportDTCSnapshotRecordbyDTCNbrResponse(
+                    memorySelection = request.memorySelection,
                     dtc = fault.id,
                     status = fault.status,
                     parameters = fault.snapshots,
@@ -133,6 +168,30 @@ fun RequestsData.addDtcRequests() {
         }
     }
 
+    request("19 19 []", "Development_Fault_Memory_ReportDTCExtendedDataByDTCNbr") {
+        val buffer = ByteBuffer.wrap(this.message, 2, this.message.size - 2)
+        val request = DevelopmentFaultMemReportDTCExtendedDataByDTCNbrRequest.parse(buffer)
+        val fault = ecu.dtcFaults(FaultMemory.Development)[request.dtc]
+        if (fault == null) {
+            nrc(NrcError.RequestOutOfRange)
+        } else {
+            val response =
+                DevelopmentFaultMemReportDTCExtendedDataByDTCNbrResponse(
+                    memorySelection = request.memorySelection,
+                    dtc = fault.id,
+                    statusMask = fault.status,
+                    extendedDataRecords =
+                        fault.extendedData.map {
+                            ExtendedDataRecord(
+                                recordNumber = it.recordNumber,
+                                recordData = it,
+                            )
+                        },
+                )
+            ack(response.asByteArray)
+        }
+    }
+
     request("31 01 42 00", "Clear_Diagnostic_User_Memory") {
         val devFaults = ecu.dtcFaults(FaultMemory.Development)
         devFaults.clear()
@@ -148,6 +207,19 @@ class ReadDtcDTCByStatusMaskResponse(
     val asByteArray: ByteArray
         get() {
             return availabilityStatusMask.asByteArray + records.map { it.asByteArray }.concat()
+        }
+}
+
+class DevelopmentFaultMemReportDTCByStatusMaskResponse(
+    val availabilityStatusMask: DTCStatusMask,
+    val memorySelector: Byte,
+    val records: List<DTCAndStatusRecord> = emptyList(),
+) {
+    val asByteArray: ByteArray
+        get() {
+            return availabilityStatusMask.asByteArray +
+                byteArrayOf(memorySelector) +
+                records.map { it.asByteArray }.concat()
         }
 }
 
@@ -214,4 +286,82 @@ class ReadDtcReportDTCExtendedDataByDTCNbrResponse(
         get() {
             return dtc.to24BitByteArray() + statusMask.asByteArray + extendedDataRecords.map { it.asByteArray }.concat()
         }
+}
+
+class DevelopmentFaultMemReportDTCSnapshotRecordByDTCNbrRequest(
+    val dtc: Int, // 24 bit
+    val recordNumber: Byte, // 0x10 = First occurrence; 0x20 = Last occurrence; 0xff = all snapshot records
+    val memorySelection: Byte,
+) {
+    companion object {
+        fun parse(buffer: ByteBuffer): DevelopmentFaultMemReportDTCSnapshotRecordByDTCNbrRequest {
+            val dtc = buffer.get24BitInt()
+            val recordNumber = buffer.get()
+            val memorySelector = buffer.get()
+            return DevelopmentFaultMemReportDTCSnapshotRecordByDTCNbrRequest(
+                dtc = dtc,
+                recordNumber = recordNumber,
+                memorySelection = memorySelector,
+            )
+        }
+    }
+}
+
+class DevelopmentFaultMemReportDTCSnapshotRecordbyDTCNbrResponse(
+    val memorySelection: Byte,
+    val dtc: Int, // 24 bit
+    val status: DTCStatusMask,
+    val parameters: List<DTCSnapshotParameter>,
+) {
+    val asByteArray: ByteArray
+        get() {
+            return byteArrayOf(memorySelection) + dtc.to24BitByteArray() + status.asByteArray +
+                parameters.map { it.asByteArray }.concat()
+        }
+}
+
+class DevelopmentFaultMemReportDTCExtendedDataByDTCNbrRequest(
+    val dtc: Int, // 24 bit
+    val recordNumber: ExtendedDataRecordNumber = ExtendedDataRecordNumber.StandardEnvironment, // 0x01 = Standard Environment, 0xFF = All
+    val memorySelection: Byte,
+) {
+    companion object {
+        fun parse(buffer: ByteBuffer): DevelopmentFaultMemReportDTCExtendedDataByDTCNbrRequest {
+            val dtc = buffer.get24BitInt()
+            val recordNumber = ExtendedDataRecordNumber.parse(buffer.get())
+            val memorySelection = buffer.get()
+            return DevelopmentFaultMemReportDTCExtendedDataByDTCNbrRequest(
+                dtc = dtc,
+                recordNumber = recordNumber,
+                memorySelection = memorySelection,
+            )
+        }
+    }
+}
+
+class DevelopmentFaultMemReportDTCExtendedDataByDTCNbrResponse(
+    val memorySelection: Byte,
+    val dtc: Int,
+    val statusMask: DTCStatusMask,
+    val extendedDataRecords: List<ExtendedDataRecord> = emptyList(),
+) {
+    val asByteArray: ByteArray
+        get() {
+            return byteArrayOf(memorySelection) +
+                dtc.to24BitByteArray() +
+                statusMask.asByteArray +
+                extendedDataRecords.map { it.asByteArray }.concat()
+        }
+}
+
+enum class ExtendedDataRecordNumber(
+    val value: Byte,
+) {
+    StandardEnvironment(0x01),
+    All(0xFF.toByte()),
+    ;
+
+    companion object {
+        fun parse(data: Byte) = entries.first { it.value == data }
+    }
 }

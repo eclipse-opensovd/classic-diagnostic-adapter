@@ -584,13 +584,38 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
     ) -> Result<DtcExtendedInfo, DiagServiceError> {
         let dtc_code = decode_dtc_from_str(sae_dtc)?;
 
+        // Check scope of the DTC from the ECU database and determine the correct DTC read information function to use.
+        let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
+        let dtc_function = ecu
+            .read()
+            .await
+            .lookup_dtc_scope_for_code(dtc_code)
+            .map_err(|_| {
+                DiagServiceError::InvalidRequest(format!(
+                    "DTC {sae_dtc} not found in ECU {ecu_name}"
+                ))
+            })?;
+
+        let dtc_scope = match dtc_function {
+            DtcReadInformationFunction::FaultMemoryByStatusMask
+            | DtcReadInformationFunction::FaultMemoryExtDataRecordByDtcNumber
+            | DtcReadInformationFunction::FaultMemorySnapshotRecordByDtcNumber => {
+                Some("FaultMem".to_string())
+            }
+            DtcReadInformationFunction::UserMemoryDtcByStatusMask
+            | DtcReadInformationFunction::UserMemoryDtcExtDataRecordByDtcNumber
+            | DtcReadInformationFunction::UserMemoryDtcSnapshotRecordByDtcNumber => {
+                Some("UserMem".to_string())
+            }
+        };
+
         let mut dtc_by_mask: HashMap<DtcCode, DtcRecordAndStatus> = self
             .ecu_dtc_by_mask(
                 ecu_name,
                 security_plugin,
                 None,
                 None,
-                None,
+                dtc_scope,
                 memory_selection,
             )
             .await?;
