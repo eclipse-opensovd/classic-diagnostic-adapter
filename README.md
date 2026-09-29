@@ -214,6 +214,18 @@ and configurations.
 We recommend using [rustup](https://rustup.rs/) for this.
 The minimum required version of the toolchain is [Rust 1.88.0](https://blog.rust-lang.org/2025/06/26/Rust-1.88.0/).
 
+With `rustup` and [uv](https://docs.astral.sh/uv/) installed, set up the pinned Rust toolchains and development tools:
+
+```shell
+make setup-devenv
+```
+
+The setup target does not install platform-specific system packages. Check required and optional system tools separately with:
+
+```shell
+make doctor
+```
+
 ### build the executable
 
 ```shell

@@ -28,6 +28,9 @@ permissions:
   id-token: write
 
 jobs:
+  versions:
+    uses: ./.github/workflows/tool-versions.yml
+
   build_documentation_and_trace_requirements:
     runs-on: ubuntu-latest
     steps:
@@ -69,6 +72,7 @@ jobs:
           path: |
             docs/_build/html/
   build_rustdoc_security_plugin:
+    needs: versions
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -78,11 +82,11 @@ jobs:
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.88.0
+          toolchain: ${{ needs.versions.outputs.stable }}
       - name: Clean docs folder
-        run: cargo clean --doc
+        run: make clean-doc
       - name: Build docs
-        run: cargo doc --no-deps -p cda-plugin-security
+        run: make rustdoc ARGS="--no-deps -p cda-plugin-security"
       - name: Remove lock file
         run: rm target/doc/.lock
       - name: Add redirect

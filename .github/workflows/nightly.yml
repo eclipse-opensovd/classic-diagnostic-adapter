@@ -25,7 +25,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  versions:
+    uses: ./.github/workflows/tool-versions.yml
+
   advisories:
+    needs: versions
     runs-on: ubuntu-latest
 
     steps:
@@ -36,12 +40,13 @@ jobs:
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.88.0
+          toolchain: ${{ needs.versions.outputs.stable }}
       - name: Install cargo-deny
-        run: cargo install --locked --version 0.18.9 cargo-deny
+        run: cargo install --locked --version "${{ needs.versions.outputs.cargo_deny }}" cargo-deny
       - name: Check advisories
-        run: cargo deny check advisories
+        run: make deny ARGS=advisories
   nightly_clippy:
+    needs: versions
     runs-on: ubuntu-latest
     name: "Nightly Lint and Format"
     steps:
@@ -54,13 +59,13 @@ jobs:
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
         with:
-          version: "34.1"
+          version: ${{ needs.versions.outputs.protoc }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Format and Clippy - Nightly toolchain pinned
         continue-on-error: true
         uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@07140bdd84f20b66fd4aff58a83c5148deec388c
         with:
-          toolchain: nightly-2026-07-21
+          toolchain: ${{ needs.versions.outputs.nightly }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fail-on-format-error: "false"
           fail-on-clippy-error: "false"

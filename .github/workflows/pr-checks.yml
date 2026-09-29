@@ -25,7 +25,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  versions:
+    uses: ./.github/workflows/tool-versions.yml
+
   format_and_clippy_for_pr:
+    needs: versions
     runs-on: ubuntu-latest
     name: "PR Lint and Format"
     env:
@@ -42,14 +46,14 @@ jobs:
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
         with:
-          version: "34.1"
+          version: ${{ needs.versions.outputs.protoc }}
           # The action queries the GitHub API to fetch releases data,
           # to avoid rate limiting, passing the default token.
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Format and Clippy - Nightly toolchain pinned
         uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@07140bdd84f20b66fd4aff58a83c5148deec388c
         with:
-          toolchain: nightly-2026-07-21
+          toolchain: ${{ needs.versions.outputs.nightly }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fail-on-format-error: "false"
           fail-on-clippy-error: "true"
