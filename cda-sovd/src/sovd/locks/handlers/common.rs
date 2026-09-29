@@ -680,7 +680,7 @@ fn sovd_lock(id: &str, exclusive: bool) -> sovd_interfaces::locking::Lock {
     sovd_interfaces::locking::Lock {
         id: id.to_owned(),
         lock_expiration: None,
-        owned: Some(true),
+        owned: true,
         x_sovd2uds_isexclusive: exclusive,
         x_sovd2uds_broken_by: None,
         x_sovd2uds_broken_at: None,
@@ -708,7 +708,7 @@ fn active_to_sovd(lock: &ActiveLock, claims: &impl Claims) -> sovd_interfaces::l
     let mut response = sovd_lock(&lock.id, lock.exclusive);
     response.lock_expiration =
         Some(DateTime::<Utc>::from(lock.expires_at).to_rfc3339_opts(SecondsFormat::Secs, true));
-    response.owned = Some(lock.principal.subject == claims.sub());
+    response.owned = lock.principal.subject == claims.sub();
     response
 }
 

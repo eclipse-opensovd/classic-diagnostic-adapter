@@ -355,7 +355,7 @@ impl DefunctLock {
                 DateTime::<Utc>::from(self.original_expires_at)
                     .to_rfc3339_opts(SecondsFormat::Secs, true),
             ),
-            owned: Some(self.principal.subject == claims.sub()),
+            owned: self.principal.subject == claims.sub(),
             x_sovd2uds_isexclusive: self.exclusive,
             x_sovd2uds_broken_by: Some(self.broken_by.clone()),
             x_sovd2uds_broken_at: Some(

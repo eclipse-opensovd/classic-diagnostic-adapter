@@ -31,8 +31,7 @@ pub struct Lock {
     pub lock_expiration: Option<String>,
 
     /// Whether the requesting SOVD client owns the lock.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub owned: Option<bool>,
+    pub owned: bool,
     /// Whether the lock excludes read communication by other clients.
     #[serde(rename = "x-sovd2uds-isexclusive")]
     pub x_sovd2uds_isexclusive: bool,
@@ -246,7 +245,7 @@ mod tests {
         let lock = Lock {
             id: "lock-id".to_owned(),
             lock_expiration: Some("2026-01-01T00:00:00Z".to_owned()),
-            owned: Some(true),
+            owned: true,
             x_sovd2uds_isexclusive: true,
             x_sovd2uds_broken_by: Some("priority-client".to_owned()),
             x_sovd2uds_broken_at: Some("2025-01-01T00:00:00Z".to_owned()),
@@ -282,9 +281,16 @@ mod tests {
         assert!(properties.contains_key("x-sovd2uds-isexclusive"));
         assert!(!properties.contains_key("x_sovd2uds_isexclusive"));
 
+        let lock_schema = serde_json::to_value(schemars::schema_for!(Lock))
+            .expect("Lock schema should serialize");
+        let required = lock_schema
+            .get("required")
+            .and_then(Value::as_array)
+            .expect("Lock schema should list required fields");
+        assert!(required.iter().any(|field| field.as_str() == Some("owned")));
+
         for schema in [
-            serde_json::to_value(schemars::schema_for!(Lock))
-                .expect("Lock schema should serialize"),
+            lock_schema,
             serde_json::to_value(schemars::schema_for!(id::get::Response))
                 .expect("Lock detail schema should serialize"),
         ] {
