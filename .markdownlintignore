@@ -11,3 +11,10 @@
 
 comm-mbedtls/mbedtls-sys/mbedtls-4.0.0/
 comm-mbedtls/mbedtls-sys/tf-psa-crypto/
+.opencode/
+.claude/
+.codex/
+.cursor/
+.gemini/
+.github/copilot-instructions.md
+.github/instructions/
