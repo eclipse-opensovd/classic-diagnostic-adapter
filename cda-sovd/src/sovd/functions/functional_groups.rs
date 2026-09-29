@@ -486,7 +486,6 @@ pub(crate) mod tests {
 
     use cda_interfaces::mock::MockUdsEcu;
     use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
-    use tokio::sync::RwLock;
 
     use super::WebserverFgState;
     use crate::sovd::{HashMap, locks::Locks};

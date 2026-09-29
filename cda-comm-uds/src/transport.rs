@@ -1307,38 +1307,6 @@ pub(crate) mod send_tests {
         async fn shutdown(&self) {}
     }
 
-    impl FunctionalTransport for TestGateway {
-        fn send_functional(
-            &self,
-            _transmission_params: TransmissionParameters,
-            _message: ServicePayload,
-            _expected_ecu_logical_addrs: HashMap<u16, String>,
-            _timeout: Duration,
-            _expect_positive_response: bool,
-        ) -> impl Future<
-            Output = Result<
-                HashMap<String, Result<ServicePayload, DiagServiceError>>,
-                DiagServiceError,
-            >,
-        > + Send {
-            std::future::ready(Ok(HashMap::new()))
-        }
-    }
-
-    impl NetworkTopology for TestGateway {
-        fn get_gateway_network_address(
-            &self,
-            _logical_address: u16,
-        ) -> impl Future<Output = Option<String>> + Send {
-            std::future::ready(None)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl cda_interfaces::Shutdown for TestGateway {
-        async fn shutdown(&self) {}
-    }
-
     // Test helpers
 
     fn make_test_payload(sid: u8, data: &[u8]) -> ServicePayload {

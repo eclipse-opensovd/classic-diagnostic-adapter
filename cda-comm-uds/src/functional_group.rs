@@ -488,9 +488,7 @@ mod tests {
         DiagCommType, DiagServiceError, EcuAddresses, EcuRuntimeState, FunctionalTransport,
         HashMap, HashMapExtensions, NetworkTopology, PhysicalTransport, ServicePayload,
         TransmissionParameters, TransportResponse, VariantDetectionSender,
-        communication_control::CommunicationAccess,
-        datatypes::{DtcField, DtcRecord, FaultConfig},
-        diagservices::{DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType},
+        communication_control::CommunicationAccess, datatypes::FaultConfig,
     };
     use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
     use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
@@ -500,73 +498,6 @@ mod tests {
 
     const GATEWAY_KEY: &str = "a-gateway";
     const CHILD_KEY: &str = "z-child";
-
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub(crate) struct TestResponse;
-
-    impl DiagServiceResponse for TestResponse {
-        fn empty_positive(_service: DiagComm) -> Self {
-            Self
-        }
-
-        fn is_empty(&self) -> bool {
-            true
-        }
-
-        fn service_name(&self) -> String {
-            String::new()
-        }
-
-        fn response_type(&self) -> DiagServiceResponseType {
-            DiagServiceResponseType::Positive
-        }
-
-        fn get_raw(&self) -> &[u8] {
-            &[]
-        }
-
-        fn into_json(self) -> Result<DiagServiceJsonResponse, DiagServiceError> {
-            unimplemented!()
-        }
-
-        fn as_nrc(&self) -> Result<cda_interfaces::diagservices::MappedNRC, DiagServiceError> {
-            unimplemented!()
-        }
-
-        fn get_dtcs(&self) -> Result<Vec<(DtcField, DtcRecord)>, DiagServiceError> {
-            unimplemented!()
-        }
-    }
-
-    impl PayloadDecoder for TestEcuDb {
-        type Response = TestResponse;
-
-        fn convert_from_uds(
-            &self,
-            _diag_service: &DiagComm,
-            _payload: &ServicePayload,
-            _map_to_json: bool,
-            _functional_group_name: Option<&str>,
-        ) -> impl Future<Output = Result<Self::Response, DiagServiceError>> + Send {
-            std::future::ready(Ok(TestResponse))
-        }
-
-        fn convert_request_from_uds(
-            &self,
-            _diag_service: &DiagComm,
-            _payload: &ServicePayload,
-            _map_to_json: bool,
-        ) -> impl Future<Output = Result<Self::Response, DiagServiceError>> + Send {
-            std::future::ready(Ok(TestResponse))
-        }
-
-        fn convert_service_14_response(
-            _diag_comm: DiagComm,
-            _response: ServicePayload,
-        ) -> Result<Self::Response, DiagServiceError> {
-            Ok(TestResponse)
-        }
-    }
 
     #[derive(Clone)]
     struct RecordingGateway {
@@ -777,12 +708,11 @@ mod tests {
         assert_eq!(manager.gateway.functional_sends.load(Ordering::SeqCst), 0);
         assert_eq!(results.len(), 2);
         for ecu_name in ["gateway", "child"] {
-            assert_eq!(
+            assert!(matches!(
                 results.get(ecu_name),
-                Some(&Err(DiagServiceError::ResourceError(
-                    "Request gate was closed".to_owned()
-                )))
-            );
+                Some(Err(DiagServiceError::ResourceError(message)))
+                    if message == "Request gate was closed"
+            ));
         }
     }
 }

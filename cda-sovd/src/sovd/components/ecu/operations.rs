@@ -2028,12 +2028,19 @@ mod tests {
             }
         }
 
-        fn execution() -> comparams::Execution {
-            comparams::Execution {
-                capability: executions::Capability::Execute,
-                status: executions::Status::Running,
-                comparam_override: HashMap::new(),
-            }
+        fn execution(
+            communication_access: &dyn cda_interfaces::communication_control::CommunicationAccess,
+        ) -> crate::sovd::ComparamExecution {
+            crate::sovd::ComparamExecution::new(
+                comparams::Execution {
+                    capability: executions::Capability::Execute,
+                    status: executions::Status::Running,
+                    comparam_override: HashMap::new(),
+                },
+                communication_access
+                    .acquire()
+                    .expect("Test communication must be enabled"),
+            )
         }
 
         #[tokio::test]
@@ -2048,7 +2055,7 @@ mod tests {
                 .comparam_executions
                 .write()
                 .await
-                .insert(id, execution());
+                .insert(id, execution(&*state.communication_access));
             let executions = Arc::clone(&state.comparam_executions);
 
             let response = handlers::id::get::<MockUdsEcu, MockFileManager>(
@@ -2071,7 +2078,6 @@ mod tests {
                 MockFileManager::new(),
             );
             let executions = Arc::clone(&state.comparam_executions);
-            let activities = Arc::clone(&state.communication_activities);
 
             let response = handlers::post::<MockUdsEcu, MockFileManager>(
                 UseApi(
@@ -2095,7 +2101,6 @@ mod tests {
 
             assert_eq!(response.status(), http::StatusCode::CONFLICT);
             assert!(executions.read().await.is_empty());
-            assert!(activities.lock().await.is_empty());
         }
 
         #[tokio::test]
@@ -2110,7 +2115,7 @@ mod tests {
                 .comparam_executions
                 .write()
                 .await
-                .insert(id, execution());
+                .insert(id, execution(&*state.communication_access));
             let executions = Arc::clone(&state.comparam_executions);
 
             let response = handlers::id::put::<MockUdsEcu, MockFileManager>(
@@ -2155,7 +2160,7 @@ mod tests {
                 .comparam_executions
                 .write()
                 .await
-                .insert(id, execution());
+                .insert(id, execution(&*state.communication_access));
             let executions = Arc::clone(&state.comparam_executions);
 
             let response = handlers::id::delete::<MockUdsEcu, MockFileManager>(
@@ -2181,7 +2186,6 @@ mod tests {
             );
             insert_test_ecu_lock(&state.locks, "TestECU").await;
             let executions = Arc::clone(&state.comparam_executions);
-            let activities = Arc::clone(&state.communication_activities);
 
             let response = handlers::post::<MockUdsEcu, MockFileManager>(
                 UseApi(
@@ -2205,7 +2209,6 @@ mod tests {
 
             assert_eq!(response.status(), http::StatusCode::ACCEPTED);
             assert_eq!(executions.read().await.len(), 1);
-            assert_eq!(activities.lock().await.len(), 1);
         }
     }
 
