@@ -91,6 +91,23 @@ impl<S: SecurityPlugin> Dtc for EcuManager<S> {
             })
             .collect()
     }
+
+    fn lookup_dtc_scope_for_code(
+        &self,
+        dtc_code: u32,
+    ) -> Result<DtcReadInformationFunction, DiagServiceError> {
+        let dtc_map = self.lookup_dtc_services(&[
+            DtcReadInformationFunction::FaultMemoryByStatusMask,
+            DtcReadInformationFunction::UserMemoryDtcByStatusMask,
+        ])?;
+        dtc_map
+            .into_iter()
+            .find(|(_, lookup)| lookup.dtcs.iter().any(|dtc| dtc.code == dtc_code))
+            .map(|(service_type, _)| service_type)
+            .ok_or(DiagServiceError::NotFound(
+                format!("DTC code {} not found in ecu {}", dtc_code, self.ecu_name).to_owned(),
+            ))
+    }
 }
 
 fn find_dtc_dop_in_params<'a>(

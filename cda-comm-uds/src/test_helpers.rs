@@ -620,6 +620,13 @@ impl Dtc for TestEcuDb {
     ) -> Result<HashMap<DtcReadInformationFunction, DtcLookup>, DiagServiceError> {
         unimplemented!()
     }
+
+    fn lookup_dtc_scope_for_code(
+        &self,
+        _dtc_code: u32,
+    ) -> Result<DtcReadInformationFunction, DiagServiceError> {
+        unimplemented!()
+    }
 }
 
 impl DiagCommLookup for TestEcuDb {
