@@ -180,7 +180,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         value: Option<&serde_json::Value>,
         payload: &mut Vec<u8>,
         parent_byte_pos: usize,
-        sibling_values: Option<&HashMap<String, serde_json::Value>>,
+        sibling_values: Option<SiblingValues<'_>>,
     ) -> Result<(), DiagServiceError> {
         //  ISO_22901-1:2008-11 7.3.5.4
         //  MATCHING-REQUEST-PARAM, DYNAMIC and NRC-CONST are only allowed in responses
@@ -190,7 +190,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 "MatchingRequestParam only supported for responses".to_owned(),
             )),
             datatypes::ParamType::Value => {
-                self.map_param_value_to_uds(param, value, payload, parent_byte_pos)
+                self.map_param_value_to_uds(param, value, payload, parent_byte_pos, sibling_values)
             }
             datatypes::ParamType::Reserved => Self::map_reserved_param_to_uds(param, payload),
             datatypes::ParamType::TableStruct => {
@@ -226,6 +226,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         value: Option<&serde_json::Value>,
         payload: &mut Vec<u8>,
         parent_byte_pos: usize,
+        sibling_values: Option<SiblingValues<'_>>,
     ) -> Result<(), DiagServiceError> {
         let value_data =
             param
@@ -239,6 +240,22 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 "DoP lookup failed".to_owned(),
             ));
         };
+
+        // A dynamic length field needs its own handling of missing values
+        // (invisible fields may be omitted), so it is dispatched before the
+        // generic required-parameter resolution.
+        if let datatypes::DataOperationVariant::DynamicLengthField(dynamic_length_field) =
+            dop.variant()?
+        {
+            return self.map_dynamic_length_field_to_uds(
+                param,
+                &dynamic_length_field,
+                value,
+                payload,
+                parent_byte_pos,
+                sibling_values,
+            );
+        }
 
         let value = resolve_required_param(
             value,
@@ -342,9 +359,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
                  handled via a dedicated 'faults' endpoint"
                     .to_owned(),
             )),
-            datatypes::DataOperationVariant::DynamicLengthField(_dynamic_length_field) => {
-                Err(DiagServiceError::ParameterConversionError(
-                    "Mapping DynamicLengthField DoP to UDS payload not implemented".to_owned(),
+            datatypes::DataOperationVariant::DynamicLengthField(_) => {
+                // handled above, before resolving the required value
+                Err(DiagServiceError::InvalidDatabase(
+                    "Unexpected DynamicLengthField DoP".to_owned(),
                 ))
             }
         }
@@ -700,7 +718,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         value: Option<&serde_json::Value>,
         payload: &mut Vec<u8>,
         parent_byte_pos: usize,
-        sibling_values: Option<&HashMap<String, serde_json::Value>>,
+        sibling_values: Option<SiblingValues<'_>>,
     ) -> Result<(), DiagServiceError> {
         let table_struct_data =
             param
@@ -862,7 +880,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 value.get(short_name),
                 payload,
                 struct_byte_pos,
-                None,
+                Some(SiblingValues::Object(value)),
             )
         })
     }
@@ -901,20 +919,634 @@ impl<S: SecurityPlugin> EcuManager<S> {
             // When BYTE-POSITION is absent, pass effective_byte_pos as
             // parent_byte_pos so that the inner encode writes at the
             // correct absolute position (param.byte_position() returns 0).
-            let parent_byte_pos = if param.has_byte_position() {
-                0
-            } else {
-                effective_byte_pos
-            };
+            //
+            // Dynamic length fields are the exception: the decoder anchors the positions
+            // of DETERMINE-NUMBER-OF-ITEMS and OFFSET at the enclosing base (0 here) when
+            // the field has no BYTE-POSITION, so the encoder does the same to stay the
+            // exact inverse.
+            let parent_byte_pos =
+                if param.has_byte_position() || is_dynamic_length_field_param(param) {
+                    0
+                } else {
+                    effective_byte_pos
+                };
             self.map_param_to_uds(
                 param,
                 json_values.get(short_name),
                 uds,
                 parent_byte_pos,
-                Some(json_values),
+                Some(SiblingValues::Map(json_values)),
             )?;
         }
         Ok(())
+    }
+
+    /// Encode an ODX DYNAMIC-LENGTH-FIELD (ISO 22901-1 7.3.6.10.4).
+    ///
+    /// This is the inverse of `map_dynamic_length_field_from_uds`:
+    /// * The field is anchored at `parent_byte_pos + BYTE-POSITION` of the parameter.
+    /// * The items are encoded one after another, starting at `anchor + OFFSET`.
+    /// * The number of items is written at `anchor + DETERMINE-NUMBER-OF-ITEMS/BYTE-POSITION`
+    ///   (and its BIT-POSITION) using the DOP of DETERMINE-NUMBER-OF-ITEMS.
+    ///
+    /// The count is written last and replaces whatever bits are already present at its
+    /// position, as the count derived from the provided array is authoritative.
+    fn map_dynamic_length_field_to_uds(
+        &self,
+        param: &datatypes::Parameter,
+        dynamic_length_field: &datatypes::DynamicLengthDop,
+        value: Option<&serde_json::Value>,
+        payload: &mut Vec<u8>,
+        parent_byte_pos: usize,
+        sibling_values: Option<SiblingValues<'_>>,
+    ) -> Result<(), DiagServiceError> {
+        let field_name = param.short_name().unwrap_or_default();
+        let field = dynamic_length_field
+            .field()
+            .map(datatypes::DopField)
+            .ok_or_else(|| {
+                DiagServiceError::InvalidDatabase(format!(
+                    "DynamicLengthField '{field_name}' has no FIELD"
+                ))
+            })?;
+
+        let items: &[serde_json::Value] = match value {
+            Some(v) => v.as_array().map(Vec::as_slice).ok_or_else(|| {
+                DiagServiceError::InvalidRequest(format!(
+                    "Expected array value for DynamicLengthField '{field_name}', got: {v}"
+                ))
+            })?,
+            // An invisible field cannot be provided by the user, encode it as empty.
+            None if !field.is_visible() => &[],
+            None => {
+                return Err(DiagServiceError::InvalidRequest(format!(
+                    "Required parameter '{field_name}' missing",
+                )));
+            }
+        };
+
+        let item_kind = DynamicLengthFieldItem::from_field(&field, field_name)?;
+        let count_info = DynamicLengthFieldCount::from_dop(dynamic_length_field, field_name)?;
+
+        let param_abs_byte_pos = parent_byte_pos.saturating_add(param.byte_position() as usize);
+        let count_byte_pos = param_abs_byte_pos.saturating_add(count_info.byte_position);
+        let count_end = count_byte_pos.saturating_add(count_info.byte_len());
+        let items_start = param_abs_byte_pos.saturating_add(dynamic_length_field.offset() as usize);
+
+        let coded_count = count_info.coded_count(items.len(), field_name)?;
+
+        if payload.len() < items_start {
+            payload.resize(items_start, 0);
+        }
+
+        let mut item_pos = items_start;
+        for (index, item) in items.iter().enumerate() {
+            item_pos = self
+                .map_dynamic_length_field_item_to_uds(
+                    &item_kind,
+                    item,
+                    payload,
+                    item_pos,
+                    sibling_values,
+                )
+                .map_err(|e| {
+                    prefix_error(
+                        e,
+                        &format!("DynamicLengthField '{field_name}' item {index}"),
+                    )
+                })?;
+        }
+
+        if item_pos > items_start && count_byte_pos < item_pos && items_start < count_end {
+            return Err(DiagServiceError::InvalidDatabase(format!(
+                "DynamicLengthField '{field_name}': item count at bytes \
+                 {count_byte_pos}..{count_end} overlaps the items at bytes \
+                 {items_start}..{item_pos}"
+            )));
+        }
+
+        self.write_dynamic_length_field_count(
+            &count_info,
+            coded_count,
+            payload,
+            count_byte_pos,
+            field_name,
+        )
+    }
+
+    /// Encodes one item of a dynamic length field at `item_pos` and returns the position
+    /// at which the next item starts.
+    fn map_dynamic_length_field_item_to_uds(
+        &self,
+        item_kind: &DynamicLengthFieldItem<'_>,
+        item: &serde_json::Value,
+        payload: &mut Vec<u8>,
+        item_pos: usize,
+        sibling_values: Option<SiblingValues<'_>>,
+    ) -> Result<usize, DiagServiceError> {
+        // Each item is encoded into its own buffer (anchored at 0), so its extent is
+        // exactly the buffer length. Deriving it from `payload.len()` would be wrong
+        // whenever the payload already contains data beyond `item_pos`, e.g. a later
+        // parameter with an explicit BYTE-POSITION that was encoded before the field.
+        let mut item_data = Vec::new();
+        let item_len = match item_kind {
+            DynamicLengthFieldItem::Structure(structure) => {
+                self.map_struct_to_uds(structure, 0, item, &mut item_data)?;
+                match structure.byte_size() {
+                    Some(byte_size) => {
+                        let byte_size = byte_size as usize;
+                        if item_data.len() > byte_size {
+                            return Err(DiagServiceError::InvalidRequest(format!(
+                                "Encoded item needs {} bytes, but the structure has a fixed \
+                                 BYTE-SIZE of {byte_size}",
+                                item_data.len()
+                            )));
+                        }
+                        byte_size
+                    }
+                    None => item_data.len(),
+                }
+            }
+            DynamicLengthFieldItem::EnvDataDesc(env_data_desc) => {
+                self.map_env_data_desc_item_to_uds(
+                    env_data_desc,
+                    item,
+                    &mut item_data,
+                    0,
+                    sibling_values,
+                )?;
+                item_data.len()
+            }
+        };
+
+        let item_end = item_pos.saturating_add(item_len);
+        if payload.len() < item_end {
+            payload.resize(item_end, 0);
+        }
+        // Merge like `DiagCodedType::encode` does: OR into the existing bytes.
+        payload
+            .get_mut(item_pos..item_pos.saturating_add(item_data.len()))
+            .ok_or_else(|| {
+                DiagServiceError::BadPayload("DynamicLengthField item out of bounds".to_owned())
+            })?
+            .iter_mut()
+            .zip(&item_data)
+            .for_each(|(dst, src)| *dst |= src);
+        Ok(item_end)
+    }
+
+    /// Inverse of `map_env_data_desc_item_from_uds`: resolves the ENV-DATA selected by the
+    /// value of the sibling parameter referenced by the ENV-DATA-DESC and encodes its params.
+    fn map_env_data_desc_item_to_uds(
+        &self,
+        env_data_desc: &datatypes::EnvDataDescDop,
+        item: &serde_json::Value,
+        payload: &mut Vec<u8>,
+        item_pos: usize,
+        sibling_values: Option<SiblingValues<'_>>,
+    ) -> Result<(), DiagServiceError> {
+        let item = item.as_object().ok_or_else(|| {
+            DiagServiceError::InvalidRequest(format!(
+                "Expected value to be object type, but it was: {item}"
+            ))
+        })?;
+        let selector_name = env_data_desc.param_short_name().ok_or_else(|| {
+            DiagServiceError::InvalidDatabase("EnvDataDesc missing param_short_name".to_owned())
+        })?;
+        let selector_value = sibling_values
+            .and_then(|siblings| siblings.get(selector_name))
+            .ok_or_else(|| {
+                DiagServiceError::InvalidRequest(format!(
+                    "EnvDataDesc selector parameter '{selector_name}' not found in request"
+                ))
+            })?;
+        let discriminator = json_value_to_u32(selector_value).ok_or_else(|| {
+            DiagServiceError::InvalidRequest(format!(
+                "EnvDataDesc selector parameter '{selector_name}' must be an unsigned 32 bit \
+                 number, got: {selector_value}"
+            ))
+        })?;
+        let env_datas = env_data_desc.env_datas().ok_or_else(|| {
+            DiagServiceError::InvalidDatabase("EnvDataDesc has no env_datas".to_owned())
+        })?;
+
+        // Same selection as the decoder: exact match first, wildcard second.
+        let matching_env_data = env_datas
+            .iter()
+            .filter_map(|dop| dop.specific_data_as_env_data())
+            .find(|env_data| {
+                env_data
+                    .dtc_values()
+                    .is_some_and(|values| values.iter().any(|v| v == discriminator))
+            })
+            .or_else(|| {
+                env_datas
+                    .iter()
+                    .filter_map(|dop| dop.specific_data_as_env_data())
+                    .find(|env_data| env_data.dtc_values().is_none_or(|v| v.is_empty()))
+            });
+
+        let Some(env_data) = matching_env_data else {
+            // The decoder yields an empty item in this case, accept exactly that.
+            if item.is_empty() {
+                return Ok(());
+            }
+            return Err(DiagServiceError::InvalidRequest(format!(
+                "No EnvData matches selector '{selector_name}' value {discriminator:#X}"
+            )));
+        };
+
+        let params: Vec<_> = env_data
+            .params()
+            .into_iter()
+            .flatten()
+            .map(datatypes::Parameter)
+            .collect();
+        self.reject_unexpected_keys(
+            params.iter().filter_map(|p| p.short_name()),
+            item.keys().map(String::as_str),
+        )?;
+        params.iter().try_for_each(|param| {
+            let short_name = param.short_name().ok_or_else(|| {
+                DiagServiceError::InvalidDatabase("EnvData param missing short_name".to_owned())
+            })?;
+            self.map_param_to_uds(
+                param,
+                item.get(short_name),
+                payload,
+                item_pos,
+                Some(SiblingValues::Object(item)),
+            )
+        })
+    }
+
+    /// Writes the item count of a dynamic length field, replacing existing bits.
+    ///
+    /// Another parameter (e.g. a selector sharing the byte) may already have written a
+    /// value at the count position. If it differs from the actual item count this is
+    /// rejected in strict mode, otherwise it is logged and overwritten.
+    fn write_dynamic_length_field_count(
+        &self,
+        count_info: &DynamicLengthFieldCount,
+        coded_count: Vec<u8>,
+        payload: &mut Vec<u8>,
+        count_byte_pos: usize,
+        field_name: &str,
+    ) -> Result<(), DiagServiceError> {
+        let byte_len = count_info.byte_len();
+        let bit_pos = count_info.bit_position;
+
+        let mut canonical = vec![0u8; byte_len];
+        count_info
+            .diag_type
+            .encode(coded_count.clone(), &mut canonical, 0, bit_pos)?;
+        let (new_bits, _) = count_info.diag_type.decode(&canonical, 0, bit_pos)?;
+
+        let mut existing: Vec<u8> = payload
+            .iter()
+            .skip(count_byte_pos)
+            .take(byte_len)
+            .copied()
+            .collect();
+        existing.resize(byte_len, 0);
+        let (old_bits, _) = count_info.diag_type.decode(&existing, 0, bit_pos)?;
+
+        if old_bits.iter().any(|&b| b != 0) && old_bits != new_bits {
+            if self.strict_parameter_validation {
+                return Err(DiagServiceError::InvalidRequest(format!(
+                    "DynamicLengthField '{field_name}': the item count position (byte \
+                     {count_byte_pos}, bit {bit_pos}) already holds {old_bits:02X?}, which \
+                     conflicts with the item count {new_bits:02X?} derived from the provided items"
+                )));
+            }
+            tracing::warn!(
+                field = field_name,
+                existing = ?old_bits,
+                count = ?new_bits,
+                "Overwriting conflicting value at DynamicLengthField item count position with \
+                 the count derived from the provided items"
+            );
+        }
+
+        count_info
+            .diag_type
+            .encode_replace(coded_count, payload, count_byte_pos, bit_pos)
+    }
+}
+
+/// Parameter values on the same level as the parameter being encoded, used to resolve
+/// references to sibling parameters (TABLE-KEY, ENV-DATA-DESC selector).
+#[derive(Clone, Copy)]
+enum SiblingValues<'a> {
+    Map(&'a HashMap<String, serde_json::Value>),
+    Object(&'a serde_json::Map<String, serde_json::Value>),
+}
+
+impl<'a> SiblingValues<'a> {
+    fn get(self, key: &str) -> Option<&'a serde_json::Value> {
+        match self {
+            SiblingValues::Map(map) => map.get(key),
+            SiblingValues::Object(object) => object.get(key),
+        }
+    }
+}
+
+/// The repeated item of a dynamic length field, either a structure or an ENV-DATA-DESC.
+enum DynamicLengthFieldItem<'a> {
+    Structure(datatypes::StructureDop<'a>),
+    EnvDataDesc(datatypes::EnvDataDescDop<'a>),
+}
+
+impl<'a> DynamicLengthFieldItem<'a> {
+    fn from_field(
+        field: &datatypes::DopField<'a>,
+        field_name: &str,
+    ) -> Result<Self, DiagServiceError> {
+        match (field.basic_structure(), field.env_data_desc()) {
+            (Some(structure), None) => structure
+                .specific_data_as_structure()
+                .map(|s| Self::Structure(datatypes::StructureDop(s)))
+                .ok_or_else(|| {
+                    DiagServiceError::InvalidDatabase(format!(
+                        "DynamicLengthField '{field_name}' BASIC-STRUCTURE is not a structure"
+                    ))
+                }),
+            (None, Some(env_data_desc)) => env_data_desc
+                .specific_data_as_env_data_desc()
+                .map(|e| Self::EnvDataDesc(datatypes::EnvDataDescDop(e)))
+                .ok_or_else(|| {
+                    DiagServiceError::InvalidDatabase(format!(
+                        "DynamicLengthField '{field_name}' ENV-DATA-DESC is not an EnvDataDesc"
+                    ))
+                }),
+            (Some(_), Some(_)) => Err(DiagServiceError::InvalidDatabase(format!(
+                "DynamicLengthField '{field_name}' defines both BASIC-STRUCTURE and ENV-DATA-DESC"
+            ))),
+            (None, None) => Err(DiagServiceError::InvalidDatabase(format!(
+                "DynamicLengthField '{field_name}' defines neither BASIC-STRUCTURE nor \
+                 ENV-DATA-DESC"
+            ))),
+        }
+    }
+}
+
+/// Validated DETERMINE-NUMBER-OF-ITEMS information of a dynamic length field.
+struct DynamicLengthFieldCount {
+    byte_position: usize,
+    bit_position: usize,
+    diag_type: datatypes::DiagCodedType,
+    compu_method: Option<datatypes::CompuMethod>,
+    physical_type: Option<datatypes::PhysicalType>,
+    lower_limit: Option<datatypes::Limit>,
+    upper_limit: Option<datatypes::Limit>,
+    bit_length: u32,
+    /// Maximum number of bits that can carry the coded count
+    capacity_bits: u32,
+    /// Non-condensed bit mask, coded values must not set bits outside of it
+    plain_mask: Option<u64>,
+}
+
+impl DynamicLengthFieldCount {
+    fn from_dop(
+        dynamic_length_field: &datatypes::DynamicLengthDop,
+        field_name: &str,
+    ) -> Result<Self, DiagServiceError> {
+        let invalid = |msg: &str| {
+            DiagServiceError::InvalidDatabase(format!("DynamicLengthField '{field_name}': {msg}"))
+        };
+
+        let determine_num_items = dynamic_length_field
+            .determine_number_of_items()
+            .ok_or_else(|| invalid("DETERMINE-NUMBER-OF-ITEMS is missing"))?;
+        let normal_dop = determine_num_items
+            .dop()
+            .ok_or_else(|| invalid("DETERMINE-NUMBER-OF-ITEMS has no DOP"))?
+            .specific_data_as_normal_dop()
+            .map(datatypes::NormalDop)
+            .ok_or_else(|| invalid("DETERMINE-NUMBER-OF-ITEMS DOP is not a NormalDOP"))?;
+        let diag_type = normal_dop.diag_coded_type()?;
+        if diag_type.base_datatype() != datatypes::DataType::UInt32 {
+            return Err(invalid(
+                "DETERMINE-NUMBER-OF-ITEMS DOP must have base data type A_UINT32",
+            ));
+        }
+        let datatypes::DiagCodedTypeVariant::StandardLength(standard_length) = diag_type.type_()
+        else {
+            return Err(invalid(
+                "DETERMINE-NUMBER-OF-ITEMS DOP must use a STANDARD-LENGTH-TYPE",
+            ));
+        };
+        let bit_length = standard_length.bit_length;
+        if bit_length == 0 || bit_length > 32 {
+            return Err(invalid(
+                "DETERMINE-NUMBER-OF-ITEMS bit length must be 1..=32",
+            ));
+        }
+        let mask = standard_length
+            .bit_mask
+            .as_ref()
+            .filter(|m| !m.is_empty())
+            .map(|m| {
+                m.iter()
+                    .rev()
+                    .take(8)
+                    .rev()
+                    .fold(0u64, |acc, &b| (acc << 8) | u64::from(b))
+            });
+        let (capacity_bits, plain_mask) = match mask {
+            Some(mask) if standard_length.condensed => (mask.count_ones().min(bit_length), None),
+            Some(mask) => (bit_length, Some(mask)),
+            None => (bit_length, None),
+        };
+
+        let bit_position = determine_num_items.bit_position() as usize;
+        if bit_position > 7 {
+            return Err(invalid(
+                "DETERMINE-NUMBER-OF-ITEMS bit position must be 0..=7",
+            ));
+        }
+
+        let internal_constr = normal_dop.internal_constr();
+        Ok(Self {
+            byte_position: determine_num_items.byte_position() as usize,
+            bit_position,
+            compu_method: normal_dop.compu_method().map(Into::into),
+            physical_type: normal_dop.physical_type().map(Into::into),
+            lower_limit: internal_constr
+                .and_then(|c| c.lower_limit())
+                .map(Into::into),
+            upper_limit: internal_constr
+                .and_then(|c| c.upper_limit())
+                .map(Into::into),
+            diag_type,
+            bit_length,
+            capacity_bits,
+            plain_mask,
+        })
+    }
+
+    fn byte_len(&self) -> usize {
+        self.bit_position
+            .saturating_add(self.bit_length as usize)
+            .div_ceil(8)
+    }
+
+    /// Converts the physical item count into its validated coded representation.
+    fn coded_count(&self, count: usize, field_name: &str) -> Result<Vec<u8>, DiagServiceError> {
+        let invalid = |msg: String| {
+            DiagServiceError::InvalidRequest(format!("DynamicLengthField '{field_name}': {msg}"))
+        };
+        let count_u32 = u32::try_from(count)
+            .map_err(|_| invalid(format!("{count} items exceed the maximum item count")))?;
+
+        let coded = json_value_to_uds_data(
+            &self.diag_type,
+            self.compu_method.clone(),
+            self.physical_type,
+            &serde_json::Value::from(count_u32),
+        )
+        .map_err(|e| invalid(format!("cannot encode item count {count}: {e}")))?;
+
+        if coded.len() > 8 {
+            return Err(invalid(format!(
+                "coded item count {coded:02X?} exceeds 64 bits"
+            )));
+        }
+        let coded_value = coded.iter().fold(0u64, |acc, &b| (acc << 8) | u64::from(b));
+
+        if self.capacity_bits < u64::BITS && coded_value >> self.capacity_bits != 0 {
+            return Err(invalid(format!(
+                "item count {count} (coded {coded_value}) does not fit into the {} bit(s) \
+                 available for the item count",
+                self.capacity_bits
+            )));
+        }
+        if let Some(mask) = self.plain_mask
+            && coded_value & !mask != 0
+        {
+            return Err(invalid(format!(
+                "item count {count} (coded {coded_value}) cannot be represented with bit mask \
+                 {mask:#X}"
+            )));
+        }
+
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "Coded value is limited to 32 bits and fits into f64 exactly"
+        )]
+        let coded_f64 = coded_value as f64;
+        check_limit(self.lower_limit.as_ref(), coded_f64, true)
+            .and_then(|()| check_limit(self.upper_limit.as_ref(), coded_f64, false))
+            .map_err(|msg| {
+                invalid(format!(
+                    "item count {count} (coded {coded_value}) violates the internal constraint: \
+                     {msg}"
+                ))
+            })?;
+
+        Ok(coded)
+    }
+}
+
+/// Checks `value` against an optional internal constraint limit.
+/// Returns a description of the violation on failure.
+fn check_limit(limit: Option<&datatypes::Limit>, value: f64, is_lower: bool) -> Result<(), String> {
+    let Some(limit) = limit else {
+        return Ok(());
+    };
+    if limit.interval_type == datatypes::IntervalType::Infinite {
+        return Ok(());
+    }
+    let Ok(bound) = TryInto::<f64>::try_into(limit) else {
+        tracing::warn!(limit = ?limit, "Ignoring non-numeric internal constraint limit");
+        return Ok(());
+    };
+    let closed = limit.interval_type == datatypes::IntervalType::Closed;
+    let ok = match (is_lower, closed) {
+        (true, true) => value >= bound,
+        (true, false) => value > bound,
+        (false, true) => value <= bound,
+        (false, false) => value < bound,
+    };
+    if ok {
+        Ok(())
+    } else {
+        let (op, kind) = match (is_lower, closed) {
+            (true, true) => (">=", "lower"),
+            (true, false) => (">", "lower"),
+            (false, true) => ("<=", "upper"),
+            (false, false) => ("<", "upper"),
+        };
+        Err(format!("{kind} limit requires value {op} {bound}"))
+    }
+}
+
+/// Interprets the physical value of an ENV-DATA-DESC selector as `u32`.
+///
+/// ISO 22901-1 7.3.6.10.3: the switch-key is the *physical* value of the referenced
+/// parameter and its PHYSICAL-TYPE shall be `A_UINT32`. Accepted representations, mirroring
+/// what the decoder produces:
+/// * integer numbers, or floats with an integral value (e.g. from a LINEAR compu method),
+/// * decimal or `0x` prefixed hex strings,
+/// * DTC objects, using their `code` (as the decoder does for DTC-DOP selectors).
+fn json_value_to_u32(value: &serde_json::Value) -> Option<u32> {
+    match value {
+        serde_json::Value::Number(n) => n.as_u64().or_else(|| {
+            n.as_f64()
+                .filter(|f| f.fract() == 0.0 && *f >= 0.0 && *f <= f64::from(u32::MAX))
+                .map(|f| {
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "Checked above to be an integral value within u32 range"
+                    )]
+                    let v = f as u64;
+                    v
+                })
+        }),
+        serde_json::Value::String(s) => {
+            let s = s.trim();
+            if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                u64::from_str_radix(hex, 16).ok()
+            } else {
+                s.parse().ok()
+            }
+        }
+        serde_json::Value::Object(obj) => return obj.get("code").and_then(json_value_to_u32),
+        _ => None,
+    }
+    .and_then(|n| u32::try_from(n).ok())
+}
+
+/// Returns true if the parameter is a VALUE parameter referencing a DYNAMIC-LENGTH-FIELD.
+fn is_dynamic_length_field_param(param: &datatypes::Parameter) -> bool {
+    param
+        .specific_data_as_value()
+        .and_then(|v| v.dop())
+        .is_some_and(|dop| {
+            matches!(
+                datatypes::DataOperation(dop).variant(),
+                Ok(datatypes::DataOperationVariant::DynamicLengthField(_))
+            )
+        })
+}
+
+/// Prefixes the message of `error` with `prefix`, keeping the error kind.
+fn prefix_error(error: DiagServiceError, prefix: &str) -> DiagServiceError {
+    match error {
+        DiagServiceError::InvalidRequest(msg) => {
+            DiagServiceError::InvalidRequest(format!("{prefix}: {msg}"))
+        }
+        DiagServiceError::InvalidDatabase(msg) => {
+            DiagServiceError::InvalidDatabase(format!("{prefix}: {msg}"))
+        }
+        DiagServiceError::BadPayload(msg) => {
+            DiagServiceError::BadPayload(format!("{prefix}: {msg}"))
+        }
+        DiagServiceError::ParameterConversionError(msg) => {
+            DiagServiceError::ParameterConversionError(format!("{prefix}: {msg}"))
+        }
+        other => other,
     }
 }
 
@@ -2146,5 +2778,644 @@ mod tests {
             "Error message should not reference the unrelated service '{unrestricted_name}', got: \
              {err_msg}"
         );
+    }
+
+    mod dynamic_length_field {
+        use cda_database::datatypes::{DataType, IntervalType, Limit};
+        use cda_interfaces::{
+            DiagServiceError, DynamicPlugin, EcuSchemas, PayloadDecoder, PayloadEncoder,
+            diagservices::UdsPayloadData,
+        };
+        use cda_plugin_security::DefaultSecurityPluginData;
+        use serde_json::json;
+
+        use super::create_payload;
+        use crate::diag_kernel::{
+            ecumanager::EcuManager,
+            test_utils::ecu_manager_builder::{
+                DlfCountCompu, DlfItemConfig, DlfRequestConfig,
+                create_ecu_manager_with_dlf_request_service,
+            },
+        };
+
+        /// SID + DID 0x1234 prefix of every request
+        const PREFIX: [u8; 3] = [0x2E, 0x12, 0x34];
+
+        fn manager(
+            config: &DlfRequestConfig,
+        ) -> (
+            EcuManager<DefaultSecurityPluginData>,
+            cda_interfaces::DiagComm,
+        ) {
+            let (ecu_manager, service, _) = create_ecu_manager_with_dlf_request_service(config);
+            (ecu_manager, service)
+        }
+
+        async fn encode(
+            ecu_manager: &EcuManager<DefaultSecurityPluginData>,
+            service: &cda_interfaces::DiagComm,
+            value: serde_json::Value,
+        ) -> Result<Vec<u8>, DiagServiceError> {
+            let payload_data = UdsPayloadData::ParameterMap(serde_json::from_value(value).unwrap());
+            ecu_manager
+                .create_uds_payload(service, &skip_sec_plugin!(), Some(payload_data), None)
+                .await
+                .map(|p| p.data)
+        }
+
+        async fn decode(
+            ecu_manager: &EcuManager<DefaultSecurityPluginData>,
+            service: &cda_interfaces::DiagComm,
+            data: Vec<u8>,
+        ) -> serde_json::Value {
+            ecu_manager
+                .convert_from_uds(service, &create_payload(data), true, None)
+                .await
+                .unwrap()
+                .serialize_to_json()
+                .unwrap()
+                .data
+        }
+
+        fn expected(tail: &[u8]) -> Vec<u8> {
+            let mut v = PREFIX.to_vec();
+            v.extend_from_slice(tail);
+            v
+        }
+
+        /// Encodes `value`, checks the bytes and decodes them again, expecting the same
+        /// `items` array.
+        async fn assert_round_trip(
+            config: &DlfRequestConfig,
+            value: serde_json::Value,
+            tail: &[u8],
+        ) {
+            let (ecu_manager, service) = manager(config);
+            let data = encode(&ecu_manager, &service, value.clone()).await.unwrap();
+            assert_eq!(data, expected(tail));
+            let decoded = decode(&ecu_manager, &service, data).await;
+            assert_eq!(
+                decoded.get("items"),
+                value.get("items"),
+                "decoded: {decoded}"
+            );
+        }
+
+        async fn encode_err(
+            config: &DlfRequestConfig,
+            value: serde_json::Value,
+        ) -> DiagServiceError {
+            let (ecu_manager, service) = manager(config);
+            encode(&ecu_manager, &service, value).await.unwrap_err()
+        }
+
+        fn closed(value: &str) -> Limit {
+            Limit {
+                value: value.to_owned(),
+                interval_type: IntervalType::Closed,
+            }
+        }
+
+        #[tokio::test]
+        async fn test_zero_items() {
+            assert_round_trip(&DlfRequestConfig::default(), json!({"items": []}), &[0x00]).await;
+        }
+
+        #[tokio::test]
+        async fn test_one_item() {
+            assert_round_trip(
+                &DlfRequestConfig::default(),
+                json!({"items": [{"val": 0x1122}]}),
+                &[0x01, 0x11, 0x22],
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn test_multiple_items() {
+            assert_round_trip(
+                &DlfRequestConfig::default(),
+                json!({"items": [{"val": 0x1122}, {"val": 0x3344}, {"val": 0x5566}]}),
+                &[0x03, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn test_selector_sharing_count_byte() {
+            let config = DlfRequestConfig {
+                selector_byte_pos: Some(3),
+                ..Default::default()
+            };
+            let (mut ecu_manager, service) = manager(&config);
+            let two_items = json!([{"val": 0x1122}, {"val": 0x3344}]);
+
+            // consistent values
+            let data = encode(
+                &ecu_manager,
+                &service,
+                json!({"selector": 2, "items": two_items}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(data, expected(&[0x02, 0x11, 0x22, 0x33, 0x44]));
+
+            // conflicting selector value is overwritten by the count in lenient mode
+            let data = encode(
+                &ecu_manager,
+                &service,
+                json!({"selector": 5, "items": two_items}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(data, expected(&[0x02, 0x11, 0x22, 0x33, 0x44]));
+
+            // ... and rejected in strict mode
+            ecu_manager.strict_parameter_validation = true;
+            let err = encode(
+                &ecu_manager,
+                &service,
+                json!({"selector": 5, "items": two_items}),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(&err, DiagServiceError::InvalidRequest(msg) if msg.contains("conflicts")),
+                "{err:?}"
+            );
+            let data = encode(
+                &ecu_manager,
+                &service,
+                json!({"selector": 2, "items": two_items}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(data, expected(&[0x02, 0x11, 0x22, 0x33, 0x44]));
+        }
+
+        #[tokio::test]
+        async fn test_count_with_byte_and_bit_position() {
+            let config = DlfRequestConfig {
+                count_byte_pos: 1,
+                count_bit_pos: 4,
+                count_bit_len: 4,
+                offset: 2,
+                ..Default::default()
+            };
+            assert_round_trip(
+                &config,
+                json!({"items": [{"val": 0x1122}, {"val": 0x3344}]}),
+                &[0x00, 0x20, 0x11, 0x22, 0x33, 0x44],
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn test_16_bit_count_both_byte_orders() {
+            for (high_low, count_bytes) in [(true, [0x00, 0x02]), (false, [0x02, 0x00])] {
+                let config = DlfRequestConfig {
+                    count_bit_len: 16,
+                    count_high_low: high_low,
+                    offset: 2,
+                    ..Default::default()
+                };
+                let mut tail = count_bytes.to_vec();
+                tail.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+                assert_round_trip(
+                    &config,
+                    json!({"items": [{"val": 0x1122}, {"val": 0x3344}]}),
+                    &tail,
+                )
+                .await;
+            }
+        }
+
+        #[tokio::test]
+        async fn test_count_overflow() {
+            let config = DlfRequestConfig {
+                count_bit_len: 2,
+                ..Default::default()
+            };
+            let items: Vec<_> = (0..4).map(|i| json!({"val": i})).collect();
+            let err = encode_err(&config, json!({"items": items})).await;
+            assert!(
+                matches!(err, DiagServiceError::InvalidRequest(_)),
+                "{err:?}"
+            );
+
+            let items: Vec<_> = (0..3).map(|i| json!({"val": i})).collect();
+            let (ecu_manager, service) = manager(&config);
+            let data = encode(&ecu_manager, &service, json!({"items": items}))
+                .await
+                .unwrap();
+            assert_eq!(data.get(3), Some(&0x03));
+        }
+
+        #[tokio::test]
+        async fn test_condensed_mask_capacity() {
+            let config = DlfRequestConfig {
+                count_mask: Some(vec![0xF0]),
+                count_condensed: true,
+                ..Default::default()
+            };
+            // only 4 bits available -> 16 items do not fit
+            let items: Vec<_> = (0..16).map(|i| json!({"val": i})).collect();
+            let err = encode_err(&config, json!({"items": items})).await;
+            assert!(
+                matches!(&err, DiagServiceError::InvalidRequest(msg) if msg.contains("4 bit")),
+                "{err:?}"
+            );
+
+            assert_round_trip(
+                &config,
+                json!({"items": [{"val": 1}, {"val": 2}, {"val": 3}]}),
+                &[0x30, 0x00, 0x01, 0x00, 0x02, 0x00, 0x03],
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn test_internal_constraint() {
+            let config = DlfRequestConfig {
+                count_lower_limit: Some(Limit {
+                    value: "0".to_owned(),
+                    interval_type: IntervalType::Open,
+                }),
+                count_upper_limit: Some(closed("2")),
+                ..Default::default()
+            };
+            let err = encode_err(&config, json!({"items": []})).await;
+            assert!(
+                matches!(&err, DiagServiceError::InvalidRequest(msg) if msg.contains("lower")),
+                "{err:?}"
+            );
+            let items: Vec<_> = (0..3).map(|i| json!({"val": i})).collect();
+            let err = encode_err(&config, json!({"items": items})).await;
+            assert!(
+                matches!(&err, DiagServiceError::InvalidRequest(msg) if msg.contains("upper")),
+                "{err:?}"
+            );
+            assert_round_trip(
+                &config,
+                json!({"items": [{"val": 1}, {"val": 2}]}),
+                &[0x02, 0x00, 0x01, 0x00, 0x02],
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn test_linear_compu_count() {
+            // phys = coded - 1  =>  coded = items + 1
+            let config = DlfRequestConfig {
+                count_compu: DlfCountCompu::Linear {
+                    offset: -1.0,
+                    factor: 1.0,
+                },
+                ..Default::default()
+            };
+            assert_round_trip(
+                &config,
+                json!({"items": [{"val": 1}, {"val": 2}]}),
+                &[0x03, 0x00, 0x01, 0x00, 0x02],
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn test_offset_zero_overlaps_count() {
+            let config = DlfRequestConfig {
+                offset: 0,
+                ..Default::default()
+            };
+            let err = encode_err(&config, json!({"items": [{"val": 1}]})).await;
+            assert!(
+                matches!(err, DiagServiceError::InvalidDatabase(_)),
+                "{err:?}"
+            );
+
+            // no items -> nothing overlaps
+            let (ecu_manager, service) = manager(&config);
+            let data = encode(&ecu_manager, &service, json!({"items": []}))
+                .await
+                .unwrap();
+            assert_eq!(data, expected(&[0x00]));
+        }
+
+        #[tokio::test]
+        async fn test_offset_gap_is_zero_filled() {
+            let config = DlfRequestConfig {
+                offset: 3,
+                ..Default::default()
+            };
+            assert_round_trip(
+                &config,
+                json!({"items": [{"val": 0x1122}]}),
+                &[0x01, 0x00, 0x00, 0x11, 0x22],
+            )
+            .await;
+
+            // an empty field still covers the gap up to the item start
+            let (ecu_manager, service) = manager(&config);
+            let data = encode(&ecu_manager, &service, json!({"items": []}))
+                .await
+                .unwrap();
+            assert_eq!(data, expected(&[0x00, 0x00, 0x00]));
+        }
+
+        #[tokio::test]
+        async fn test_fixed_byte_size_padding() {
+            let config = DlfRequestConfig {
+                item: DlfItemConfig::Fixed { byte_size: Some(4) },
+                ..Default::default()
+            };
+            assert_round_trip(
+                &config,
+                json!({"items": [{"val": 0x1122}, {"val": 0x3344}]}),
+                &[0x02, 0x11, 0x22, 0x00, 0x00, 0x33, 0x44, 0x00, 0x00],
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn test_fixed_byte_size_overflow() {
+            let config = DlfRequestConfig {
+                item: DlfItemConfig::Fixed { byte_size: Some(1) },
+                ..Default::default()
+            };
+            let err = encode_err(&config, json!({"items": [{"val": 0x1122}]})).await;
+            assert!(
+                matches!(&err, DiagServiceError::InvalidRequest(msg)
+                    if msg.contains("'items' item 0") && msg.contains("BYTE-SIZE")),
+                "{err:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_variable_length_items() {
+            let config = DlfRequestConfig {
+                item: DlfItemConfig::VariableLength,
+                ..Default::default()
+            };
+            let (ecu_manager, service) = manager(&config);
+            let data = encode(
+                &ecu_manager,
+                &service,
+                json!({"items": [{"data": "0x0102"}, {"data": "0x03"}]}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(data, expected(&[0x02, 0x02, 0x01, 0x02, 0x01, 0x03]));
+            let decoded = decode(&ecu_manager, &service, data).await;
+            assert_eq!(
+                decoded
+                    .get("items")
+                    .and_then(|v| v.as_array())
+                    .map(Vec::len),
+                Some(2),
+                "{decoded}"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_nested_dynamic_length_field() {
+            assert_round_trip(
+                &DlfRequestConfig {
+                    item: DlfItemConfig::Nested,
+                    ..Default::default()
+                },
+                json!({"items": [{"inner": [{"v": 1}, {"v": 2}]}, {"inner": []}]}),
+                &[0x02, 0x02, 0x01, 0x02, 0x00],
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn test_non_array_and_non_object_values() {
+            let err = encode_err(&DlfRequestConfig::default(), json!({"items": {"val": 1}})).await;
+            assert!(
+                matches!(&err, DiagServiceError::InvalidRequest(msg) if msg.contains("array")),
+                "{err:?}"
+            );
+            let err = encode_err(&DlfRequestConfig::default(), json!({"items": [1]})).await;
+            assert!(
+                matches!(&err, DiagServiceError::InvalidRequest(msg) if msg.contains("item 0")),
+                "{err:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_missing_value() {
+            let err = encode_err(&DlfRequestConfig::default(), json!({})).await;
+            assert!(
+                matches!(&err, DiagServiceError::InvalidRequest(msg) if msg.contains("missing")),
+                "{err:?}"
+            );
+
+            let config = DlfRequestConfig {
+                is_visible: false,
+                ..Default::default()
+            };
+            let (ecu_manager, service) = manager(&config);
+            let data = encode(&ecu_manager, &service, json!({})).await.unwrap();
+            assert_eq!(data, expected(&[0x00]));
+        }
+
+        #[tokio::test]
+        async fn test_invalid_count_dop() {
+            for config in [
+                DlfRequestConfig {
+                    count_dop_is_structure: true,
+                    ..Default::default()
+                },
+                DlfRequestConfig {
+                    count_base_type: DataType::Int32,
+                    ..Default::default()
+                },
+            ] {
+                let err = encode_err(&config, json!({"items": []})).await;
+                assert!(
+                    matches!(err, DiagServiceError::InvalidDatabase(_)),
+                    "{err:?}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn test_param_without_byte_position_after_sibling() {
+            let config = DlfRequestConfig {
+                param_byte_pos: None,
+                count_byte_pos: 4,
+                offset: 5,
+                ..Default::default()
+            };
+            let value = json!({"sibling": 0xAB, "items": [{"val": 0x1122}]});
+            assert_round_trip(&config, value, &[0xAB, 0x01, 0x11, 0x22]).await;
+        }
+
+        #[tokio::test]
+        async fn test_env_data_desc_items() {
+            let config = DlfRequestConfig {
+                selector_byte_pos: Some(3),
+                param_byte_pos: Some(4),
+                item: DlfItemConfig::EnvDataDesc { wildcard: false },
+                ..Default::default()
+            };
+            assert_round_trip(
+                &config,
+                json!({"selector": 2, "items": [{"b": 0x1122}, {"b": 0x3344}]}),
+                &[0x02, 0x02, 0x11, 0x22, 0x33, 0x44],
+            )
+            .await;
+            assert_round_trip(
+                &config,
+                json!({"selector": 1, "items": [{"a": 0x11}]}),
+                &[0x01, 0x01, 0x11],
+            )
+            .await;
+
+            // no matching ENV-DATA and no wildcard
+            let err = encode_err(&config, json!({"selector": 7, "items": [{"a": 1}]})).await;
+            assert!(
+                matches!(err, DiagServiceError::InvalidRequest(_)),
+                "{err:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_env_data_desc_wildcard() {
+            let config = DlfRequestConfig {
+                selector_byte_pos: Some(3),
+                param_byte_pos: Some(4),
+                item: DlfItemConfig::EnvDataDesc { wildcard: true },
+                ..Default::default()
+            };
+            assert_round_trip(
+                &config,
+                json!({"selector": 7, "items": [{"w": 0x55}]}),
+                &[0x07, 0x01, 0x55],
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn test_env_data_desc_missing_selector() {
+            let config = DlfRequestConfig {
+                item: DlfItemConfig::EnvDataDesc { wildcard: true },
+                ..Default::default()
+            };
+            let err = encode_err(&config, json!({"items": [{"w": 1}]})).await;
+            assert!(
+                matches!(&err, DiagServiceError::InvalidRequest(msg) if msg.contains("selector")),
+                "{err:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_field_with_both_or_neither_item_kind() {
+            for item in [DlfItemConfig::Both, DlfItemConfig::Neither] {
+                let config = DlfRequestConfig {
+                    item,
+                    selector_byte_pos: Some(3),
+                    param_byte_pos: Some(4),
+                    ..Default::default()
+                };
+                let err = encode_err(&config, json!({"selector": 1, "items": []})).await;
+                assert!(
+                    matches!(err, DiagServiceError::InvalidDatabase(_)),
+                    "{err:?}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn test_variable_length_items_with_later_param_encoded_first() {
+            // `trailer` (byte 9) is encoded before `items`, so the payload already
+            // extends past the items when they are encoded.
+            let config = DlfRequestConfig {
+                item: DlfItemConfig::VariableLength,
+                trailer_byte_pos: Some(9),
+                ..Default::default()
+            };
+            let (ecu_manager, service) = manager(&config);
+            let data = encode(
+                &ecu_manager,
+                &service,
+                json!({"trailer": 0xAB, "items": [{"data": "0x0102"}, {"data": "0x03"}]}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(data, expected(&[0x02, 0x02, 0x01, 0x02, 0x01, 0x03, 0xAB]));
+        }
+
+        #[tokio::test]
+        async fn test_fixed_byte_size_overflow_with_later_param_encoded_first() {
+            let config = DlfRequestConfig {
+                item: DlfItemConfig::Fixed { byte_size: Some(1) },
+                trailer_byte_pos: Some(9),
+                ..Default::default()
+            };
+            let err = encode_err(
+                &config,
+                json!({"trailer": 0xAB, "items": [{"val": 0x1122}]}),
+            )
+            .await;
+            assert!(
+                matches!(&err, DiagServiceError::InvalidRequest(msg) if msg.contains("BYTE-SIZE")),
+                "{err:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_env_data_desc_unexpected_keys_only_rejected_in_strict_mode() {
+            let config = DlfRequestConfig {
+                selector_byte_pos: Some(3),
+                param_byte_pos: Some(4),
+                item: DlfItemConfig::EnvDataDesc { wildcard: false },
+                ..Default::default()
+            };
+            let value = json!({"selector": 1, "items": [{"a": 0x11, "extra": 1}]});
+            let (mut ecu_manager, service) = manager(&config);
+            let data = encode(&ecu_manager, &service, value.clone()).await.unwrap();
+            assert_eq!(data, expected(&[0x01, 0x01, 0x11]));
+
+            ecu_manager.strict_parameter_validation = true;
+            let err = encode(&ecu_manager, &service, value).await.unwrap_err();
+            assert!(
+                matches!(&err, DiagServiceError::BadPayload(msg) if msg.contains("extra")),
+                "{err:?}"
+            );
+        }
+
+        #[test]
+        fn test_selector_value_representations() {
+            use super::super::json_value_to_u32;
+            assert_eq!(json_value_to_u32(&json!(2)), Some(2));
+            assert_eq!(json_value_to_u32(&json!(2.0)), Some(2));
+            assert_eq!(json_value_to_u32(&json!(2.5)), None);
+            assert_eq!(json_value_to_u32(&json!(-1)), None);
+            assert_eq!(json_value_to_u32(&json!(4_294_967_296u64)), None);
+            assert_eq!(json_value_to_u32(&json!("0x120")), Some(0x120));
+            assert_eq!(json_value_to_u32(&json!("288")), Some(288));
+            assert_eq!(
+                json_value_to_u32(&json!({"code": 288, "display_code": "P0120"})),
+                Some(288)
+            );
+            assert_eq!(json_value_to_u32(&json!({"display_code": "P0120"})), None);
+            assert_eq!(json_value_to_u32(&json!("on")), None);
+        }
+
+        #[tokio::test]
+        async fn test_request_schema() {
+            let (ecu_manager, service) = manager(&DlfRequestConfig::default());
+            let schema = ecu_manager.schema_for_request(&service).await.unwrap();
+            let schema = serde_json::to_value(schema.into_schema().unwrap()).unwrap();
+            let items = schema
+                .pointer("/properties/items")
+                .unwrap_or_else(|| panic!("no items in {schema}"));
+            assert_eq!(items.get("type"), Some(&json!("array")));
+            assert_eq!(items.get("minItems"), Some(&json!(0)));
+            assert_eq!(items.get("maxItems"), Some(&json!(255)));
+            assert!(items.pointer("/items/properties/val").is_some(), "{items}");
+        }
     }
 }

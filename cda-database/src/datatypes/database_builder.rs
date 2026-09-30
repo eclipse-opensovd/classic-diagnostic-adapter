@@ -176,6 +176,24 @@ impl TransmissionMode {
     pub const SEND_OR_RECEIVE: Self = Self(dataformat::TransmissionMode::SEND_OR_RECEIVE);
 }
 
+/// Parameters for [`EcuDataBuilder::create_dynamic_length_field_specific_dop_data`].
+pub struct DynamicLengthFieldParams<'a> {
+    /// `OFFSET` of the first item relative to the field's byte position
+    pub offset: u32,
+    /// `DETERMINE-NUMBER-OF-ITEMS/BYTE-POSITION`, relative to the field's byte position
+    pub number_of_items_byte_pos: u32,
+    /// `DETERMINE-NUMBER-OF-ITEMS/BIT-POSITION`
+    pub number_of_items_bit_pos: u32,
+    /// DOP of `DETERMINE-NUMBER-OF-ITEMS`
+    pub number_of_items_dop: WIPOffset<dataformat::DOP<'a>>,
+    /// `BASIC-STRUCTURE` DOP of the field
+    pub basic_structure: Option<WIPOffset<dataformat::DOP<'a>>>,
+    /// `ENV-DATA-DESC` DOP of the field
+    pub env_data_desc: Option<WIPOffset<dataformat::DOP<'a>>>,
+    /// Visibility of the field
+    pub is_visible: bool,
+}
+
 pub struct EcuDataBuilder<'a> {
     fbb: flatbuffers::FlatBufferBuilder<'a>,
     max_param_id: u32,
@@ -1067,42 +1085,48 @@ impl<'a> EcuDataBuilder<'a> {
         offset: u32,
         number_of_items_byte_pos: u32,
         number_of_items_bit_pos: u32,
-        number_of_items_dop: WIPOffset<dataformat::DOP>,
+        number_of_items_dop: WIPOffset<dataformat::DOP<'a>>,
         repeated_struct: Option<WIPOffset<dataformat::Structure<'a>>>,
     ) -> UnionWIPOffset<dataformat::SpecificDOPDataUnionValue> {
-        let repeated_struct = if let Some(repeated_struct) = repeated_struct {
-            let structure_dop = self.create_dop(
-                *DopType::STRUCTURE,
-                None,
-                None,
-                *SpecificDOPData::Structure,
-                Some(dataformat::SpecificDOPData::tag_as_structure(repeated_struct).value_offset()),
-            );
-            Some(structure_dop)
-        } else {
-            None
-        };
+        let basic_structure = repeated_struct.map(|s| self.create_anonymous_structure_dop(s));
+        self.create_dynamic_length_field_specific_dop_data(&DynamicLengthFieldParams {
+            offset,
+            number_of_items_byte_pos,
+            number_of_items_bit_pos,
+            number_of_items_dop,
+            basic_structure,
+            env_data_desc: None,
+            is_visible: true,
+        })
+    }
 
+    /// Creates the specific data of a `DYNAMIC-LENGTH-FIELD` DOP with full control over
+    /// all attributes of the model, including an `ENV-DATA-DESC` as repeated item and the
+    /// visibility of the field.
+    pub fn create_dynamic_length_field_specific_dop_data(
+        &mut self,
+        params: &DynamicLengthFieldParams<'a>,
+    ) -> UnionWIPOffset<dataformat::SpecificDOPDataUnionValue> {
         let field = dataformat::Field::create(
             &mut self.fbb,
             &dataformat::FieldArgs {
-                basic_structure: repeated_struct,
-                env_data_desc: None, // not supported yet.
-                is_visible: true,
+                basic_structure: params.basic_structure,
+                env_data_desc: params.env_data_desc,
+                is_visible: params.is_visible,
             },
         );
 
         let determine_number_of_items = dataformat::DetermineNumberOfItems::create(
             &mut self.fbb,
             &dataformat::DetermineNumberOfItemsArgs {
-                byte_position: number_of_items_byte_pos,
-                bit_position: number_of_items_bit_pos,
-                dop: Some(number_of_items_dop),
+                byte_position: params.number_of_items_byte_pos,
+                bit_position: params.number_of_items_bit_pos,
+                dop: Some(params.number_of_items_dop),
             },
         );
 
         let dynamic_length_field_args = dataformat::DynamicLengthFieldArgs {
-            offset,
+            offset: params.offset,
             field: Some(field),
             determine_number_of_items: Some(determine_number_of_items),
         };
@@ -1110,6 +1134,72 @@ impl<'a> EcuDataBuilder<'a> {
         let dynamic_length_field =
             dataformat::DynamicLengthField::create(&mut self.fbb, &dynamic_length_field_args);
         dataformat::SpecificDOPData::tag_as_dynamic_length_field(dynamic_length_field)
+    }
+
+    /// Wraps a structure into an unnamed `STRUCTURE` DOP.
+    pub fn create_anonymous_structure_dop(
+        &mut self,
+        structure: WIPOffset<dataformat::Structure<'a>>,
+    ) -> WIPOffset<dataformat::DOP<'a>> {
+        self.create_dop(
+            *DopType::STRUCTURE,
+            None,
+            None,
+            *SpecificDOPData::Structure,
+            Some(dataformat::SpecificDOPData::tag_as_structure(structure).value_offset()),
+        )
+    }
+
+    /// Creates an `INTERNAL-CONSTR` with the given limits.
+    pub fn create_internal_constr(
+        &mut self,
+        lower_limit: Option<&Limit>,
+        upper_limit: Option<&Limit>,
+    ) -> WIPOffset<dataformat::InternalConstr<'a>> {
+        let lower_limit = lower_limit.map(|l| self.cda_limit_to_flatbuf_limit(l));
+        let upper_limit = upper_limit.map(|l| self.cda_limit_to_flatbuf_limit(l));
+        dataformat::InternalConstr::create(
+            &mut self.fbb,
+            &dataformat::InternalConstrArgs {
+                lower_limit,
+                upper_limit,
+                scale_constr: None,
+            },
+        )
+    }
+
+    /// Creates a `LINEAR` compu method `phys = (offset + factor * internal) / denominator`.
+    pub fn create_linear_compu_method(
+        &mut self,
+        offset: f64,
+        factor: f64,
+        denominator: f64,
+    ) -> WIPOffset<dataformat::CompuMethod<'a>> {
+        let numerator = self.fbb.create_vector(&[offset, factor]);
+        let denominator = self.fbb.create_vector(&[denominator]);
+        let coeffs = dataformat::CompuRationalCoEffs::create(
+            &mut self.fbb,
+            &dataformat::CompuRationalCoEffsArgs {
+                numerator: Some(numerator),
+                denominator: Some(denominator),
+            },
+        );
+        let scale = dataformat::CompuScale::create(
+            &mut self.fbb,
+            &dataformat::CompuScaleArgs {
+                rational_co_effs: Some(coeffs),
+                ..Default::default()
+            },
+        );
+        let scales = self.fbb.create_vector(&[scale]);
+        let itp = dataformat::CompuInternalToPhys::create(
+            &mut self.fbb,
+            &dataformat::CompuInternalToPhysArgs {
+                compu_scales: Some(scales),
+                ..Default::default()
+            },
+        );
+        self.create_compu_method(CompuCategory::Linear, Some(itp), None)
     }
 
     pub fn create_mux_dop(
