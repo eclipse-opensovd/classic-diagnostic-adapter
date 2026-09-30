@@ -106,6 +106,7 @@ fun RequestsData.addAllFunctionality() {
     addDtcSettingRequests()
     addAuthenticationRequests()
     addDiagnosticRequests()
+    addTimelineRequests()
     addFlashRequests()
     addDtcRequests()
 }
