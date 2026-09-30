@@ -29,7 +29,7 @@ use crate::{
         runtimefiles,
     },
     util::{
-        ecusim,
+        TestingError, ecusim,
         http::{auth_header, response_to_t, send_cda_request},
         test_env::{TestEnv, setup_integration_test_without_cda, skip_for_can, use_can},
     },
@@ -69,6 +69,9 @@ impl CdaMode {
 
 /// Polls `path` with the given (already-authenticated) headers until it stops
 /// returning 503, or the timeout elapses.
+/// How long a single request of a polling loop waits for an answer.
+const POLL_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 async fn wait_until_not_pending(
     base_url: &str,
     path: &str,
@@ -80,12 +83,23 @@ async fn wait_until_not_pending(
         .checked_add(timeout)
         .expect("Timeout is too large");
     loop {
-        let response = client
+        let response = match client
             .get(format!("{base_url}{path}"))
             .headers(headers.clone())
+            .timeout(POLL_REQUEST_TIMEOUT)
             .send()
             .await
-            .unwrap_or_else(|e| panic!("request to {path} failed: {e}"));
+        {
+            Ok(response) => response,
+            // A single poll can get no answer when the host is loaded. The
+            // deadline still bounds the wait.
+            Err(e) if Instant::now() < deadline => {
+                eprintln!("Request to {path} failed, retrying: {e}");
+                cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(100)).await;
+                continue;
+            }
+            Err(e) => panic!("request to {path} failed: {e}"),
+        };
         if response.status() != reqwest::StatusCode::SERVICE_UNAVAILABLE {
             return response;
         }
@@ -115,12 +129,23 @@ async fn wait_until_update_protection_lifted(
         .checked_add(timeout)
         .expect("Timeout is too large");
     loop {
-        let response = client
+        let response = match client
             .get(format!("{base_url}{path}"))
             .headers(headers.clone())
+            .timeout(POLL_REQUEST_TIMEOUT)
             .send()
             .await
-            .unwrap_or_else(|e| panic!("request to {path} failed: {e}"));
+        {
+            Ok(response) => response,
+            // A single poll can get no answer when the host is loaded. The
+            // deadline still bounds the wait.
+            Err(e) if Instant::now() < deadline => {
+                eprintln!("Request to {path} failed, retrying: {e}");
+                cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(100)).await;
+                continue;
+            }
+            Err(e) => panic!("request to {path} failed: {e}"),
+        };
         if response.status() != reqwest::StatusCode::CONFLICT {
             return response;
         }
@@ -484,6 +509,16 @@ async fn ecu_variant_state(
     headers: &HeaderMap,
     ecu_endpoint: &str,
 ) -> sovd_interfaces::components::ecu::State {
+    try_ecu_variant_state(config, headers, ecu_endpoint)
+        .await
+        .expect("Failed to get ecu component")
+}
+
+async fn try_ecu_variant_state(
+    config: &opensovd_cda_lib::config::configfile::Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+) -> Result<sovd_interfaces::components::ecu::State, TestingError> {
     let response = send_cda_request(
         config,
         ecu_endpoint,
@@ -493,11 +528,9 @@ async fn ecu_variant_state(
         Some(headers),
         None,
     )
-    .await
-    .expect("Failed to get ecu component");
-    let ecu: sovd_interfaces::components::ecu::get::Response =
-        response_to_t(&response).expect("Failed to parse ecu component response");
-    ecu.variant.state
+    .await?;
+    let ecu: sovd_interfaces::components::ecu::get::Response = response_to_t(&response)?;
+    Ok(ecu.variant.state)
 }
 
 /// Polls `ecu_endpoint`'s variant state until it matches `expected`, or
@@ -517,7 +550,16 @@ async fn wait_for_ecu_variant_state(
         .checked_add(timeout)
         .expect("deadline does not overflow");
     loop {
-        let state = ecu_variant_state(config, headers, ecu_endpoint).await;
+        let state = match try_ecu_variant_state(config, headers, ecu_endpoint).await {
+            Ok(state) => state,
+            // See `wait_until_not_pending`.
+            Err(TestingError::Timeout(e)) if Instant::now() < deadline => {
+                eprintln!("Reading the variant state of {ecu_endpoint} failed, retrying: {e}");
+                cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(200)).await;
+                continue;
+            }
+            Err(e) => panic!("Failed to get ecu component: {e}"),
+        };
         if state == expected {
             return state;
         }

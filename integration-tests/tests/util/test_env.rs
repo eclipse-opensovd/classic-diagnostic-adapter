@@ -836,7 +836,7 @@ pub(crate) async fn wait_for_ecus_online(config: &Configuration) -> Result<(), T
             )));
         }
 
-        let response = send_cda_request(
+        let response = match send_cda_request(
             config,
             "apps/sovd2uds/data/networkstructure",
             StatusCode::OK,
@@ -845,7 +845,18 @@ pub(crate) async fn wait_for_ecus_online(config: &Configuration) -> Result<(), T
             None,
             None,
         )
-        .await?;
+        .await
+        {
+            Ok(response) => response,
+            // A single poll can get no answer when the host is loaded. The
+            // deadline above still bounds the wait.
+            Err(TestingError::Timeout(e)) => {
+                eprintln!("Polling the network structure failed, retrying: {e}");
+                cda_interfaces::util::tokio_ext::sleep_for(POLL_INTERVAL).await;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         let network_structure_response: NetworkStructureResponse = response_to_t(&response)
             .map_err(|e| {
                 TestingError::InvalidData(format!("Failed to parse networkstructure response: {e}"))
@@ -923,7 +934,13 @@ pub(crate) async fn wait_for_http_ready_with_timeout(
     let start_time = Instant::now();
 
     while start_time.elapsed() < timeout {
-        if let Ok(response) = client.get(&url).send().await {
+        // Bounded, so a request without an answer cannot outlast `timeout`.
+        if let Ok(response) = client
+            .get(&url)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+        {
             if let Some(expected_status) = result {
                 if response.status() == expected_status {
                     return Ok(());

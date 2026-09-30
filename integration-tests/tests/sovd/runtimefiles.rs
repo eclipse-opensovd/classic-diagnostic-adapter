@@ -1413,7 +1413,7 @@ async fn wait_for_execution_completion(
         .ok_or_else(|| TestingError::SetupError("timeout overflowed Instant".to_owned()))?;
     let execution_path = format!("{RUNTIMEFILES_UPDATE_EXECUTIONS}/{execution_id}");
     loop {
-        let response = send_cda_request(
+        let execution = match send_cda_request(
             config,
             &execution_path,
             StatusCode::OK,
@@ -1422,8 +1422,17 @@ async fn wait_for_execution_completion(
             Some(auth),
             None,
         )
-        .await?;
-        let execution = response_to_t::<ExecutionResponse>(&response)?;
+        .await
+        {
+            Ok(response) => response_to_t::<ExecutionResponse>(&response)?,
+            // A single poll can get no answer when the host is loaded. The
+            // deadline still bounds the wait.
+            Err(TestingError::Timeout(error)) if Instant::now() < deadline => {
+                eprintln!("Polling runtime update {execution_id} failed, retrying: {error}");
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         match execution.status {
             ExecutionStatusKind::Completed => break,
             ExecutionStatusKind::Running => {}
@@ -1456,15 +1465,20 @@ async fn wait_for_execution_completion(
     );
     let client = reqwest::Client::new();
     loop {
-        let status = client
+        match client
             .get(&url)
             .header(reqwest::header::AUTHORIZATION, authorization)
+            .timeout(Duration::from_secs(10))
             .send()
             .await
-            .map_err(|error| TestingError::ProcessFailed(error.to_string()))?
-            .status();
-        if status != StatusCode::CONFLICT {
-            return Ok(());
+        {
+            Ok(response) if response.status() != StatusCode::CONFLICT => return Ok(()),
+            Ok(_) => {}
+            // See the status poll above.
+            Err(error) if Instant::now() < deadline => {
+                eprintln!("Polling the update protection failed, retrying: {error}");
+            }
+            Err(error) => return Err(TestingError::ProcessFailed(error.to_string())),
         }
         if Instant::now() >= deadline {
             return Err(TestingError::Timeout(format!(
