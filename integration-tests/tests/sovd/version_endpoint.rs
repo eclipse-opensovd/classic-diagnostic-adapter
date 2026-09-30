@@ -11,63 +11,41 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use axum::http::StatusCode;
+use http::StatusCode;
 use opensovd_cda_lib::cda_version;
-use reqwest::Method;
 
-use crate::util::{
-    endpoints::SOVD2UDS_VERSION,
-    http::{extract_field_from_json, response_to_json},
-    test_env::TestEnv,
-};
+use crate::{client::data::Version, util::test_env::TestEnv};
 
-fn assert_version_response(json: &serde_json::Value) {
-    let id = extract_field_from_json::<String>(json, "id").expect("Missing 'id' field");
-    assert_eq!(id, "version");
-
-    let data =
-        extract_field_from_json::<serde_json::Value>(json, "data").expect("Missing 'data' field");
-    let name = extract_field_from_json::<String>(&data, "name").expect("Missing 'data.name' field");
-    assert_eq!(name, "Eclipse OpenSOVD Classic Diagnostic Adapter");
-
-    let api =
-        extract_field_from_json::<serde_json::Value>(&data, "api").expect("Missing 'data.api'");
-    let api_version =
-        extract_field_from_json::<String>(&api, "version").expect("Missing 'data.api.version'");
-    assert_eq!(api_version, "1.1");
-
-    let implementation = extract_field_from_json::<serde_json::Value>(&data, "implementation")
-        .expect("Missing 'data.implementation'");
-    let impl_version = extract_field_from_json::<String>(&implementation, "version")
-        .expect("Missing 'data.implementation.version'");
-    assert_eq!(impl_version, cda_version());
+fn assert_version_response(version: &Version) {
+    assert_eq!(version.id, "version");
+    assert_eq!(
+        version.data.name,
+        "Eclipse OpenSOVD Classic Diagnostic Adapter"
+    );
+    assert_eq!(version.data.api.version, "1.1");
+    assert_eq!(version.data.implementation.version, cda_version());
 }
 
 /// [[ itest~sovd-api-version-endpoint, Version Endpoint Integration Test, itest ]]
 #[tokio::test]
 async fn test_version_endpoint() {
     let test_env = TestEnv::builder().await.unwrap();
+    let client = test_env.anonymous_client();
+
     // Test app-scoped version endpoint
-    let app_url =
-        reqwest::Url::parse(&test_env.vehicle_url(SOVD2UDS_VERSION)).expect("Invalid URL");
-
-    let response =
-        crate::util::http::send_request(StatusCode::OK, Method::GET, None, None, app_url)
-            .await
-            .expect("GET app version endpoint failed");
-
-    let json = response_to_json(&response).expect("Failed to parse version response");
-    assert_version_response(&json);
+    let version = client
+        .sovd2uds()
+        .version()
+        .await
+        .expect("GET app version endpoint failed")
+        .expect_status(StatusCode::OK);
+    assert_version_response(&version);
 
     // Test global version endpoint
-    let global_url =
-        reqwest::Url::parse(&test_env.vehicle_url("data/version")).expect("Invalid URL");
-
-    let response =
-        crate::util::http::send_request(StatusCode::OK, Method::GET, None, None, global_url)
-            .await
-            .expect("GET global version endpoint failed");
-
-    let json = response_to_json(&response).expect("Failed to parse version response");
-    assert_version_response(&json);
+    let version = client
+        .version()
+        .await
+        .expect("GET global version endpoint failed")
+        .expect_status(StatusCode::OK);
+    assert_version_response(&version);
 }

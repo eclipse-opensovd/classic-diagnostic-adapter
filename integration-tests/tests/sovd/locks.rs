@@ -13,112 +13,123 @@
 
 use std::time::Duration;
 
-use http::{HeaderMap, Method, StatusCode};
-use serde::{self, Deserialize};
+use chrono::{DateTime, Utc};
+use http::StatusCode;
+use serde_json::Map;
+use sovd_interfaces::locking;
 
 use crate::{
-    sovd,
-    sovd::{ECU_FLXC1000, set_dtc_setting_with_headers},
+    client::{
+        SovdTestClient,
+        locks::{Lock, Locks},
+    },
+    sovd::{self, ECU_FLXC1000, FUNCTIONAL_GROUP, set_dtc_setting},
     util::{
         TestingError,
-        http::{
-            extract_field_from_json, response_to_json, response_to_json_to_field, send_cda_request,
-        },
-        locks::{
-            ECU_ENDPOINT, ENDPOINTS, FUNCTIONAL_GROUP_ENDPOINT, NON_OWNER_BEARER_TOKEN,
-            VEHICLE_ENDPOINT, bearer_token_header, create_lock, create_lock_with_headers,
-            create_lock_with_payload, default_timeout, lock_expiration, lock_operation,
-            lock_operation_with_headers,
-        },
+        endpoints::{ECU_FLXC1000_ENDPOINT, FUNCTIONAL_GROUP_ENDPOINT},
+        locks::{NON_OWNER_BEARER_TOKEN, default_timeout},
         test_env::TestEnv,
     },
 };
 
+/// The lock collections of the functional group, the vehicle and FLXC1000.
+const ENDPOINTS: [&str; 3] = [
+    const_format::formatcp!("{}/locks", FUNCTIONAL_GROUP_ENDPOINT),
+    "locks",
+    const_format::formatcp!("{}/locks", ECU_FLXC1000_ENDPOINT),
+];
+
+/// The expiration of the lock `id` of `locks`.
+async fn lock_expiration(locks: &Locks<'_>, id: &str) -> Result<DateTime<Utc>, TestingError> {
+    let expiration = locks
+        .lock(id)
+        .get()
+        .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .lock_expiration;
+    expiration.parse::<DateTime<Utc>>().map_err(|_| {
+        TestingError::InvalidData("Failed to parse lock expiration datetime".to_string())
+    })
+}
+
 #[tokio::test]
 async fn lock_unlock() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
+    let client = test_env.client();
 
     for endpoint in ENDPOINTS {
+        let locks = client.locks_at(endpoint);
+
         // Check if the lock is created successfully and deleted after the timeout
         {
             let expiration_timeout = Duration::from_secs(2);
-            let timing_out_lock =
-                create_lock(expiration_timeout, endpoint, StatusCode::CREATED, &test_env).await;
-            let lock_id =
-                extract_field_from_json::<String>(&response_to_json(&timing_out_lock)?, "id")?;
+            let timing_out_lock = locks
+                .create(expiration_timeout)
+                .await?
+                .expect_status(StatusCode::CREATED)
+                .into_body();
+            let lock = timing_out_lock.handle();
 
-            lock_operation(
-                endpoint,
-                Some(&lock_id),
-                &test_env,
-                StatusCode::OK,
-                Method::GET,
-            )
-            .await;
+            lock.get().await?.expect_status(StatusCode::OK);
             cda_interfaces::util::tokio_ext::sleep_for(expiration_timeout).await;
-            lock_operation(
-                endpoint,
-                Some(&lock_id),
-                &test_env,
-                StatusCode::NOT_FOUND,
-                Method::GET,
-            )
-            .await;
+            let err = lock
+                .get()
+                .await
+                .map(drop)
+                .expect_err("expired lock still exists");
+            assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
 
             // lock expired, expect 404
-            lock_operation(
-                endpoint,
-                Some(&lock_id),
-                &test_env,
-                StatusCode::NOT_FOUND,
-                Method::DELETE,
-            )
-            .await;
+            let err = lock
+                .delete()
+                .await
+                .expect_err("expired lock could be deleted");
+            assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
         }
 
         // Test if creating a lock twice extends the expiration time on the same lock
         // instead of creating a new lock or returning an error.
         {
-            let create_first =
-                create_lock(default_timeout(), endpoint, StatusCode::CREATED, &test_env).await;
-            let create_first_json = response_to_json(&create_first)?;
-            let lock_id = extract_field_from_json::<String>(&create_first_json, "id")?;
-            let expected_location = format!("/vehicle/v15/{endpoint}/{lock_id}");
-            assert_eq!(
-                create_first
-                    .header(http::header::LOCATION)
-                    .and_then(|value| value.to_str().ok()),
-                Some(expected_location.as_str())
-            );
+            let create_first = locks
+                .create(default_timeout())
+                .await?
+                .expect_status(StatusCode::CREATED);
+            let lock_id = create_first.id().to_owned();
+            let expected_location = locks.lock(&lock_id).absolute_path();
+            assert_eq!(create_first.location(), Some(expected_location.as_str()));
+            let create_first = create_first.into_body();
 
-            let expiration_first = lock_expiration(&test_env, endpoint, &lock_id).await?;
+            let expiration_first = lock_expiration(&locks, &lock_id).await?;
 
             cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(2)).await;
 
-            let create_second =
-                create_lock(default_timeout(), endpoint, StatusCode::OK, &test_env).await;
+            // Extending the lock answers 200 without a `Location`.
+            let create_second = locks
+                .create(default_timeout())
+                .await?
+                .expect_status(StatusCode::OK);
+            assert_eq!(create_second.location(), None);
+            let second = create_second.into_body();
 
-            let create_second_json = response_to_json(&create_second)?;
-            assert_eq!(
-                create_second
-                    .header(http::header::LOCATION)
-                    .and_then(|value| value.to_str().ok()),
-                None
-            );
-            let expiration_second = lock_expiration(&test_env, endpoint, &lock_id).await?;
+            let expiration_second = lock_expiration(&locks, &lock_id).await?;
 
             assert!(expiration_first < expiration_second);
 
             // second call extended the lock but ids stayed the same.
-            assert_eq!(create_first_json, create_second_json);
-            lock_operation(
-                endpoint,
-                Some(&lock_id),
-                &test_env,
-                StatusCode::NO_CONTENT,
-                Method::DELETE,
-            )
-            .await;
+            let to_json = |lock: &locking::Lock| {
+                serde_json::to_value(lock).map_err(|e| {
+                    TestingError::InvalidData(format!("Failed to serialize lock: {e}"))
+                })
+            };
+            assert_eq!(to_json(create_first.info())?, to_json(second.info())?);
+            create_first
+                .release()
+                .await?
+                .expect_status(StatusCode::NO_CONTENT);
+            // `second` is the same lock, released above already; dropping it
+            // only tries to release it again, on a best effort basis.
+            drop(second);
         }
     }
 
@@ -128,86 +139,61 @@ async fn lock_unlock() -> Result<(), TestingError> {
 #[tokio::test]
 async fn unrelated_functional_group_and_ecu_locks_can_coexist() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
+    let client = test_env.client();
 
-    let func_lock_response = create_lock(
-        default_timeout(),
-        FUNCTIONAL_GROUP_ENDPOINT,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
-    let lock_id: String = response_to_json_to_field(&func_lock_response, "id")?;
+    let func_lock = client
+        .functional_group(FUNCTIONAL_GROUP)
+        .locks()
+        .create(default_timeout())
+        .await?
+        .expect_status(StatusCode::CREATED)
+        .into_body();
 
-    let ecu_lock_response = create_lock(
-        default_timeout(),
-        ECU_ENDPOINT,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
-    let ecu_lock_id: String = response_to_json_to_field(&ecu_lock_response, "id")?;
+    let ecu_lock = client
+        .component(ECU_FLXC1000)
+        .locks()
+        .create(default_timeout())
+        .await?
+        .expect_status(StatusCode::CREATED)
+        .into_body();
 
-    lock_operation(
-        ECU_ENDPOINT,
-        Some(&ecu_lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
-
-    lock_operation(
-        FUNCTIONAL_GROUP_ENDPOINT,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    ecu_lock
+        .release()
+        .await?
+        .expect_status(StatusCode::NO_CONTENT);
+    func_lock
+        .release()
+        .await?
+        .expect_status(StatusCode::NO_CONTENT);
 
     Ok(())
 }
 
 #[tokio::test]
 async fn ownership() -> Result<(), TestingError> {
-    #[derive(Deserialize)]
-    struct LockElement {
-        id: String,
-        owned: bool,
-    }
-
-    #[derive(Deserialize)]
-    struct LockList {
-        items: Vec<LockElement>,
-    }
-
     let test_env = TestEnv::builder().await?;
-    let auth_owner = test_env.auth_header().await?;
-    let auth_other = test_env.auth_header_for("ownership-test").await?;
+    let owner = test_env.client();
+    let other = test_env.client_as("ownership-test").await?;
 
     for endpoint in ENDPOINTS {
-        let lock_id: String = response_to_json_to_field(
-            &create_lock(default_timeout(), endpoint, StatusCode::CREATED, &test_env).await,
-            "id",
-        )?;
+        let lock = owner
+            .locks_at(endpoint)
+            .create(default_timeout())
+            .await?
+            .expect_status(StatusCode::CREATED)
+            .into_body();
+        let lock_id = lock.id().to_owned();
 
-        let get_lock_list = async |auth: &HeaderMap| {
-            serde_json::from_value(response_to_json(
-                &lock_operation_with_headers(
-                    endpoint,
-                    None,
-                    &test_env.config,
-                    auth,
-                    StatusCode::OK,
-                    Method::GET,
-                )
-                .await,
-            )?)
-            .map_err(|e| TestingError::InvalidData(format!("Failed to parse lock list, err={e}")))
-        };
-
-        let lock_list_user_1: LockList = get_lock_list(&auth_owner).await?;
-        let lock_list_user_2: LockList = get_lock_list(&auth_other).await?;
+        let lock_list_user_1 = owner
+            .locks_at(endpoint)
+            .list()
+            .await?
+            .expect_status(StatusCode::OK);
+        let lock_list_user_2 = other
+            .locks_at(endpoint)
+            .list()
+            .await?
+            .expect_status(StatusCode::OK);
 
         assert_eq!(lock_list_user_1.items.len(), 1);
         assert_eq!(lock_list_user_2.items.len(), 1);
@@ -226,27 +212,20 @@ async fn ownership() -> Result<(), TestingError> {
         assert!(item_user_1.owned);
         assert!(!item_user_2.owned);
 
-        lock_operation(
-            endpoint,
-            Some(&lock_id),
-            &test_env,
-            StatusCode::NO_CONTENT,
-            Method::DELETE,
-        )
-        .await;
+        lock.release().await?.expect_status(StatusCode::NO_CONTENT);
 
-        let lock_id: String = response_to_json_to_field(
-            &create_lock_with_headers(
-                default_timeout(),
-                endpoint,
-                StatusCode::CREATED,
-                &test_env.config,
-                &auth_other,
-            )
-            .await,
-            "id",
-        )?;
-        let lock_list_user_2: LockList = get_lock_list(&auth_other).await?;
+        let lock = other
+            .locks_at(endpoint)
+            .create(default_timeout())
+            .await?
+            .expect_status(StatusCode::CREATED)
+            .into_body();
+        let lock_id = lock.id().to_owned();
+        let lock_list_user_2 = other
+            .locks_at(endpoint)
+            .list()
+            .await?
+            .expect_status(StatusCode::OK);
         let item_user_2 = lock_list_user_2
             .items
             .iter()
@@ -254,15 +233,7 @@ async fn ownership() -> Result<(), TestingError> {
             .unwrap_or_else(|| panic!("After delete, user 2 lock id {lock_id} not found"));
         assert!(item_user_2.owned);
 
-        lock_operation_with_headers(
-            endpoint,
-            Some(&lock_id),
-            &test_env.config,
-            &auth_other,
-            StatusCode::NO_CONTENT,
-            Method::DELETE,
-        )
-        .await;
+        lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     }
 
     Ok(())
@@ -271,155 +242,123 @@ async fn ownership() -> Result<(), TestingError> {
 #[tokio::test]
 async fn test_vehicle_locking_blocked_by_other() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let auth_user2 = test_env.auth_header_for("user2").await?;
+    let user2 = test_env.client_as("user2").await?;
 
     // User1 creates a functional lock
-    let func_lock_id: String = response_to_json_to_field(
-        &create_lock(
-            default_timeout(),
-            FUNCTIONAL_GROUP_ENDPOINT,
-            StatusCode::CREATED,
-            &test_env,
-        )
-        .await,
-        "id",
-    )?;
+    let func_lock = test_env
+        .client()
+        .functional_group(FUNCTIONAL_GROUP)
+        .locks()
+        .create(default_timeout())
+        .await?
+        .expect_status(StatusCode::CREATED)
+        .into_body();
 
     // User2 cannot create a vehicle lock because user1 holds a lock
-    create_lock_with_headers(
-        default_timeout(),
-        VEHICLE_ENDPOINT,
-        StatusCode::LOCKED,
-        &test_env.config,
-        &auth_user2,
-    )
-    .await;
+    let err = user2
+        .locks()
+        .create(default_timeout())
+        .await
+        .map(drop)
+        .expect_err("user2 locked the vehicle while user1 holds a lock");
+    assert_eq!(err.status(), Some(StatusCode::LOCKED));
 
     // Cleanup
-    lock_operation(
-        FUNCTIONAL_GROUP_ENDPOINT,
-        Some(&func_lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    func_lock
+        .release()
+        .await?
+        .expect_status(StatusCode::NO_CONTENT);
 
     Ok(())
 }
 
 #[tokio::test]
 async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
-    async fn create_ecu_and_func_lock(
-        user: &HeaderMap,
-        test_env: &TestEnv,
-    ) -> Result<(String, String), TestingError> {
+    /// Creates the ECU and the functional group lock. Their guards must be
+    /// kept, dropping them would delete the locks.
+    async fn create_ecu_and_func_lock(user: &SovdTestClient) -> Result<(Lock, Lock), TestingError> {
         // Create locks in correct hierarchy: ECU (lowest) -> Functional -> Vehicle (highest)
-        let ecu_lock_id: String = response_to_json_to_field(
-            &create_lock_with_headers(
-                default_timeout(),
-                ECU_ENDPOINT,
-                StatusCode::CREATED,
-                &test_env.config,
-                user,
-            )
-            .await,
-            "id",
-        )?;
+        let ecu_lock = user
+            .component(ECU_FLXC1000)
+            .locks()
+            .create(default_timeout())
+            .await?
+            .expect_status(StatusCode::CREATED)
+            .into_body();
 
-        let func_lock_id: String = response_to_json_to_field(
-            &create_lock_with_headers(
-                default_timeout(),
-                FUNCTIONAL_GROUP_ENDPOINT,
-                StatusCode::CREATED,
-                &test_env.config,
-                user,
-            )
-            .await,
-            "id",
-        )?;
+        let func_lock = user
+            .functional_group(FUNCTIONAL_GROUP)
+            .locks()
+            .create(default_timeout())
+            .await?
+            .expect_status(StatusCode::CREATED)
+            .into_body();
 
-        Ok((ecu_lock_id, func_lock_id))
+        Ok((ecu_lock, func_lock))
     }
 
     async fn assert_ecu_and_func_locks_deleted(
-        ecu_lock_id: &str,
-        func_lock_id: &str,
-        user: &HeaderMap,
-        test_env: &TestEnv,
+        ecu_lock: &Lock,
+        func_lock: &Lock,
+        user: &SovdTestClient,
     ) {
-        lock_operation_with_headers(
-            ECU_ENDPOINT,
-            Some(ecu_lock_id),
-            &test_env.config,
-            user,
-            StatusCode::NOT_FOUND,
-            Method::GET,
-        )
-        .await;
+        let err = user
+            .component(ECU_FLXC1000)
+            .lock(ecu_lock.id())
+            .get()
+            .await
+            .map(drop)
+            .expect_err("ECU lock still exists");
+        assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
 
-        lock_operation_with_headers(
-            FUNCTIONAL_GROUP_ENDPOINT,
-            Some(func_lock_id),
-            &test_env.config,
-            user,
-            StatusCode::NOT_FOUND,
-            Method::GET,
-        )
-        .await;
-    }
-
-    async fn create_vehicle_lock(
-        test_env: &TestEnv,
-        user: &HeaderMap,
-    ) -> Result<String, TestingError> {
-        response_to_json_to_field(
-            &create_lock_with_headers(
-                default_timeout(),
-                VEHICLE_ENDPOINT,
-                StatusCode::CREATED,
-                &test_env.config,
-                user,
-            )
-            .await,
-            "id",
-        )
-    }
-
-    async fn delete_lock(test_env: &TestEnv, user: &HeaderMap, lock_id: &str) {
-        lock_operation_with_headers(
-            VEHICLE_ENDPOINT,
-            Some(lock_id),
-            &test_env.config,
-            user,
-            StatusCode::NO_CONTENT,
-            Method::DELETE,
-        )
-        .await;
+        let err = user
+            .functional_group(FUNCTIONAL_GROUP)
+            .lock(func_lock.id())
+            .get()
+            .await
+            .map(drop)
+            .expect_err("functional group lock still exists");
+        assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
     }
 
     let test_env = TestEnv::builder().await?;
-    let auth_user1 = test_env.auth_header().await?;
-    let auth_user2 = test_env.auth_header_for("user2").await?;
+    let user1 = test_env.client();
+    let user2 = test_env.client_as("user2").await?;
 
     // tests are done with two users to ensure locks are properly deleted
     // test with locks created before vehicle lock
     {
-        for user in [&auth_user1, &auth_user2] {
-            let (ecu_lock_id, func_lock_id) = create_ecu_and_func_lock(user, &test_env).await?;
-            let vehicle_lock = create_vehicle_lock(&test_env, user).await?;
-            delete_lock(&test_env, user, &vehicle_lock).await;
-            assert_ecu_and_func_locks_deleted(&ecu_lock_id, &func_lock_id, user, &test_env).await;
+        for user in [user1, &user2] {
+            let (ecu_lock, func_lock) = create_ecu_and_func_lock(user).await?;
+            let vehicle_lock = user
+                .locks()
+                .create(default_timeout())
+                .await?
+                .expect_status(StatusCode::CREATED)
+                .into_body();
+            vehicle_lock
+                .release()
+                .await?
+                .expect_status(StatusCode::NO_CONTENT);
+            assert_ecu_and_func_locks_deleted(&ecu_lock, &func_lock, user).await;
         }
     }
 
     // test with locks created after vehicle lock
     {
-        for user in [&auth_user1, &auth_user2] {
-            let vehicle_lock = create_vehicle_lock(&test_env, user).await?;
-            let (ecu_lock_id, func_lock_id) = create_ecu_and_func_lock(user, &test_env).await?;
-            delete_lock(&test_env, user, &vehicle_lock).await;
-            assert_ecu_and_func_locks_deleted(&ecu_lock_id, &func_lock_id, user, &test_env).await;
+        for user in [user1, &user2] {
+            let vehicle_lock = user
+                .locks()
+                .create(default_timeout())
+                .await?
+                .expect_status(StatusCode::CREATED)
+                .into_body();
+            let (ecu_lock, func_lock) = create_ecu_and_func_lock(user).await?;
+            vehicle_lock
+                .release()
+                .await?
+                .expect_status(StatusCode::NO_CONTENT);
+            assert_ecu_and_func_locks_deleted(&ecu_lock, &func_lock, user).await;
         }
     }
     Ok(())
@@ -428,50 +367,38 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
 #[tokio::test]
 async fn test_vehicle_lock_cannot_be_deleted_by_non_owner() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let auth_other = test_env.auth_header_for("other-user").await?;
+    let other = test_env.client_as("other-user").await?;
 
     // Owner creates vehicle lock
-    let vehicle_lock_id: String = response_to_json_to_field(
-        &create_lock(
-            default_timeout(),
-            VEHICLE_ENDPOINT,
-            StatusCode::CREATED,
-            &test_env,
-        )
-        .await,
-        "id",
-    )?;
+    let vehicle_lock = test_env
+        .client()
+        .locks()
+        .create(default_timeout())
+        .await?
+        .expect_status(StatusCode::CREATED)
+        .into_body();
 
     // Other user cannot delete the vehicle lock
-    lock_operation_with_headers(
-        VEHICLE_ENDPOINT,
-        Some(&vehicle_lock_id),
-        &test_env.config,
-        &auth_other,
-        StatusCode::FORBIDDEN,
-        Method::DELETE,
-    )
-    .await;
+    let err = other
+        .locks()
+        .lock(vehicle_lock.id())
+        .delete()
+        .await
+        .expect_err("other user deleted the vehicle lock");
+    assert_eq!(err.status(), Some(StatusCode::FORBIDDEN));
 
     // Verify lock still exists
-    lock_operation(
-        VEHICLE_ENDPOINT,
-        Some(&vehicle_lock_id),
-        &test_env,
-        StatusCode::OK,
-        Method::GET,
-    )
-    .await;
+    vehicle_lock
+        .handle()
+        .get()
+        .await?
+        .expect_status(StatusCode::OK);
 
     // Owner can delete their own lock
-    lock_operation(
-        VEHICLE_ENDPOINT,
-        Some(&vehicle_lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    vehicle_lock
+        .release()
+        .await?
+        .expect_status(StatusCode::NO_CONTENT);
 
     Ok(())
 }
@@ -482,38 +409,31 @@ async fn test_component_ownership_protection_with_vehicle_lock_only() -> Result<
 
     // Lock the vehicle as 'owner'
     let expiration_timeout = Duration::from_secs(30);
-    let ecu_lock = create_lock(
-        expiration_timeout,
-        VEHICLE_ENDPOINT,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
-    let lock_id = extract_field_from_json::<String>(&response_to_json(&ecu_lock)?, "id")?;
+    let vehicle_lock = test_env
+        .client()
+        .locks()
+        .create(expiration_timeout)
+        .await?
+        .expect_status(StatusCode::CREATED)
+        .into_body();
 
-    // Create headers for non_owner using the specific bearer token
-    let auth_non_owner = bearer_token_header(NON_OWNER_BEARER_TOKEN);
+    // Client for the non_owner using the specific bearer token
+    let non_owner = test_env
+        .anonymous_client()
+        .with_token(NON_OWNER_BEARER_TOKEN);
 
     // Non-owner tries to set dtcsetting - should fail because lock owners differ
     // Without lock, the CDA should reject the request
-    set_dtc_setting_with_headers(
-        "On",
-        &test_env.config,
-        &auth_non_owner,
-        sovd::ECU_FLXC1000_ENDPOINT,
-        StatusCode::LOCKED,
-    )
-    .await?;
+    let err = set_dtc_setting(&non_owner.component(ECU_FLXC1000), "On")
+        .await
+        .expect_err("non-owner set the DTC setting");
+    assert_eq!(err.status(), Some(StatusCode::LOCKED));
 
     // Cleanup: delete the lock as owner
-    lock_operation(
-        VEHICLE_ENDPOINT,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    vehicle_lock
+        .release()
+        .await?
+        .expect_status(StatusCode::NO_CONTENT);
 
     Ok(())
 }
@@ -521,82 +441,55 @@ async fn test_component_ownership_protection_with_vehicle_lock_only() -> Result<
 #[tokio::test]
 async fn vehicle_lock_exclusivity_controls_foreign_communication() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let other = bearer_token_header(NON_OWNER_BEARER_TOKEN);
+    let locks = test_env.client().locks();
+    let other = test_env
+        .anonymous_client()
+        .with_token(NON_OWNER_BEARER_TOKEN);
+    let other_ecu = other.component(ECU_FLXC1000);
+    let vin = other_ecu.data("vindataidentifier");
 
-    let non_exclusive_id: String = response_to_json_to_field(
-        &create_lock_with_payload(
-            VEHICLE_ENDPOINT,
-            StatusCode::CREATED,
-            &test_env,
-            &serde_json::json!({
-                "lock_expiration": default_timeout().as_secs(),
-                "x-sovd2uds-isexclusive": false,
-            }),
-        )
-        .await,
-        "id",
-    )?;
-    send_cda_request(
-        &test_env.config,
-        sovd::ECU_FLXC1000_VIN_ENDPOINT,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        Some(&other),
-        None,
-    )
-    .await?;
-    set_dtc_setting_with_headers(
-        "On",
-        &test_env.config,
-        &other,
-        sovd::ECU_FLXC1000_ENDPOINT,
-        StatusCode::LOCKED,
-    )
-    .await?;
-    lock_operation(
-        VEHICLE_ENDPOINT,
-        Some(&non_exclusive_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    let non_exclusive = locks
+        .create_with(&locking::Request {
+            lock_expiration: default_timeout().as_secs(),
+            break_lock: false,
+            x_sovd2uds_isexclusive: Some(false),
+            metadata: Map::new(),
+        })
+        .await?
+        .expect_status(StatusCode::CREATED)
+        .into_body();
+    vin.get().await?.expect_status(StatusCode::OK);
+    let err = set_dtc_setting(&other_ecu, "On")
+        .await
+        .expect_err("non-owner set the DTC setting");
+    assert_eq!(err.status(), Some(StatusCode::LOCKED));
+    non_exclusive
+        .release()
+        .await?
+        .expect_status(StatusCode::NO_CONTENT);
 
-    let exclusive_id: String = response_to_json_to_field(
-        &create_lock_with_payload(
-            VEHICLE_ENDPOINT,
-            StatusCode::CREATED,
-            &test_env,
-            &serde_json::json!({
-                "lock_expiration": default_timeout().as_secs(),
-                "x-sovd2uds-isexclusive": true,
-            }),
-        )
-        .await,
-        "id",
-    )?;
-    let recorder = test_env.record(ECU_FLXC1000).await?;
-    send_cda_request(
-        &test_env.config,
-        sovd::ECU_FLXC1000_VIN_ENDPOINT,
-        StatusCode::LOCKED,
-        Method::GET,
-        None,
-        Some(&other),
-        None,
-    )
-    .await?;
+    let exclusive = locks
+        .create_with(&locking::Request {
+            lock_expiration: default_timeout().as_secs(),
+            break_lock: false,
+            x_sovd2uds_isexclusive: Some(true),
+            metadata: Map::new(),
+        })
+        .await?
+        .expect_status(StatusCode::CREATED)
+        .into_body();
+    let recorder = test_env.record(sovd::ECU_FLXC1000).await?;
+    let err = vin
+        .get()
+        .await
+        .expect_err("non-owner read through an exclusive lock");
+    assert_eq!(err.status(), Some(StatusCode::LOCKED));
     let frames = recorder.stop().await?;
     assert!(frames.is_empty(), "Rejected read reached ECU: {frames:?}");
-    lock_operation(
-        VEHICLE_ENDPOINT,
-        Some(&exclusive_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    exclusive
+        .release()
+        .await?
+        .expect_status(StatusCode::NO_CONTENT);
 
     Ok(())
 }

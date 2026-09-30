@@ -84,9 +84,7 @@ use cda_interfaces::{
     config::ConfigSanity,
 };
 use futures::FutureExt;
-use http::{HeaderMap, Method, StatusCode};
 use opensovd_cda_lib::config::configfile::{Configuration, ServerTransport};
-use sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response as NetworkStructureResponse;
 use testcontainers::{
     ContainerAsync, GenericImage, ImageExt, TestcontainersError,
     core::{AccessMode, CmdWaitFor, ExecCommand, Mount},
@@ -94,20 +92,21 @@ use testcontainers::{
 };
 use tokio::sync::{Semaphore, SemaphorePermit};
 
-use crate::util::{
-    TestingError,
-    config::{
-        CDA_CONFIG_FILE, CDA_FLASH_DIR, CDA_HTTP_PORT, CDA_STORAGE_DIR, ECU_SIM_CONTROL_PORT,
-        cda_test_config, cda_test_config_can, cda_test_config_mixed, container_config_toml,
-        flash_files_host_dir,
-    },
-    ecusim::{self, EcuSim, Recorder},
-    endpoints::SOVD2UDS_NETWORK_STRUCTURE,
-    http::{auth_header, response_to_t, send_cda_request, vehicle_url},
-    test_containers::{
-        ContainerOwner, ECU_SIM_STARTUP_TIMEOUT, SocketcandEndpoint, cda_container_for,
-        current_test_name, ecu_sim_container_for, follow_logs_since, save_coverage_with_cli,
-        session_network_prefix, socketcand_container_for, unix_time_secs,
+use crate::{
+    client::{DEFAULT_CLIENT_ID, SovdTestClient},
+    util::{
+        TestingError,
+        config::{
+            CDA_CONFIG_FILE, CDA_FLASH_DIR, CDA_HTTP_PORT, CDA_STORAGE_DIR, ECU_SIM_CONTROL_PORT,
+            cda_test_config, cda_test_config_can, cda_test_config_mixed, container_config_toml,
+            flash_files_host_dir,
+        },
+        ecusim::{self, EcuSim, Recorder},
+        test_containers::{
+            ContainerOwner, ECU_SIM_STARTUP_TIMEOUT, SocketcandEndpoint, cda_container_for,
+            current_test_name, ecu_sim_container_for, follow_logs_since, save_coverage_with_cli,
+            session_network_prefix, socketcand_container_for, unix_time_secs,
+        },
     },
 };
 
@@ -249,8 +248,8 @@ pub(crate) struct TestEnv {
     ecu_sim_running: bool,
     cda_starts: usize,
     containers: Containers,
-    /// The header of [`Self::auth_header`], until the CDA is restarted.
-    auth: Mutex<Option<HeaderMap>>,
+    /// The default test client of the running CDA, see [`Self::client`].
+    client: Option<SovdTestClient>,
 }
 
 /// What container operations need to know about an environment. Cheap to
@@ -345,6 +344,7 @@ impl TestEnv {
         };
         let mut config = config.clone();
         config.server = self.default_config.server.clone();
+        self.client = Some(SovdTestClient::authorize(&config, DEFAULT_CLIENT_ID).await?);
         self.config = config;
         Ok(())
     }
@@ -372,39 +372,29 @@ impl TestEnv {
         Recorder::start(&self.ecu_sim, ecu).await
     }
 
-    /// The `Authorization` header of the default test client for the CDA of
-    /// this environment. Authorizes once per CDA start.
+    /// The client of the CDA of this environment, authorized as the default
+    /// test client when the CDA started.
+    ///
+    /// # Panics
+    /// If no CDA runs, e.g. with [`TestEnvBuilder::without_cda`].
+    pub(crate) fn client(&self) -> &SovdTestClient {
+        self.client
+            .as_ref()
+            .expect("no CDA runs in this environment")
+    }
+
+    /// A client of the CDA of this environment, authorized as the test
+    /// client `client_id`, e.g. to act as another user than [`Self::client`].
     ///
     /// # Errors
     /// Returns an error if the CDA does not authorize the client.
-    pub(crate) async fn auth_header(&self) -> Result<HeaderMap, TestingError> {
-        if let Some(header) = self
-            .auth
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-        {
-            return Ok(header);
-        }
-        let header = auth_header(&self.config, None).await?;
-        *self.auth.lock().unwrap_or_else(PoisonError::into_inner) = Some(header.clone());
-        Ok(header)
+    pub(crate) async fn client_as(&self, client_id: &str) -> Result<SovdTestClient, TestingError> {
+        Ok(SovdTestClient::authorize(&self.config, client_id).await?)
     }
 
-    /// The `Authorization` header of the test client `client_id`, e.g. to act
-    /// as another user than [`Self::auth_header`].
-    ///
-    /// # Errors
-    /// Returns an error if the CDA does not authorize the client.
-    pub(crate) async fn auth_header_for(&self, client_id: &str) -> Result<HeaderMap, TestingError> {
-        auth_header(&self.config, Some(client_id)).await
-    }
-
-    /// The URL of `endpoint` below `/vehicle/v15/` of the CDA of this
-    /// environment, e.g. `components/flxc1000/data`. Changes whenever the CDA
-    /// is restarted, see [`Self::restart_cda`].
-    pub(crate) fn vehicle_url(&self, endpoint: &str) -> String {
-        vehicle_url(&self.config, endpoint)
+    /// An unauthorized client of the CDA of this environment.
+    pub(crate) fn anonymous_client(&self) -> SovdTestClient {
+        SovdTestClient::new(&self.config)
     }
 
     /// Runs `body` against a CDA running with `temporary_config`, then
@@ -459,7 +449,7 @@ impl TestEnv {
     /// Never fails today; the container is removed on a best effort basis.
     pub(crate) async fn stop_cda(&mut self) -> Result<(), TestingError> {
         self.cda_running = false;
-        *self.auth.get_mut().unwrap_or_else(PoisonError::into_inner) = None;
+        self.client = None;
         if let Some(cda) = self.containers.cda.take() {
             let coverage = coverage_mode();
             on_shared_runtime(async move {
@@ -619,7 +609,7 @@ impl TestEnv {
             cda_starts: 0,
             containers,
             spec,
-            auth: Mutex::new(None),
+            client: None,
         })
     }
 
@@ -1075,20 +1065,10 @@ pub(crate) async fn wait_for_ecus_online(config: &Configuration) -> Result<(), T
             )));
         }
 
-        let response = send_cda_request(
-            config,
-            SOVD2UDS_NETWORK_STRUCTURE,
-            StatusCode::OK,
-            Method::GET,
-            None,
-            None,
-            None,
-        )
-        .await?;
-        let network_structure_response: NetworkStructureResponse = response_to_t(&response)
-            .map_err(|e| {
-                TestingError::InvalidData(format!("Failed to parse networkstructure response: {e}"))
-            })?;
+        let network_structure_response = SovdTestClient::new(config)
+            .sovd2uds()
+            .network_structure()
+            .await?;
 
         let offline_ecus: Vec<String> = network_structure_response
             .data
