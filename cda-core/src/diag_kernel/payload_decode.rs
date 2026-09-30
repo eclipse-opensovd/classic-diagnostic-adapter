@@ -1111,10 +1111,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         let num_items_diag_type: datatypes::DiagCodedType = num_items_dop.diag_coded_type()?;
 
+        // ISO 22901-1 7.3.5.4: without BYTE-POSITION the field starts at the byte edge
+        // following the previously extracted parameter. DETERMINE-NUMBER-OF-ITEMS and
+        // OFFSET are relative to this position (7.3.6.10.4).
         let param_abs_byte_pos = if param_ctx.parameter.has_byte_position() {
             param_ctx.abs_byte_pos()
         } else {
-            param_ctx.base_offset
+            uds_payload.last_read_byte_pos()
         };
         let (num_items_data, _count_field_bit_len) = num_items_diag_type.decode(
             uds_payload

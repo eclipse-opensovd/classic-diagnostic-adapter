@@ -919,17 +919,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
             // When BYTE-POSITION is absent, pass effective_byte_pos as
             // parent_byte_pos so that the inner encode writes at the
             // correct absolute position (param.byte_position() returns 0).
-            //
-            // Dynamic length fields are the exception: the decoder anchors the positions
-            // of DETERMINE-NUMBER-OF-ITEMS and OFFSET at the enclosing base (0 here) when
-            // the field has no BYTE-POSITION, so the encoder does the same to stay the
-            // exact inverse.
-            let parent_byte_pos =
-                if param.has_byte_position() || is_dynamic_length_field_param(param) {
-                    0
-                } else {
-                    effective_byte_pos
-                };
+            let parent_byte_pos = if param.has_byte_position() {
+                0
+            } else {
+                effective_byte_pos
+            };
             self.map_param_to_uds(
                 param,
                 json_values.get(short_name),
@@ -1516,19 +1510,6 @@ fn json_value_to_u32(value: &serde_json::Value) -> Option<u32> {
         _ => None,
     }
     .and_then(|n| u32::try_from(n).ok())
-}
-
-/// Returns true if the parameter is a VALUE parameter referencing a DYNAMIC-LENGTH-FIELD.
-fn is_dynamic_length_field_param(param: &datatypes::Parameter) -> bool {
-    param
-        .specific_data_as_value()
-        .and_then(|v| v.dop())
-        .is_some_and(|dop| {
-            matches!(
-                datatypes::DataOperation(dop).variant(),
-                Ok(datatypes::DataOperationVariant::DynamicLengthField(_))
-            )
-        })
 }
 
 /// Prefixes the message of `error` with `prefix`, keeping the error kind.
@@ -3244,8 +3225,9 @@ mod tests {
         async fn test_param_without_byte_position_after_sibling() {
             let config = DlfRequestConfig {
                 param_byte_pos: None,
-                count_byte_pos: 4,
-                offset: 5,
+                // relative to the field, which starts right after `sibling` (byte 4)
+                count_byte_pos: 0,
+                offset: 1,
                 ..Default::default()
             };
             let value = json!({"sibling": 0xAB, "items": [{"val": 0x1122}]});
