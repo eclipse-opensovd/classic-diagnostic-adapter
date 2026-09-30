@@ -20,13 +20,17 @@ on:
     branches: [main]
 
 jobs:
+  versions:
+    uses: ./.github/workflows/tool-versions.yml
+
   update:
     # only run on success and do not run in forks
     if: github.event.workflow_run.conclusion == 'success' && github.repository_owner == 'eclipse-opensovd'
+    needs: versions
     uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap-baseline.yml@07140bdd84f20b66fd4aff58a83c5148deec388c
     with:
       run-id: ${{ github.event.workflow_run.id }}
-      rust-version: "1.88.0"
+      rust-version: ${{ needs.versions.outputs.stable }}
       cargo-crap-git-url: "https://github.com/theswiftfox/cargo-crap.git"
       cargo-crap-git-rev: "27bab7d86c0ff9c4f8f681d6538be24572ca1a8d"
       lcov-file: "lcov-merged.info"

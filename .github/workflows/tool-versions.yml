@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: Tool Versions
+
+on:
+  workflow_call:
+    outputs:
+      stable:
+        description: Stable Rust toolchain
+        value: ${{ jobs.versions.outputs.stable }}
+      nightly:
+        description: Pinned nightly Rust toolchain
+        value: ${{ jobs.versions.outputs.nightly }}
+      cargo_deny:
+        description: cargo-deny version
+        value: ${{ jobs.versions.outputs.cargo_deny }}
+      cargo_llvm_cov:
+        description: cargo-llvm-cov version
+        value: ${{ jobs.versions.outputs.cargo_llvm_cov }}
+      protoc:
+        description: Protobuf compiler version
+        value: ${{ jobs.versions.outputs.protoc }}
+
+permissions:
+  contents: read
+
+jobs:
+  versions:
+    runs-on: ubuntu-latest
+    outputs:
+      stable: ${{ steps.versions.outputs.stable }}
+      nightly: ${{ steps.versions.outputs.nightly }}
+      cargo_deny: ${{ steps.versions.outputs.cargo_deny }}
+      cargo_llvm_cov: ${{ steps.versions.outputs.cargo_llvm_cov }}
+      protoc: ${{ steps.versions.outputs.protoc }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+      - name: Read tool versions
+        id: versions
+        run: make --no-print-directory tool-versions >> "$GITHUB_OUTPUT"

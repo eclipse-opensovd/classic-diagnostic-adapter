@@ -27,17 +27,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  versions:
+    uses: ./.github/workflows/tool-versions.yml
+
   pre-commit:
+    needs: versions
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
           submodules: false
+      - name: Install stable Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ needs.versions.outputs.stable }}
+          components: clippy
+      - name: Install nightly Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ needs.versions.outputs.nightly }}
+          components: clippy,rustfmt
       - name: Run checks
         uses: eclipse-opensovd/cicd-workflows/pre-commit-action@07140bdd84f20b66fd4aff58a83c5148deec388c
         with:
-          rust-toolchain: "1.88"
+          rust-toolchain: ${{ needs.versions.outputs.stable }}
       - name: Validate commit subjects (Conventional Commits)
         if: github.event_name == 'pull_request'
         env:

@@ -28,7 +28,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  versions:
+    uses: ./.github/workflows/tool-versions.yml
+
   features:
+    needs: versions
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: "--cfg tokio_unstable -L /usr/local/lib"
@@ -41,31 +45,32 @@ jobs:
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: nightly-2026-07-21
+          toolchain: ${{ needs.versions.outputs.stable }}
+          components: clippy,rustfmt
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
         with:
-          version: "34.1"
+          version: ${{ needs.versions.outputs.protoc }}
           # The action queries the GitHub API to fetch releases data,
           # to avoid rate limiting, passing the default token.
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Setup DLT tracing lib
         uses: eclipse-opensovd/dlt-tracing-lib/.github/actions/setup-dlt@main
       - name: Build all features
-        run: cargo build --locked --verbose --all-features
+        run: make build-all-features
       - name: Verify generated files are up to date
         run: |
           if ! git diff --exit-code cda-database/src/flatbuf/diagnostic_description.rs cda-database/src/proto/fileformat.rs; then
             echo ""
             echo "::error::Generated files are out of date."
-            echo "Regenerate flatbuffers with: cargo build -p cda-database --features gen-flatbuffers"
-            echo "Regenerate protos with: cargo build -p cda-database --features gen-protos"
+            echo "Regenerate flatbuffers with: make generate-flatbuffers"
+            echo "Regenerate protos with: make generate-protos"
             exit 1
           fi
           echo "Generated files are up to date."
       - name: Verify reference config matches generated config
         run: |
-          cargo run --locked --all-features -- generate-config --output /tmp/opensovd-cda.toml
+          make generate-config OUTPUT=/tmp/opensovd-cda.toml
           if ! diff -u opensovd-cda.toml /tmp/opensovd-cda.toml; then
             echo ""
             echo "::error::opensovd-cda.toml does not match configuration generated from code."
@@ -76,7 +81,7 @@ jobs:
           edit the configuration fields in the source code.
 
           You can regenerate it with:
-          cargo run --all-features -- generate-config --output opensovd-cda.toml
+          make generate-config
 
           You will need DLT installed as a library on your system.
           You can install it like so:
@@ -91,16 +96,17 @@ jobs:
       # note: if openssl and mbedtls are enabled falls back to openssl
       # therefore we build mbedtls separately as well
       - name: Build mbedtls features
-        run: cargo build --locked --verbose -p opensovd-cda --no-default-features --features mbedtls
+        run: make build-mbedtls
       - name: Build minimal features
-        run: cargo build --locked --verbose --no-default-features
+        run: make build-minimal
       - name: Build minimal CDA only
         # Building CDA only makes sure that optional dependencies
         # from within the workspace are properly marked as optional and guarded
         # with cfg flags.
-        run: cargo build --locked --verbose --no-default-features --package opensovd-cda
+        run: make build-minimal-cda
 
   build_and_test:
+    needs: versions
     runs-on: ubuntu-latest
 
     steps:
@@ -113,26 +119,28 @@ jobs:
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.88.0
+          toolchain: ${{ needs.versions.outputs.stable }}
           components: clippy, rustfmt, llvm-tools
       - name: Install cargo-deny
-        run: cargo install --locked --version 0.18.9 cargo-deny
+        run: cargo install --locked --version "${{ needs.versions.outputs.cargo_deny }}" cargo-deny
       - name: Install cargo-llvm-cov
-        run: cargo install --locked cargo-llvm-cov
+        run: cargo install --locked --version "${{ needs.versions.outputs.cargo_llvm_cov }}" cargo-llvm-cov
       - name: Build
-        run: cargo build --locked --verbose
+        run: make build
       - name: Check licenses
-        run: cargo deny check licenses
+        run: make deny ARGS=licenses
       - name: Check allowed sources
-        run: cargo deny check sources
+        run: make deny ARGS=sources
       - name: Check banned practises
-        run: cargo deny check bans
+        run: make deny ARGS=bans
       # In order to utilize caching, the docker images need to be built in the github action.
       - name: Build CDA docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: testcontainer/cda/Dockerfile
+          build-args: |
+            RUST_VERSION=${{ needs.versions.outputs.stable }}
           push: false
           tags: ghcr.io/${{ github.repository }}/opensovd-cda:latest
           load: true
@@ -150,6 +158,7 @@ jobs:
           context: .
           file: testcontainer/cda/Dockerfile
           build-args: |
+            RUST_VERSION=${{ needs.versions.outputs.stable }}
             BUILD_PROFILE=dev
             RUSTFLAGS=-C instrument-coverage
           push: false
@@ -177,12 +186,12 @@ jobs:
           cache-to: |
             type=gha,mode=max,scope=ecu-sim-gradle-${{ github.ref_name }}
       - name: Run unit tests with coverage
-        run: cargo llvm-cov --locked --workspace --lcov --output-path lcov.info -- --show-output
+        run: make coverage
       - name: Run integration tests with Docker coverage
         env:
           CACHE_REGISTRY: ghcr.io/${{ github.repository }}
           CDA_INTEGRATION_TEST_COVERAGE: "true"
-        run: cargo test --locked -p integration-tests --features integration-tests -- --show-output
+        run: make integration-test
       - name: Install lcov
         run: sudo apt-get update && sudo apt-get install -y lcov
       - name: Process Docker coverage
@@ -216,6 +225,7 @@ jobs:
           retention-days: 30
   can_integration_tests:
     name: CAN integration tests
+    needs: versions
     runs-on: ubuntu-latest
 
     steps:
@@ -228,7 +238,7 @@ jobs:
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.88.0
+          toolchain: ${{ needs.versions.outputs.stable }}
           components: clippy, rustfmt, llvm-tools
       # The vcan kernel module backs the socketcand container's shared bus.
       - name: Load vcan kernel module
@@ -253,6 +263,7 @@ jobs:
           tags: ghcr.io/${{ github.repository }}/opensovd-cda:coverage
           load: true
           build-args: |
+            RUST_VERSION=${{ needs.versions.outputs.stable }}
             BUILD_PROFILE=dev
             RUSTFLAGS=-C instrument-coverage
             CDA_FEATURES=can-socketcand
@@ -283,17 +294,16 @@ jobs:
       # under coverage so they count toward the merged report like the
       # default-features unit tests in build_and_test.
       - name: Install cargo-llvm-cov
-        run: cargo install --locked cargo-llvm-cov
+        run: cargo install --locked --version "${{ needs.versions.outputs.cargo_llvm_cov }}" cargo-llvm-cov
       - name: Run unit tests with coverage (CAN features)
-        run: cargo llvm-cov --locked -p opensovd-cda -p cda-comm-can --features opensovd-cda/can-socketcand,cda-comm-can/can-socketcand --lcov --output-path lcov-can-unit.info -- --show-output
+        run: make coverage-can
       - name: Run CAN integration tests
         env:
           CACHE_REGISTRY: ghcr.io/${{ github.repository }}
-          CDA_INTEGRATION_TEST_USE_CAN: "true"
           CDA_INTEGRATION_TEST_COVERAGE: "true"
         # Run serially: the CAN transport is timing-sensitive (per-transaction
         # TCP sockets + TesterPresent keepalive), so parallel tests can flake.
-        run: cargo test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
+        run: make integration-test-can
       - name: Install lcov
         run: sudo apt-get update && sudo apt-get install -y lcov
       - name: Process Docker coverage
@@ -321,6 +331,7 @@ jobs:
 
   mixed_integration_tests:
     name: Mixed DoIP+CAN integration tests
+    needs: versions
     runs-on: ubuntu-latest
 
     steps:
@@ -333,7 +344,7 @@ jobs:
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.88.0
+          toolchain: ${{ needs.versions.outputs.stable }}
           components: clippy, rustfmt, llvm-tools
       - name: Load vcan kernel module
         run: |
@@ -358,6 +369,7 @@ jobs:
           tags: ghcr.io/${{ github.repository }}/opensovd-cda:coverage
           load: true
           build-args: |
+            RUST_VERSION=${{ needs.versions.outputs.stable }}
             BUILD_PROFILE=dev
             RUSTFLAGS=-C instrument-coverage
             CDA_FEATURES=can-socketcand
@@ -385,9 +397,8 @@ jobs:
       - name: Run mixed integration tests
         env:
           CACHE_REGISTRY: ghcr.io/${{ github.repository }}
-          CDA_INTEGRATION_TEST_USE_MIXED: "true"
           CDA_INTEGRATION_TEST_COVERAGE: "true"
-        run: cargo test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
+        run: make integration-test-mixed
       - name: Process Docker coverage
         uses: ./.github/actions/process-docker-coverage
         with:
@@ -456,10 +467,10 @@ jobs:
   cargo-crap:
     name: CRAP (Change Risk Anti-Patterns)
     if: github.event_name == 'pull_request'
-    needs: [merge_coverage]
+    needs: [merge_coverage, versions]
     uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap.yml@07140bdd84f20b66fd4aff58a83c5148deec388c
     with:
-      rust-version: "1.88.0"
+      rust-version: ${{ needs.versions.outputs.stable }}
       cargo-crap-git-url: "https://github.com/theswiftfox/cargo-crap.git"
       cargo-crap-git-rev: "27bab7d86c0ff9c4f8f681d6538be24572ca1a8d"
       lcov-file: "lcov-merged.info"
@@ -470,6 +481,7 @@ jobs:
       pull-requests: write
 
   build_windows:
+    needs: versions
     runs-on: windows-latest
 
     steps:
@@ -480,8 +492,10 @@ jobs:
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.88.0
+          toolchain: ${{ needs.versions.outputs.stable }}
           components: clippy, rustfmt, llvm-tools
+      - name: Install GNU Make
+        run: choco install make --no-progress -y
       - name: Setup OpenSSL (Windows) Environment
         run: |
           echo "OPENSSL_DIR=$env:OPENSSL_DIR" >> $env:GITHUB_ENV
@@ -490,6 +504,6 @@ jobs:
         env:
           OPENSSL_DIR: C:\Program Files\OpenSSL
       - name: Build
-        run: cargo build --locked --verbose
+        run: make build
       - name: Test
-        run: cargo test --locked -- --show-output
+        run: make test ARGS="-- --show-output"
