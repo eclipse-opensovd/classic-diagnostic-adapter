@@ -250,117 +250,44 @@ async fn test_vehicle_locking_blocked_by_other() -> Result<(), TestingError> {
 
 #[tokio::test]
 async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
-    async fn create_ecu_and_func_lock(
-        user: &HeaderMap,
-        runtime: &TestEnv,
-    ) -> Result<(String, String), TestingError> {
-        // Create locks in correct hierarchy: ECU (lowest) -> Functional -> Vehicle (highest)
-        let ecu_lock_id: String = response_to_json_to_field(
-            &create_lock(
-                default_timeout(),
-                ECU_ENDPOINT,
-                StatusCode::CREATED,
+    /// Asserts that deleting the vehicle lock deleted `locks` too.
+    async fn assert_deleted(runtime: &TestEnv, user: &HeaderMap, locks: [&Lock; 2]) {
+        for lock in locks {
+            lock_operation(
+                &lock.endpoint,
+                Some(lock.id()),
                 &runtime.config,
                 user,
+                StatusCode::NOT_FOUND,
+                Method::GET,
             )
-            .await,
-            "id",
-        )?;
-
-        let func_lock_id: String = response_to_json_to_field(
-            &create_lock(
-                default_timeout(),
-                FUNCTIONAL_GROUP_ENDPOINT,
-                StatusCode::CREATED,
-                &runtime.config,
-                user,
-            )
-            .await,
-            "id",
-        )?;
-
-        Ok((ecu_lock_id, func_lock_id))
-    }
-
-    async fn assert_ecu_and_func_locks_deleted(
-        ecu_lock_id: &str,
-        func_lock_id: &str,
-        user: &HeaderMap,
-        runtime: &TestEnv,
-    ) {
-        lock_operation(
-            ECU_ENDPOINT,
-            Some(ecu_lock_id),
-            &runtime.config,
-            user,
-            StatusCode::NOT_FOUND,
-            Method::GET,
-        )
-        .await;
-
-        lock_operation(
-            FUNCTIONAL_GROUP_ENDPOINT,
-            Some(func_lock_id),
-            &runtime.config,
-            user,
-            StatusCode::NOT_FOUND,
-            Method::GET,
-        )
-        .await;
-    }
-
-    async fn create_vehicle_lock(
-        runtime: &TestEnv,
-        user: &HeaderMap,
-    ) -> Result<String, TestingError> {
-        response_to_json_to_field(
-            &create_lock(
-                default_timeout(),
-                VEHICLE_ENDPOINT,
-                StatusCode::CREATED,
-                &runtime.config,
-                user,
-            )
-            .await,
-            "id",
-        )
-    }
-
-    async fn delete_lock(runtime: &TestEnv, user: &HeaderMap, lock_id: &str) {
-        lock_operation(
-            VEHICLE_ENDPOINT,
-            Some(lock_id),
-            &runtime.config,
-            user,
-            StatusCode::NO_CONTENT,
-            Method::DELETE,
-        )
-        .await;
+            .await;
+        }
     }
 
     let runtime = setup_integration_test().await?;
     let auth_user1 = auth_header(&runtime.config, None).await?;
     let auth_user2 = auth_header(&runtime.config, Some("user2")).await?;
 
-    // tests are done with two users to ensure locks are properly deleted
+    // Locks in hierarchy: ECU (lowest) -> Functional -> Vehicle (highest).
+    // Tests are done with two users to ensure locks are properly deleted.
+
     // test with locks created before vehicle lock
-    {
-        for user in [&auth_user1, &auth_user2] {
-            let (ecu_lock_id, func_lock_id) = create_ecu_and_func_lock(user, &runtime).await?;
-            let vehicle_lock = create_vehicle_lock(&runtime, user).await?;
-            delete_lock(&runtime, user, &vehicle_lock).await;
-            assert_ecu_and_func_locks_deleted(&ecu_lock_id, &func_lock_id, user, &runtime).await;
-        }
+    for user in [&auth_user1, &auth_user2] {
+        let ecu_lock = Lock::create(ECU_ENDPOINT, &runtime.config, user).await?;
+        let func_lock = Lock::create(FUNCTIONAL_GROUP_ENDPOINT, &runtime.config, user).await?;
+        let vehicle_lock = Lock::create(VEHICLE_ENDPOINT, &runtime.config, user).await?;
+        vehicle_lock.delete().await;
+        assert_deleted(&runtime, user, [&ecu_lock, &func_lock]).await;
     }
 
     // test with locks created after vehicle lock
-    {
-        for user in [&auth_user1, &auth_user2] {
-            let vehicle_lock = create_vehicle_lock(&runtime, user).await?;
-            let (ecu_lock_id, func_lock_id) = create_ecu_and_func_lock(user, &runtime).await?;
-            delete_lock(&runtime, user, &vehicle_lock).await;
-            assert_ecu_and_func_locks_deleted(&ecu_lock_id, &func_lock_id, user, &runtime).await;
-        }
+    for user in [&auth_user1, &auth_user2] {
+        let vehicle_lock = Lock::create(VEHICLE_ENDPOINT, &runtime.config, user).await?;
+        let ecu_lock = Lock::create(ECU_ENDPOINT, &runtime.config, user).await?;
+        let func_lock = Lock::create(FUNCTIONAL_GROUP_ENDPOINT, &runtime.config, user).await?;
+        vehicle_lock.delete().await;
+        assert_deleted(&runtime, user, [&ecu_lock, &func_lock]).await;
     }
     Ok(())
 }
