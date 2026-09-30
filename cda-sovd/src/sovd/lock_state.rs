@@ -18,7 +18,7 @@ use std::{
     time::SystemTime,
 };
 
-use cda_interfaces::lock_priority_api::{LockPrincipal, LockScope};
+use cda_interfaces::lock_priority_api::{LockId, LockPrincipal, LockScope};
 use serde_json::{Map, Value};
 
 /// Canonical, case-insensitive lock scope key.
@@ -31,8 +31,6 @@ pub(crate) enum ScopeKey {
     /// One functional group.
     FunctionalGroup(String),
 }
-
-pub(super) type LockId = String;
 
 impl From<&LockScope> for ScopeKey {
     fn from(scope: &LockScope) -> Self {
@@ -154,19 +152,19 @@ pub(super) enum ExpirationStart {
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub(super) enum StateError {
     #[error("Lock ID already exists: {0}")]
-    DuplicateId(String),
+    DuplicateId(LockId),
     #[error("Lock scope is already active")]
     DuplicateScope,
     #[error("Active lock does not exist: {0}")]
-    ActiveLockNotFound(String),
+    ActiveLockNotFound(LockId),
     #[error("Parent vehicle lock does not exist: {0}")]
-    ParentNotFound(String),
+    ParentNotFound(LockId),
     #[error("Parent lock is not a vehicle lock: {0}")]
-    ParentNotVehicle(String),
+    ParentNotVehicle(LockId),
     #[error("Replacement conflicts with an active scope")]
     ReplacementScopeConflict,
     #[error("Lock coverage conflicts with active lock: {0}")]
-    CoverageConflict(String),
+    CoverageConflict(LockId),
     #[error("State revision overflow")]
     RevisionOverflow,
     #[error("Lock has expired")]
@@ -229,7 +227,7 @@ impl LockState {
     pub(super) fn insert_vehicle(
         &mut self,
         lock: ActiveLock,
-        child_ids: &[String],
+        child_ids: &[LockId],
     ) -> Result<(), StateError> {
         self.transaction(|state| {
             if lock.scope != ScopeKey::Vehicle || lock.parent_vehicle_lock_id.is_some() {
@@ -276,7 +274,7 @@ impl LockState {
             let lock = state
                 .active_by_id
                 .get_mut(lock_id)
-                .ok_or_else(|| StateError::ActiveLockNotFound(lock_id.to_owned()))?;
+                .ok_or_else(|| StateError::ActiveLockNotFound(lock_id.into()))?;
             if lock.expires_at <= now {
                 return Err(StateError::LockExpired);
             }
@@ -293,7 +291,7 @@ impl LockState {
         let mut removed = Vec::new();
         self.transaction(|state| {
             if !state.active_by_id.contains_key(lock_id) {
-                return Err(StateError::ActiveLockNotFound(lock_id.to_owned()));
+                return Err(StateError::ActiveLockNotFound(lock_id.into()));
             }
             removed = state.remove_active_tree_uncommitted(lock_id);
             Ok(())
@@ -319,7 +317,7 @@ impl LockState {
     /// Atomically expands and preempts selected lock roots and inserts the replacement lock.
     pub(super) fn commit_replacement(
         &mut self,
-        preempted_ids: &[String],
+        preempted_ids: &[LockId],
         replacement: ActiveLock,
         broken_by: &str,
         broken_at: SystemTime,
@@ -402,8 +400,8 @@ impl LockState {
     }
 
     /// Removes all defunct locks whose original expiration has elapsed.
-    pub(super) fn expire_defunct(&mut self, now: SystemTime) -> Result<Vec<String>, StateError> {
-        let expired: Vec<String> = self
+    pub(super) fn expire_defunct(&mut self, now: SystemTime) -> Result<Vec<LockId>, StateError> {
+        let expired: Vec<LockId> = self
             .defunct_by_id
             .iter()
             .filter(|(_, lock)| lock.original_expires_at <= now)
@@ -432,7 +430,7 @@ impl LockState {
             return false;
         };
         for lock in self.defunct_by_id.values_mut() {
-            if lock.replacement_lock_id == lock_id {
+            if lock.replacement_lock_id.as_str() == lock_id {
                 lock.replacement_lock_id.clone_from(&replacement_id);
                 lock.replacement_holder.clone_from(&replacement_holder);
             }
@@ -607,7 +605,7 @@ impl LockState {
         removed
     }
 
-    fn expand_active_trees(&self, lock_ids: &[String]) -> Result<BTreeSet<String>, StateError> {
+    fn expand_active_trees(&self, lock_ids: &[LockId]) -> Result<BTreeSet<LockId>, StateError> {
         let roots: BTreeSet<_> = lock_ids.iter().cloned().collect();
         let mut expanded = roots.clone();
         for id in roots {
@@ -672,7 +670,7 @@ mod tests {
         parent_vehicle_lock_id: Option<&str>,
     ) -> ActiveLock {
         ActiveLock {
-            id: id.to_owned(),
+            id: id.into(),
             scope,
             coverage: LockCoverage::new(coverage.iter().map(ToString::to_string)),
             principal: principal("owner"),
@@ -681,7 +679,7 @@ mod tests {
             expires_at: SystemTime::UNIX_EPOCH
                 .checked_add(Duration::from_secs(100))
                 .expect("Test expiration should fit"),
-            parent_vehicle_lock_id: parent_vehicle_lock_id.map(ToOwned::to_owned),
+            parent_vehicle_lock_id: parent_vehicle_lock_id.map(LockId::from),
         }
     }
 
@@ -774,7 +772,7 @@ mod tests {
             .insert_active(powertrain)
             .expect_err("Foreign overlapping coverage should fail");
 
-        assert_eq!(error, StateError::CoverageConflict("engine".to_owned()));
+        assert_eq!(error, StateError::CoverageConflict("engine".into()));
         assert_eq!(state.revision(), revision);
         assert_eq!(state.active().count(), 2);
     }
@@ -955,7 +953,7 @@ mod tests {
 
         state
             .commit_replacement(
-                &["old".to_owned()],
+                &["old".into()],
                 replacement,
                 "priority-app",
                 SystemTime::UNIX_EPOCH
@@ -988,14 +986,14 @@ mod tests {
 
         let error = state
             .commit_replacement(
-                &["old".to_owned(), "missing".to_owned()],
+                &["old".into(), "missing".into()],
                 active_lock("new", ScopeKey::Ecu("engine".to_owned()), &["engine"], None),
                 "priority-app",
                 SystemTime::UNIX_EPOCH,
             )
             .expect_err("Missing preempted lock should fail");
 
-        assert_eq!(error, StateError::ActiveLockNotFound("missing".to_owned()));
+        assert_eq!(error, StateError::ActiveLockNotFound("missing".into()));
         assert_eq!(state.revision(), before.revision());
         assert_eq!(
             state.active().collect::<Vec<_>>(),
@@ -1017,7 +1015,7 @@ mod tests {
             .expect("Initial insertion should succeed");
         state
             .commit_replacement(
-                &["old".to_owned()],
+                &["old".into()],
                 active_lock("new", ScopeKey::Ecu("engine".to_owned()), &["engine"], None),
                 "priority-app",
                 SystemTime::UNIX_EPOCH,
@@ -1032,7 +1030,7 @@ mod tests {
             )
             .expect("Defunct expiration should succeed");
 
-        assert_eq!(expired, vec!["old"]);
+        assert_eq!(expired, vec![LockId::from("old")]);
         assert_eq!(
             state
                 .active()
@@ -1067,7 +1065,7 @@ mod tests {
 
         let removed = state
             .commit_replacement(
-                &["z-vehicle".to_owned()],
+                &["z-vehicle".into()],
                 replacement,
                 "new-owner",
                 SystemTime::now(),
@@ -1095,7 +1093,7 @@ mod tests {
             .expect("Initial insertion should succeed");
         state
             .commit_replacement(
-                &["old".to_owned()],
+                &["old".into()],
                 active_lock("new", ScopeKey::Ecu("engine".to_owned()), &["engine"], None),
                 "priority-app",
                 SystemTime::UNIX_EPOCH,
@@ -1135,7 +1133,7 @@ mod tests {
         second.principal = principal("second-owner");
         state
             .commit_replacement(
-                &["first".to_owned()],
+                &["first".into()],
                 second,
                 "second-owner",
                 SystemTime::UNIX_EPOCH,
@@ -1150,7 +1148,7 @@ mod tests {
         third.principal = principal("third-owner");
         state
             .commit_replacement(
-                &["second".to_owned()],
+                &["second".into()],
                 third,
                 "third-owner",
                 SystemTime::UNIX_EPOCH,
@@ -1159,7 +1157,7 @@ mod tests {
 
         let first = state
             .defunct()
-            .find(|lock| lock.id == "first")
+            .find(|lock| lock.id.as_str() == "first")
             .expect("First defunct lock should remain");
         assert_eq!(state.current_holder(first), "third-owner");
 
@@ -1168,7 +1166,7 @@ mod tests {
             .expect("Intermediate acknowledgement should succeed");
         let first = state
             .defunct()
-            .find(|lock| lock.id == "first")
+            .find(|lock| lock.id.as_str() == "first")
             .expect("First defunct lock should remain");
         assert_eq!(state.current_holder(first), "third-owner");
     }

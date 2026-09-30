@@ -281,7 +281,7 @@ pub(in crate::sovd::locks) async fn run_acquisition_transaction<T: UdsEcu>(
         policy,
     )
     .await;
-    Ok(new_lock.id)
+    Ok(new_lock.id.into())
 }
 
 /// Schedules expiration and emits lifecycle events for a committed acquisition.

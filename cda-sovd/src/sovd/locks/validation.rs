@@ -13,14 +13,17 @@
 
 use std::{option::Option, time::SystemTime};
 
-use cda_interfaces::{UdsEcu, lock_priority_api::LockScope};
+use cda_interfaces::{
+    UdsEcu,
+    lock_priority_api::{LockId, LockScope},
+};
 use cda_plugin_security::Claims;
 
 use super::{ActiveLock, ApiError, ErrorWrapper, LockCoverage, LockState, Locks, ScopeKey};
 
 pub(super) fn validate_vehicle_children(
     active: &[ActiveLock],
-    preempted_roots: &[String],
+    preempted_roots: &[LockId],
     subject: &str,
 ) -> Result<(), ApiError> {
     let is_preempted = |lock: &ActiveLock| {
@@ -274,7 +277,8 @@ pub(super) fn validate_claim(
     lock_opt: Option<&ActiveLock>,
 ) -> Result<(), ApiError> {
     if let Some(lock) = lock_opt
-        && (claim.sub() != lock.principal.subject || lock_id.is_some_and(|id| id != lock.id))
+        && (claim.sub() != lock.principal.subject
+            || lock_id.is_some_and(|id| id != lock.id.as_str()))
     {
         return Err(ApiError::Forbidden(Some(
             "lock validation failed".to_owned(),

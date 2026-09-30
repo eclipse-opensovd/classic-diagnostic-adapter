@@ -46,7 +46,7 @@ async fn expiration_holds_mutation_guard_until_cleanup_finishes() {
     let cleanup_started = Arc::new(Notify::new());
     let release_cleanup = Arc::new(Notify::new());
     let lock = ActiveLock {
-        id: "expiring-lock".to_owned(),
+        id: "expiring-lock".into(),
         scope: ScopeKey::Vehicle,
         coverage: LockCoverage::vehicle(),
         principal: LockPrincipal {
@@ -60,7 +60,7 @@ async fn expiration_holds_mutation_guard_until_cleanup_finishes() {
     };
     locks.test_insert_active(lock.clone()).await;
     let child = ActiveLock {
-        id: "expiring-child".to_owned(),
+        id: "expiring-child".into(),
         scope: ScopeKey::Ecu("ecu-a".to_owned()),
         coverage: LockCoverage::vehicle(),
         principal: lock.principal.clone(),
@@ -127,7 +127,7 @@ async fn expiration_holds_mutation_guard_until_cleanup_finishes() {
 async fn expiration_releases_transition_after_cleanup_panic() {
     let locks = Arc::new(Locks::new());
     let lock = ActiveLock {
-        id: "panicking-cleanup".to_owned(),
+        id: "panicking-cleanup".into(),
         scope: ScopeKey::Vehicle,
         coverage: LockCoverage::vehicle(),
         principal: LockPrincipal {

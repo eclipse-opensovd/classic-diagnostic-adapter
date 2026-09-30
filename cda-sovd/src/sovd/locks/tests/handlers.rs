@@ -63,7 +63,7 @@ async fn child_lock_created_under_owned_vehicle_has_parent() {
 async fn post_handler_commits_policy_preemption_end_to_end() {
     let policy = Arc::new(TestPolicy {
         decision: Some(LockPriorityDecision::Preempt {
-            lock_ids: vec!["existing-lock".to_owned()],
+            lock_ids: vec!["existing-lock".into()],
             broken_by: "priority-app".to_owned(),
         }),
         evaluations: StdMutex::new(Vec::new()),
@@ -199,7 +199,7 @@ async fn same_owner_post_renewal_returns_ok_without_location() {
 async fn defunct_lock_remains_visible_and_reports_lock_broken() {
     let locks = Locks::new_with_policy(Arc::new(TestPolicy {
         decision: Some(LockPriorityDecision::Preempt {
-            lock_ids: vec!["existing-lock".to_owned()],
+            lock_ids: vec!["existing-lock".into()],
             broken_by: "priority-app".to_owned(),
         }),
         evaluations: StdMutex::new(Vec::new()),
@@ -294,7 +294,7 @@ async fn defunct_put_validates_owner_before_reporting_broken_lock() {
             store
                 .state
                 .commit_replacement(
-                    &["preempted".to_owned()],
+                    &["preempted".into()],
                     replacement,
                     "priority-app",
                     SystemTime::now(),
@@ -396,7 +396,7 @@ async fn get_handlers_hide_expired_defunct_records() {
             store
                 .state
                 .commit_replacement(
-                    &["expired-preempted".to_owned()],
+                    &["expired-preempted".into()],
                     replacement,
                     "priority-app",
                     SystemTime::UNIX_EPOCH,
@@ -544,7 +544,7 @@ async fn defunct_lock_details_remain_owned_by_original_client() {
             store
                 .state
                 .commit_replacement(
-                    &["preempted".to_owned()],
+                    &["preempted".into()],
                     test_lock("replacement").owner("replacement-owner").build(),
                     "priority-app",
                     SystemTime::now(),

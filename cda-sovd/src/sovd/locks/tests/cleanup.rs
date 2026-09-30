@@ -412,7 +412,7 @@ async fn creation_and_deletion_notify_registered_policy() {
         ));
     }
     let child = ActiveLock {
-        id: "released-child".to_owned(),
+        id: "released-child".into(),
         scope: ScopeKey::Ecu("child".to_owned()),
         coverage: LockCoverage::default(),
         principal: LockPrincipal {
@@ -422,7 +422,7 @@ async fn creation_and_deletion_notify_registered_policy() {
         metadata: serde_json::Map::new(),
         exclusive: true,
         expires_at: SystemTime::now() + Duration::from_secs(60),
-        parent_vehicle_lock_id: Some(lock_id.clone()),
+        parent_vehicle_lock_id: Some(lock_id.clone().into()),
     };
     locks
         .test_mutate_store(|store| {
@@ -454,7 +454,7 @@ async fn creation_and_deletion_notify_registered_policy() {
     assert!(matches!(
         events.get(2),
         Some(LockLifecycleEvent::Released { lock })
-            if lock.id == lock_id && lock.scope == LockScope::Vehicle
+            if lock.id.as_str() == lock_id && lock.scope == LockScope::Vehicle
     ));
 }
 

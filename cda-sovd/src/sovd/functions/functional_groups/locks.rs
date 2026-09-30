@@ -271,7 +271,7 @@ mod tests {
 
     fn ecu_lock(id: &str, ecu_name: &str, subject: &str) -> ActiveLock {
         ActiveLock {
-            id: id.to_owned(),
+            id: id.into(),
             scope: ScopeKey::Ecu(ecu_name.to_owned()),
             coverage: LockCoverage::new([ecu_name.to_owned()]),
             principal: LockPrincipal {

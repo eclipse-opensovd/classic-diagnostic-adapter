@@ -16,7 +16,7 @@ use std::{option::Option, sync::Arc};
 use cda_interfaces::{
     HashMap, HashMapExtensions,
     lock_config::LockConfig,
-    lock_priority_api::{LockPriorityPolicy, LockScope},
+    lock_priority_api::{LockId, LockPriorityPolicy, LockScope},
 };
 use cda_plugin_security::Claims;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -98,7 +98,7 @@ pub enum LockUpdateError {
 
 pub(super) struct LockStore {
     state: LockState,
-    cleanups: HashMap<String, LockCleanupFnHelper>,
+    cleanups: HashMap<LockId, LockCleanupFnHelper>,
     generation: u64,
 }
 
@@ -350,7 +350,7 @@ fn scope_from_key(scope: &ScopeKey) -> LockScope {
 impl DefunctLock {
     fn to_sovd_lock(&self, claims: &impl Claims) -> sovd_interfaces::locking::Lock {
         sovd_interfaces::locking::Lock {
-            id: self.id.clone(),
+            id: self.id.to_string(),
             lock_expiration: Some(
                 DateTime::<Utc>::from(self.original_expires_at)
                     .to_rfc3339_opts(SecondsFormat::Secs, true),

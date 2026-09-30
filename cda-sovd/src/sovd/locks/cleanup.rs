@@ -13,7 +13,10 @@
 
 use std::{pin::Pin, sync::Arc, time::SystemTime};
 
-use cda_interfaces::{DynamicPlugin, UdsEcu, lock_priority_api::LockLifecycleEvent};
+use cda_interfaces::{
+    DynamicPlugin, HashMap, UdsEcu,
+    lock_priority_api::{LockId, LockLifecycleEvent},
+};
 use futures::FutureExt;
 use tokio::time::{Instant, sleep_until};
 
@@ -163,7 +166,7 @@ pub(super) async fn run_cleanups(pending: Vec<LockCleanupFnHelper>) {
 }
 
 pub(super) fn take_cleanups(
-    cleanups: &mut cda_interfaces::HashMap<String, LockCleanupFnHelper>,
+    cleanups: &mut HashMap<LockId, LockCleanupFnHelper>,
     removed: &[ActiveLock],
 ) -> Vec<LockCleanupFnHelper> {
     removed

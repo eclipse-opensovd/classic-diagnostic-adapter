@@ -108,7 +108,7 @@ pub(super) async fn create_lock<T: UdsEcu + Clone>(
     };
     Ok((
         ActiveLock {
-            id,
+            id: id.into(),
             scope: ScopeKey::from(&scope),
             coverage,
             principal,

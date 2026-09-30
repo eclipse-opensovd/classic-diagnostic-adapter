@@ -65,7 +65,7 @@ mod tests {
             revision: 1,
             captured_at: SystemTime::now(),
             active_locks: Vec::new(),
-            preemption_candidates: vec!["existing-lock".to_owned()],
+            preemption_candidates: vec!["existing-lock".into()],
         };
 
         let decision = NoPreemptionPolicy.evaluate(&evaluation).await;

@@ -139,15 +139,15 @@ fn ineffective_preemption_selections_are_priority_denied() {
     struct Case {
         name: &'static str,
         break_lock: bool,
-        lock_ids: Vec<String>,
+        lock_ids: Vec<LockId>,
     }
 
-    let candidates = vec!["candidate".to_owned()];
+    let candidates = vec![LockId::from("candidate")];
     let cases = [
         Case {
             name: "breaking not requested",
             break_lock: false,
-            lock_ids: vec!["candidate".to_owned()],
+            lock_ids: vec!["candidate".into()],
         },
         Case {
             name: "empty selection",
@@ -157,12 +157,12 @@ fn ineffective_preemption_selections_are_priority_denied() {
         Case {
             name: "duplicate selection",
             break_lock: true,
-            lock_ids: vec!["candidate".to_owned(), "candidate".to_owned()],
+            lock_ids: vec!["candidate".into(), "candidate".into()],
         },
         Case {
             name: "unknown candidate",
             break_lock: true,
-            lock_ids: vec!["not-a-candidate".to_owned()],
+            lock_ids: vec!["not-a-candidate".into()],
         },
     ];
 
@@ -211,7 +211,7 @@ async fn elapsed_locks_do_not_authorize_or_block_communication() {
 
     let locks = Locks::new();
     let vehicle = ActiveLock {
-        id: "expired-vehicle".to_owned(),
+        id: "expired-vehicle".into(),
         scope: ScopeKey::Vehicle,
         coverage: LockCoverage::vehicle(),
         principal: LockPrincipal {
@@ -303,7 +303,7 @@ async fn fg_validation_rejects_defunct_overlapping_ecu_coverage() {
             store
                 .state
                 .commit_replacement(
-                    &["test-lock-id".to_owned()],
+                    &["test-lock-id".into()],
                     replacement,
                     "priority-app",
                     SystemTime::now(),
@@ -343,7 +343,7 @@ async fn defunct_lock_rejects_reads_with_conflict_for_nonexclusive_replacement()
             store
                 .state
                 .commit_replacement(
-                    &["preempted".to_owned()],
+                    &["preempted".into()],
                     test_lock("replacement")
                         .owner("replacement-owner")
                         .exclusive(false)

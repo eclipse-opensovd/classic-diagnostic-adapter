@@ -16,7 +16,7 @@ use std::{option::Option, sync::Arc, time::SystemTime};
 use cda_interfaces::{
     HashMap,
     lock_priority_api::{
-        LockPrincipal, LockPriorityDecision, LockPriorityError, LockPriorityEvaluation,
+        LockId, LockPrincipal, LockPriorityDecision, LockPriorityError, LockPriorityEvaluation,
         LockPriorityOperation, LockPriorityPolicy, LockRequest, LockScope, LockSnapshot,
     },
 };
@@ -34,11 +34,19 @@ pub(crate) struct PendingPreemption {
     pub(super) evaluation_id: String,
     pub(super) policy: Arc<dyn LockPriorityPolicy>,
     lifecycle_sender: Sender<LifecycleDelivery>,
-    pub(super) root_lock_ids: Vec<String>,
+    pub(super) root_lock_ids: Vec<LockId>,
     pub(super) broken_by: String,
     pub(super) broken_at: SystemTime,
     armed: bool,
 }
+
+struct PreemptionAbandonmentGuard {
+    evaluation_id: String,
+    policy: Arc<dyn LockPriorityPolicy>,
+    lifecycle_sender: Sender<LifecycleDelivery>,
+    armed: bool,
+}
+
 pub(crate) struct AcquisitionGuard {
     pub(super) reservation: TransitionReservation,
     pub(super) evaluation_id: Option<String>,
@@ -48,6 +56,51 @@ pub(crate) struct AcquisitionGuard {
 impl AcquisitionGuard {
     pub(crate) fn finish(self) {
         self.reservation.finish();
+    }
+}
+
+impl PreemptionAbandonmentGuard {
+    fn new(
+        evaluation_id: &str,
+        policy: Arc<dyn LockPriorityPolicy>,
+        lifecycle_sender: Sender<LifecycleDelivery>,
+    ) -> Self {
+        Self {
+            evaluation_id: evaluation_id.to_owned(),
+            policy,
+            lifecycle_sender,
+            armed: true,
+        }
+    }
+
+    fn evaluation_id(&self) -> &str {
+        &self.evaluation_id
+    }
+
+    fn into_pending(mut self, root_lock_ids: Vec<LockId>, broken_by: String) -> PendingPreemption {
+        self.armed = false;
+        PendingPreemption {
+            evaluation_id: self.evaluation_id.clone(),
+            policy: Arc::clone(&self.policy),
+            lifecycle_sender: self.lifecycle_sender.clone(),
+            root_lock_ids,
+            broken_by,
+            broken_at: SystemTime::now(),
+            armed: true,
+        }
+    }
+}
+
+impl Drop for PreemptionAbandonmentGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            enqueue_preemption_abandoned(
+                &self.lifecycle_sender,
+                Arc::clone(&self.policy),
+                &self.evaluation_id,
+                "Policy-approved preemption was discarded before staging",
+            );
+        }
     }
 }
 
@@ -64,14 +117,12 @@ impl PendingPreemption {
         if !self.armed {
             return;
         }
-        tracing::warn!(evaluation_id = %self.evaluation_id, reason, "Preemption transaction was abandoned");
         self.armed = false;
-        super::enqueue_lock_event(
+        enqueue_preemption_abandoned(
             &self.lifecycle_sender,
             Arc::clone(&self.policy),
-            cda_interfaces::lock_priority_api::LockLifecycleEvent::PreemptionAbandoned {
-                evaluation_id: self.evaluation_id.clone(),
-            },
+            &self.evaluation_id,
+            reason,
         );
     }
 }
@@ -80,6 +131,26 @@ impl Drop for PendingPreemption {
     fn drop(&mut self) {
         self.abandon("Pending preemption dropped before commit");
     }
+}
+
+fn enqueue_preemption_abandoned(
+    lifecycle_sender: &Sender<LifecycleDelivery>,
+    policy: Arc<dyn LockPriorityPolicy>,
+    evaluation_id: &str,
+    reason: &str,
+) {
+    tracing::warn!(
+        evaluation_id,
+        reason,
+        "Preemption transaction was abandoned"
+    );
+    super::enqueue_lock_event(
+        lifecycle_sender,
+        policy,
+        cda_interfaces::lock_priority_api::LockLifecycleEvent::PreemptionAbandoned {
+            evaluation_id: evaluation_id.to_owned(),
+        },
+    );
 }
 
 pub(crate) async fn rollback_preemption(pending: Option<PendingPreemption>, _locks: &Locks) {
@@ -106,6 +177,7 @@ impl Locks {
         // The lock priority/preemption mechanism is applicable to vehicle locks only
         // (see req~sovd-api-lock-priority). ECU and functional-group lock acquisition
         // never invokes the plugin and can never be preemption candidates.
+        let scope = scope_from_key(&ScopeKey::from(&scope));
         let is_vehicle_scope = matches!(scope, LockScope::Vehicle);
         let policy = Arc::clone(&self.priority_policy);
         let validated = validated_expiration(request)?;
@@ -141,7 +213,6 @@ impl Locks {
                 policy_request,
             ));
         }
-        let evaluation_id = Uuid::new_v4().to_string();
         let mut stale_attempts = 0;
         loop {
             let (revision, generation, active_locks, candidates, operation) = self
@@ -202,6 +273,7 @@ impl Locks {
                     "Lock state changed during priority evaluation".to_owned(),
                 ));
             }
+            let evaluation_id = Uuid::new_v4().to_string();
             let evaluation = LockPriorityEvaluation {
                 evaluation_id: evaluation_id.clone(),
                 operation: operation.clone(),
@@ -229,6 +301,14 @@ impl Locks {
                 ApiError::InternalServerError(Some("Lock priority policy panicked".to_owned()))
             })?
             .map_err(map_policy_error)?;
+            let preemption_abandonment = matches!(&decision, LockPriorityDecision::Preempt { .. })
+                .then(|| {
+                    PreemptionAbandonmentGuard::new(
+                        &evaluation_id,
+                        Arc::clone(&policy),
+                        self.lifecycle_sender.clone(),
+                    )
+                });
 
             if matches!(operation, LockPriorityOperation::PostRenew { .. })
                 && matches!(&decision, LockPriorityDecision::Preempt { .. })
@@ -264,7 +344,7 @@ impl Locks {
                     &candidates,
                     revision,
                     guard,
-                    &evaluation_id,
+                    preemption_abandonment,
                 )
                 .await;
             let (guard, pending) = result?;
@@ -302,10 +382,10 @@ impl Locks {
         &self,
         decision: LockPriorityDecision,
         request: &sovd_interfaces::locking::Request,
-        candidates: &[String],
+        candidates: &[LockId],
         revision: u64,
         guard: AcquisitionGuard,
-        evaluation_id: &str,
+        preemption_abandonment: Option<PreemptionAbandonmentGuard>,
     ) -> Result<(AcquisitionGuard, Option<PendingPreemption>), ApiError> {
         match decision {
             LockPriorityDecision::Allow => Ok((guard, None)),
@@ -319,12 +399,18 @@ impl Locks {
                 lock_ids,
                 broken_by,
             } => {
+                let Some(preemption_abandonment) = preemption_abandonment else {
+                    guard.finish();
+                    return Err(ApiError::InternalServerError(Some(
+                        "Preemption abandonment guard is missing".to_owned(),
+                    )));
+                };
                 self.stage_preemption(
                     request,
                     candidates,
                     revision,
                     guard,
-                    evaluation_id,
+                    preemption_abandonment,
                     (lock_ids, broken_by),
                 )
                 .await
@@ -335,12 +421,13 @@ impl Locks {
     async fn stage_preemption(
         &self,
         request: &sovd_interfaces::locking::Request,
-        candidates: &[String],
+        candidates: &[LockId],
         revision: u64,
         guard: AcquisitionGuard,
-        evaluation_id: &str,
-        selection: (Vec<String>, String),
+        preemption_abandonment: PreemptionAbandonmentGuard,
+        selection: (Vec<LockId>, String),
     ) -> Result<(AcquisitionGuard, Option<PendingPreemption>), ApiError> {
+        let evaluation_id = preemption_abandonment.evaluation_id();
         let (lock_ids, broken_by) = selection;
         if let Err(error) =
             Self::validate_preemption_selection(request.break_lock, &lock_ids, candidates)
@@ -364,8 +451,8 @@ impl Locks {
                 ));
             }
             let selected_ids: std::collections::HashSet<&str> =
-                lock_ids.iter().map(String::as_str).collect();
-            let root_lock_ids: Vec<String> = lock_ids
+                lock_ids.iter().map(LockId::as_str).collect();
+            let root_lock_ids: Vec<LockId> = lock_ids
                 .iter()
                 .filter(|id| {
                     state
@@ -377,22 +464,14 @@ impl Locks {
                 .collect();
             root_lock_ids
         };
-        let pending = PendingPreemption {
-            evaluation_id: evaluation_id.to_owned(),
-            policy: Arc::clone(&guard.policy),
-            lifecycle_sender: self.lifecycle_sender.clone(),
-            root_lock_ids,
-            broken_by,
-            broken_at: SystemTime::now(),
-            armed: true,
-        };
+        let pending = preemption_abandonment.into_pending(root_lock_ids, broken_by);
         Ok((guard, Some(pending)))
     }
 
     pub(super) fn validate_preemption_selection(
         break_lock: bool,
-        lock_ids: &[String],
-        candidates: &[String],
+        lock_ids: &[LockId],
+        candidates: &[LockId],
     ) -> Result<(), ApiError> {
         if !break_lock {
             return Err(lock_priority_denied(
@@ -405,14 +484,14 @@ impl Locks {
             ));
         }
         let selected_ids: std::collections::HashSet<&str> =
-            lock_ids.iter().map(String::as_str).collect();
+            lock_ids.iter().map(LockId::as_str).collect();
         if selected_ids.len() != lock_ids.len() {
             return Err(lock_priority_denied(
                 "Lock policy selected a lock more than once",
             ));
         }
         let candidate_ids: std::collections::HashSet<&str> =
-            candidates.iter().map(String::as_str).collect();
+            candidates.iter().map(LockId::as_str).collect();
         if lock_ids
             .iter()
             .any(|id| !candidate_ids.contains(id.as_str()))

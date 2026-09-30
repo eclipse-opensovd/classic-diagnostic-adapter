@@ -13,20 +13,76 @@
 
 //! Vendor-neutral policy interface for lock acquisition and preemption.
 
-use std::time::SystemTime;
+use std::{borrow::Borrow, fmt, ops::Deref, time::SystemTime};
 
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 use thiserror::Error;
+
+/// Opaque SOVD lock identifier.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LockId(String);
+
+impl LockId {
+    /// Returns the identifier as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for LockId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Borrow<str> for LockId {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Deref for LockId {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for LockId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl From<String> for LockId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for LockId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+impl From<LockId> for String {
+    fn from(value: LockId) -> Self {
+        value.0
+    }
+}
 
 /// Entity protected by a lock.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LockScope {
     /// Whole vehicle.
     Vehicle,
-    /// One ECU component.
+    /// One ECU component, identified by its canonical lowercase name.
     Ecu { name: String },
-    /// One functional group.
+    /// One functional group, identified by its canonical lowercase name.
     FunctionalGroup { name: String },
 }
 
@@ -65,7 +121,7 @@ pub struct LockRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LockSnapshot {
     /// SOVD lock identifier.
-    pub id: String,
+    pub id: LockId,
     /// Protected entity.
     pub scope: LockScope,
     /// Principal which acquired the lock.
@@ -75,7 +131,7 @@ pub struct LockSnapshot {
     /// Whether this lock excludes read communication by other clients.
     pub exclusive: bool,
     /// Parent vehicle-lock ID for an adopted child lock.
-    pub parent_vehicle_lock_id: Option<String>,
+    pub parent_vehicle_lock_id: Option<LockId>,
     /// Absolute expiration time.
     pub expires_at: SystemTime,
 }
@@ -96,7 +152,7 @@ pub struct LockPriorityEvaluation {
     /// Active locks in deterministic scope-and-ID order.
     pub active_locks: Vec<LockSnapshot>,
     /// Lock IDs which this request may preempt.
-    pub preemption_candidates: Vec<String>,
+    pub preemption_candidates: Vec<LockId>,
 }
 
 /// Operation presented to a revision-aware priority policy.
@@ -111,7 +167,7 @@ pub enum LockPriorityOperation {
         /// The full prior [`LockSnapshot`] for this lock is not provided
         /// denormalized here; look it up in
         /// `evaluation.active_locks` by matching this `lock_id`.
-        lock_id: String,
+        lock_id: LockId,
     },
 }
 
@@ -130,7 +186,7 @@ pub enum LockPriorityDecision {
     /// Permit acquisition and preempt selected active locks.
     Preempt {
         /// Existing lock IDs selected by policy.
-        lock_ids: Vec<String>,
+        lock_ids: Vec<LockId>,
         /// Identity recorded on defunct locks.
         broken_by: String,
     },
@@ -193,7 +249,7 @@ pub enum LockLifecycleEvent {
         /// Identity recorded as the preemptor.
         broken_by: String,
         /// Identifiers of the locks that became defunct as part of this preemption.
-        defunct_lock_ids: Vec<String>,
+        defunct_lock_ids: Vec<LockId>,
     },
     /// A policy-approved preemption was abandoned before it committed.
     PreemptionAbandoned {
@@ -227,9 +283,10 @@ pub trait LockPriorityPolicy: Send + Sync + 'static {
         evaluation: &LockPriorityEvaluation,
     ) -> Result<LockPriorityDecision, LockPriorityError>;
 
-    /// Best-effort notification after a lock lifecycle transition is committed.
+    /// Best-effort notification of a lock lifecycle outcome.
     ///
-    /// The default implementation does nothing. CDA contains and logs callback timeouts
+    /// Outcomes include committed transitions and policy-approved preemptions abandoned before
+    /// commit. The default implementation does nothing. CDA contains and logs callback timeouts
     /// and panics; delivery never affects the triggering HTTP response and is not retried.
     /// Implementations must not perform synchronous blocking work. Offload blocking or
     /// CPU-intensive work, for example with `tokio::task::spawn_blocking`. A timeout can

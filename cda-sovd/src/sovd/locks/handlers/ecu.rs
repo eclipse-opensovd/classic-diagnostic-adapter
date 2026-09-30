@@ -19,12 +19,12 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{UdsEcu, file_manager::FileManager, lock_priority_api::LockScope};
-use cda_plugin_security::Secured;
+use cda_plugin_security::{Claims, Secured};
 
 use super::super::{
-    ApiError, ErrorWrapper, LockContext, LockCoverage, LockPathParam, LockUpdateContext, ScopeKey,
-    delete_handler, get_handler, get_id_handler, post_handler, put_handler, rollback_preemption,
-    validate_vehicle_owner,
+    ActiveLock, ApiError, ErrorWrapper, LockContext, LockCoverage, LockPathParam,
+    LockUpdateContext, ScopeKey, delete_handler, get_handler, get_id_handler, post_handler,
+    put_handler, rollback_preemption, validate_vehicle_owner,
 };
 use crate::{
     openapi,
@@ -176,9 +176,7 @@ pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
         .into_response();
     }
 
-    if locks.open_locks().await.iter().any(|lock| {
-        matches!(lock.scope, ScopeKey::FunctionalGroup(_)) && lock.coverage.contains_ecu(&ecu_name)
-    }) {
+    if functional_lock_blocks_ecu(&locks.open_locks().await, &ecu_name, claims.sub()) {
         rollback_preemption(pending, &locks).await;
         acquisition.finish();
         return ErrorWrapper {
@@ -202,6 +200,14 @@ pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
         sec_plugin,
     )
     .await
+}
+
+fn functional_lock_blocks_ecu(open_locks: &[ActiveLock], ecu_name: &str, subject: &str) -> bool {
+    open_locks.iter().any(|lock| {
+        matches!(lock.scope, ScopeKey::FunctionalGroup(_))
+            && lock.coverage.contains_ecu(ecu_name)
+            && lock.principal.subject != subject
+    })
 }
 
 pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
@@ -256,4 +262,47 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
             res.example(openapi::lock_list_example())
                 .description("List of ECU locks.")
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::SystemTime;
+
+    use cda_interfaces::lock_priority_api::LockPrincipal;
+
+    use super::*;
+
+    fn functional_lock(subject: &str) -> ActiveLock {
+        ActiveLock {
+            id: "functional-lock".into(),
+            scope: ScopeKey::FunctionalGroup("powertrain".to_owned()),
+            coverage: LockCoverage::new(["engine".to_owned()]),
+            principal: LockPrincipal {
+                subject: subject.to_owned(),
+                claims: serde_json::Map::new(),
+            },
+            metadata: serde_json::Map::new(),
+            exclusive: true,
+            expires_at: SystemTime::now(),
+            parent_vehicle_lock_id: None,
+        }
+    }
+
+    #[test]
+    fn owned_functional_lock_does_not_block_ecu_lock() {
+        assert!(!functional_lock_blocks_ecu(
+            &[functional_lock("owner")],
+            "ENGINE",
+            "owner"
+        ));
+    }
+
+    #[test]
+    fn foreign_functional_lock_blocks_ecu_lock() {
+        assert!(functional_lock_blocks_ecu(
+            &[functional_lock("other")],
+            "ENGINE",
+            "owner"
+        ));
+    }
 }

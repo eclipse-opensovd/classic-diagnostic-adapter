@@ -135,7 +135,7 @@ impl Locks {
         .await;
     }
 
-    async fn test_insert_cleanup(&self, lock_id: String, cleanup: LockCleanupFnHelper) {
+    async fn test_insert_cleanup(&self, lock_id: LockId, cleanup: LockCleanupFnHelper) {
         self.test_mutate_store(|store| {
             store.cleanups.insert(lock_id, cleanup);
         })
@@ -218,7 +218,7 @@ impl LockPriorityPolicy for AbandonmentRecordingPolicy {
         _evaluation: &LockPriorityEvaluation,
     ) -> Result<LockPriorityDecision, LockPriorityError> {
         Ok(LockPriorityDecision::Preempt {
-            lock_ids: vec!["existing-lock".to_owned()],
+            lock_ids: vec!["existing-lock".into()],
             broken_by: "priority-policy".to_owned(),
         })
     }
@@ -324,7 +324,7 @@ impl LockPriorityPolicy for BlockingPolicy {
 
 pub(crate) async fn insert_test_fg_lock(locks: &Locks, functional_group_name: &str) {
     let lock = ActiveLock {
-        id: "test-fg-lock-id".to_owned(),
+        id: "test-fg-lock-id".into(),
         scope: ScopeKey::FunctionalGroup(functional_group_name.to_ascii_lowercase()),
         coverage: LockCoverage::new(["test-ecu".to_owned()]),
         principal: LockPrincipal {
@@ -343,7 +343,7 @@ pub(crate) async fn insert_test_fg_lock(locks: &Locks, functional_group_name: &s
 
 pub(crate) async fn insert_test_ecu_lock(locks: &Locks, ecu_name: &str) {
     let lock = ActiveLock {
-        id: "test-lock-id".to_owned(),
+        id: "test-lock-id".into(),
         scope: ScopeKey::Ecu(ecu_name.to_ascii_lowercase()),
         coverage: LockCoverage::new([ecu_name.to_owned()]),
         principal: LockPrincipal {
@@ -363,7 +363,7 @@ pub(crate) async fn insert_test_ecu_lock(locks: &Locks, ecu_name: &str) {
 async fn insert_policy_test_lock(locks: &Locks, cleanup_count: Arc<AtomicUsize>) -> String {
     let id = "existing-lock".to_owned();
     let lock = ActiveLock {
-        id: id.clone(),
+        id: id.clone().into(),
         scope: ScopeKey::Vehicle,
         coverage: LockCoverage::vehicle(),
         principal: LockPrincipal {
@@ -380,7 +380,7 @@ async fn insert_policy_test_lock(locks: &Locks, cleanup_count: Arc<AtomicUsize>)
     locks.test_insert_active(lock).await;
     locks
         .test_insert_cleanup(
-            id.clone(),
+            id.clone().into(),
             LockCleanupFnHelper::new(move || async move {
                 cleanup_count.fetch_add(1, Ordering::SeqCst);
             }),
@@ -392,7 +392,7 @@ async fn insert_policy_test_lock(locks: &Locks, cleanup_count: Arc<AtomicUsize>)
 fn test_lock(id: &str) -> TestLockBuilder {
     TestLockBuilder {
         lock: ActiveLock {
-            id: id.to_owned(),
+            id: id.into(),
             scope: ScopeKey::Ecu("ecu-a".to_owned()),
             coverage: LockCoverage::new(["ecu-a".to_owned()]),
             principal: LockPrincipal {
@@ -448,7 +448,7 @@ impl TestLockBuilder {
     }
 
     fn parent(mut self, lock_id: &str) -> Self {
-        self.lock.parent_vehicle_lock_id = Some(lock_id.to_owned());
+        self.lock.parent_vehicle_lock_id = Some(lock_id.into());
         self
     }
 
