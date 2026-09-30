@@ -13,115 +13,79 @@
 
 use std::time::Duration;
 
-use cda_interfaces::{HashMap, HashMapExtensions};
 use const_format::formatcp;
 use http::{Method, StatusCode};
 use sovd_interfaces::{
     apps::sovd2uds::{
-        bulk_data::{BulkDataDeleted, BulkDataList},
-        operations::runtimefilesupdate::{ExecutionMode, ExecutionResponse, ExecutionStatusKind},
+        bulk_data::BulkDataCreatedList,
+        operations::runtimefilesupdate::{ExecutionMode, ExecutionStatusKind},
     },
     common::operations::OperationIdItem,
-    locking::post_put::Response as LockResponse,
     sovd2uds::BulkDataDescriptor,
 };
 
 use crate::{
-    sovd,
-    sovd::{COMPONENTS_FLXC1000_BASE, COMPONENTS_FSNR2000_BASE, ECU_FLXC1000},
+    client::{
+        self, Response, SovdTestClient, apps::sovd2uds::bulk_data::RuntimeFiles, locks::Lock,
+    },
+    sovd::{ECU_FLXC1000, ECU_FSNR2000, FUNCTIONAL_GROUP},
     util::{
         TestingError,
         config::{mdd_file_path, test_container_dir},
-        endpoints::{APPS_SOVD2UDS_BULK_DATA, APPS_SOVD2UDS_OPERATIONS},
-        http::{
-            CdaClient, QueryParams, bearer_token_header, poll_until, poll_while, response_to_json,
-            response_to_t, send_authenticated_cda_request, send_cda_request, vehicle_url,
-        },
-        locks::{self, NON_OWNER_BEARER_TOKEN, create_lock, default_timeout, lock_operation},
+        endpoints::APPS_SOVD2UDS_OPERATIONS,
+        http::poll_until,
+        locks::{NON_OWNER_BEARER_TOKEN, default_timeout},
         test_env::{TestEnv, Transport, skip_unless, wait_for_ecus_online},
     },
 };
 
-const APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE: &str =
-    formatcp!("{}/runtimefiles-nextupdate", APPS_SOVD2UDS_BULK_DATA);
-const APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_CURRENT: &str =
-    formatcp!("{}/runtimefiles-current", APPS_SOVD2UDS_BULK_DATA);
-const APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_BACKUP: &str =
-    formatcp!("{}/runtimefiles-backup", APPS_SOVD2UDS_BULK_DATA);
-const APPS_SOVD2UDS_OPERATIONS_RUNTIMEFILESUPDATE_EXECUTIONS: &str =
+/// The executions of the runtime update operation, for the `Location` they
+/// are reported at.
+const RUNTIMEFILES_UPDATE_EXECUTIONS: &str =
     formatcp!("{}/runtimefilesupdate/executions", APPS_SOVD2UDS_OPERATIONS);
+
+/// Asserts that the CDA answered `result` with the error status `expected`.
+#[track_caller]
+fn assert_error_status<T>(result: client::Result<T>, expected: StatusCode, context: &str) {
+    match result {
+        Ok(_) => panic!("{context}: expected {expected}, but the request succeeded"),
+        Err(err) => assert_eq!(err.status(), Some(expected), "{context}: {err}"),
+    }
+}
 
 /// Tests that mutating runtime-update endpoints reject requests without a vehicle lock.
 #[tokio::test]
 async fn runtimefiles_requires_lock() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let auth = test_env.auth_header().await?;
+    let sovd2uds = test_env.client().sovd2uds();
 
-    let auth_value = auth
-        .get(reqwest::header::AUTHORIZATION)
-        .expect("Authorization header missing")
-        .clone();
-    let client = reqwest::Client::new();
     let form = reqwest::multipart::Form::new().part(
         "files",
         reqwest::multipart::Part::bytes(b"fake content".to_vec()).file_name("test.mdd"),
     );
-    let upload_url = test_env.vehicle_url(APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE);
-    let upload_response = client
-        .post(&upload_url)
-        .header(reqwest::header::AUTHORIZATION, auth_value)
-        .multipart(form)
-        .send()
-        .await
-        .expect("upload request failed");
-    assert_eq!(
-        upload_response.status(),
+    assert_error_status(
+        sovd2uds.runtime_files_next_update().upload(form).await,
         StatusCode::FORBIDDEN,
-        "Expected 403 for upload without vehicle lock"
+        "Expected 403 for upload without vehicle lock",
     );
 
-    send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE,
+    assert_error_status(
+        sovd2uds.runtime_files_next_update().delete_all().await,
         StatusCode::FORBIDDEN,
-        Method::DELETE,
-        None,
-        None,
-    )
-    .await?;
+        "Expected 403 for deleting the next update without vehicle lock",
+    );
 
-    let body = mode_json(ExecutionMode::Apply);
-    send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_OPERATIONS_RUNTIMEFILESUPDATE_EXECUTIONS,
-        StatusCode::FORBIDDEN,
-        Method::POST,
-        Some(&body),
-        None,
-    )
-    .await?;
-
-    let body = mode_json(ExecutionMode::Rollback);
-    send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_OPERATIONS_RUNTIMEFILESUPDATE_EXECUTIONS,
-        StatusCode::FORBIDDEN,
-        Method::POST,
-        Some(&body),
-        None,
-    )
-    .await?;
-
-    let body = mode_json(ExecutionMode::Cleanup);
-    send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_OPERATIONS_RUNTIMEFILESUPDATE_EXECUTIONS,
-        StatusCode::FORBIDDEN,
-        Method::POST,
-        Some(&body),
-        None,
-    )
-    .await?;
+    for mode in [
+        ExecutionMode::Apply,
+        ExecutionMode::Rollback,
+        ExecutionMode::Cleanup,
+    ] {
+        assert_error_status(
+            sovd2uds.runtime_files_update().start(mode).await,
+            StatusCode::FORBIDDEN,
+            &format!("Expected 403 for {mode:?} without vehicle lock"),
+        );
+    }
 
     Ok(())
 }
@@ -130,39 +94,32 @@ async fn runtimefiles_requires_lock() -> Result<(), TestingError> {
 #[tokio::test]
 async fn runtimefiles_execution_responses_follow_operation_standard() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let lock = setup_with_lock(client).await;
 
-    let response = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_OPERATIONS_RUNTIMEFILESUPDATE_EXECUTIONS,
-        StatusCode::ACCEPTED,
-        Method::POST,
-        Some(&mode_json(ExecutionMode::Cleanup)),
-        None,
-    )
-    .await?;
-    let execution_id = response_to_t::<OperationIdItem>(&response)?.id;
-    let expected_location = test_env.vehicle_url(&format!(
-        "{APPS_SOVD2UDS_OPERATIONS_RUNTIMEFILESUPDATE_EXECUTIONS}/{execution_id}"
-    ));
+    let response = client
+        .sovd2uds()
+        .runtime_files_update()
+        .start(ExecutionMode::Cleanup)
+        .await?
+        .expect_status(StatusCode::ACCEPTED);
+    let execution_id = response.id.clone();
+    let expected_location = client.url(&format!("{RUNTIMEFILES_UPDATE_EXECUTIONS}/{execution_id}"));
     assert_eq!(
-        response
-            .header(http::header::LOCATION)
-            .and_then(|value| value.to_str().ok()),
+        response.location(),
         Some(expected_location.as_str()),
         "202 responses must identify the execution resource with an absolute Location URI"
     );
 
-    let list_response = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_OPERATIONS_RUNTIMEFILESUPDATE_EXECUTIONS,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await?;
-    let list = response_to_json(&list_response)?;
+    // JSON rather than the typed list, which would not notice extra fields.
+    let list = client
+        .sovd2uds()
+        .runtime_files_update()
+        .request(Method::GET, "")
+        .send_json::<serde_json::Value>()
+        .await?
+        .expect_status(StatusCode::OK)
+        .into_body();
     assert_eq!(
         list,
         serde_json::json!({ "items": [{ "id": execution_id }] }),
@@ -171,18 +128,17 @@ async fn runtimefiles_execution_responses_follow_operation_standard() -> Result<
 
     // Also waits for the update protection to lift, or deleting the lock below
     // would answer 409.
-    wait_for_execution_completion(&test_env, &execution_id).await?;
-    let execution = response_to_json(
-        &send_authenticated_cda_request(
-            &test_env,
-            &format!("{APPS_SOVD2UDS_OPERATIONS_RUNTIMEFILESUPDATE_EXECUTIONS}/{execution_id}"),
-            StatusCode::OK,
-            Method::GET,
-            None,
-            None,
-        )
-        .await?,
-    )?;
+    wait_for_execution_completion(client, &execution_id).await?;
+    // Raw JSON rather than the typed execution, which would not notice the
+    // fields the caller asserts to be absent.
+    let execution = client
+        .sovd2uds()
+        .runtime_files_update()
+        .request(Method::GET, &execution_id)
+        .send_json::<serde_json::Value>()
+        .await?
+        .expect_status(StatusCode::OK)
+        .into_body();
     assert_eq!(
         execution.get("status").and_then(serde_json::Value::as_str),
         Some("completed"),
@@ -207,14 +163,7 @@ async fn runtimefiles_execution_responses_follow_operation_standard() -> Result<
         "a successful execution must not include a failure reason"
     );
 
-    lock_operation(
-        locks::LOCKS,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -222,35 +171,24 @@ async fn runtimefiles_execution_responses_follow_operation_standard() -> Result<
 #[tokio::test]
 async fn runtimefiles_bulk_data_responses_follow_standard() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let next_update = client.sovd2uds().runtime_files_next_update();
+    let lock = setup_with_lock(client).await;
 
-    let upload = upload_mdd(&test_env).await;
-    assert_eq!(upload.status(), StatusCode::CREATED);
-    let location = upload.headers().get(reqwest::header::LOCATION).cloned();
-    let upload_body: serde_json::Value = serde_json::from_str(
-        &upload
-            .text()
-            .await
-            .expect("upload response body must be readable"),
-    )
-    .expect("upload response must be JSON");
-    let first_id = upload_body
-        .get("items")
-        .and_then(|items| items.as_array())
-        .and_then(|items| items.first())
-        .and_then(|item| item.get("id"))
-        .and_then(|id| id.as_str())
-        .expect("upload response must identify the created file");
-    let expected_location = test_env.vehicle_url(&format!(
-        "{APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE}/{first_id}"
-    ));
+    let upload = upload_mdd(client).await?.expect_status(StatusCode::CREATED);
+    let first_id = &upload
+        .items
+        .first()
+        .expect("upload response must identify the created file")
+        .id;
+    let expected_location = client.url(&format!("{}/{first_id}", next_update.path()));
     assert_eq!(
-        location.as_ref().and_then(|value| value.to_str().ok()),
+        upload.location(),
         Some(expected_location.as_str()),
         "bulk-data uploads must identify a created resource with Location"
     );
 
-    let list = get_file_list(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE).await?;
+    let list = next_update.list().await?.expect_status(StatusCode::OK);
     assert!(
         list.items
             .iter()
@@ -258,71 +196,39 @@ async fn runtimefiles_bulk_data_responses_follow_standard() -> Result<(), Testin
         "runtime file descriptors must expose the filename as name"
     );
 
-    let mut date_query = HashMap::new();
-    date_query.insert(
-        "created-after".to_owned(),
-        "2025-01-01T00:00:00Z".to_owned(),
-    );
-    date_query.insert(
-        "created-before".to_owned(),
-        "2026-01-01T00:00:00Z".to_owned(),
-    );
-    let filtered = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        Some(&QueryParams(date_query)),
-    )
-    .await?;
-    assert_eq!(
-        response_to_t::<BulkDataList>(&filtered)?.items.len(),
-        list.items.len()
-    );
+    let filtered = next_update
+        .list_with(&[
+            ("created-after", "2025-01-01T00:00:00Z"),
+            ("created-before", "2026-01-01T00:00:00Z"),
+        ])
+        .await?
+        .expect_status(StatusCode::OK);
+    assert_eq!(filtered.items.len(), list.items.len());
 
-    let deleted = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE,
-        StatusCode::OK,
-        Method::DELETE,
-        None,
-        None,
-    )
-    .await?;
-    let deleted = response_to_t::<BulkDataDeleted>(&deleted)?;
+    let deleted = next_update
+        .delete_all()
+        .await?
+        .expect_status(StatusCode::OK);
     assert!(deleted.errors.is_empty());
     assert!(deleted.deleted_ids.iter().any(|id| id == first_id));
 
-    let categories = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await?;
-    let categories = response_to_json(&categories)?;
+    let categories = client
+        .sovd2uds()
+        .bulk_data()
+        .await?
+        .expect_status(StatusCode::OK);
     for name in [
         "runtimefiles-current",
         "runtimefiles-nextupdate",
         "runtimefiles-backup",
     ] {
         assert!(
-            categories
-                .get("items")
-                .and_then(|items| items.as_array())
-                .is_some_and(|items| {
-                    items
-                        .iter()
-                        .any(|item| item.get("name").is_some_and(|item_name| item_name == name))
-                }),
+            categories.items.iter().any(|item| item.name == name),
             "bulk-data discovery must include {name}"
         );
     }
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -330,24 +236,28 @@ async fn runtimefiles_bulk_data_responses_follow_standard() -> Result<(), Testin
 async fn runtimefiles_lifecycle() -> Result<(), TestingError> {
     // Acquire an exclusive vehicle lock (spec: all modifying actions require one).
     let test_env = TestEnv::builder().await?;
+    let client = test_env.client();
 
-    let lock_response = create_lock(
-        Duration::from_secs(333),
-        locks::LOCKS,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
-    let lock_id = response_to_t::<LockResponse>(&lock_response)?.id;
+    let lock = client
+        .locks()
+        .create(Duration::from_secs(333))
+        .await?
+        .expect_status(StatusCode::CREATED)
+        .into_body();
 
     // Snapshot the current database item count so we can verify rollback restores it.
-    let initial_count = get_file_list(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_CURRENT)
+    let initial_count = client
+        .sovd2uds()
+        .runtime_files_current()
+        .list()
         .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
         .items
         .len();
 
     // POST a .mdd file via multipart form data (spec: "Adds files to the next update").
-    let upload_response = upload_mdd(&test_env).await;
+    let upload_response = upload_mdd(client).await?;
     assert_eq!(
         upload_response.status(),
         StatusCode::CREATED,
@@ -355,28 +265,21 @@ async fn runtimefiles_lifecycle() -> Result<(), TestingError> {
     );
 
     // GET nextupdate must show the uploaded file (case-insensitive match per spec).
-    assert_nextupdate_contains_flxc1000(&test_env).await?;
+    assert_nextupdate_contains_flxc1000(client).await?;
 
     // Trigger "Apply" - pending update becomes active database.
-    execute_mode(&test_env, ExecutionMode::Apply).await?;
-    assert_state_after_apply(&test_env, initial_count).await?;
+    execute_mode(client, ExecutionMode::Apply).await?;
+    assert_state_after_apply(client, initial_count).await?;
 
-    execute_mode(&test_env, ExecutionMode::Rollback).await?;
-    assert_state_after_rollback(&test_env, initial_count).await?;
+    execute_mode(client, ExecutionMode::Rollback).await?;
+    assert_state_after_rollback(client, initial_count).await?;
 
     // Trigger "Cleanup" - spec: "reset all pending updates, as well as deleting the backup".
-    execute_mode(&test_env, ExecutionMode::Cleanup).await?;
-    assert_state_after_cleanup(&test_env).await?;
+    execute_mode(client, ExecutionMode::Cleanup).await?;
+    assert_state_after_cleanup(client).await?;
 
     // Release the vehicle lock.
-    lock_operation(
-        locks::LOCKS,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
 
     Ok(())
 }
@@ -386,68 +289,39 @@ async fn runtimefiles_lifecycle() -> Result<(), TestingError> {
 #[tokio::test]
 async fn runtimefiles_post_delete_forbidden_on_current_and_backup() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let auth = test_env.auth_header().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let sovd2uds = client.sovd2uds();
+    let lock = setup_with_lock(client).await;
 
-    let mdd_bytes = std::fs::read(
-        test_container_dir()
-            .expect("testcontainer dir")
-            .join("odx/FLXC1000.mdd"),
-    )
-    .expect("MDD fixture not found");
-    let auth_value = auth
-        .get(reqwest::header::AUTHORIZATION)
-        .expect("Authorization header missing")
-        .clone();
-    let client = reqwest::Client::new();
+    let mdd_bytes = read_mdd_fixture("FLXC1000.mdd");
 
     let form = reqwest::multipart::Form::new().part(
         "files",
         reqwest::multipart::Part::bytes(mdd_bytes.clone()).file_name("test.mdd"),
     );
-    let current_url = test_env.vehicle_url(APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_CURRENT);
-    let response = client
-        .post(&current_url)
-        .header(reqwest::header::AUTHORIZATION, auth_value.clone())
-        .multipart(form)
-        .send()
-        .await
-        .expect("POST to runtimefiles-current failed");
-    assert_eq!(
-        response.status(),
+    assert_error_status(
+        sovd2uds.runtime_files_current().upload(form).await,
         StatusCode::METHOD_NOT_ALLOWED,
-        "Expected 405 for POST to runtimefiles-current"
+        "Expected 405 for POST to runtimefiles-current",
     );
 
-    send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_CURRENT,
+    assert_error_status(
+        sovd2uds.runtime_files_current().delete_all().await,
         StatusCode::METHOD_NOT_ALLOWED,
-        Method::DELETE,
-        None,
-        None,
-    )
-    .await?;
+        "Expected 405 for DELETE of runtimefiles-current",
+    );
 
     let form = reqwest::multipart::Form::new().part(
         "files",
         reqwest::multipart::Part::bytes(mdd_bytes).file_name("test.mdd"),
     );
-    let backup_url = test_env.vehicle_url(APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_BACKUP);
-    let response = client
-        .post(&backup_url)
-        .header(reqwest::header::AUTHORIZATION, auth_value)
-        .multipart(form)
-        .send()
-        .await
-        .expect("POST to runtimefiles-backup failed");
-    assert_eq!(
-        response.status(),
+    assert_error_status(
+        sovd2uds.runtime_files_backup().upload(form).await,
         StatusCode::METHOD_NOT_ALLOWED,
-        "Expected 405 for POST to runtimefiles-backup"
+        "Expected 405 for POST to runtimefiles-backup",
     );
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -456,42 +330,36 @@ async fn runtimefiles_post_delete_forbidden_on_current_and_backup() -> Result<()
 #[tokio::test]
 async fn runtimefiles_non_owner_cannot_delete_backup() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let lock = setup_with_lock(client).await;
 
-    let upload_response = upload_mdd(&test_env).await;
+    let upload_response = upload_mdd(client).await?;
     assert_eq!(upload_response.status(), StatusCode::CREATED);
 
-    execute_mode(&test_env, ExecutionMode::Apply).await?;
-    let backup = ids_of(
-        &get_file_list(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_BACKUP)
-            .await?
-            .items,
-    );
+    execute_mode(client, ExecutionMode::Apply).await?;
+    let backup = ids(&client.sovd2uds().runtime_files_backup()).await?;
     assert!(!backup.is_empty(), "Precondition: backup must not be empty");
 
-    let non_owner_auth = bearer_token_header(NON_OWNER_BEARER_TOKEN);
-    send_cda_request(
-        &test_env.config,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_BACKUP,
+    let non_owner = test_env
+        .anonymous_client()
+        .with_token(NON_OWNER_BEARER_TOKEN);
+    assert_error_status(
+        non_owner
+            .sovd2uds()
+            .runtime_files_backup()
+            .delete_all()
+            .await,
         StatusCode::FORBIDDEN,
-        Method::DELETE,
-        None,
-        Some(&non_owner_auth),
-        None,
-    )
-    .await?;
+        "Expected 403 for deleting the backup by a non-lock-holder",
+    );
 
     assert_eq!(
-        ids_of(
-            &get_file_list(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_BACKUP)
-                .await?
-                .items
-        ),
+        ids(&client.sovd2uds().runtime_files_backup()).await?,
         backup,
         "the backup changed although its deletion was forbidden"
     );
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -499,36 +367,37 @@ async fn runtimefiles_non_owner_cannot_delete_backup() -> Result<(), TestingErro
 #[tokio::test]
 async fn runtimefiles_file_retrieval_not_allowed() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
+    let sovd2uds = test_env.client().sovd2uds();
 
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_CURRENT}/FLXC1000.mdd"),
+    assert_error_status(
+        sovd2uds
+            .runtime_files_current()
+            .file("FLXC1000.mdd")
+            .get()
+            .await,
         StatusCode::NOT_FOUND,
-        Method::GET,
-        None,
-        None,
-    )
-    .await?;
+        "Expected 404 for retrieving a file of runtimefiles-current",
+    );
 
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE}/FLXC1000.mdd"),
+    assert_error_status(
+        sovd2uds
+            .runtime_files_next_update()
+            .file("FLXC1000.mdd")
+            .get()
+            .await,
         StatusCode::METHOD_NOT_ALLOWED,
-        Method::GET,
-        None,
-        None,
-    )
-    .await?;
+        "Expected 405 for retrieving a file of runtimefiles-nextupdate",
+    );
 
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_BACKUP}/FLXC1000.mdd"),
+    assert_error_status(
+        sovd2uds
+            .runtime_files_backup()
+            .file("FLXC1000.mdd")
+            .get()
+            .await,
         StatusCode::NOT_FOUND,
-        Method::GET,
-        None,
-        None,
-    )
-    .await?;
+        "Expected 404 for retrieving a file of runtimefiles-backup",
+    );
 
     Ok(())
 }
@@ -537,19 +406,21 @@ async fn runtimefiles_file_retrieval_not_allowed() -> Result<(), TestingError> {
 #[tokio::test]
 async fn runtimefiles_delete_nonexistent_file_returns_not_found() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let lock = setup_with_lock(client).await;
 
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE}/this-file-does-not-exist.mdd"),
+    assert_error_status(
+        client
+            .sovd2uds()
+            .runtime_files_next_update()
+            .file("this-file-does-not-exist.mdd")
+            .delete()
+            .await,
         StatusCode::NOT_FOUND,
-        Method::DELETE,
-        None,
-        None,
-    )
-    .await?;
+        "Expected 404 for deleting a file that does not exist",
+    );
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -558,12 +429,17 @@ async fn runtimefiles_delete_nonexistent_file_returns_not_found() -> Result<(), 
 #[tokio::test]
 async fn runtimefiles_delete_backup_when_empty() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let backup = client.sovd2uds().runtime_files_backup();
+    let lock = setup_with_lock(client).await;
 
-    execute_mode(&test_env, ExecutionMode::Cleanup).await?;
+    execute_mode(client, ExecutionMode::Cleanup).await?;
 
-    let backup_items = get_file_list(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_BACKUP)
+    let backup_items = backup
+        .list()
         .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
         .items;
     assert!(
         backup_items.is_empty(),
@@ -571,17 +447,9 @@ async fn runtimefiles_delete_backup_when_empty() -> Result<(), TestingError> {
     );
 
     // If implementation returns 404 instead, that's a finding.
-    send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_BACKUP,
-        StatusCode::OK,
-        Method::DELETE,
-        None,
-        None,
-    )
-    .await?;
+    backup.delete_all().await?.expect_status(StatusCode::OK);
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -590,51 +458,38 @@ async fn runtimefiles_delete_backup_when_empty() -> Result<(), TestingError> {
 #[tokio::test]
 async fn runtimefiles_execution_mode_case_insensitive() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let lock = setup_with_lock(client).await;
 
     // Upload a file so Apply has something to work with
-    let upload_response = upload_mdd(&test_env).await;
-    assert!(
-        upload_response.status().is_success(),
-        "Precondition: upload must succeed, got {}",
-        upload_response.status()
-    );
+    upload_mdd(client)
+        .await
+        .expect("Precondition: upload must succeed");
 
     // Test lowercase "apply"
-    let response = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_OPERATIONS_RUNTIMEFILESUPDATE_EXECUTIONS,
-        StatusCode::ACCEPTED,
-        Method::POST,
-        Some(r#"{"parameters": {"mode": "apply"}}"#),
-        None,
-    )
-    .await?;
-    let execution_id = response_to_t::<OperationIdItem>(&response)?.id;
-    wait_for_execution_completion(&test_env, &execution_id).await?;
+    let execution_id = start_execution(client, r#"{"parameters": {"mode": "apply"}}"#)
+        .await?
+        .expect_status(StatusCode::ACCEPTED)
+        .json::<OperationIdItem>()?
+        .into_body()
+        .id;
+    wait_for_execution_completion(client, &execution_id).await?;
 
     // Upload again for uppercase test
-    let upload_response2 = upload_mdd(&test_env).await;
-    assert!(
-        upload_response2.status().is_success(),
-        "Precondition: second upload must succeed, got {}",
-        upload_response2.status()
-    );
+    upload_mdd(client)
+        .await
+        .expect("Precondition: second upload must succeed");
 
     // Test uppercase "APPLY"
-    let response = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_OPERATIONS_RUNTIMEFILESUPDATE_EXECUTIONS,
-        StatusCode::ACCEPTED,
-        Method::POST,
-        Some(r#"{"parameters": {"mode": "APPLY"}}"#),
-        None,
-    )
-    .await?;
-    let execution_id = response_to_t::<OperationIdItem>(&response)?.id;
-    wait_for_execution_completion(&test_env, &execution_id).await?;
+    let execution_id = start_execution(client, r#"{"parameters": {"mode": "APPLY"}}"#)
+        .await?
+        .expect_status(StatusCode::ACCEPTED)
+        .json::<OperationIdItem>()?
+        .into_body()
+        .id;
+    wait_for_execution_completion(client, &execution_id).await?;
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -643,32 +498,24 @@ async fn runtimefiles_execution_mode_case_insensitive() -> Result<(), TestingErr
 #[tokio::test]
 async fn runtimefiles_query_parameters_all_endpoints() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let sovd2uds = client.sovd2uds();
+    let lock = setup_with_lock(client).await;
 
     // Upload a file so nextupdate is non-empty
-    let upload_response = upload_mdd(&test_env).await;
-    assert!(
-        upload_response.status().is_success(),
-        "Precondition: upload must succeed, got {}",
-        upload_response.status()
-    );
+    upload_mdd(client)
+        .await
+        .expect("Precondition: upload must succeed");
 
     // Reads should not depend on a vehicle lock, so release it before GET checks.
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
 
     // Test hash query on nextupdate
-    let mut hash_params = HashMap::new();
-    hash_params.insert("x-sovd2uds-include-hash".to_owned(), "sha256".to_owned());
-    let nextupdate_hash_response = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        Some(&QueryParams(hash_params)),
-    )
-    .await?;
-    let nextupdate_hash_list = response_to_t::<BulkDataList>(&nextupdate_hash_response)?;
+    let nextupdate_hash_list = sovd2uds
+        .runtime_files_next_update()
+        .list_with(&[("x-sovd2uds-include-hash", "sha256")])
+        .await?
+        .expect_status(StatusCode::OK);
     let first_item = nextupdate_hash_list
         .items
         .first()
@@ -679,23 +526,16 @@ async fn runtimefiles_query_parameters_all_endpoints() -> Result<(), TestingErro
     );
 
     // Apply to populate backup
-    let lock_id = setup_with_lock(&test_env).await;
-    execute_mode(&test_env, ExecutionMode::Apply).await?;
-    teardown_lock(&test_env, &lock_id).await;
+    let lock = setup_with_lock(client).await;
+    execute_mode(client, ExecutionMode::Apply).await?;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
 
     // Test file-size query on backup
-    let mut size_params = HashMap::new();
-    size_params.insert("x-sovd2uds-include-file-size".to_owned(), "true".to_owned());
-    let backup_size_response = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_BACKUP,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        Some(&QueryParams(size_params)),
-    )
-    .await?;
-    let backup_size_list = response_to_t::<BulkDataList>(&backup_size_response)?;
+    let backup_size_list = sovd2uds
+        .runtime_files_backup()
+        .list_with(&[("x-sovd2uds-include-file-size", "true")])
+        .await?
+        .expect_status(StatusCode::OK);
     let first_item = backup_size_list
         .items
         .first()
@@ -711,20 +551,11 @@ async fn runtimefiles_query_parameters_all_endpoints() -> Result<(), TestingErro
 #[tokio::test]
 async fn runtimefiles_upload_multiple_files() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let auth = test_env.auth_header().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let next_update = client.sovd2uds().runtime_files_next_update();
+    let lock = setup_with_lock(client).await;
 
-    let mdd_bytes = std::fs::read(
-        test_container_dir()
-            .expect("testcontainer dir")
-            .join("odx/FLXC1000.mdd"),
-    )
-    .expect("MDD fixture not found");
-    let auth_value = auth
-        .get(reqwest::header::AUTHORIZATION)
-        .expect("Authorization header missing")
-        .clone();
-    let client = reqwest::Client::new();
+    let mdd_bytes = read_mdd_fixture("FLXC1000.mdd");
 
     // Build a multipart form with TWO file parts
     let form = reqwest::multipart::Form::new()
@@ -737,49 +568,32 @@ async fn runtimefiles_upload_multiple_files() -> Result<(), TestingError> {
             reqwest::multipart::Part::bytes(mdd_bytes).file_name("FILE_B.mdd"),
         );
 
-    let upload_url = test_env.vehicle_url(APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE);
-    let response = client
-        .post(&upload_url)
-        .header(reqwest::header::AUTHORIZATION, auth_value)
-        .multipart(form)
-        .send()
+    let uploaded = next_update
+        .upload(form)
         .await
-        .expect("multi-file upload request failed");
-
-    assert!(
-        response.status().is_success(),
-        "Expected success for multi-file upload, got {}",
-        response.status()
-    );
-    let location = response
-        .headers()
-        .get(reqwest::header::LOCATION)
-        .and_then(|value| value.to_str().ok())
-        .expect("multi-file upload must include Location")
-        .to_owned();
+        .expect("Expected success for multi-file upload");
+    let location = uploaded
+        .location()
+        .expect("multi-file upload must include Location");
     assert!(
         location.ends_with("/file_a.mdd"),
         "multi-file upload Location must point to the first created file, got {location}"
     );
 
     // Verify both files appear in nextupdate
-    let list_response = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await?;
-    let items = response_to_t::<BulkDataList>(&list_response)?.items;
+    let items = next_update
+        .list()
+        .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .items;
     assert!(
         items.len() >= 2,
         "Expected at least 2 items after uploading FILE_A.mdd and FILE_B.mdd, got {}",
         items.len()
     );
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -789,10 +603,11 @@ async fn runtimefiles_upload_multiple_files() -> Result<(), TestingError> {
 #[tokio::test]
 async fn runtimefiles_upload_octet_stream() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let lock = setup_with_lock(client).await;
 
     let response =
-        upload_mdd_octet_stream(&test_env, Some("attachment; filename=\"FLXC1000.mdd\"")).await;
+        upload_mdd_octet_stream(client, Some("attachment; filename=\"FLXC1000.mdd\"")).await?;
 
     assert_eq!(
         response.status(),
@@ -801,16 +616,14 @@ async fn runtimefiles_upload_octet_stream() -> Result<(), TestingError> {
         response.status()
     );
 
-    let list_response = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await?;
-    let items = response_to_t::<BulkDataList>(&list_response)?.items;
+    let items = client
+        .sovd2uds()
+        .runtime_files_next_update()
+        .list()
+        .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .items;
     assert!(
         items
             .iter()
@@ -818,7 +631,7 @@ async fn runtimefiles_upload_octet_stream() -> Result<(), TestingError> {
         "Expected FLXC1000.mdd to appear in nextupdate after octet-stream upload"
     );
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -827,10 +640,11 @@ async fn runtimefiles_upload_octet_stream() -> Result<(), TestingError> {
 #[tokio::test]
 async fn runtimefiles_upload_octet_stream_unquoted_filename() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let lock = setup_with_lock(client).await;
 
     let response =
-        upload_mdd_octet_stream(&test_env, Some("attachment; filename=FLXC1000.mdd")).await;
+        upload_mdd_octet_stream(client, Some("attachment; filename=FLXC1000.mdd")).await?;
 
     assert_eq!(
         response.status(),
@@ -839,7 +653,7 @@ async fn runtimefiles_upload_octet_stream_unquoted_filename() -> Result<(), Test
         response.status()
     );
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -849,18 +663,16 @@ async fn runtimefiles_upload_octet_stream_unquoted_filename() -> Result<(), Test
 async fn runtimefiles_upload_octet_stream_missing_content_disposition() -> Result<(), TestingError>
 {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let lock = setup_with_lock(client).await;
 
-    let response = upload_mdd_octet_stream(&test_env, None).await;
-
-    assert_eq!(
-        response.status(),
+    assert_error_status(
+        upload_mdd_octet_stream(client, None).await,
         StatusCode::BAD_REQUEST,
-        "Expected 400 Bad Request for octet-stream upload without Content-Disposition, got {}",
-        response.status()
+        "Expected 400 Bad Request for octet-stream upload without Content-Disposition",
     );
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -869,18 +681,16 @@ async fn runtimefiles_upload_octet_stream_missing_content_disposition() -> Resul
 #[tokio::test]
 async fn runtimefiles_upload_octet_stream_missing_filename_param() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let lock = setup_with_lock(client).await;
 
-    let response = upload_mdd_octet_stream(&test_env, Some("attachment")).await;
-
-    assert_eq!(
-        response.status(),
+    assert_error_status(
+        upload_mdd_octet_stream(client, Some("attachment")).await,
         StatusCode::BAD_REQUEST,
-        "Expected 400 Bad Request for octet-stream upload without filename param, got {}",
-        response.status()
+        "Expected 400 Bad Request for octet-stream upload without filename param",
     );
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -889,23 +699,21 @@ async fn runtimefiles_upload_octet_stream_missing_filename_param() -> Result<(),
 #[tokio::test]
 async fn runtimefiles_upload_unsupported_content_type() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let lock = setup_with_lock(client).await;
 
-    let response = upload_mdd_raw(
-        &test_env,
-        "text/plain",
-        Some("attachment; filename=\"FLXC1000.mdd\""),
-    )
-    .await;
-
-    assert_eq!(
-        response.status(),
+    assert_error_status(
+        upload_mdd_raw(
+            client,
+            "text/plain",
+            Some("attachment; filename=\"FLXC1000.mdd\""),
+        )
+        .await,
         StatusCode::BAD_REQUEST,
-        "Expected 400 Bad Request for upload with unsupported Content-Type, got {}",
-        response.status()
+        "Expected 400 Bad Request for upload with unsupported Content-Type",
     );
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -914,37 +722,30 @@ async fn runtimefiles_upload_unsupported_content_type() -> Result<(), TestingErr
 #[tokio::test]
 async fn runtimefiles_apply_with_no_pending_changes() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let lock = setup_with_lock(client).await;
 
     // Reset nextupdate to current state (spec: DELETE removes all pending changes,
     // resetting nextupdate to the currently active database - not to empty).
-    send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE,
-        StatusCode::OK,
-        Method::DELETE,
-        None,
-        None,
-    )
-    .await?;
+    client
+        .sovd2uds()
+        .runtime_files_next_update()
+        .delete_all()
+        .await?
+        .expect_status(StatusCode::OK);
 
     // Attempt Apply with no pending changes (nextupdate == current) - must NOT return 202
-    let body = mode_json(ExecutionMode::Apply);
-    let apply_response = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_OPERATIONS_RUNTIMEFILESUPDATE_EXECUTIONS,
-        StatusCode::NOT_FOUND,
-        Method::POST,
-        Some(&body),
-        None,
-    )
-    .await;
-    if apply_response.is_err() {
+    let apply_result = client
+        .sovd2uds()
+        .runtime_files_update()
+        .start(ExecutionMode::Apply)
+        .await;
+    if apply_result.map_or_else(|err| err.status() != Some(StatusCode::NOT_FOUND), |_| true) {
         // If the server returns something other than 404, that's a finding - log it but don't fail
         // The primary assertion is that it must NOT be 202
     }
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -952,49 +753,38 @@ async fn runtimefiles_apply_with_no_pending_changes() -> Result<(), TestingError
 #[tokio::test]
 async fn runtimefiles_rollback_with_no_backup() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let backup = client.sovd2uds().runtime_files_backup();
+    let lock = setup_with_lock(client).await;
 
     // Clear backup
-    send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_BACKUP,
-        StatusCode::OK,
-        Method::DELETE,
-        None,
-        None,
-    )
-    .await?;
+    backup.delete_all().await?.expect_status(StatusCode::OK);
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(1)).await;
 
     // Verify backup is empty
-    let backup_response = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_BACKUP,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await?;
-    let backup_items = response_to_t::<BulkDataList>(&backup_response)?.items;
+    let backup_items = backup
+        .list()
+        .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .items;
     assert!(
         backup_items.is_empty(),
         "Precondition: backup must be empty before Rollback"
     );
 
     // Attempt Rollback with empty backup - expect 404
-    let body = mode_json(ExecutionMode::Rollback);
-    send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_OPERATIONS_RUNTIMEFILESUPDATE_EXECUTIONS,
+    assert_error_status(
+        client
+            .sovd2uds()
+            .runtime_files_update()
+            .start(ExecutionMode::Rollback)
+            .await,
         StatusCode::NOT_FOUND,
-        Method::POST,
-        Some(&body),
-        None,
-    )
-    .await?;
+        "Expected 404 for Rollback without backup",
+    );
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -1002,34 +792,33 @@ async fn runtimefiles_rollback_with_no_backup() -> Result<(), TestingError> {
 #[tokio::test]
 async fn runtimefiles_rollback_clears_nextupdate_with_new_pending() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let sovd2uds = client.sovd2uds();
+    let lock = setup_with_lock(client).await;
 
     // Step 1: Upload and Apply to establish a backup
-    let upload_response = upload_mdd(&test_env).await;
-    assert!(
-        upload_response.status().is_success(),
-        "Precondition: first upload must succeed, got {}",
-        upload_response.status()
-    );
-    execute_mode(&test_env, ExecutionMode::Apply).await?;
+    upload_mdd(client)
+        .await
+        .expect("Precondition: first upload must succeed");
+    execute_mode(client, ExecutionMode::Apply).await?;
 
     // Step 2: Upload a new file to nextupdate (new pending changes)
-    let upload_response2 = upload_mdd_with_filename(&test_env, "NEW_PENDING.mdd").await;
-    assert!(
-        upload_response2.status().is_success(),
-        "Precondition: second upload must succeed, got {}",
-        upload_response2.status()
-    );
+    upload_mdd_with_filename(client, "NEW_PENDING.mdd")
+        .await
+        .expect("Precondition: second upload must succeed");
 
     // Step 3: Rollback - should revert current and clear nextupdate
-    execute_mode(&test_env, ExecutionMode::Rollback).await?;
+    execute_mode(client, ExecutionMode::Rollback).await?;
 
     // Step 4: Verify NEW_PENDING.mdd (the uploaded pending file) is gone, and nextupdate mirrors
     // the restored current state.
-    let nextupdate_items =
-        get_file_list(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE)
-            .await?
-            .items;
+    let nextupdate_items = sovd2uds
+        .runtime_files_next_update()
+        .list()
+        .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .items;
     assert!(
         !nextupdate_items
             .iter()
@@ -1038,8 +827,12 @@ async fn runtimefiles_rollback_clears_nextupdate_with_new_pending() -> Result<()
         nextupdate_items.iter().map(|i| &i.id).collect::<Vec<_>>()
     );
 
-    let current_items = get_file_list(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_CURRENT)
+    let current_items = sovd2uds
+        .runtime_files_current()
+        .list()
         .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
         .items;
     assert_eq!(
         ids_of(&nextupdate_items),
@@ -1047,7 +840,7 @@ async fn runtimefiles_rollback_clears_nextupdate_with_new_pending() -> Result<()
         "Expected nextupdate to mirror current after Rollback (no pending changes)"
     );
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -1056,176 +849,157 @@ async fn runtimefiles_rollback_clears_nextupdate_with_new_pending() -> Result<()
 #[tokio::test]
 async fn runtimefiles_apply_blocked_by_active_operations() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
+    let client = test_env.client();
 
     // Create vehicle lock (required for runtimefiles mutations)
-    let vehicle_lock_response = create_lock(
-        Duration::from_secs(333),
-        locks::LOCKS,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
-    let vehicle_lock_id = response_to_t::<LockResponse>(&vehicle_lock_response)?.id;
+    let vehicle_lock = client
+        .locks()
+        .create(Duration::from_secs(333))
+        .await?
+        .expect_status(StatusCode::CREATED)
+        .into_body();
 
     // Upload a file so Apply has something to work with
-    let upload_response = upload_mdd(&test_env).await;
-    assert!(
-        upload_response.status().is_success(),
-        "Precondition: upload must succeed, got {}",
-        upload_response.status()
-    );
+    upload_mdd(client)
+        .await
+        .expect("Precondition: upload must succeed");
 
     // Create functional group lock (same user) to block Apply
-    let fg_lock_response = create_lock(
-        Duration::from_secs(333),
-        locks::FUNCTIONS_FUNCTIONALGROUPS_DOIP_LOCKS,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
-    let fg_lock_id = response_to_t::<LockResponse>(&fg_lock_response)?.id;
+    let fg_lock = client
+        .functional_group(FUNCTIONAL_GROUP)
+        .locks()
+        .create(Duration::from_secs(333))
+        .await?
+        .expect_status(StatusCode::CREATED)
+        .into_body();
 
     // Attempt Apply while functional group lock is held - expect 409 Conflict
-    let body = mode_json(ExecutionMode::Apply);
-    send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_OPERATIONS_RUNTIMEFILESUPDATE_EXECUTIONS,
+    assert_error_status(
+        client
+            .sovd2uds()
+            .runtime_files_update()
+            .start(ExecutionMode::Apply)
+            .await,
         StatusCode::CONFLICT,
-        Method::POST,
-        Some(&body),
-        None,
-    )
-    .await?;
+        "Expected 409 for Apply while a functional group lock is held",
+    );
 
-    lock_operation(
-        locks::FUNCTIONS_FUNCTIONALGROUPS_DOIP_LOCKS,
-        Some(&fg_lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    fg_lock
+        .release()
+        .await?
+        .expect_status(StatusCode::NO_CONTENT);
 
     // Now Apply should succeed (202)
-    execute_mode(&test_env, ExecutionMode::Apply).await?;
+    execute_mode(client, ExecutionMode::Apply).await?;
 
     // Release vehicle lock
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("locks/{vehicle_lock_id}"),
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-        None,
-        None,
-    )
-    .await?;
+    vehicle_lock
+        .release()
+        .await?
+        .expect_status(StatusCode::NO_CONTENT);
 
     Ok(())
 }
 
-/// Helper: uploads the `FLXC1000.mdd` fixture to nextupdate as multipart form.
-pub(crate) async fn upload_mdd(cda: &impl CdaClient) -> reqwest::Response {
-    upload_mdd_as(cda, "FLXC1000.mdd", "FLXC1000.mdd").await
-}
-
-/// Helper: uploads the fixture `testcontainer/odx/{name}`, e.g. `FSNR2000.mdd`.
-async fn upload_mdd_by_name(cda: &impl CdaClient, name: &str) -> reqwest::Response {
-    upload_mdd_as(cda, name, name).await
-}
-
-/// Helper: uploads the `FLXC1000.mdd` fixture with a custom filename.
-async fn upload_mdd_with_filename(cda: &impl CdaClient, filename: &str) -> reqwest::Response {
-    upload_mdd_as(cda, "FLXC1000.mdd", filename).await
-}
-
-/// Helper: uploads the fixture `testcontainer/odx/{fixture}` as `filename`.
-async fn upload_mdd_as(cda: &impl CdaClient, fixture: &str, filename: &str) -> reqwest::Response {
-    let form = reqwest::multipart::Form::new().part(
-        "files",
-        reqwest::multipart::Part::bytes(read_mdd_fixture(fixture)).file_name(filename.to_owned()),
-    );
-    upload_request(cda)
-        .await
-        .multipart(form)
-        .send()
-        .await
-        .expect("upload request failed")
-}
-
-/// The fixture `testcontainer/odx/{name}`.
+/// Helper: reads the MDD fixture testcontainer/odx/{name} (e.g. "FSNR2000.mdd").
 fn read_mdd_fixture(name: &str) -> Vec<u8> {
     std::fs::read(
         test_container_dir()
             .expect("testcontainer dir")
             .join(format!("odx/{name}")),
     )
-    .unwrap_or_else(|_| panic!("MDD fixture {name} not found"))
+    .unwrap_or_else(|e| panic!("MDD fixture {name} not found: {e}"))
 }
 
-/// An authorized `POST` to nextupdate, without a body yet.
-async fn upload_request(cda: &impl CdaClient) -> reqwest::RequestBuilder {
-    let auth = cda.auth().await.expect("Failed to authenticate");
-    reqwest::Client::new()
-        .post(vehicle_url(
-            cda.config(),
-            APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE,
-        ))
-        .headers(auth)
+/// Helper: uploads the MDD fixture `fixture` to nextupdate as `file_name`.
+/// Returns the response, as callers check its exact status.
+async fn upload_mdd_fixture(
+    client: &SovdTestClient,
+    fixture: &str,
+    file_name: &str,
+) -> client::Result<Response<BulkDataCreatedList>> {
+    let form = reqwest::multipart::Form::new().part(
+        "files",
+        reqwest::multipart::Part::bytes(read_mdd_fixture(fixture)).file_name(file_name.to_owned()),
+    );
+    client
+        .sovd2uds()
+        .runtime_files_next_update()
+        .upload(form)
+        .await
+}
+
+/// Helper: uploads the MDD fixture to nextupdate and returns the response.
+pub(crate) async fn upload_mdd(
+    client: &SovdTestClient,
+) -> client::Result<Response<BulkDataCreatedList>> {
+    upload_mdd_fixture(client, "FLXC1000.mdd", "FLXC1000.mdd").await
+}
+
+/// Helper: uploads an MDD from testcontainer/odx/{name} (e.g. "FSNR2000.mdd").
+async fn upload_mdd_by_name(
+    client: &SovdTestClient,
+    name: &str,
+) -> client::Result<Response<BulkDataCreatedList>> {
+    upload_mdd_fixture(client, name, name).await
+}
+
+/// Helper: uploads an MDD fixture with a custom filename.
+async fn upload_mdd_with_filename(
+    client: &SovdTestClient,
+    filename: &str,
+) -> client::Result<Response<BulkDataCreatedList>> {
+    upload_mdd_fixture(client, "FLXC1000.mdd", filename).await
 }
 
 /// Helper: uploads the `FLXC1000.mdd` fixture as a single raw-body request with the
 /// given `Content-Type`, optionally setting a `Content-Disposition` header value.
 async fn upload_mdd_raw(
-    cda: &impl CdaClient,
+    client: &SovdTestClient,
     content_type: &str,
     content_disposition: Option<&str>,
-) -> reqwest::Response {
-    let mut request = upload_request(cda)
+) -> client::Result<Response<BulkDataCreatedList>> {
+    client
+        .sovd2uds()
+        .runtime_files_next_update()
+        .upload_bytes(
+            content_type,
+            read_mdd_fixture("FLXC1000.mdd"),
+            content_disposition,
+        )
         .await
-        .header(reqwest::header::CONTENT_TYPE, content_type.to_owned());
-    if let Some(content_disposition) = content_disposition {
-        request = request.header(reqwest::header::CONTENT_DISPOSITION, content_disposition);
-    }
-    request
-        .body(read_mdd_fixture("FLXC1000.mdd"))
-        .send()
-        .await
-        .expect("raw upload request failed")
 }
 
 /// Helper: uploads the `FLXC1000.mdd` fixture as a single `application/octet-stream`
 /// request, optionally setting a `Content-Disposition` header value.
 async fn upload_mdd_octet_stream(
-    test_env: &TestEnv,
+    client: &SovdTestClient,
     content_disposition: Option<&str>,
-) -> reqwest::Response {
-    upload_mdd_raw(test_env, "application/octet-stream", content_disposition).await
+) -> client::Result<Response<BulkDataCreatedList>> {
+    upload_mdd_raw(client, "application/octet-stream", content_disposition).await
 }
 
-/// Helper: creates a vehicle lock and returns the lock id.
-pub(crate) async fn setup_with_lock(cda: &impl CdaClient) -> String {
-    let lock_response = create_lock(
-        Duration::from_secs(333),
-        locks::LOCKS,
-        StatusCode::CREATED,
-        cda,
-    )
-    .await;
-    response_to_t::<LockResponse>(&lock_response)
-        .expect("Failed to deserialize lock response")
-        .id
+/// Helper: creates a vehicle lock.
+pub(crate) async fn setup_with_lock(client: &SovdTestClient) -> Lock {
+    client
+        .locks()
+        .create(Duration::from_secs(333))
+        .await
+        .expect("Failed to create lock")
+        .expect_status(StatusCode::CREATED)
+        .into_body()
 }
 
-/// Helper: releases a vehicle lock.
-pub(crate) async fn teardown_lock(cda: &impl CdaClient, lock_id: &str) {
-    lock_operation(
-        locks::LOCKS,
-        Some(lock_id),
-        cda,
+/// Helper: deletes the file `id` of `files`, which the CDA answers with
+/// `204 No Content`.
+async fn delete_file(files: &RuntimeFiles<'_>, id: &str) -> Result<(), TestingError> {
+    let response = files.file(id).delete().await?;
+    assert_eq!(
+        response.status(),
         StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+        "Expected 204 for deleting {id}"
+    );
+    Ok(())
 }
 
 /// The file names of every MDD the test container ships, i.e. the whole vehicle.
@@ -1247,37 +1021,33 @@ fn mdd_file_names() -> Vec<String> {
     names
 }
 
-/// Helper: GETs a runtimefiles list endpoint and deserializes the typed response.
-async fn get_file_list(cda: &impl CdaClient, endpoint: &str) -> Result<BulkDataList, TestingError> {
-    let response =
-        send_authenticated_cda_request(cda, endpoint, StatusCode::OK, Method::GET, None, None)
-            .await?;
-    response_to_t::<BulkDataList>(&response)
-}
-
-/// Serializes an `ExecutionMode` into the JSON body expected by execution endpoints.
-fn mode_json(mode: ExecutionMode) -> String {
-    serde_json::json!({ "parameters": { "mode": mode } }).to_string()
+/// Helper: starts a runtime update execution with the JSON `body` as it is.
+/// Raw rather than `RuntimeFilesUpdate::start`, which only sends the modes
+/// as `ExecutionMode` serializes them, not in other letter cases.
+async fn start_execution(client: &SovdTestClient, body: &str) -> client::Result<Response> {
+    client
+        .sovd2uds()
+        .runtime_files_update()
+        .request(Method::POST, "")
+        .raw_json(body)
+        .send()
+        .await
 }
 
 /// POSTs an execution mode to the executions endpoint (expecting 202 Accepted)
 /// and waits for that execution to finish.
 pub(crate) async fn execute_mode(
-    cda: &impl CdaClient,
+    client: &SovdTestClient,
     mode: ExecutionMode,
 ) -> Result<OperationIdItem, TestingError> {
-    let body = mode_json(mode);
-    let response = send_authenticated_cda_request(
-        cda,
-        APPS_SOVD2UDS_OPERATIONS_RUNTIMEFILESUPDATE_EXECUTIONS,
+    let response = client.sovd2uds().runtime_files_update().start(mode).await?;
+    assert_eq!(
+        response.status(),
         StatusCode::ACCEPTED,
-        Method::POST,
-        Some(&body),
-        None,
-    )
-    .await?;
-    let execution = response_to_t::<OperationIdItem>(&response)?;
-    wait_for_execution_completion(cda, &execution.id).await?;
+        "Expected 202 for starting a {mode:?} execution"
+    );
+    let execution = response.into_body();
+    wait_for_execution_completion(client, &execution.id).await?;
     Ok(execution)
 }
 
@@ -1292,23 +1062,18 @@ pub(crate) async fn execute_mode(
 ///
 /// The execution resource stays readable throughout, being on the exempt list.
 async fn wait_for_execution_completion(
-    cda: &impl CdaClient,
+    client: &SovdTestClient,
     execution_id: &str,
 ) -> Result<(), TestingError> {
     const TIMEOUT: Duration = Duration::from_secs(60);
-    let execution_path =
-        format!("{APPS_SOVD2UDS_OPERATIONS_RUNTIMEFILESUPDATE_EXECUTIONS}/{execution_id}");
+
+    let update = client.sovd2uds().runtime_files_update();
     poll_until(TIMEOUT, Duration::from_millis(100), || async {
-        let response = send_authenticated_cda_request(
-            cda,
-            &execution_path,
-            StatusCode::OK,
-            Method::GET,
-            None,
-            None,
-        )
-        .await?;
-        let execution = response_to_t::<ExecutionResponse>(&response)?;
+        let execution = update
+            .execution(execution_id)
+            .await?
+            .expect_status(StatusCode::OK)
+            .into_body();
         match execution.status {
             ExecutionStatusKind::Completed => Ok(Ok(())),
             ExecutionStatusKind::Running => {
@@ -1326,21 +1091,26 @@ async fn wait_for_execution_completion(
     .await?;
 
     // `runtimefiles-current` is not exempt, so it answers 409 for as long as
-    // the protection is installed.
-    poll_while(
-        cda,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_CURRENT,
-        StatusCode::CONFLICT,
-        TIMEOUT,
-    )
-    .await
-    .map(|_| ())
+    // the protection is installed. A raw request, as only a request can be
+    // polled.
+    client
+        .sovd2uds()
+        .runtime_files_current()
+        .request(Method::GET)
+        .poll_while(StatusCode::CONFLICT, TIMEOUT)
+        .await?;
+    Ok(())
 }
 
 /// Helper: asserts the uploaded FLXC1000.mdd is visible in nextupdate (case-insensitive).
-async fn assert_nextupdate_contains_flxc1000(test_env: &TestEnv) -> Result<(), TestingError> {
-    let items = get_file_list(test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE)
+async fn assert_nextupdate_contains_flxc1000(client: &SovdTestClient) -> Result<(), TestingError> {
+    let items = client
+        .sovd2uds()
+        .runtime_files_next_update()
+        .list()
         .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
         .items;
     assert!(
         !items.is_empty(),
@@ -1359,19 +1129,28 @@ async fn assert_nextupdate_contains_flxc1000(test_env: &TestEnv) -> Result<(), T
 /// current non-empty, nextupdate mirrors current (no pending changes), and backup matches the
 /// original current snapshot.
 async fn assert_state_after_apply(
-    test_env: &TestEnv,
+    client: &SovdTestClient,
     initial_count: usize,
 ) -> Result<(), TestingError> {
-    let current = get_file_list(test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_CURRENT)
+    let sovd2uds = client.sovd2uds();
+    let current = sovd2uds
+        .runtime_files_current()
+        .list()
         .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
         .items;
     assert!(
         !current.is_empty(),
         "Expected non-empty current after apply"
     );
 
-    let nextupdate = get_file_list(test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE)
+    let nextupdate = sovd2uds
+        .runtime_files_next_update()
+        .list()
         .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
         .items;
     assert_eq!(
         ids_of(&nextupdate),
@@ -1379,8 +1158,12 @@ async fn assert_state_after_apply(
         "Expected nextupdate to mirror current after apply (no pending changes)"
     );
 
-    let backup = get_file_list(test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_BACKUP)
+    let backup = sovd2uds
+        .runtime_files_backup()
+        .list()
         .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
         .items;
     assert_eq!(
         backup.len(),
@@ -1394,11 +1177,16 @@ async fn assert_state_after_apply(
 /// Helper: verifies the post-Rollback invariants:
 /// current count matches `expected_count`, nextupdate mirrors current (no pending changes).
 async fn assert_state_after_rollback(
-    test_env: &TestEnv,
+    client: &SovdTestClient,
     expected_count: usize,
 ) -> Result<(), TestingError> {
-    let current = get_file_list(test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_CURRENT)
+    let sovd2uds = client.sovd2uds();
+    let current = sovd2uds
+        .runtime_files_current()
+        .list()
         .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
         .items;
     assert_eq!(
         current.len(),
@@ -1406,8 +1194,12 @@ async fn assert_state_after_rollback(
         "Expected item count to match initial count after rollback"
     );
 
-    let nextupdate = get_file_list(test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE)
+    let nextupdate = sovd2uds
+        .runtime_files_next_update()
+        .list()
         .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
         .items;
     assert_eq!(
         ids_of(&nextupdate),
@@ -1416,24 +1208,41 @@ async fn assert_state_after_rollback(
          reset)"
     );
 
-    get_file_list(test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_BACKUP).await?;
+    sovd2uds
+        .runtime_files_backup()
+        .list()
+        .await?
+        .expect_status(StatusCode::OK);
 
     Ok(())
 }
 
 /// Helper: verifies the post-Cleanup invariants:
 /// backup empty, nextupdate mirrors current (no pending changes).
-async fn assert_state_after_cleanup(test_env: &TestEnv) -> Result<(), TestingError> {
-    let backup = get_file_list(test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_BACKUP)
+async fn assert_state_after_cleanup(client: &SovdTestClient) -> Result<(), TestingError> {
+    let sovd2uds = client.sovd2uds();
+    let backup = sovd2uds
+        .runtime_files_backup()
+        .list()
         .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
         .items;
     assert!(backup.is_empty(), "Expected empty backup after cleanup");
 
-    let current = get_file_list(test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_CURRENT)
+    let current = sovd2uds
+        .runtime_files_current()
+        .list()
         .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
         .items;
-    let nextupdate = get_file_list(test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE)
+    let nextupdate = sovd2uds
+        .runtime_files_next_update()
+        .list()
         .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
         .items;
     assert_eq!(
         ids_of(&nextupdate),
@@ -1453,9 +1262,14 @@ fn ids_of(items: &[BulkDataDescriptor]) -> Vec<String> {
 }
 
 /// Helper: finds the FLXC1000 entry id in nextupdate, failing the test if absent.
-async fn find_flxc1000_id_in_nextupdate(test_env: &TestEnv) -> Result<String, TestingError> {
-    let items = get_file_list(test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE)
+async fn find_flxc1000_id_in_nextupdate(client: &SovdTestClient) -> Result<String, TestingError> {
+    let items = client
+        .sovd2uds()
+        .runtime_files_next_update()
+        .list()
         .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
         .items;
     let id = items
         .iter()
@@ -1468,30 +1282,17 @@ async fn find_flxc1000_id_in_nextupdate(test_env: &TestEnv) -> Result<String, Te
 
 /// Helper: verifies ECU route state after Apply (FLXC1000 gone, FSNR2000 present, health ok).
 async fn assert_ecu_routes_after_apply(test_env: &TestEnv) -> Result<(), TestingError> {
+    let client = test_env.client();
+
     // FLXC1000 was removed from staging -> its route no longer exists.
-    send_authenticated_cda_request(
-        test_env,
-        COMPONENTS_FLXC1000_BASE,
-        StatusCode::NOT_FOUND,
-        Method::GET,
-        None,
-        None,
-    )
-    .await?;
+    assert_route(client, ECU_FLXC1000, StatusCode::NOT_FOUND).await;
 
     // FSNR2000 was in staging, so its route must survive the rebuild.
-    send_authenticated_cda_request(
-        test_env,
-        COMPONENTS_FSNR2000_BASE,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await?;
+    assert_route(client, ECU_FSNR2000, StatusCode::OK).await;
 
     // The health route lives in a separate group and must not be affected
-    // by replace_routes on the vehicle route handle.
+    // by replace_routes on the vehicle route handle. It is outside the SOVD
+    // API the client reaches.
     let health_url = format!(
         "http://{}:{}/health/ready",
         test_env.config.server.address(),
@@ -1516,36 +1317,44 @@ async fn assert_ecu_routes_after_apply(test_env: &TestEnv) -> Result<(), Testing
 #[tokio::test]
 async fn runtimefiles_delete_nextupdate_clears_pending() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let sovd2uds = client.sovd2uds();
+    let lock = setup_with_lock(client).await;
 
-    let upload_response = upload_mdd(&test_env).await;
+    let upload_response = upload_mdd(client).await?;
     assert_eq!(upload_response.status(), StatusCode::CREATED);
 
-    let nextupdate_items =
-        get_file_list(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE)
-            .await?
-            .items;
+    let nextupdate_items = sovd2uds
+        .runtime_files_next_update()
+        .list()
+        .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .items;
     assert!(
         !nextupdate_items.is_empty(),
         "Precondition: nextupdate should have items after upload"
     );
 
-    send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE,
-        StatusCode::OK,
-        Method::DELETE,
-        None,
-        None,
-    )
-    .await?;
-
-    let post_delete_items =
-        get_file_list(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE)
-            .await?
-            .items;
-    let current_items = get_file_list(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_CURRENT)
+    sovd2uds
+        .runtime_files_next_update()
+        .delete_all()
         .await?
+        .expect_status(StatusCode::OK);
+
+    let post_delete_items = sovd2uds
+        .runtime_files_next_update()
+        .list()
+        .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .items;
+    let current_items = sovd2uds
+        .runtime_files_current()
+        .list()
+        .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
         .items;
     assert_eq!(
         ids_of(&post_delete_items),
@@ -1553,7 +1362,7 @@ async fn runtimefiles_delete_nextupdate_clears_pending() -> Result<(), TestingEr
         "Expected nextupdate to mirror current after DELETE (no pending files)"
     );
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -1561,15 +1370,19 @@ async fn runtimefiles_delete_nextupdate_clears_pending() -> Result<(), TestingEr
 #[tokio::test]
 async fn runtimefiles_delete_nextupdate_by_id() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let next_update = client.sovd2uds().runtime_files_next_update();
+    let lock = setup_with_lock(client).await;
 
-    let upload_response = upload_mdd(&test_env).await;
+    let upload_response = upload_mdd(client).await?;
     assert_eq!(upload_response.status(), StatusCode::CREATED);
 
-    let nextupdate_items =
-        get_file_list(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE)
-            .await?
-            .items;
+    let nextupdate_items = next_update
+        .list()
+        .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .items;
 
     let file_id = nextupdate_items
         .iter()
@@ -1578,26 +1391,14 @@ async fn runtimefiles_delete_nextupdate_by_id() -> Result<(), TestingError> {
         .id
         .clone();
 
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE}/{file_id}"),
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-        None,
-        None,
-    )
-    .await?;
+    delete_file(&next_update, &file_id).await?;
 
-    let post_delete_response = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await?;
-    let post_delete_items = response_to_t::<BulkDataList>(&post_delete_response)?.items;
+    let post_delete_items = next_update
+        .list()
+        .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .items;
     let still_has_file = post_delete_items
         .iter()
         .any(|item| item.id.to_lowercase().contains(ECU_FLXC1000));
@@ -1606,7 +1407,7 @@ async fn runtimefiles_delete_nextupdate_by_id() -> Result<(), TestingError> {
         "Expected FLXC1000 to be removed from nextupdate after DELETE by id"
     );
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -1615,47 +1416,40 @@ async fn runtimefiles_delete_nextupdate_by_id() -> Result<(), TestingError> {
 #[tokio::test]
 async fn runtimefiles_delete_backup() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let backup = client.sovd2uds().runtime_files_backup();
+    let lock = setup_with_lock(client).await;
 
-    let upload_response = upload_mdd(&test_env).await;
+    let upload_response = upload_mdd(client).await?;
     assert_eq!(upload_response.status(), StatusCode::CREATED);
 
-    execute_mode(&test_env, ExecutionMode::Apply).await?;
+    execute_mode(client, ExecutionMode::Apply).await?;
 
-    let backup_items = get_file_list(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_BACKUP)
+    let backup_items = backup
+        .list()
         .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
         .items;
     assert!(
         !backup_items.is_empty(),
         "Precondition: backup should be non-empty after apply"
     );
 
-    send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_BACKUP,
-        StatusCode::OK,
-        Method::DELETE,
-        None,
-        None,
-    )
-    .await?;
+    backup.delete_all().await?.expect_status(StatusCode::OK);
 
-    let post_delete_backup = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_BACKUP,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await?;
-    let post_delete_backup_items = response_to_t::<BulkDataList>(&post_delete_backup)?.items;
+    let post_delete_backup_items = backup
+        .list()
+        .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .items;
     assert!(
         post_delete_backup_items.is_empty(),
         "Expected empty backup after DELETE"
     );
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -1664,19 +1458,23 @@ async fn runtimefiles_delete_backup() -> Result<(), TestingError> {
 #[tokio::test]
 async fn runtimefiles_case_insensitive_filenames() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let client = test_env.client();
+    let next_update = client.sovd2uds().runtime_files_next_update();
+    let lock = setup_with_lock(client).await;
 
-    let upload_response = upload_mdd_with_filename(&test_env, "FLXC1000.MDD").await;
+    let upload_response = upload_mdd_with_filename(client, "FLXC1000.MDD").await?;
     assert_eq!(upload_response.status(), StatusCode::CREATED);
 
     // Upload again with lowercase - should overwrite, not duplicate
-    let upload_response2 = upload_mdd_with_filename(&test_env, "flxc1000.mdd").await;
+    let upload_response2 = upload_mdd_with_filename(client, "flxc1000.mdd").await?;
     assert_eq!(upload_response2.status(), StatusCode::CREATED);
 
-    let nextupdate_items =
-        get_file_list(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE)
-            .await?
-            .items;
+    let nextupdate_items = next_update
+        .list()
+        .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .items;
 
     let matching_items: Vec<_> = nextupdate_items
         .iter()
@@ -1699,26 +1497,14 @@ async fn runtimefiles_case_insensitive_filenames() -> Result<(), TestingError> {
     } else {
         file_id.to_uppercase()
     };
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE}/{opposite_case_id}"),
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-        None,
-        None,
-    )
-    .await?;
+    delete_file(&next_update, &opposite_case_id).await?;
 
-    let post_delete_response = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await?;
-    let post_delete_items = response_to_t::<BulkDataList>(&post_delete_response)?.items;
+    let post_delete_items = next_update
+        .list()
+        .await?
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .items;
     let still_has_file = post_delete_items
         .iter()
         .any(|item| item.id.to_lowercase().contains(ECU_FLXC1000));
@@ -1727,7 +1513,7 @@ async fn runtimefiles_case_insensitive_filenames() -> Result<(), TestingError> {
         "Expected file to be deleted via case-insensitive id path"
     );
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -1736,19 +1522,12 @@ async fn runtimefiles_case_insensitive_filenames() -> Result<(), TestingError> {
 #[tokio::test]
 async fn runtimefiles_query_parameters() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
+    let current = test_env.client().sovd2uds().runtime_files_current();
 
-    let mut hash_params = HashMap::new();
-    hash_params.insert("x-sovd2uds-include-hash".to_owned(), "sha256".to_owned());
-    let hash_response = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_CURRENT,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        Some(&QueryParams(hash_params)),
-    )
-    .await?;
-    let hash_list = response_to_t::<BulkDataList>(&hash_response)?;
+    let hash_list = current
+        .list_with(&[("x-sovd2uds-include-hash", "sha256")])
+        .await?
+        .expect_status(StatusCode::OK);
     let first_item = hash_list
         .items
         .first()
@@ -1758,18 +1537,10 @@ async fn runtimefiles_query_parameters() -> Result<(), TestingError> {
         "Expected 'hash' field when x-sovd2uds-include-hash=sha256 is set"
     );
 
-    let mut size_params = HashMap::new();
-    size_params.insert("x-sovd2uds-include-file-size".to_owned(), "true".to_owned());
-    let size_response = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_CURRENT,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        Some(&QueryParams(size_params)),
-    )
-    .await?;
-    let size_list = response_to_t::<BulkDataList>(&size_response)?;
+    let size_list = current
+        .list_with(&[("x-sovd2uds-include-file-size", "true")])
+        .await?
+        .expect_status(StatusCode::OK);
     let first_item = size_list
         .items
         .first()
@@ -1779,18 +1550,10 @@ async fn runtimefiles_query_parameters() -> Result<(), TestingError> {
         "Expected file size field when x-sovd2uds-include-file-size=true is set"
     );
 
-    let mut revision_params = HashMap::new();
-    revision_params.insert("x-sovd2uds-include-revision".to_owned(), "true".to_owned());
-    let revision_response = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_CURRENT,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        Some(&QueryParams(revision_params)),
-    )
-    .await?;
-    let revision_list = response_to_t::<BulkDataList>(&revision_response)?;
+    let revision_list = current
+        .list_with(&[("x-sovd2uds-include-revision", "true")])
+        .await?
+        .expect_status(StatusCode::OK);
     // Not all the test ecus have a revision set
     assert!(
         revision_list
@@ -1809,92 +1572,45 @@ async fn runtimefiles_query_parameters() -> Result<(), TestingError> {
 #[tokio::test]
 async fn runtimefiles_only_lock_holder_can_mutate() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-    let lock_id = setup_with_lock(&test_env).await;
+    let lock = setup_with_lock(test_env.client()).await;
 
-    let non_owner_auth = bearer_token_header(NON_OWNER_BEARER_TOKEN);
+    let non_owner = test_env
+        .anonymous_client()
+        .with_token(NON_OWNER_BEARER_TOKEN);
+    let sovd2uds = non_owner.sovd2uds();
 
     // Non-owner: upload should be forbidden
-    let non_owner_auth_value = non_owner_auth
-        .get(reqwest::header::AUTHORIZATION)
-        .expect("Authorization header missing")
-        .clone();
-    let client = reqwest::Client::new();
-    let mdd_bytes = std::fs::read(
-        test_container_dir()
-            .expect("testcontainer dir")
-            .join("odx/FLXC1000.mdd"),
-    )
-    .expect("MDD fixture not found");
     let form = reqwest::multipart::Form::new().part(
         "files",
-        reqwest::multipart::Part::bytes(mdd_bytes).file_name("FLXC1000.mdd"),
+        reqwest::multipart::Part::bytes(read_mdd_fixture("FLXC1000.mdd")).file_name("FLXC1000.mdd"),
     );
-    let upload_url = test_env.vehicle_url(APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE);
-    let upload_response = client
-        .post(&upload_url)
-        .header(reqwest::header::AUTHORIZATION, non_owner_auth_value)
-        .multipart(form)
-        .send()
-        .await
-        .expect("upload request failed");
-    assert_eq!(
-        upload_response.status(),
+    assert_error_status(
+        sovd2uds.runtime_files_next_update().upload(form).await,
         StatusCode::FORBIDDEN,
-        "Expected 403 for upload by non-lock-holder"
+        "Expected 403 for upload by non-lock-holder",
     );
 
     // Non-owner: DELETE nextupdate should be forbidden
-    send_cda_request(
-        &test_env.config,
-        APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE,
+    assert_error_status(
+        sovd2uds.runtime_files_next_update().delete_all().await,
         StatusCode::FORBIDDEN,
-        Method::DELETE,
-        None,
-        Some(&non_owner_auth),
-        None,
-    )
-    .await?;
+        "Expected 403 for DELETE of nextupdate by non-lock-holder",
+    );
 
-    // Non-owner: Apply should be forbidden
-    let body = mode_json(ExecutionMode::Apply);
-    send_cda_request(
-        &test_env.config,
-        APPS_SOVD2UDS_OPERATIONS_RUNTIMEFILESUPDATE_EXECUTIONS,
-        StatusCode::FORBIDDEN,
-        Method::POST,
-        Some(&body),
-        Some(&non_owner_auth),
-        None,
-    )
-    .await?;
+    // Non-owner: Apply, Rollback and Cleanup should be forbidden
+    for mode in [
+        ExecutionMode::Apply,
+        ExecutionMode::Rollback,
+        ExecutionMode::Cleanup,
+    ] {
+        assert_error_status(
+            sovd2uds.runtime_files_update().start(mode).await,
+            StatusCode::FORBIDDEN,
+            &format!("Expected 403 for {mode:?} by non-lock-holder"),
+        );
+    }
 
-    // Non-owner: Rollback should be forbidden
-    let body = mode_json(ExecutionMode::Rollback);
-    send_cda_request(
-        &test_env.config,
-        APPS_SOVD2UDS_OPERATIONS_RUNTIMEFILESUPDATE_EXECUTIONS,
-        StatusCode::FORBIDDEN,
-        Method::POST,
-        Some(&body),
-        Some(&non_owner_auth),
-        None,
-    )
-    .await?;
-
-    // Non-owner: Cleanup should be forbidden
-    let body = mode_json(ExecutionMode::Cleanup);
-    send_cda_request(
-        &test_env.config,
-        APPS_SOVD2UDS_OPERATIONS_RUNTIMEFILESUPDATE_EXECUTIONS,
-        StatusCode::FORBIDDEN,
-        Method::POST,
-        Some(&body),
-        Some(&non_owner_auth),
-        None,
-    )
-    .await?;
-
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -1907,24 +1623,17 @@ async fn runtimefiles_only_lock_holder_can_mutate() -> Result<(), TestingError> 
 #[tokio::test]
 async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
+    let client = test_env.client();
 
     // Pre-check: FLXC1000 exists at baseline.
-    send_authenticated_cda_request(
-        &test_env,
-        sovd::COMPONENTS_FLXC1000_BASE,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await?;
+    assert_route(client, ECU_FLXC1000, StatusCode::OK).await;
 
     // All mutating runtimefiles endpoints require a vehicle lock.
-    let lock_id = setup_with_lock(&test_env).await;
+    let lock = setup_with_lock(client).await;
 
     // Upload FSNR2000.mdd -> triggers init_collection_from_copy_if_missing, copying all
     // current MDDs into nextupdate, then adds FSNR2000 on top.
-    let upload_response = upload_mdd_by_name(&test_env, "FSNR2000.mdd").await;
+    let upload_response = upload_mdd_by_name(client, "FSNR2000.mdd").await?;
     assert_eq!(
         upload_response.status(),
         StatusCode::CREATED,
@@ -1932,26 +1641,18 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
     );
 
     // Verify FLXC1000 is in nextupdate (copied from current during init) and delete it.
-    let flxc1000_id = find_flxc1000_id_in_nextupdate(&test_env).await?;
+    let flxc1000_id = find_flxc1000_id_in_nextupdate(client).await?;
 
     // Explicitly delete FLXC1000 from nextupdate - staging now lacks FLXC1000.
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE}/{flxc1000_id}"),
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-        None,
-        None,
-    )
-    .await?;
+    delete_file(&client.sovd2uds().runtime_files_next_update(), &flxc1000_id).await?;
 
     // Trigger Apply - the CDA replaces its entire DB with staging (without FLXC1000).
     // The reload_databases path shuts down the old UDS/gateway and rebuilds routes.
-    execute_mode(&test_env, ExecutionMode::Apply).await?;
+    execute_mode(client, ExecutionMode::Apply).await?;
     assert_ecu_routes_after_apply(&test_env).await?;
 
     // Apply created a backup of the original database; Rollback restores it.
-    execute_mode(&test_env, ExecutionMode::Rollback).await?;
+    execute_mode(client, ExecutionMode::Rollback).await?;
 
     // Wait for all ECUs to come back online after the reload triggered by rollback.
     // The reload creates a new DoIP gateway that must re-discover ECUs via VIR/VAM
@@ -1959,17 +1660,9 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
     wait_for_ecus_online(&test_env.config).await?;
 
     // Rollback restores the original database -> FLXC1000 is back.
-    send_authenticated_cda_request(
-        &test_env,
-        COMPONENTS_FLXC1000_BASE,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await?;
+    assert_route(client, ECU_FLXC1000, StatusCode::OK).await;
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -1983,13 +1676,14 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
 #[tokio::test]
 async fn runtimefiles_apply_blocked_by_vehicle_and_ecu_lock() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
+    let client = test_env.client();
 
     // All mutating runtimefiles endpoints require a vehicle lock.
-    let vehicle_lock_id = setup_with_lock(&test_env).await;
+    let vehicle_lock = setup_with_lock(client).await;
 
     // The update starts from the running databases, so re-uploading one of them
     // keeps the vehicle unchanged for every later test.
-    let response = upload_mdd(&test_env).await;
+    let response = upload_mdd(client).await?;
     assert_eq!(
         response.status(),
         StatusCode::CREATED,
@@ -1998,42 +1692,39 @@ async fn runtimefiles_apply_blocked_by_vehicle_and_ecu_lock() -> Result<(), Test
 
     // Creating an ECU lock while the vehicle lock is already held is allowed,
     // but it must block any subsequent Apply/Rollback/Cleanup execution.
-    let ecu_lock_response = create_lock(
-        default_timeout(),
-        locks::COMPONENTS_FLXC1000_LOCKS,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
-    let ecu_lock_id = response_to_t::<LockResponse>(&ecu_lock_response)?.id;
+    let ecu_lock = client
+        .component(ECU_FLXC1000)
+        .locks()
+        .create(default_timeout())
+        .await?
+        .expect_status(StatusCode::CREATED)
+        .into_body();
 
     // The caller owns both locks, but the ECU lock still prevents a live
     // database swap - expect 409 Conflict.
-    let body = mode_json(ExecutionMode::Apply);
-    send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_OPERATIONS_RUNTIMEFILESUPDATE_EXECUTIONS,
+    assert_error_status(
+        client
+            .sovd2uds()
+            .runtime_files_update()
+            .start(ExecutionMode::Apply)
+            .await,
         StatusCode::CONFLICT,
-        Method::POST,
-        Some(&body),
-        None,
-    )
-    .await?;
+        "Expected 409 for Apply while an ECU lock is held",
+    );
 
-    lock_operation(
-        locks::COMPONENTS_FLXC1000_LOCKS,
-        Some(&ecu_lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    ecu_lock
+        .release()
+        .await?
+        .expect_status(StatusCode::NO_CONTENT);
 
     // With only the vehicle lock held, the database swap is safe to proceed.
     // No Rollback afterwards, because the update did not change the vehicle.
-    execute_mode(&test_env, ExecutionMode::Apply).await?;
+    execute_mode(client, ExecutionMode::Apply).await?;
 
-    teardown_lock(&test_env, &vehicle_lock_id).await;
+    vehicle_lock
+        .release()
+        .await?
+        .expect_status(StatusCode::NO_CONTENT);
 
     Ok(())
 }
@@ -2051,14 +1742,16 @@ async fn runtimefiles_apply_blocked_by_vehicle_and_ecu_lock() -> Result<(), Test
 #[tokio::test]
 async fn runtimefiles_first_update_starts_from_database_dir() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
+    let client = test_env.client();
+    let sovd2uds = client.sovd2uds();
     let dir_ids = database_dir_ids();
 
     // Precondition: running from database.dir.
-    assert_route(&test_env, COMPONENTS_FSNR2000_BASE, StatusCode::OK).await?;
+    assert_route(client, ECU_FSNR2000, StatusCode::OK).await;
 
-    let lock_id = setup_with_lock(&test_env).await;
+    let lock = setup_with_lock(client).await;
 
-    let response = upload_mdd_by_name(&test_env, "FLXC1000.mdd").await;
+    let response = upload_mdd_by_name(client, "FLXC1000.mdd").await?;
     assert_eq!(
         response.status(),
         StatusCode::CREATED,
@@ -2066,36 +1759,36 @@ async fn runtimefiles_first_update_starts_from_database_dir() -> Result<(), Test
     );
 
     assert_eq!(
-        ids(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE).await?,
+        ids(&sovd2uds.runtime_files_next_update()).await?,
         dir_ids,
         "the first update must start from the databases in database.dir"
     );
 
-    execute_mode(&test_env, ExecutionMode::Apply).await?;
+    execute_mode(client, ExecutionMode::Apply).await?;
 
     assert_eq!(
-        ids(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_CURRENT).await?,
+        ids(&sovd2uds.runtime_files_current()).await?,
         dir_ids,
         "applying the first update must keep the databases from database.dir"
     );
     assert_eq!(
-        ids(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_BACKUP).await?,
+        ids(&sovd2uds.runtime_files_backup()).await?,
         dir_ids,
         "the backup of the first update must be the databases from database.dir"
     );
     // An ECU that was not part of the upload keeps its routes.
-    assert_route(&test_env, COMPONENTS_FSNR2000_BASE, StatusCode::OK).await?;
+    assert_route(client, ECU_FSNR2000, StatusCode::OK).await;
 
-    execute_mode(&test_env, ExecutionMode::Rollback).await?;
+    execute_mode(client, ExecutionMode::Rollback).await?;
 
     assert_eq!(
-        ids(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_CURRENT).await?,
+        ids(&sovd2uds.runtime_files_current()).await?,
         dir_ids,
         "rolling back the first update must restore the databases from database.dir"
     );
-    assert_route(&test_env, COMPONENTS_FSNR2000_BASE, StatusCode::OK).await?;
+    assert_route(client, ECU_FSNR2000, StatusCode::OK).await;
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -2113,60 +1806,54 @@ async fn runtimefiles_deleting_all_databases_is_not_undone_by_seeding() -> Resul
         return Ok(());
     }
     let test_env = TestEnv::builder().await?;
+    let client = test_env.client();
     let dir_ids = database_dir_ids();
 
-    let lock_id = setup_with_lock(&test_env).await;
+    let lock = setup_with_lock(client).await;
 
     // The first write of the update is a delete. It has to seed first, so the
     // databases from database.dir exist in the update and can be deleted.
+    let next_update = client.sovd2uds().runtime_files_next_update();
     for id in &dir_ids {
-        send_authenticated_cda_request(
-            &test_env,
-            &format!("{APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE}/{id}"),
-            StatusCode::NO_CONTENT,
-            Method::DELETE,
-            None,
-            None,
-        )
-        .await?;
+        delete_file(&next_update, id).await?;
     }
     assert_eq!(
-        ids(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE).await?,
+        ids(&next_update).await?,
         Vec::<String>::new(),
         "every database from database.dir was deleted from the update"
     );
 
-    execute_mode(&test_env, ExecutionMode::Apply).await?;
+    execute_mode(client, ExecutionMode::Apply).await?;
 
     assert_eq!(
-        ids(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_CURRENT).await?,
+        ids(&client.sovd2uds().runtime_files_current()).await?,
         Vec::<String>::new(),
         "applying the update must leave no databases"
     );
-    assert_route(&test_env, COMPONENTS_FLXC1000_BASE, StatusCode::NOT_FOUND).await?;
-    teardown_lock(&test_env, &lock_id).await;
+    assert_route(client, ECU_FLXC1000, StatusCode::NOT_FOUND).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
 
-    assert_route(&test_env, COMPONENTS_FSNR2000_BASE, StatusCode::NOT_FOUND).await?;
+    assert_route(client, ECU_FSNR2000, StatusCode::NOT_FOUND).await;
 
     // The next update starts from the empty data set, not from database.dir.
-    let lock_id = setup_with_lock(&test_env).await;
-    let response = upload_mdd_by_name(&test_env, "FLXC1000.mdd").await;
+    let lock = setup_with_lock(client).await;
+    let response = upload_mdd_by_name(client, "FLXC1000.mdd").await?;
     assert_eq!(
         response.status(),
         StatusCode::CREATED,
         "upload FLXC1000.mdd"
     );
     assert_eq!(
-        ids(&test_env, APPS_SOVD2UDS_BULK_DATA_RUNTIMEFILES_NEXTUPDATE).await?,
+        ids(&client.sovd2uds().runtime_files_next_update()).await?,
         vec!["flxc1000.mdd".to_owned()],
         "the storage was seeded before, so it must not be seeded again"
     );
 
-    execute_mode(&test_env, ExecutionMode::Apply).await?;
-    assert_route(&test_env, COMPONENTS_FLXC1000_BASE, StatusCode::OK).await?;
-    assert_route(&test_env, COMPONENTS_FSNR2000_BASE, StatusCode::NOT_FOUND).await?;
+    execute_mode(client, ExecutionMode::Apply).await?;
+    assert_route(client, ECU_FLXC1000, StatusCode::OK).await;
+    assert_route(client, ECU_FSNR2000, StatusCode::NOT_FOUND).await;
 
-    teardown_lock(&test_env, &lock_id).await;
+    lock.release().await?.expect_status(StatusCode::NO_CONTENT);
     Ok(())
 }
 
@@ -2180,17 +1867,27 @@ fn database_dir_ids() -> Vec<String> {
     ids
 }
 
-/// The sorted, lowercased ids listed by a runtime files endpoint.
-async fn ids(cda: &impl CdaClient, endpoint: &str) -> Result<Vec<String>, TestingError> {
-    Ok(ids_of(&get_file_list(cda, endpoint).await?.items))
+/// The sorted, lowercased ids listed by a runtime files category.
+async fn ids(files: &RuntimeFiles<'_>) -> Result<Vec<String>, TestingError> {
+    Ok(ids_of(
+        &files
+            .list()
+            .await?
+            .expect_status(StatusCode::OK)
+            .into_body()
+            .items,
+    ))
 }
 
-async fn assert_route(
-    cda: &impl CdaClient,
-    endpoint: &str,
-    expected: StatusCode,
-) -> Result<(), TestingError> {
-    send_authenticated_cda_request(cda, endpoint, expected, Method::GET, None, None)
-        .await
-        .map(|_| ())
+/// Asserts that the component `ecu` is served (`200 OK`), or answered with the
+/// error status `expected`, e.g. `404 Not Found` for an ECU without database.
+async fn assert_route(client: &SovdTestClient, ecu: &str, expected: StatusCode) {
+    match client.component(ecu).get().await {
+        Ok(response) => assert_eq!(
+            response.status(),
+            expected,
+            "{ecu} is served, expected {expected}"
+        ),
+        Err(err) => assert_eq!(err.status(), Some(expected), "{ecu}: {err}"),
+    }
 }

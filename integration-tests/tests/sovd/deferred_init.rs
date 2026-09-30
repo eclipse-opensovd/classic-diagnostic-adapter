@@ -16,33 +16,22 @@ use std::time::{Duration, Instant};
 use cda_interfaces::communication_control::{
     CommunicationInitMode, CommunicationSettings, PostUpdateCommunicationMode, VariantDetectionMode,
 };
-use http::{Method, StatusCode};
+use http::StatusCode;
 use sovd_interfaces::{
-    apps::sovd2uds::operations::runtimefilesupdate::ExecutionMode,
-    error::{ApiErrorResponse, ErrorCode},
+    apps::sovd2uds::operations::runtimefilesupdate::ExecutionMode, error::ErrorCode,
 };
 
 use crate::{
-    sovd::{
-        COMPONENTS_FLXC1000_BASE, COMPONENTS_FLXC1000_DATA, ECU_FLXC1000, ecu_status,
-        force_variant_detection, runtimefiles,
-    },
-    util::{
-        endpoints::APPS_SOVD2UDS_DATA_VERSION,
-        http::{
-            Response, poll_while, response_to_t, send_authenticated_cda_request, send_cda_request,
-        },
-        test_env::{
-            ON_DEMAND_RETRY_AFTER_SECONDS, TestEnv, Transport, on_demand_communication, skip_unless,
-        },
+    sovd::{ECU_FLXC1000, runtimefiles},
+    util::test_env::{
+        ON_DEMAND_RETRY_AFTER_SECONDS, TestEnv, Transport, on_demand_communication, skip_unless,
     },
 };
 
-/// Reads the `Retry-After` header as whole seconds, or `None` when it is absent
-/// or not a plain seconds value.
-fn retry_after_seconds(response: &Response) -> Option<u64> {
-    response
-        .header(reqwest::header::RETRY_AFTER)
+/// Reads a `Retry-After` header, e.g. of a response or an error, as whole
+/// seconds, or `None` when it is absent or not a plain seconds value.
+fn retry_after_seconds(retry_after: Option<&http::HeaderValue>) -> Option<u64> {
+    retry_after
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse().ok())
 }
@@ -57,52 +46,48 @@ async fn on_demand_diagnostic_path_returns_503_then_200() {
         .with_cda_communication_settings(on_demand_communication())
         .await
         .expect("Failed to set up the test environment");
-    send_cda_request(
-        &test_env.config,
-        APPS_SOVD2UDS_DATA_VERSION,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-        None,
-    )
-    .await
-    .expect("non-ECU endpoints must remain available while communication is deferred");
+    test_env
+        .anonymous_client()
+        .sovd2uds()
+        .version()
+        .await
+        .expect("non-ECU endpoints must remain available while communication is deferred")
+        .expect_status(StatusCode::OK);
 
     // The request must return 503 immediately rather than block through
     // the full activation sequence.
-    let response = send_authenticated_cda_request(
-        &test_env,
-        COMPONENTS_FLXC1000_DATA,
-        StatusCode::SERVICE_UNAVAILABLE,
-        Method::GET,
-        None,
-        None,
-    )
-    .await
-    .expect("Expected 503 before the background activation trigger completes");
+    let err = test_env
+        .client()
+        .component(ECU_FLXC1000)
+        .data_list()
+        .await
+        .expect_err("Expected 503 before the background activation trigger completes");
+    assert_eq!(
+        err.status(),
+        Some(StatusCode::SERVICE_UNAVAILABLE),
+        "Expected 503 before the background activation trigger completes: {err}"
+    );
 
     // Retry-After must equal the configured value.
     assert_eq!(
-        retry_after_seconds(&response),
+        retry_after_seconds(err.header(reqwest::header::RETRY_AFTER)),
         Some(ON_DEMAND_RETRY_AFTER_SECONDS),
         "Retry-After must equal the configured value"
     );
 
-    let body: ApiErrorResponse<String> =
-        response_to_t(&response).expect("failed to parse the error body");
+    let body = err
+        .api_error::<String>()
+        .unwrap_or_else(|| panic!("failed to parse the error body: {err}"));
     assert_eq!(body.error_code, ErrorCode::VendorSpecific);
     assert_eq!(body.vendor_code.as_deref(), Some("communication-not-ready"));
 
     // The gate's own request fired the trigger. Poll until it completes.
-    let response = poll_while(
-        &test_env,
-        COMPONENTS_FLXC1000_DATA,
-        StatusCode::SERVICE_UNAVAILABLE,
-        Duration::from_secs(30),
-    )
-    .await
-    .expect("endpoint stayed pending");
+    let response = test_env
+        .client()
+        .component(ECU_FLXC1000)
+        .poll_data_list_while(StatusCode::SERVICE_UNAVAILABLE, Duration::from_secs(30))
+        .await
+        .expect("endpoint stayed pending");
     assert_eq!(
         response.status(),
         StatusCode::OK,
@@ -149,14 +134,12 @@ async fn on_demand_trigger_produces_no_doip_traffic_before_authorized_request() 
     // The first authenticated diagnostic request is the only authorized
     // trigger. It fires the activation in the background, so poll until
     // the guard lifts.
-    let response = poll_while(
-        &test_env,
-        COMPONENTS_FLXC1000_DATA,
-        StatusCode::SERVICE_UNAVAILABLE,
-        Duration::from_secs(30),
-    )
-    .await
-    .expect("endpoint stayed pending");
+    let response = test_env
+        .client()
+        .component(ECU_FLXC1000)
+        .poll_data_list_while(StatusCode::SERVICE_UNAVAILABLE, Duration::from_secs(30))
+        .await
+        .expect("endpoint stayed pending");
     assert_eq!(
         response.status(),
         StatusCode::OK,
@@ -200,14 +183,12 @@ async fn post_update_deferred_mode_returns_503_until_triggered() {
 
     // Step b: trigger initialization by sending an authenticated diagnostic
     // request and waiting until the guard exits the 503 state.
-    let response = poll_while(
-        &test_env,
-        COMPONENTS_FLXC1000_DATA,
-        StatusCode::SERVICE_UNAVAILABLE,
-        Duration::from_secs(30),
-    )
-    .await
-    .expect("endpoint stayed pending");
+    let response = test_env
+        .client()
+        .component(ECU_FLXC1000)
+        .poll_data_list_while(StatusCode::SERVICE_UNAVAILABLE, Duration::from_secs(30))
+        .await
+        .expect("endpoint stayed pending");
     assert_eq!(
         response.status(),
         StatusCode::OK,
@@ -215,55 +196,54 @@ async fn post_update_deferred_mode_returns_503_until_triggered() {
     );
 
     // Step c: perform a runtime update. Mutating runtime files needs a
-    // vehicle lock. The update and the lock go with the CDA container when
-    // the lease ends.
-    runtimefiles::setup_with_lock(&test_env).await;
+    // vehicle lock, released when the test ends. The update goes with the
+    // CDA container when the lease ends.
+    let _lock = runtimefiles::setup_with_lock(test_env.client()).await;
 
     // The update starts from the running databases, so re-uploading one of
     // them keeps this update from changing the "vehicle".
-    let response = runtimefiles::upload_mdd(&test_env).await;
+    let response = runtimefiles::upload_mdd(test_env.client())
+        .await
+        .expect("Failed to upload the database for the update");
     assert_eq!(
         response.status(),
         StatusCode::CREATED,
         "Failed to upload the database for the update"
     );
 
-    runtimefiles::execute_mode(&test_env, ExecutionMode::Apply)
+    runtimefiles::execute_mode(test_env.client(), ExecutionMode::Apply)
         .await
         .expect("Apply execution failed");
 
     // Step d: the update dropped the disable lease instead of releasing
     // it, so the diagnostic path answers 503 again. A non-deferred
     // post-update mode would have served 200 here.
-    let response = poll_while(
-        &test_env,
-        COMPONENTS_FLXC1000_DATA,
-        StatusCode::CONFLICT,
-        Duration::from_secs(30),
-    )
-    .await
-    .expect("update protection was not lifted");
+    let err = test_env
+        .client()
+        .component(ECU_FLXC1000)
+        .poll_data_list_while(StatusCode::CONFLICT, Duration::from_secs(30))
+        .await
+        .expect_err("diagnostic endpoint must return 503 again after a Deferred post-update");
     assert_eq!(
-        response.status(),
-        StatusCode::SERVICE_UNAVAILABLE,
-        "diagnostic endpoint must return 503 again after a Deferred post-update: {response:?}"
+        err.status(),
+        Some(StatusCode::SERVICE_UNAVAILABLE),
+        "diagnostic endpoint must return 503 again after a Deferred post-update (a timeout means \
+         the update protection was not lifted): {err}"
     );
     assert_eq!(
-        retry_after_seconds(&response),
+        retry_after_seconds(err.header(reqwest::header::RETRY_AFTER)),
         Some(ON_DEMAND_RETRY_AFTER_SECONDS),
         "Retry-After must equal the configured value"
     );
 
     // Step e: that request fired the trigger again. Poll until it
     // completes.
-    let response = poll_while(
-        &test_env,
-        COMPONENTS_FLXC1000_DATA,
-        StatusCode::SERVICE_UNAVAILABLE,
-        Duration::from_secs(30),
-    )
-    .await
-    .expect("endpoint stayed pending");
+    let response = test_env
+        .client()
+        .component(ECU_FLXC1000)
+        .poll_data_list_while(StatusCode::SERVICE_UNAVAILABLE, Duration::from_secs(30))
+        .await
+        .expect("endpoint stayed pending");
     assert_eq!(
         response.status(),
         StatusCode::OK,
@@ -313,16 +293,17 @@ async fn disabled_mode_never_activates_or_produces_traffic() {
         .checked_add(Duration::from_secs(3))
         .expect("deadline does not overflow");
     while Instant::now() < deadline {
-        send_authenticated_cda_request(
-            &test_env,
-            COMPONENTS_FLXC1000_DATA,
-            StatusCode::SERVICE_UNAVAILABLE,
-            Method::GET,
-            None,
-            None,
-        )
-        .await
-        .expect("Disabled must never authorize activation from an ordinary request");
+        let err = test_env
+            .client()
+            .component(ECU_FLXC1000)
+            .data_list()
+            .await
+            .expect_err("Disabled must never authorize activation from an ordinary request");
+        assert_eq!(
+            err.status(),
+            Some(StatusCode::SERVICE_UNAVAILABLE),
+            "Disabled must never authorize activation from an ordinary request: {err}"
+        );
         cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(200)).await;
     }
 
@@ -335,19 +316,24 @@ async fn disabled_mode_never_activates_or_produces_traffic() {
     );
 }
 
-/// The SOVD variant state of the ECU at `ecu_endpoint`.
+/// The SOVD variant state of the ECU `ecu`.
 async fn ecu_variant_state(
     test_env: &TestEnv,
-    ecu_endpoint: &str,
+    ecu: &str,
 ) -> sovd_interfaces::components::ecu::State {
-    ecu_status(test_env, ecu_endpoint)
+    test_env
+        .client()
+        .component(ecu)
+        .get()
         .await
         .expect("Failed to get ecu component")
+        .expect_status(StatusCode::OK)
+        .into_body()
         .variant
         .state
 }
 
-/// Polls `ecu_endpoint`'s variant state until it matches `expected`, or
+/// Polls `ecu`'s variant state until it matches `expected`, or
 /// panics once `timeout` elapses.
 ///
 /// Not `wait_for_ecus_online`, which waits for `networkstructure` to reach
@@ -355,7 +341,7 @@ async fn ecu_variant_state(
 /// detected, so under `variant_detection = Never` it would hang.
 async fn wait_for_ecu_variant_state(
     test_env: &TestEnv,
-    ecu_endpoint: &str,
+    ecu: &str,
     expected: sovd_interfaces::components::ecu::State,
     timeout: Duration,
 ) -> sovd_interfaces::components::ecu::State {
@@ -363,13 +349,13 @@ async fn wait_for_ecu_variant_state(
         .checked_add(timeout)
         .expect("deadline does not overflow");
     loop {
-        let state = ecu_variant_state(test_env, ecu_endpoint).await;
+        let state = ecu_variant_state(test_env, ecu).await;
         if state == expected {
             return state;
         }
         assert!(
             Instant::now() < deadline,
-            "{ecu_endpoint} did not reach {expected:?} within {timeout:?}, last state: {state:?}"
+            "{ecu} did not reach {expected:?} within {timeout:?}, last state: {state:?}"
         );
         cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(200)).await;
     }
@@ -378,7 +364,8 @@ async fn wait_for_ecu_variant_state(
 /// `variant_detection = Never` must still bring the transport up under `Always`
 /// `init_mode`, but must never settle any ECU's variant via the automatic
 /// whole-vehicle variant detection. A manual per-ECU trigger (see
-/// [`force_variant_detection`]) still works, because it bypasses that path.
+/// [`Component::detect_variant`](crate::client::components::Component::detect_variant))
+/// still works, because it bypasses that path.
 /// [[ itest~variant-detection-explicit, Disabled automatic variant detection permits an explicit ECU trigger, itest ]]
 #[tokio::test]
 async fn variant_detection_never_requires_explicit_trigger() {
@@ -410,7 +397,7 @@ async fn variant_detection_never_requires_explicit_trigger() {
     };
     wait_for_ecu_variant_state(
         &test_env,
-        COMPONENTS_FLXC1000_BASE,
+        ECU_FLXC1000,
         undetected_state(),
         Duration::from_secs(10),
     )
@@ -419,7 +406,7 @@ async fn variant_detection_never_requires_explicit_trigger() {
     // Give the absent detector the window it would have had under Always,
     // then confirm the state never moved on its own.
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(2)).await;
-    let state = ecu_variant_state(&test_env, COMPONENTS_FLXC1000_BASE).await;
+    let state = ecu_variant_state(&test_env, ECU_FLXC1000).await;
     assert_eq!(
         state,
         undetected_state(),
@@ -428,10 +415,14 @@ async fn variant_detection_never_requires_explicit_trigger() {
 
     // A manual per-ECU trigger bypasses the gated variant detection and
     // must settle the variant as it would under Always.
-    force_variant_detection(&test_env, COMPONENTS_FLXC1000_BASE)
+    test_env
+        .client()
+        .component(ECU_FLXC1000)
+        .detect_variant()
         .await
-        .expect("Failed to trigger variant detection");
-    let state = ecu_variant_state(&test_env, COMPONENTS_FLXC1000_BASE).await;
+        .expect("Failed to trigger variant detection")
+        .expect_status(StatusCode::CREATED);
+    let state = ecu_variant_state(&test_env, ECU_FLXC1000).await;
     assert_eq!(
         state,
         sovd_interfaces::components::ecu::State::Online,
