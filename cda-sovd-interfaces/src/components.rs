@@ -20,7 +20,7 @@ pub mod get {
     pub type Response = crate::ResourceResponse;
 }
 
-#[derive(Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ComponentQuery {
     #[serde(rename = "x-sovd2uds-includesdgs", alias = "x-include-sdgs", default)]
     pub include_sdgs: bool,
@@ -34,7 +34,7 @@ pub struct ComponentQuery {
 /// `additional_fields` allows to extend the component response with adidtional fields.<br>
 /// See [`ComponentsConfig`](cda_interfaces::datatypes::ComponentsConfig) for
 /// additional details.
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, schemars::JsonSchema, serde::Deserialize)]
 pub struct ComponentsResponse<T> {
     pub items: Vec<T>,
     #[serde(flatten)]

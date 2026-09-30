@@ -60,7 +60,7 @@ pub struct Lock {
     pub schema: Option<schemars::Schema>,
 }
 
-#[derive(Clone, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[schemars(rename = "CreateLockRequest")]
 pub struct Request {
     pub lock_expiration: u64,
@@ -185,7 +185,7 @@ pub mod id {
     use super::{Deserialize, Serialize};
     pub mod get {
         use super::{Deserialize, Serialize};
-        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         #[schemars(rename = "LockResponse")]
         pub struct Response {
             pub lock_expiration: String,
