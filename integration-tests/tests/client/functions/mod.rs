@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -11,12 +11,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#![allow(
-    clippy::mod_module_files,
-    reason = "Cargo builds every top-level file in tests/ as a test target of its own, so the \
-              modules of this target live in directories with a mod.rs"
-)]
+//! `/vehicle/v15/functions`.
 
-mod client;
-mod sovd;
-mod util;
+pub(crate) mod functional_groups;
