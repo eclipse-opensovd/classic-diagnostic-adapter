@@ -15,16 +15,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cda_interfaces::HashMap;
 use http::HeaderMap;
-use opensovd_cda_lib::config::configfile::Configuration;
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 
-use crate::util::{
-    TestingError,
-    test_env::{Lease, TestEnv},
-};
+use crate::util::TestingError;
 
 #[derive(Debug)]
 pub(crate) struct Response {
@@ -35,87 +30,6 @@ pub(crate) struct Response {
         reason = "Headers captured for debugging. Not all tests assert on them"
     )]
     header_map: HeaderMap,
-}
-
-#[derive(Default)]
-pub(crate) struct QueryParams(pub HashMap<String, String>);
-
-pub(crate) async fn auth_header(
-    config: &Configuration,
-    client_id: Option<&str>,
-) -> Result<HeaderMap, TestingError> {
-    Ok(bearer_token_header(&authorize(config, client_id).await?))
-}
-
-/// An `Authorization` header with the bearer `token`.
-pub(crate) fn bearer_token_header(token: &str) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        reqwest::header::AUTHORIZATION,
-        format!("Bearer {token}")
-            .parse()
-            .expect("invalid header value"),
-    );
-    headers
-}
-
-async fn authorize(
-    config: &Configuration,
-    client_id: Option<&str>,
-) -> Result<String, TestingError> {
-    let body = &serde_json::json!(
-    {
-        "client_id": client_id.unwrap_or("test_client"),
-        "client_secret": "test_secret",
-    });
-    let response = send_cda_request(
-        config,
-        "authorize",
-        StatusCode::OK,
-        Method::POST,
-        Some(&body.to_string()),
-        None,
-        None,
-    )
-    .await?;
-    extract_field_from_json::<String>(&response_to_json(&response)?, "access_token")
-}
-
-pub(crate) fn response_to_json_to_field<T: DeserializeOwned + std::fmt::Debug>(
-    response: &Response,
-    field: &str,
-) -> Result<T, TestingError> {
-    extract_field_from_json(&response_to_json(response)?, field)
-}
-
-pub(crate) fn extract_field_from_json<T: DeserializeOwned + std::fmt::Debug>(
-    json: &serde_json::Value,
-    field: &str,
-) -> Result<T, TestingError> {
-    json.get(field).map_or(
-        Err(TestingError::InvalidData(format!(
-            "Field '{field}' not found in JSON: {json:#?}"
-        ))),
-        |v| {
-            serde_json::from_value(v.clone())
-                .ok()
-                .ok_or_else(|| {
-                    format!(
-                        "Failed to deserialize '{field}' into: {}",
-                        std::any::type_name::<T>()
-                    )
-                })
-                .map_err(TestingError::InvalidData)
-        },
-    )
-}
-
-pub(crate) fn response_to_json(response: &Response) -> Result<serde_json::Value, TestingError> {
-    if let Some(body) = &response.body {
-        serde_json::from_str(body).map_err(|e| TestingError::InvalidData(e.to_string()))
-    } else {
-        Err(TestingError::InvalidData("No body was provided".to_owned()))
-    }
 }
 
 pub(crate) fn response_to_t<T>(response: &Response) -> Result<T, TestingError>
@@ -134,114 +48,6 @@ where
     } else {
         Err(TestingError::InvalidData("No body was provided".to_owned()))
     }
-}
-
-/// The URL of `endpoint` below `/vehicle/v15/` of the CDA configured by
-/// `config`, e.g. `components/flxc1000/data`.
-pub(crate) fn vehicle_url(config: &Configuration, endpoint: &str) -> String {
-    format!(
-        "http://{}:{}/vehicle/v15/{endpoint}",
-        config.server.address(),
-        config.server.port()
-    )
-}
-
-/// A CDA and the headers authorizing requests to it: a test environment as
-/// its default test client, or [`Authorized`] with explicit headers, e.g. of
-/// another user or of a CDA outside a test environment.
-pub(crate) trait CdaClient {
-    fn config(&self) -> &Configuration;
-    async fn auth(&self) -> Result<HeaderMap, TestingError>;
-}
-
-impl CdaClient for TestEnv {
-    fn config(&self) -> &Configuration {
-        &self.config
-    }
-
-    async fn auth(&self) -> Result<HeaderMap, TestingError> {
-        self.auth_header().await
-    }
-}
-
-impl CdaClient for Lease {
-    fn config(&self) -> &Configuration {
-        &self.config
-    }
-
-    async fn auth(&self) -> Result<HeaderMap, TestingError> {
-        self.auth_header().await
-    }
-}
-
-impl TestEnv {
-    /// This environment as a [`CdaClient`] with `headers`, e.g. of another
-    /// user than the default test client.
-    pub(crate) fn with_headers<'a>(&'a self, headers: &'a HeaderMap) -> Authorized<'a> {
-        Authorized {
-            config: &self.config,
-            headers,
-        }
-    }
-}
-
-/// A [`CdaClient`] with explicit headers.
-pub(crate) struct Authorized<'a> {
-    pub(crate) config: &'a Configuration,
-    pub(crate) headers: &'a HeaderMap,
-}
-
-impl CdaClient for Authorized<'_> {
-    fn config(&self) -> &Configuration {
-        self.config
-    }
-
-    fn auth(&self) -> impl Future<Output = Result<HeaderMap, TestingError>> {
-        std::future::ready(Ok(self.headers.clone()))
-    }
-}
-
-/// [`send_cda_request`] to the CDA of `cda`, authorized by it.
-///
-/// # Errors
-/// See [`send_cda_request`], or the client is not authorized.
-pub(crate) async fn send_authenticated_cda_request(
-    cda: &impl CdaClient,
-    endpoint: &str,
-    expected_status: StatusCode,
-    method: Method,
-    data: Option<&str>,
-    query_params: Option<&QueryParams>,
-) -> Result<Response, TestingError> {
-    let auth = cda.auth().await?;
-    send_cda_request(
-        cda.config(),
-        endpoint,
-        expected_status,
-        method,
-        data,
-        Some(&auth),
-        query_params,
-    )
-    .await
-}
-
-pub(crate) async fn send_cda_request(
-    config: &Configuration,
-    endpoint: &str,
-    expected_status: StatusCode,
-    method: Method,
-    data: Option<&str>,
-    headers: Option<&HeaderMap>,
-    query_params: Option<&QueryParams>,
-) -> Result<Response, TestingError> {
-    let url_params = query_params
-        .unwrap_or(&QueryParams::default())
-        .to_query_string();
-    let url = reqwest::Url::parse(&vehicle_url(config, &format!("{endpoint}{url_params}")))
-        .expect("Invalid endpoint URL");
-
-    send_request(expected_status, method, data, headers, url).await
 }
 
 pub(crate) async fn send_request(
@@ -297,57 +103,7 @@ async fn send_request_any_status(
                 TestingError::ProcessFailed(format!("Fetching {url} failed: {}", error_chain(&e)))
             }
         })?;
-    let header_map = req_response.headers().clone();
-    let status = req_response.status();
-    let body = if status == StatusCode::NO_CONTENT {
-        None
-    } else {
-        Some(
-            req_response
-                .text()
-                .await
-                .map_err(|_| TestingError::UnexpectedResponse {
-                    expected: status,
-                    actual: status,
-                    body: None,
-                    message: "Failed to get text from response".to_owned(),
-                    url: url.to_string(),
-                })?,
-        )
-    };
-
-    Ok(Response {
-        status,
-        body,
-        header_map,
-    })
-}
-
-/// Sends `GET`s to `endpoint` of `cda` for as long as it answers `pending`,
-/// and returns the first other response, whatever its status.
-///
-/// # Errors
-/// Returns [`TestingError::Timeout`] if the CDA still answers `pending` after
-/// `timeout`, or an error if a request fails.
-pub(crate) async fn poll_while(
-    cda: &impl CdaClient,
-    endpoint: &str,
-    pending: StatusCode,
-    timeout: Duration,
-) -> Result<Response, TestingError> {
-    let url =
-        reqwest::Url::parse(&vehicle_url(cda.config(), endpoint)).expect("Invalid endpoint URL");
-    let headers = cda.auth().await?;
-    poll_until(timeout, Duration::from_millis(100), || async {
-        let response =
-            send_request_any_status(Method::GET, None, Some(&headers), url.clone()).await?;
-        Ok(if response.status == pending {
-            Err(format!("{endpoint} still answers {pending}"))
-        } else {
-            Ok(response)
-        })
-    })
-    .await
+    Response::read(req_response, url.as_str()).await
 }
 
 /// Calls `poll` every `interval` for at most `timeout`, until it is done or
@@ -389,29 +145,35 @@ where
     }
 }
 
-impl QueryParams {
-    pub fn to_query_string(&self) -> String {
-        if self.0.is_empty() {
-            String::new()
-        } else {
-            let params = self
-                .0
-                .iter()
-                .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
-                .collect::<Vec<_>>()
-                .join("&");
-            format!("?{params}")
-        }
-    }
-}
-
 impl Response {
-    pub(crate) fn status(&self) -> StatusCode {
-        self.status
-    }
-
-    pub(crate) fn header(&self, name: http::header::HeaderName) -> Option<&http::HeaderValue> {
-        self.header_map.get(name)
+    /// Reads the status, headers and body of the response to `url`.
+    ///
+    /// # Errors
+    /// Returns an error if the body cannot be read.
+    pub(crate) async fn read(response: reqwest::Response, url: &str) -> Result<Self, TestingError> {
+        let header_map = response.headers().clone();
+        let status = response.status();
+        let body = if status == StatusCode::NO_CONTENT {
+            None
+        } else {
+            Some(
+                response
+                    .text()
+                    .await
+                    .map_err(|_| TestingError::UnexpectedResponse {
+                        expected: status,
+                        actual: status,
+                        body: None,
+                        message: "Failed to get text from response".to_owned(),
+                        url: url.to_owned(),
+                    })?,
+            )
+        };
+        Ok(Self {
+            status,
+            body,
+            header_map,
+        })
     }
 }
 
