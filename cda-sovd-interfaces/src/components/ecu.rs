@@ -101,14 +101,14 @@ pub enum SdSdg {
     },
 }
 
-#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServicesSdgs {
     pub items: HashMap<String, ServiceSdgs>,
     #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<schemars::Schema>,
 }
-#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServiceSdgs {
     pub sdgs: Vec<SdSdg>,
 }
@@ -170,7 +170,7 @@ pub mod data {
     use super::ComponentData;
     use crate::Payload;
 
-    #[derive(Deserialize, schemars::JsonSchema)]
+    #[derive(Debug, Deserialize, schemars::JsonSchema, serde::Serialize)]
     pub struct DataRequestPayload {
         data: HashMap<String, serde_json::Value>,
     }
@@ -193,7 +193,7 @@ pub mod data {
         pub type Response = ComponentData;
 
         /// Query parameters for `GET /data`.
-        #[derive(serde::Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, serde::Deserialize, schemars::JsonSchema, serde::Serialize)]
         pub struct Query {
             #[serde(rename = "include-schema", default)]
             pub include_schema: bool,
@@ -282,7 +282,7 @@ pub mod x {
             pub mod flash_transfer {
                 pub mod post {
                     use serde::{Deserialize, Serialize};
-                    #[derive(Debug, Deserialize, schemars::JsonSchema)]
+                    #[derive(Debug, Deserialize, schemars::JsonSchema, serde::Serialize)]
                     #[schemars(rename = "FlashTransferRequest")]
                     pub struct Request {
                         #[serde(rename = "blocksequencecounter")]
@@ -293,7 +293,7 @@ pub mod x {
                         pub id: String,
                     }
 
-                    #[derive(Debug, Serialize, schemars::JsonSchema)]
+                    #[derive(Debug, Serialize, schemars::JsonSchema, serde::Deserialize)]
                     #[schemars(rename = "FlashTransferResponse")]
                     pub struct Response {
                         pub id: String,
@@ -307,7 +307,7 @@ pub mod x {
 
                     use crate::Items;
 
-                    #[derive(Serialize, Clone, schemars::JsonSchema)]
+                    #[derive(Debug, Serialize, Clone, schemars::JsonSchema, serde::Deserialize)]
                     #[serde(rename_all = "camelCase")]
                     pub struct DataTransferMetaData {
                         pub acknowledged_bytes: u64,
@@ -323,12 +323,12 @@ pub mod x {
                         pub schema: Option<schemars::Schema>,
                     }
 
-                    #[derive(Serialize, Clone, schemars::JsonSchema)]
+                    #[derive(Debug, Serialize, Clone, schemars::JsonSchema, serde::Deserialize)]
                     pub struct DataTransferError {
                         pub text: String,
                     }
 
-                    #[derive(Serialize, Debug, Clone, PartialEq)]
+                    #[derive(Serialize, Debug, Clone, PartialEq, serde::Deserialize)]
                     #[serde(rename_all = "lowercase")]
                     #[derive(schemars::JsonSchema)]
                     #[allow(
@@ -359,18 +359,21 @@ pub mod x {
 
                     use crate::error::DataError;
 
-                    #[derive(Deserialize, schemars::JsonSchema)]
+                    #[derive(Debug, Deserialize, schemars::JsonSchema, serde::Serialize)]
                     #[schemars(rename = "RequestDownloadRequest")]
                     pub struct Request {
                         #[serde(rename = "requestdownload")]
                         pub parameters: HashMap<String, serde_json::Value>,
                     }
-                    #[derive(Serialize, schemars::JsonSchema)]
+                    #[derive(Debug, Serialize, schemars::JsonSchema, serde::Deserialize)]
                     #[schemars(rename = "RequestDownloadResponse")]
+                    // Without the explicit bound, `#[serde(default)]` makes serde require
+                    // `Default` for the type parameters when deserializing.
+                    #[serde(bound(deserialize = "T: serde::Deserialize<'de>"))]
                     pub struct Response<T> {
                         #[serde(rename = "requestdownload")]
                         pub parameters: serde_json::Map<String, serde_json::Value>,
-                        #[serde(skip_serializing_if = "Vec::is_empty")]
+                        #[serde(default, skip_serializing_if = "Vec::is_empty")]
                         pub errors: Vec<DataError<T>>,
                         #[schemars(skip)]
                         #[serde(skip_serializing_if = "Option::is_none")]
@@ -384,7 +387,7 @@ pub mod x {
     pub mod single_ecu_job {
         use serde::{Deserialize, Serialize};
 
-        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         pub struct LongName {
             #[serde(skip_serializing_if = "Option::is_none")]
             #[serde(default)]
@@ -395,7 +398,7 @@ pub mod x {
             pub ti: Option<String>,
         }
 
-        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         pub struct Param {
             pub short_name: String,
 
@@ -414,7 +417,7 @@ pub mod x {
             pub long_name: Option<LongName>,
         }
 
-        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         pub struct ProgCode {
             pub code_file: String,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -430,7 +433,7 @@ pub mod x {
             pub entrypoint: String,
         }
 
-        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         pub struct Job {
             #[serde(rename = "x-input-params")]
             pub input_params: Vec<Param>,
@@ -555,7 +558,7 @@ pub mod faults {
             pub memory_selection: Option<u8>,
         }
 
-        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         pub struct Response {
             pub items: Vec<Fault>,
             #[schemars(skip)]
@@ -567,7 +570,7 @@ pub mod faults {
     pub mod delete {
         use serde::{Deserialize, Serialize};
 
-        #[derive(Deserialize, Serialize, schemars::JsonSchema)]
+        #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
         pub struct FaultQuery {
             /// Defines the scope for which fault entries are deleted
             /// must be a valid scope for the given component
@@ -581,7 +584,7 @@ pub mod faults {
             use super::{Deserialize, Fault, HashMap, Serialize};
             use crate::{default_true, error::DataError};
 
-            #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+            #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
             #[serde(rename_all = "kebab-case")]
             pub struct DtcIdQuery {
                 /// If true, extended dtc data from 0x19 06 is included in the response
@@ -662,4 +665,5 @@ mod tests {
         assert!(!query_with_schema.include_snapshot_data);
         assert!(query_with_schema.include_schema);
     }
+
 }
