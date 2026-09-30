@@ -630,7 +630,6 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "cargo_toml",
- "cda-build",
  "cda-database",
  "cda-interfaces",
  "cda-storage",
@@ -685,7 +684,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
- "cda-build",
  "foldhash",
  "futures",
  "hex",
@@ -779,7 +777,6 @@ dependencies = [
  "axum",
  "axum-extra",
  "bytes",
- "cda-build",
  "cda-comm-doip",
  "cda-interfaces",
  "cda-plugin-communication-management",
@@ -829,7 +826,6 @@ dependencies = [
 name = "cda-tracing"
 version = "0.1.0"
 dependencies = [
- "cda-build",
  "console-subscriber",
  "nu-ansi-term",
  "opentelemetry",
@@ -2283,7 +2279,6 @@ dependencies = [
  "aide",
  "axum",
  "cargo_metadata",
- "cda-build",
  "cda-comm-doip",
  "cda-comm-uds",
  "cda-core",
@@ -2941,7 +2936,6 @@ version = "0.1.0"
 dependencies = [
  "aide",
  "axum",
- "cda-build",
  "http",
  "tokio",
 ]
