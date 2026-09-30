@@ -27,11 +27,13 @@ use crate::{
         self, delete_all_faults, delete_all_faults_with_scope, delete_fault,
         delete_fault_with_scope,
         ecu::{get_dtc_setting, switch_session},
-        get_extended_fault, get_fault, get_faults, locks, set_dtc_setting,
+        get_extended_fault, get_fault, get_faults,
+        locks::{self, Lock},
+        set_dtc_setting,
     },
     util::{
         ecusim::{self, DtcExtended, DtcMinimal, ExtDataRecord, SnapshotData, SnapshotRecord},
-        http::{auth_header, extract_field_from_json, response_to_json, send_cda_request},
+        http::{auth_header, send_cda_request},
         test_env::setup_integration_test,
     },
 };
@@ -57,16 +59,14 @@ async fn test_dtc_setting() {
 
     // Create and acquire lock
     let expiration_timeout = Duration::from_secs(60);
-    let ecu_lock = locks::create_lock(
-        expiration_timeout,
+    let lock = Lock::create_with_expiration(
         locks::ECU_ENDPOINT,
-        StatusCode::CREATED,
+        expiration_timeout,
         &runtime.config,
         &auth,
     )
-    .await;
-    let lock_id =
-        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+    .await
+    .expect("lock should be created");
 
     // Test DTC Setting On - without setting session first, this should be not possible
     // as the service has a state precondition for Session == "Extended"
@@ -201,15 +201,7 @@ async fn test_dtc_setting() {
     );
 
     // Delete the ECU lock
-    locks::lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(&lock_id),
-        &runtime.config,
-        &auth,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    lock.delete().await;
 
     // After deleting lock, we should not be able to set DTC setting
     set_dtc_setting(
@@ -237,16 +229,14 @@ async fn test_dtc_deletion() {
 
     // Create and acquire lock
     let expiration_timeout = Duration::from_secs(30);
-    let ecu_lock = locks::create_lock(
-        expiration_timeout,
+    let lock = Lock::create_with_expiration(
         locks::ECU_ENDPOINT,
-        StatusCode::CREATED,
+        expiration_timeout,
         &runtime.config,
         &auth,
     )
-    .await;
-    let lock_id =
-        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+    .await
+    .expect("lock should be created");
 
     // Clear any existing DTCs from the simulator
     ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
@@ -377,15 +367,7 @@ async fn test_dtc_deletion() {
     );
 
     // Test deletion without lock (should fail)
-    locks::lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(&lock_id),
-        &runtime.config,
-        &auth,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    lock.delete().await;
 
     // Add a DTC for testing deletion without lock
     ecusim::add_dtc(
@@ -1180,16 +1162,14 @@ async fn test_dtc_deletion_user_memory() {
 
     // Create and acquire lock
     let expiration_timeout = Duration::from_secs(30);
-    let ecu_lock = locks::create_lock(
-        expiration_timeout,
+    let _lock = Lock::create_with_expiration(
         locks::ECU_ENDPOINT,
-        StatusCode::CREATED,
+        expiration_timeout,
         &runtime.config,
         &auth,
     )
-    .await;
-    let lock_id =
-        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+    .await
+    .expect("lock should be created");
 
     // Clear any existing DTCs from both Standard and Development memories
     ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
@@ -1377,15 +1357,4 @@ async fn test_dtc_deletion_user_memory() {
         "Expected 0 Standard DTCs after default scope clear, got {}",
         standard_dtcs_after_default_scope_clear.dtcs.len()
     );
-
-    // Clean up - delete the ECU lock
-    locks::lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(&lock_id),
-        &runtime.config,
-        &auth,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
 }
