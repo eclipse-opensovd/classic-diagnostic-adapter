@@ -39,7 +39,7 @@
 //!     .with_can(can_gateway);
 //! ```
 
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
 pub use cda_interfaces::TransportType;

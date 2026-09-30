@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
     DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, HashMap,
