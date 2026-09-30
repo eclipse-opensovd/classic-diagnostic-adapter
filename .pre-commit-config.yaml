@@ -68,7 +68,7 @@ repos:
       - id: conventional-pre-commit
         stages: [commit-msg]
   - repo: https://github.com/eclipse-opensovd/cicd-workflows
-    rev: 07140bdd84f20b66fd4aff58a83c5148deec388c
+    rev: febc566231f4ff6fafec78c91078e381666120f9
     hooks:
       - id: reuse-annotate
       - id: no-unicode-check
@@ -84,7 +84,7 @@ repos:
         pass_filenames: false
         always_run: true
         args: []
-      - id: clippy
+      - id: cargo-clippy
         name: make lint
         entry: make lint
         language: system

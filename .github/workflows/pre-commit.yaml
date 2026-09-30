@@ -49,7 +49,7 @@ jobs:
           toolchain: ${{ needs.versions.outputs.nightly }}
           components: clippy,rustfmt
       - name: Run checks
-        uses: eclipse-opensovd/cicd-workflows/pre-commit-action@07140bdd84f20b66fd4aff58a83c5148deec388c
+        uses: eclipse-opensovd/cicd-workflows/pre-commit-action@febc566231f4ff6fafec78c91078e381666120f9
         with:
           rust-toolchain: ${{ needs.versions.outputs.stable }}
       - name: Validate commit subjects (Conventional Commits)
