@@ -386,31 +386,6 @@ pub(crate) async fn set_interceptor(
     Ok(())
 }
 
-/// Remove a previously installed named interceptor from the ECU simulator.
-pub(crate) async fn clear_interceptor(
-    sim: &EcuSim,
-    ecu: &str,
-    name: &str,
-) -> Result<(), TestingError> {
-    let mut url = sim_endpoint(sim)?;
-    url.path_segments_mut()
-        .map_err(|()| TestingError::InvalidUrl("cannot modify URL path".to_owned()))?
-        .push("interceptor")
-        .push(ecu)
-        .push("inbound")
-        .push(name);
-
-    crate::util::http::send_request(
-        StatusCode::NO_CONTENT,
-        http::Method::DELETE,
-        None,
-        None,
-        url,
-    )
-    .await?;
-    Ok(())
-}
-
 /// Force-close all active `DoIP` TCP connections for all ECUs.
 ///
 /// This simulates a network disconnect or ECU reboot where the TCP link is lost.

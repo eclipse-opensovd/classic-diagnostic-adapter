@@ -14,7 +14,7 @@
 use http::{Method, StatusCode};
 
 use crate::util::{
-    ecusim::{self, EcuSim},
+    ecusim,
     http::{auth_header, send_cda_request},
     test_env::setup_integration_test,
 };
@@ -69,8 +69,6 @@ async fn test_wrong_did_in_response_returns_504() {
         result.is_ok(),
         "Expected 504 Gateway Timeout when ECU responds with wrong DID, got: {result:?}"
     );
-
-    cleanup(&runtime.ecu_sim).await;
 }
 
 /// Tests that CDA returns an error response when an ECU replies with a positive
@@ -123,22 +121,4 @@ async fn test_short_ecu_response_returns_error() {
         result.is_ok(),
         "Expected 400 Bad Request when ECU responds with truncated payload, got: {result:?}"
     );
-
-    cleanup_truncated(&runtime.ecu_sim).await;
-}
-
-async fn cleanup(ecu_sim: &EcuSim) {
-    // Clean up: remove the interceptor. If the test fails before this, the
-    // next lease of the environment resets ecu-sim, which removes it too.
-    if let Err(e) = ecusim::clear_interceptor(ecu_sim, "FLXC1000", "did_mismatch").await {
-        eprintln!("Failed to clear raw response override: {e}");
-    }
-}
-
-async fn cleanup_truncated(ecu_sim: &EcuSim) {
-    // Clean up: remove the interceptor. If the test fails before this, the
-    // next lease of the environment resets ecu-sim, which removes it too.
-    if let Err(e) = ecusim::clear_interceptor(ecu_sim, "FLXC1000", "truncated_response").await {
-        eprintln!("Failed to clear truncated response interceptor: {e}");
-    }
 }

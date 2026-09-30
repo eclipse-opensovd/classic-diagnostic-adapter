@@ -150,23 +150,6 @@ async fn tester_present_sent_after_programming_session_switch() -> Result<(), Te
         .await
         .expect("failed to stop ECU sim recording");
 
-    // Cleanup: switch back to application variant
-    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
-        .await
-        .expect("failed to switch ECU sim back to APPLICATION variant");
-
-    // Force variant re-detection
-    let _ = send_cda_request(
-        &runtime.config,
-        ecu_endpoint,
-        StatusCode::CREATED,
-        Method::PUT,
-        None,
-        Some(&auth),
-        None,
-    )
-    .await;
-
     // Assert that at least one Tester Present frame was received after session switch
     let tp_count = recorded_frames
         .iter()
@@ -247,9 +230,6 @@ async fn tester_present_sent_after_doip_reconnection() -> Result<(), TestingErro
     let recorded_frames = ecusim::stop_and_clear_recording(&runtime.ecu_sim, ECU_SIM_NAME)
         .await
         .expect("failed to stop ECU sim recording");
-
-    // Cleanup: reset hard reset duration to 0 to avoid leaking armed state into subsequent tests.
-    let _ = ecusim::set_hard_reset_duration(&runtime.ecu_sim, "FLXC1000", 0).await;
 
     // Assert that at least one Tester Present frame was received after reconnection
     let tp_count = recorded_frames

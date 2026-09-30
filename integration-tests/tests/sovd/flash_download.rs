@@ -402,11 +402,6 @@ async fn test_flash_download_transfer_sequence() {
         last_transfer.checksum.is_some(),
         "Expected a checksum after transfer completion"
     );
-
-    // Reset ECU sim back to APPLICATION variant for other tests
-    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
-        .await
-        .unwrap();
 }
 
 /// Verify that attempting a flash transfer with length=0 is rejected with a bad request error.
@@ -632,11 +627,6 @@ async fn test_flash_transfer_zero_length_rejected() {
     )
     .await
     .unwrap();
-
-    // Cleanup
-    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
-        .await
-        .unwrap();
 }
 
 /// Integration test for the `Supplier` security access level, which uses (semantic label)
@@ -799,11 +789,6 @@ async fn test_security_access_supplier_level() {
         "Expected SendKey Supplier frame (270a0d0e0f1011121314) in recording, got: \
          {recorded_frames:?}"
     );
-
-    // Cleanup
-    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
-        .await
-        .unwrap();
 }
 
 // Helper types and functions for ECU sim data transfer verification

@@ -1036,11 +1036,6 @@ async fn test_boot_variant_service_inheritance() {
         service_ids.join(", ")
     );
 
-    // reset ecu-sim variant
-    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
-        .await
-        .unwrap();
-
     // As long as test_ecu_session_switching also works we know that services
     // specific to the boot variant are still looked up correct, otherwise we cannot find
     // RequestSeed and SendKey services, no need to test this again here.
