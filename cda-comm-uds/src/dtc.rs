@@ -451,22 +451,15 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             schema,
         ))
     }
-}
-
-#[async_trait]
-impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
-    async fn ecu_dtc_by_mask(
+    async fn ecu_dtc_by_mask_for_code(
         &self,
         ecu_name: &str,
         security_plugin: &DynamicPlugin,
-        status: Option<HashMap<String, serde_json::Value>>,
-        severity: Option<u32>,
-        scope: Option<String>,
+        dtc_code: DtcCode,
         memory_selection: Option<u8>,
     ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError> {
         let _communication_guard = self.require_communication_ready()?;
         let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
-        let mut all_dtcs = HashMap::new();
         let scoped_services: Vec<_> = ecu
             .read()
             .await
@@ -475,18 +468,38 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
                 DtcReadInformationFunction::UserMemoryDtcByStatusMask,
             ])?
             .into_iter()
-            .filter(|(_, lookup)| {
-                scope
-                    .as_ref()
-                    .is_none_or(|scope| scope.eq_ignore_ascii_case(lookup.scope.default_scope()))
-            })
+            .filter(|(_, lookup)| lookup.dtcs.iter().any(|dtc| dtc.code == dtc_code))
+            // Prefer fault memory if the same code is defined in both memories.
+            .min_by_key(|(service_type, _)| *service_type as u8)
+            .into_iter()
             .collect();
         if scoped_services.is_empty() {
-            return Err(DiagServiceError::RequestNotSupported(format!(
-                "ECU {ecu_name} does not support fault memory {}",
-                scope.map(|s| format!("for scope {s}")).unwrap_or_default()
+            return Err(DiagServiceError::InvalidRequest(format!(
+                "DTC code {dtc_code:X} not found in ecu {ecu_name}"
             )));
         }
+
+        self.ecu_dtc_by_mask_with_services(
+            ecu_name,
+            security_plugin,
+            None,
+            None,
+            scoped_services,
+            memory_selection,
+        )
+        .await
+    }
+
+    async fn ecu_dtc_by_mask_with_services(
+        &self,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+        status: Option<HashMap<String, serde_json::Value>>,
+        severity: Option<u32>,
+        scoped_services: Vec<(DtcReadInformationFunction, datatypes::DtcLookup)>,
+        memory_selection: Option<u8>,
+    ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError> {
+        let mut all_dtcs = HashMap::new();
 
         let mask = if let Some(status) = status {
             let mut mask = 0x00u8;
@@ -571,6 +584,52 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
             .filter(|(_code, dtc)| severity.as_ref().is_none_or(|s| dtc.record.severity <= *s))
             .collect())
     }
+}
+
+#[async_trait]
+impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
+    async fn ecu_dtc_by_mask(
+        &self,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+        status: Option<HashMap<String, serde_json::Value>>,
+        severity: Option<u32>,
+        scope: Option<String>,
+        memory_selection: Option<u8>,
+    ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError> {
+        let _communication_guard = self.require_communication_ready()?;
+        let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
+        let scoped_services: Vec<_> = ecu
+            .read()
+            .await
+            .lookup_dtc_services(&[
+                DtcReadInformationFunction::FaultMemoryByStatusMask,
+                DtcReadInformationFunction::UserMemoryDtcByStatusMask,
+            ])?
+            .into_iter()
+            .filter(|(_, lookup)| {
+                scope
+                    .as_ref()
+                    .is_none_or(|scope| scope.eq_ignore_ascii_case(lookup.scope.default_scope()))
+            })
+            .collect();
+        if scoped_services.is_empty() {
+            return Err(DiagServiceError::RequestNotSupported(format!(
+                "ECU {ecu_name} does not support fault memory {}",
+                scope.map(|s| format!("for scope {s}")).unwrap_or_default()
+            )));
+        }
+
+        self.ecu_dtc_by_mask_with_services(
+            ecu_name,
+            security_plugin,
+            status,
+            severity,
+            scoped_services,
+            memory_selection,
+        )
+        .await
+    }
 
     async fn ecu_dtc_extended(
         &self,
@@ -584,40 +643,8 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
     ) -> Result<DtcExtendedInfo, DiagServiceError> {
         let dtc_code = decode_dtc_from_str(sae_dtc)?;
 
-        // Check scope of the DTC from the ECU database and determine the correct DTC read information function to use.
-        let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
-        let dtc_function = ecu
-            .read()
-            .await
-            .lookup_dtc_scope_for_code(dtc_code)
-            .map_err(|_| {
-                DiagServiceError::InvalidRequest(format!(
-                    "DTC {sae_dtc} not found in ECU {ecu_name}"
-                ))
-            })?;
-
-        let dtc_scope = match dtc_function {
-            DtcReadInformationFunction::FaultMemoryByStatusMask
-            | DtcReadInformationFunction::FaultMemoryExtDataRecordByDtcNumber
-            | DtcReadInformationFunction::FaultMemorySnapshotRecordByDtcNumber => {
-                Some("FaultMem".to_string())
-            }
-            DtcReadInformationFunction::UserMemoryDtcByStatusMask
-            | DtcReadInformationFunction::UserMemoryDtcExtDataRecordByDtcNumber
-            | DtcReadInformationFunction::UserMemoryDtcSnapshotRecordByDtcNumber => {
-                Some("UserMem".to_string())
-            }
-        };
-
         let mut dtc_by_mask: HashMap<DtcCode, DtcRecordAndStatus> = self
-            .ecu_dtc_by_mask(
-                ecu_name,
-                security_plugin,
-                None,
-                None,
-                dtc_scope,
-                memory_selection,
-            )
+            .ecu_dtc_by_mask_for_code(ecu_name, security_plugin, dtc_code, memory_selection)
             .await?;
 
         let record_and_status =

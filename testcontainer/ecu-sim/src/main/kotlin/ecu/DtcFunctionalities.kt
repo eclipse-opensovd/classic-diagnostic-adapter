@@ -95,9 +95,8 @@ fun RequestsData.addDtcRequests() {
     }
 
     request("19 17 []", "Development_Fault_Memory_ReportDTCByStatusMask") {
-        val buffer = ByteBuffer.wrap(this.message, 2, this.message.size - 2)
-        val request = DTCStatusMask.parse(buffer)
-        val memorySelector = buffer.get()
+        val request = DTCStatusMask.parse(messagePayload())
+        val memorySelector = messagePayload().get(3)
         val faults = ecu.dtcFaults(FaultMemory.Development).values.filter { it.status.matches(request) }
 
         val response =
@@ -128,8 +127,7 @@ fun RequestsData.addDtcRequests() {
     }
 
     request("19 18 []", "Development_Fault_Memory_ReportDTCSnapshotRecordByDTCNbr") {
-        val buffer = ByteBuffer.wrap(this.message, 2, this.message.size - 2)
-        val request = DevelopmentFaultMemReportDTCSnapshotRecordByDTCNbrRequest.parse(buffer)
+        val request = DevelopmentFaultMemReportDTCSnapshotRecordByDTCNbrRequest.parse(messagePayload())
 
         val fault = ecu.dtcFaults(FaultMemory.Development)[request.dtc]
         if (fault == null) {
@@ -169,12 +167,15 @@ fun RequestsData.addDtcRequests() {
     }
 
     request("19 19 []", "Development_Fault_Memory_ReportDTCExtendedDataByDTCNbr") {
-        val buffer = ByteBuffer.wrap(this.message, 2, this.message.size - 2)
-        val request = DevelopmentFaultMemReportDTCExtendedDataByDTCNbrRequest.parse(buffer)
+        val request = DevelopmentFaultMemReportDTCExtendedDataByDTCNbrRequest.parse(messagePayload())
         val fault = ecu.dtcFaults(FaultMemory.Development)[request.dtc]
         if (fault == null) {
             nrc(NrcError.RequestOutOfRange)
         } else {
+            // If the memory selection is 0 (Standard FaultMem), it is invalid and should return a RequestOutOfRange NRC.
+            if (request.memorySelection == 0.toByte()) {
+                nrc(NrcError.RequestOutOfRange)
+            }
             val response =
                 DevelopmentFaultMemReportDTCExtendedDataByDTCNbrResponse(
                     memorySelection = request.memorySelection,
@@ -217,8 +218,8 @@ class DevelopmentFaultMemReportDTCByStatusMaskResponse(
 ) {
     val asByteArray: ByteArray
         get() {
-            return availabilityStatusMask.asByteArray +
-                byteArrayOf(memorySelector) +
+            return byteArrayOf(memorySelector) +
+                availabilityStatusMask.asByteArray +
                 records.map { it.asByteArray }.concat()
         }
 }
@@ -297,7 +298,7 @@ class DevelopmentFaultMemReportDTCSnapshotRecordByDTCNbrRequest(
         fun parse(buffer: ByteBuffer): DevelopmentFaultMemReportDTCSnapshotRecordByDTCNbrRequest {
             val dtc = buffer.get24BitInt()
             val recordNumber = buffer.get()
-            val memorySelector = buffer.get()
+            val memorySelector = buffer.get(6)
             return DevelopmentFaultMemReportDTCSnapshotRecordByDTCNbrRequest(
                 dtc = dtc,
                 recordNumber = recordNumber,
@@ -329,7 +330,7 @@ class DevelopmentFaultMemReportDTCExtendedDataByDTCNbrRequest(
         fun parse(buffer: ByteBuffer): DevelopmentFaultMemReportDTCExtendedDataByDTCNbrRequest {
             val dtc = buffer.get24BitInt()
             val recordNumber = ExtendedDataRecordNumber.parse(buffer.get())
-            val memorySelection = buffer.get()
+            val memorySelection = buffer.get(6)
             return DevelopmentFaultMemReportDTCExtendedDataByDTCNbrRequest(
                 dtc = dtc,
                 recordNumber = recordNumber,

@@ -837,14 +837,6 @@ pub trait Dtc: Send + Sync + 'static {
         &self,
         service_types: &[DtcReadInformationFunction],
     ) -> Result<HashMap<DtcReadInformationFunction, DtcLookup>, DiagServiceError>;
-
-    /// Lookup DTC service type for the given dtc code in the current ECU variant.
-    /// # Errors
-    /// Returns `DiagServiceError` if the lookup failed.
-    fn lookup_dtc_scope_for_code(
-        &self,
-        dtc_code: u32,
-    ) -> Result<DtcReadInformationFunction, DiagServiceError>;
 }
 
 /// Provides variant detection and ECU variant identity.

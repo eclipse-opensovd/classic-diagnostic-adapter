@@ -1422,9 +1422,10 @@ async fn test_dtc_deletion_user_memory() {
 /// Test that reading DTCs by fault ID with a Development Fault Memory scope works correctly.
 ///
 /// This test verifies:
-/// 1. Reading a single DTC of Development Fault Memory requests only relevant subfunctions (0x19 0x17 followed by 0x19 0x04 and 0x19 0x06) and returns the correct DTC information.
-/// 2. `FaultMem` read by status mask is not requested when reading by fault ID with a `DevelopmentFaultMemory` scope.
-
+/// 1. Reading a single DTC of Development Fault Memory requests only relevant subfunctions
+///    0x19 0x17 followed by 0x19 0x18 and 0x19 0x19 and returns the correct DTC information.
+/// 2. `FaultMem` read by status mask is not requested when reading by fault ID
+///    with a `DevelopmentFaultMemory` scope.
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
@@ -1500,47 +1501,23 @@ async fn test_dtc_read_by_fault_id_development_fault_memory() {
         .await
         .expect("failed to stop recording in ecu-sim");
 
-    // Check the requests made to ECU SIM to ensure the correct subfunctions were called (0x19 0x17, 0x19 0x04, 0x19 0x06)
-    let mut subfunction_19_17_called = false;
-    let mut subfunction_19_18_called = false;
-    let mut subfunction_19_19_called = false;
-    let mut subfunction_19_02_called = false;
-
-    for request in requests {
-        if request.contains("1917") {
-            subfunction_19_17_called = true;
-        }
-        if request.contains("1918") {
-            subfunction_19_18_called = true;
-        }
-        if request.contains("1919") {
-            subfunction_19_19_called = true;
-        }
-        if request.contains("1902") {
-            subfunction_19_02_called = true;
-        }
-    }
+    // Check the requests made to ECU SIM to ensure the correct subfunctions were called (0x17, 0x18, 0x19)
+    assert!(
+        ["1917", "1918", "1919"]
+            .iter()
+            .all(|sf| requests.iter().any(|request| request.contains(sf))),
+        "Expected subfunctions 0x17, 0x18 and 0x19 to be called"
+    );
 
     assert!(
-        subfunction_19_17_called,
-        "Expected subfunction 0x19 0x17 to be called for reading DTC by fault ID with Development \
-         Fault Memory scope"
+        !requests.iter().any(|request| request.contains("1902")),
+        "Did not expect subfunction 0x02 to be called"
     );
-    assert!(
-        subfunction_19_18_called,
-        "Expected subfunction 0x19 0x18 to be called for reading DTC by fault ID with Development \
-         Fault Memory scope"
-    );
-    assert!(
-        subfunction_19_19_called,
-        "Expected subfunction 0x19 0x19 to be called for reading DTC by fault ID with Development \
-         Fault Memory scope"
-    );
-    assert!(
-        !subfunction_19_02_called,
-        "Did not expect subfunction 0x19 0x02 to be called for reading DTC by fault ID with \
-         Development Fault Memory scope"
-    );
+
+    //clear all dtcs from development memory to clean up
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, development_fault_memory)
+        .await
+        .expect("Failed to clear Development DTCs in simulator");
 
     // clean up - delete the ecu lock
     locks::lock_operation(
@@ -1557,8 +1534,10 @@ async fn test_dtc_read_by_fault_id_development_fault_memory() {
 /// Test that reading DTCs by fault ID with a Fault Memory scope works correctly.
 ///
 /// This test verifies:
-/// 1. Reading a single DTC of Fault Memory requests only relevant subfunctions (0x19 0x02 followed by 0x19 0x04 and 0x19 0x06) and returns the correct DTC information.
-/// 2. `DevelopmentFaultMemory` read by status mask is not requested when reading by fault ID with a `FaultMem` scope.
+/// 1. Reading a single DTC of Fault Memory requests only relevant subfunctions 0x19 0x02
+///    followed by 0x19 0x04 and 0x19 0x06 and returns the correct DTC information.
+/// 2. `DevelopmentFaultMemory` read by status mask is not requested when reading by fault ID
+///    with a `FaultMem` scope.
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
@@ -1631,44 +1610,23 @@ async fn test_dtc_read_by_fault_id_fault_memory() {
         .await
         .expect("Failed to stop recording in ecu-sim");
 
-    // Check the requests made to ECU SIM to ensure the correct subfunctions were called (0x19 0x02, 0x19 0x04, 0x19 0x06)
-    let mut subfunction_19_02_called = false;
-    let mut subfunction_19_04_called = false;
-    let mut subfunction_19_06_called = false;
-    let mut subfunction_19_17_called = false;
-
-    for request in requests {
-        if request.contains("1902") {
-            subfunction_19_02_called = true;
-        }
-        if request.contains("1904") {
-            subfunction_19_04_called = true;
-        }
-        if request.contains("1906") {
-            subfunction_19_06_called = true;
-        }
-        if request.contains("1917") {
-            subfunction_19_17_called = true;
-        }
-    }
+    // Check the requests made to ecu-sim to ensure the correct subfunctions (0x02, 0x04, 0x06)
+    assert!(
+        ["1902", "1904", "1906"]
+            .iter()
+            .all(|sf| requests.iter().any(|request| request.contains(sf))),
+        "Expected subfunctions 0x02, 0x04 and 0x06 to be called"
+    );
 
     assert!(
-        subfunction_19_02_called,
-        "Expected subfunction 0x19 0x02 to be called for reading DTC by fault ID"
+        !requests.iter().any(|request| request.contains("1917")),
+        "Did not expect subfunction 0x17 to be called"
     );
-    assert!(
-        subfunction_19_04_called,
-        "Expected subfunction 0x19 0x04 to be called for reading DTC by fault ID"
-    );
-    assert!(
-        subfunction_19_06_called,
-        "Expected subfunction 0x19 0x06 to be called for reading DTC by fault ID"
-    );
-    assert!(
-        !subfunction_19_17_called,
-        "Did not expect subfunction 0x19 0x17 to be called for reading DTC by fault ID with Fault \
-         Memory scope"
-    );
+
+    // Clear all DTCs from Standard memory to clean up
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+        .await
+        .expect("Failed to clear Standard DTCs in simulator");
 
     // Clean up - delete the ECU lock
     locks::lock_operation(
