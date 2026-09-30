@@ -191,38 +191,38 @@ clean-doc:
 
 help:
 	@printf '%s\n' \
-		'build ARGS="..."         Build the workspace with optional cargo arguments' \
-		'release ARGS="..."       Build the release profile' \
-		'check                    Check the workspace' \
-		'test ARGS="..."          Run workspace unit tests' \
-		'integration-test         Run DoIP integration tests' \
-		'integration-test-can     Run serial CAN integration tests' \
-		'integration-test-mixed   Run serial mixed DoIP/CAN integration tests' \
-		'build-all-features       Build with all features' \
-		'build-mbedtls            Build CDA with only mbedTLS' \
-		'build-minimal            Build the workspace without default features' \
-		'build-minimal-cda        Build CDA without default features' \
-		'lint ARGS="..."          Run stable Clippy' \
-		'lint-all-features        Run stable Clippy with all features' \
-		'lint-nightly ARGS="..."  Run pinned-nightly Clippy' \
-		'lint-nightly-all-features Run pinned-nightly Clippy with all features' \
-		'fmt ARGS="..."           Format code' \
-		'fmt-check                Check code formatting' \
-		'precommit                Run standard pre-commit checks' \
-		'precommit-all-features   Run all pre-commit checks' \
-		'coverage                 Generate unit-test LCOV coverage' \
-		'coverage-can             Generate CAN unit-test LCOV coverage' \
-		'integration-coverage     Generate integration-test LCOV coverage' \
-		'deny ARGS="..."          Run all or selected cargo-deny checks' \
-		'generate-config          Regenerate opensovd-cda.toml' \
-		'generate-flatbuffers     Regenerate FlatBuffers sources' \
-		'generate-protos          Regenerate protobuf sources' \
-		'docs                     Rebuild Sphinx documentation' \
-		'rustdoc ARGS="..."        Build Rust API documentation' \
-		'tool-versions            Print machine-readable tool versions' \
-		'setup-devenv             Install pinned development tools' \
-		'doctor                   Check development prerequisites' \
-		'run ARGS="..."           Run the release binary' \
-		'profile                  Build the heap-profiling binary' \
-		'depgraph                 Generate depgraph.png' \
-		'clean / clean-doc        Clean all artifacts or Rustdoc artifacts'
+		'build ARGS="..."             Build the workspace with optional cargo arguments' \
+		'release ARGS="..."           Build the release profile' \
+		'check                        Check the workspace' \
+		'test ARGS="..."              Run workspace unit tests' \
+		'integration-test             Run DoIP integration tests' \
+		'integration-test-can         Run serial CAN integration tests' \
+		'integration-test-mixed       Run serial mixed DoIP/CAN integration tests' \
+		'build-all-features           Build with all features' \
+		'build-mbedtls                Build CDA with only mbedTLS' \
+		'build-minimal                Build the workspace without default features' \
+		'build-minimal-cda            Build CDA without default features' \
+		'lint ARGS="..."              Run stable Clippy' \
+		'lint-all-features            Run stable Clippy with all features' \
+		'lint-nightly ARGS="..."      Run pinned-nightly Clippy' \
+		'lint-nightly-all-features    Run pinned-nightly Clippy with all features' \
+		'fmt ARGS="..."               Format code' \
+		'fmt-check                    Check code formatting' \
+		'precommit                    Run standard pre-commit checks' \
+		'precommit-all-features       Run all pre-commit checks' \
+		'coverage                     Generate unit-test LCOV coverage' \
+		'coverage-can                 Generate CAN unit-test LCOV coverage' \
+		'integration-coverage         Generate integration-test LCOV coverage' \
+		'deny ARGS="..."              Run all or selected cargo-deny checks' \
+		'generate-config              Regenerate opensovd-cda.toml' \
+		'generate-flatbuffers         Regenerate FlatBuffers sources' \
+		'generate-protos              Regenerate protobuf sources' \
+		'docs                         Rebuild Sphinx documentation' \
+		'rustdoc ARGS="..."           Build Rust API documentation' \
+		'tool-versions                Print machine-readable tool versions' \
+		'setup-devenv                 Install pinned development tools' \
+		'doctor                       Check development prerequisites' \
+		'run ARGS="..."               Run the release binary' \
+		'profile                      Build the heap-profiling binary' \
+		'depgraph                     Generate depgraph.png' \
+		'clean / clean-doc            Clean all artifacts or Rustdoc artifacts'

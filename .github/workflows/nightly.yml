@@ -41,8 +41,8 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ needs.versions.outputs.stable }}
-      - name: Install cargo-deny
-        run: cargo install --locked --version "${{ needs.versions.outputs.cargo_deny }}" cargo-deny
+      - name: Setup devenv
+        run: make setup-devenv
       - name: Check advisories
         run: make deny ARGS=advisories
   nightly_clippy:
