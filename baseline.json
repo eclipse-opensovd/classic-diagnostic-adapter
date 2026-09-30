@@ -3288,15 +3288,6 @@
       "crate": "cda-plugin-communication-management"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/connection_receiver.rs",
-      "function": "handle_send_pending",
-      "line": 31,
-      "cyclomatic": 5.0,
-      "coverage": 61.53846153846154,
-      "crap": 6.422394173873464,
-      "crate": "cda-comm-doip"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
       "function": "EcuManager::check_genericservice",
       "line": 31,
@@ -4465,6 +4456,15 @@
       "coverage": 72.22222222222221,
       "crap": 5.535836762688615,
       "crate": "cda-sovd"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/connection_receiver.rs",
+      "function": "handle_send_pending",
+      "line": 31,
+      "cyclomatic": 5.0,
+      "coverage": 73.07692307692307,
+      "crap": 5.487881201638599,
+      "crate": "cda-comm-doip"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_decode.rs",
@@ -5801,7 +5801,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/request_guard.rs",
       "function": "HttpRestrictionService::call",
-      "line": 97,
+      "line": 96,
       "cyclomatic": 4.0,
       "coverage": 100.0,
       "crap": 4.0,
@@ -7133,7 +7133,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/request_guard.rs",
       "function": "http_restriction_denial_to_sovd_response",
-      "line": 125,
+      "line": 124,
       "cyclomatic": 3.0,
       "coverage": 100.0,
       "crap": 3.0,
@@ -19895,7 +19895,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/request_guard.rs",
       "function": "HttpRestrictionLayer::new",
-      "line": 56,
+      "line": 55,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19904,7 +19904,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/request_guard.rs",
       "function": "HttpRestrictionLayer::layer",
-      "line": 64,
+      "line": 63,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19913,7 +19913,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/request_guard.rs",
       "function": "HttpRestrictionService::poll_ready",
-      "line": 93,
+      "line": 92,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19922,7 +19922,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/request_guard.rs",
       "function": "install_http_restriction_guard",
-      "line": 155,
+      "line": 154,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
