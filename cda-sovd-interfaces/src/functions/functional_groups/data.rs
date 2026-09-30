@@ -17,7 +17,7 @@ use serde::Deserialize;
 /// Request for a functional group write request
 /// The field `data` is a JSON object expected to contain
 /// the necessary parameters for the given request.
-#[derive(Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, schemars::JsonSchema, serde::Serialize)]
 pub struct DataRequestPayload {
     data: HashMap<String, serde_json::Value>,
 }
@@ -39,13 +39,16 @@ pub mod service {
 
     /// Response for functional group data GET/PUT operations
     /// Returns data keyed by ECU name at the top level
-    #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+    #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+    // Without the explicit bound, `#[serde(default)]` makes serde require
+    // `Default` for the type parameters when deserializing.
+    #[serde(bound(deserialize = "T: serde::Deserialize<'de>"))]
     pub struct Response<T> {
         /// Data results per ECU - key is ECU name, value is the data result
         pub data: HashMap<String, serde_json::Map<String, serde_json::Value>>,
         /// Errors that occurred during the operation
         /// JSON pointers reference /data/{ecu-name} or /data/{ecu-name}/{field}
-        #[serde(skip_serializing_if = "Vec::is_empty")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub errors: Vec<DataError<T>>,
         #[schemars(skip)]
         #[serde(skip_serializing_if = "Option::is_none")]

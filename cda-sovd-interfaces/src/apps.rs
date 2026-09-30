@@ -35,7 +35,7 @@ pub mod sovd2uds {
             };
 
             /// The operation-specific parameters for a diagnostic database update execution.
-            #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+            #[derive(Debug, serde::Deserialize, schemars::JsonSchema, serde::Serialize)]
             pub struct ExecutionParameters {
                 /// The operation to perform on the staged runtime files.
                 pub mode: ExecutionMode,
@@ -45,7 +45,7 @@ pub mod sovd2uds {
             ///
             /// Follows the standard operations convention of wrapping the
             /// operation-specific inputs in a `parameters` field.
-            #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+            #[derive(Debug, serde::Deserialize, schemars::JsonSchema, serde::Serialize)]
             pub struct ExecutionRequest {
                 pub parameters: ExecutionParameters,
             }
@@ -60,7 +60,7 @@ pub mod sovd2uds {
             }
 
             /// Response body returned by `POST /executions`.
-            #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+            #[derive(Debug, serde::Serialize, schemars::JsonSchema, serde::Deserialize)]
             pub struct ExecutionCreatedResponse {
                 /// Unique execution identifier assigned by the server.
                 pub id: String,
@@ -89,7 +89,7 @@ pub mod sovd2uds {
             }
 
             /// Response body returned by `GET /executions`.
-            #[derive(serde::Serialize, schemars::JsonSchema)]
+            #[derive(Debug, serde::Serialize, schemars::JsonSchema, serde::Deserialize)]
             pub struct ExecutionListResponse {
                 pub items: Vec<crate::common::operations::OperationIdItem>,
             }
@@ -143,7 +143,7 @@ pub mod sovd2uds {
         pub mod network_structure {
             use serde::{Deserialize, Serialize};
 
-            #[derive(Serialize, Deserialize)]
+            #[derive(Debug, Serialize, Deserialize)]
             #[serde(rename_all = "PascalCase")]
             #[derive(schemars::JsonSchema)]
             pub struct Ecu {
@@ -160,7 +160,7 @@ pub mod sovd2uds {
                 pub logical_link: String,
             }
 
-            #[derive(Serialize, Deserialize)]
+            #[derive(Debug, Serialize, Deserialize)]
             #[serde(rename_all = "PascalCase")]
             #[derive(schemars::JsonSchema)]
             pub struct Gateway {
@@ -174,7 +174,7 @@ pub mod sovd2uds {
                 pub ecus: Vec<Ecu>,
             }
 
-            #[derive(Serialize, Deserialize)]
+            #[derive(Debug, Serialize, Deserialize)]
             #[serde(rename_all = "PascalCase")]
             #[derive(schemars::JsonSchema)]
             pub struct FunctionalGroup {
@@ -182,7 +182,7 @@ pub mod sovd2uds {
                 pub ecus: Vec<Ecu>,
             }
 
-            #[derive(Serialize, Deserialize)]
+            #[derive(Debug, Serialize, Deserialize)]
             #[serde(rename_all = "PascalCase")]
             #[derive(schemars::JsonSchema)]
             pub struct NetworkStructure {
@@ -193,7 +193,7 @@ pub mod sovd2uds {
             pub mod get {
                 use serde::{Deserialize, Serialize};
 
-                #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+                #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
                 #[schemars(rename = "NetworkStructureResponse")]
                 pub struct Response {
                     pub id: String,
