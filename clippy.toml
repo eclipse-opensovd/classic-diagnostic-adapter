@@ -19,3 +19,8 @@ disallowed-methods = [
   { path = "std::thread::sleep", reason = "Blocks the async runtime thread; use tokio_ext::sleep_for instead." },
   { path = "tokio::time::sleep", reason = "Deadline drifts on each call; use tokio_ext::sleep_for with a fixed Instant instead.", allow-invalid = true },
 ]
+
+## Minimum supported Rust version: CI builds and tests with 1.88.0. Lints that
+## suggest newer APIs (e.g. `Duration::from_mins`, 1.91) stay quiet, and
+## `incompatible_msrv` flags uses of them.
+msrv = "1.88"
