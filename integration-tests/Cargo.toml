@@ -29,6 +29,7 @@ cda-database = { workspace = true }
 cda-sovd = { workspace = true }
 cda-plugin-communication-management = { workspace = true }
 sovd-interfaces = { workspace = true }
+cda-plugin-lock-priority = { workspace = true }
 cda-tracing = { workspace = true }
 cda-plugin-security = { workspace = true }
 cda-comm-doip = { workspace = true }

@@ -14,7 +14,7 @@
 use std::time::Duration;
 
 use cda_interfaces::{
-    HashMap, TransmissionParameters,
+    HashMap, TesterPresentType, TransmissionParameters,
     communication_control::CommunicationGuard,
     datatypes::{DataTransferMetaData, RetryPolicy},
 };
@@ -56,9 +56,10 @@ pub(crate) struct EcuDataTransfer {
     pub(crate) _communication_guard: CommunicationGuard,
 }
 
-pub struct TesterPresentTask {
-    pub type_: cda_interfaces::TesterPresentType,
-    pub task: JoinHandle<()>,
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct TesterPresentTaskId {
+    pub(crate) type_: TesterPresentType,
+    pub(crate) ecu: EcuIdentifier,
 }
 
 pub(crate) struct PerGatewayInfo {
@@ -67,4 +68,5 @@ pub(crate) struct PerGatewayInfo {
     pub(crate) source_address: u16,
     pub(crate) functional_address: u16,
     pub(crate) ecus: HashMap<u16, String>,
+    pub(crate) request_lock_keys: Vec<String>,
 }

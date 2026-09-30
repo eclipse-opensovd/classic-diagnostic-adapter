@@ -29,6 +29,7 @@ members = [
   "cda-sovd-interfaces",
   "cda-main",
   "cda-tracing",
+  "cda-plugin-lock-priority",
   "cda-plugin-security",
   "cda-plugin-runtime-update",
   "cda-plugin-communication-management",
@@ -55,6 +56,7 @@ cda-transport-router = { path = "cda-transport-router" }
 tokio-socketcan-isotp = { git = "https://github.com/MarkSchmitt/tokio-socketcan-isotp.git", tag = "v0.6.0" }
 cda-comm-uds = { path = "cda-comm-uds" }
 cda-database = { path = "cda-database" }
+cda-plugin-lock-priority = { path = "cda-plugin-lock-priority" }
 cda-plugin-security = { path = "cda-plugin-security" }
 cda-plugin-runtime-update = { path = "cda-plugin-runtime-update" }
 cda-plugin-communication-management = { path = "cda-plugin-communication-management" }

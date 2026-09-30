@@ -96,7 +96,7 @@ async fn wait_for_execution_terminal(
     }
 }
 
-/// Tests that mutating endpoints return 403 Forbidden without a vehicle lock.
+/// Tests that mutating runtime-update endpoints reject requests without a vehicle lock.
 #[tokio::test]
 async fn runtimefiles_requires_lock() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;

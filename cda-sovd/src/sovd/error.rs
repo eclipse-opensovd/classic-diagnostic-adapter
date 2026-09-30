@@ -51,6 +51,20 @@ pub enum ApiError {
     InternalServerError(Option<String>),
     #[error("Conflict: {0}")]
     Conflict(String),
+    #[error("Required lock is missing: {0}")]
+    LockRequired(String),
+    #[error("Locked: {0}")]
+    Locked(String),
+    #[error("Lock priority policy denied acquisition: {message}")]
+    LockPriorityDenied {
+        message: String,
+        parameters: HashMap<String, serde_json::Value>,
+    },
+    #[error("Lock broken: {message}")]
+    LockBroken {
+        message: String,
+        parameters: HashMap<String, serde_json::Value>,
+    },
     #[error("Not Responding: {0}")]
     NotResponding(String),
     #[error("Service Unavailable: {message}")]
@@ -94,6 +108,19 @@ impl ApiError {
                 Some(VendorErrorCode::BadRequest),
             ),
             ApiError::Forbidden(_) => (ErrorCode::InsufficientAccessRights, None),
+            ApiError::LockRequired(_) => (
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::LockRequired),
+            ),
+            ApiError::Locked(_) => (
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::LockOwnedByAnotherClient),
+            ),
+            ApiError::LockPriorityDenied { .. } => (
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::LockPriorityDenied),
+            ),
+            ApiError::LockBroken { .. } => (ErrorCode::LockBroken, None),
             ApiError::InvalidParameter { .. } => (
                 ErrorCode::VendorSpecific,
                 Some(VendorErrorCode::InvalidParameter),
@@ -239,6 +266,12 @@ pub enum VendorErrorCode {
     StorageTransactionBusy,
     /// The provided data was not valid.
     InvalidData,
+    /// A communication request requires a lock that the client does not hold.
+    LockRequired,
+    /// A lock owned by another client prevents the requested operation.
+    LockOwnedByAnotherClient,
+    /// A lock acquisition was denied by the configured priority policy.
+    LockPriorityDenied,
     /// A severe error occurred that needs further investigation, safe operation is still possible
     /// but this indicates an issue that should be investigated
     SevereError,
@@ -257,19 +290,7 @@ impl OperationOutput for ErrorWrapper {
 
 impl IntoResponse for ErrorWrapper {
     fn into_response(self) -> Response {
-        let schema = if self.include_schema {
-            let mut schema = crate::sovd::create_schema!(
-                sovd_interfaces::error::ApiErrorResponse<VendorErrorCode>
-            );
-            if let Some(props) = schema.get_mut("properties") {
-                crate::sovd::remove_descriptions_recursive(props);
-            }
-            Some(schema)
-        } else {
-            None
-        };
-        // Every variant but `ServiceUnavailable` differs only in status,
-        // message and codes, so they share the construction below.
+        let schema = error_response_schema(self.include_schema);
         let (status, message, error_code, vendor_code, parameters) = match self.error {
             ApiError::ServiceUnavailable {
                 message,
@@ -312,6 +333,40 @@ impl IntoResponse for ErrorWrapper {
                 ErrorCode::PreconditionsNotFulfilled,
                 None,
                 None,
+            ),
+            ApiError::LockRequired(message) => (
+                StatusCode::CONFLICT,
+                message,
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::LockRequired),
+                None,
+            ),
+            ApiError::Locked(message) => (
+                StatusCode::LOCKED,
+                message,
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::LockOwnedByAnotherClient),
+                None,
+            ),
+            ApiError::LockPriorityDenied {
+                message,
+                parameters,
+            } => (
+                StatusCode::LOCKED,
+                message,
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::LockPriorityDenied),
+                Some(parameters),
+            ),
+            ApiError::LockBroken {
+                message,
+                parameters,
+            } => (
+                StatusCode::CONFLICT,
+                message,
+                ErrorCode::LockBroken,
+                None,
+                Some(parameters),
             ),
             ApiError::BadRequest(message) => (
                 StatusCode::BAD_REQUEST,
@@ -365,6 +420,17 @@ impl IntoResponse for ErrorWrapper {
         )
             .into_response()
     }
+}
+
+fn error_response_schema(include_schema: bool) -> Option<schemars::Schema> {
+    include_schema.then(|| {
+        let mut schema =
+            crate::sovd::create_schema!(sovd_interfaces::error::ApiErrorResponse<VendorErrorCode>);
+        if let Some(props) = schema.get_mut("properties") {
+            crate::sovd::remove_descriptions_recursive(props);
+        }
+        schema
+    })
 }
 
 /// Built separately from `ErrorWrapper::into_response`'s common construction,
@@ -504,4 +570,137 @@ pub(crate) async fn sovd_not_found_handler(uri: Uri) -> impl IntoResponse {
             },
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::axum_response_into;
+
+    #[tokio::test]
+    async fn lock_priority_denial_includes_schema_when_requested() {
+        let response = ErrorWrapper {
+            error: ApiError::LockPriorityDenied {
+                message: "Denied by policy".to_owned(),
+                parameters: HashMap::default(),
+            },
+            include_schema: true,
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::LOCKED);
+        let body: sovd_interfaces::error::ApiErrorResponse<VendorErrorCode> =
+            axum_response_into(response).await.expect("Valid body");
+        assert!(body.schema.is_some());
+        assert_eq!(body.error_code, ErrorCode::VendorSpecific);
+        assert_eq!(body.vendor_code, Some(VendorErrorCode::LockPriorityDenied));
+    }
+
+    #[tokio::test]
+    async fn lock_priority_denial_omits_schema_when_not_requested() {
+        let response = ErrorWrapper {
+            error: ApiError::LockPriorityDenied {
+                message: "Denied by policy".to_owned(),
+                parameters: HashMap::default(),
+            },
+            include_schema: false,
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::LOCKED);
+        let body: sovd_interfaces::error::ApiErrorResponse<VendorErrorCode> =
+            axum_response_into(response).await.expect("Valid body");
+        assert!(body.schema.is_none());
+        assert_eq!(body.error_code, ErrorCode::VendorSpecific);
+        assert_eq!(body.vendor_code, Some(VendorErrorCode::LockPriorityDenied));
+    }
+
+    #[tokio::test]
+    async fn ordinary_lock_conflict_uses_lock_owner_vendor_code() {
+        let response = ErrorWrapper {
+            error: ApiError::Locked("Lock is owned by another client".to_owned()),
+            include_schema: false,
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::LOCKED);
+        let body: sovd_interfaces::error::ApiErrorResponse<VendorErrorCode> =
+            axum_response_into(response).await.expect("Valid body");
+        assert_eq!(body.error_code, ErrorCode::VendorSpecific);
+        assert_eq!(
+            body.vendor_code,
+            Some(VendorErrorCode::LockOwnedByAnotherClient)
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_required_lock_uses_lock_required_vendor_code() {
+        let response = ErrorWrapper {
+            error: ApiError::LockRequired("Required lock is missing".to_owned()),
+            include_schema: false,
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: sovd_interfaces::error::ApiErrorResponse<VendorErrorCode> =
+            axum_response_into(response).await.expect("Valid body");
+        assert_eq!(body.error_code, ErrorCode::VendorSpecific);
+        assert_eq!(body.vendor_code, Some(VendorErrorCode::LockRequired));
+    }
+
+    #[test]
+    fn error_and_vendor_code_maps_lock_and_service_errors() {
+        let cases = [
+            (
+                ApiError::LockRequired("Required".to_owned()),
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::LockRequired),
+            ),
+            (
+                ApiError::Locked("Locked".to_owned()),
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::LockOwnedByAnotherClient),
+            ),
+            (
+                ApiError::LockPriorityDenied {
+                    message: "Denied".to_owned(),
+                    parameters: HashMap::default(),
+                },
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::LockPriorityDenied),
+            ),
+            (
+                ApiError::LockBroken {
+                    message: "Broken".to_owned(),
+                    parameters: HashMap::default(),
+                },
+                ErrorCode::LockBroken,
+                None,
+            ),
+            (
+                ApiError::ServiceUnavailable {
+                    message: "Unavailable".to_owned(),
+                    retry_after: None,
+                    error_code: ErrorCode::VendorSpecific,
+                    vendor_code: Some(VendorErrorCode::CommunicationNotReady),
+                },
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::CommunicationNotReady),
+            ),
+            (
+                ApiError::InvalidParameter {
+                    possible_values: HashSet::default(),
+                },
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::InvalidParameter),
+            ),
+        ];
+
+        for (error, expected_error_code, expected_vendor_code) in cases {
+            assert_eq!(
+                error.error_and_vendor_code(),
+                (expected_error_code, expected_vendor_code)
+            );
+        }
+    }
 }

@@ -124,8 +124,7 @@ where
             functional_group_config,
         } = components;
 
-        let ecu_names = new_uds.get_physical_ecus().await;
-        if let Err(e) = self.lock_provider.update_entries(ecu_names).await {
+        if let Err(e) = self.lock_provider.prepare_runtime_update().await {
             // These never went live, and would hold their transport resources
             // until process exit.
             new_gateway.shutdown().await;

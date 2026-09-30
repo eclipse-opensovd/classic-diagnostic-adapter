@@ -29,6 +29,7 @@ use cda_interfaces::{
         ComParams, ComponentsConfig, FaultConfig, FlatbBufConfig, SdBoolMappings,
         SdMappingsTruthyValue,
     },
+    lock_config::LockConfig,
 };
 pub use cda_interfaces::{
     TransportType,
@@ -107,6 +108,8 @@ pub struct Configuration {
     pub runtime_update_config: RuntimeUpdateConfig,
     /// Diagnostic communication initialization and post-update behavior.
     pub communication: CommunicationSettings,
+    /// Lock priority behavior and limits.
+    pub locks: LockConfig,
     /// Strict-mode validation flags.
     pub strict: StrictConfig,
 }
@@ -316,6 +319,7 @@ impl Default for Configuration {
             ecu: HashMap::default(),
             runtime_update_config: RuntimeUpdateConfig::default(),
             communication: CommunicationSettings::default(),
+            locks: LockConfig::default(),
             strict: StrictConfig::default(),
         }
     }
@@ -431,7 +435,7 @@ impl ConfigSanity for Configuration {
         self.validate_transport_presence()?;
         self.validate_can_mappings()?;
         self.validate_transport_overrides()?;
-
+        self.locks.validate_sanity()?;
         // Add more checks for Configuration fields here if needed
         Ok(())
     }
@@ -439,7 +443,9 @@ impl ConfigSanity for Configuration {
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::datatypes::DiagnosticServiceAffixPosition;
+    use cda_interfaces::{
+        datatypes::DiagnosticServiceAffixPosition, lock_config::LockExclusivityPolicy,
+    };
     use figment::{
         Figment,
         providers::{Format, Serialized, Toml},
@@ -479,6 +485,13 @@ nack_number_of_retries.name = "CP_TEST"
 [functional_description]
 description_database = "teapot"
 
+[locks]
+lock_exclusivity_policy = "non_exclusive_by_default"
+priority_policy_timeout_ms = 750
+priority_policy_stale_retries = 2
+priority_lifecycle_timeout_ms = 500
+priority_lifecycle_queue_capacity = 32
+
 "#;
 
         let figment = Figment::from(Serialized::defaults(Configuration::default()))
@@ -517,6 +530,14 @@ description_database = "teapot"
             config.database.naming_convention.long_name_affix_position,
             DiagnosticServiceAffixPosition::Prefix,
         );
+        assert_eq!(
+            config.locks.lock_exclusivity_policy,
+            LockExclusivityPolicy::NonExclusiveByDefault
+        );
+        assert_eq!(config.locks.priority_policy_timeout_ms, 750);
+        assert_eq!(config.locks.priority_policy_stale_retries, 2);
+        assert_eq!(config.locks.priority_lifecycle_timeout_ms, 500);
+        assert_eq!(config.locks.priority_lifecycle_queue_capacity, 32);
 
         assert_eq!(
             config
@@ -628,6 +649,46 @@ address = "127.0.0.1"
              \"unix_socket\""
         );
         Ok(())
+    }
+
+    fn assert_invalid_lock_config(
+        configure: impl FnOnce(&mut Configuration),
+        expected_field: &str,
+    ) {
+        let mut config = Configuration::default();
+        configure(&mut config);
+
+        let error = config
+            .validate_sanity()
+            .expect_err("Invalid lock configuration must be rejected");
+        let ConfigSanityError::InvalidValue { field, .. } = error else {
+            panic!("Expected invalid-value error, got {error:?}");
+        };
+        assert_eq!(field, expected_field);
+    }
+
+    #[test]
+    fn zero_priority_policy_timeout_is_rejected() {
+        assert_invalid_lock_config(
+            |config| config.locks.priority_policy_timeout_ms = 0,
+            "locks.priority_policy_timeout_ms",
+        );
+    }
+
+    #[test]
+    fn zero_priority_lifecycle_timeout_is_rejected() {
+        assert_invalid_lock_config(
+            |config| config.locks.priority_lifecycle_timeout_ms = 0,
+            "locks.priority_lifecycle_timeout_ms",
+        );
+    }
+
+    #[test]
+    fn zero_priority_lifecycle_queue_capacity_is_rejected() {
+        assert_invalid_lock_config(
+            |config| config.locks.priority_lifecycle_queue_capacity = 0,
+            "locks.priority_lifecycle_queue_capacity",
+        );
     }
 
     /// A `[can]` section must parse in every build (the config type is not

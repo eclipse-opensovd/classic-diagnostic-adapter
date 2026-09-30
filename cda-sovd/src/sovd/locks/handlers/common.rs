@@ -1,0 +1,752 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+ *
+ * See the NOTICE file(s) distributed with this work for additional
+ * information regarding copyright ownership.
+ *
+ * This program and the accompanying materials are made available under the
+ * terms of the Apache License Version 2.0 which is available at
+ * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+use std::{option::Option, sync::Arc, time::SystemTime};
+
+use axum::{
+    Json,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+};
+use cda_interfaces::{
+    TesterPresentType, UdsEcu, dlt_ctx,
+    lock_priority_api::{
+        LockLifecycleEvent, LockPriorityPolicy, LockRequest, LockScope, LockSnapshot,
+    },
+};
+use cda_plugin_security::{Claims, SecurityPlugin};
+use chrono::{DateTime, SecondsFormat, Utc};
+use tokio::{sync::oneshot, time::Instant};
+
+use super::super::{
+    AcquisitionGuard, ActiveLock, ApiError, DefunctLock, ErrorWrapper, LockCleanupFnHelper,
+    LockCoverage, LockState, Locks, PendingPreemption, ScopeKey, StateError, TransitionReservation,
+    active_snapshot, create_lock, map_state_error, rollback_preemption, validate_claim,
+};
+use crate::sovd::locks::cleanup::{run_cleanups, take_cleanups};
+
+pub(in crate::sovd::locks) struct ValidatedLockRequest {
+    pub(in crate::sovd::locks) metadata: serde_json::Map<String, serde_json::Value>,
+    pub(in crate::sovd::locks) requested_exclusive: Option<bool>,
+    pub(in crate::sovd::locks) expires_at: SystemTime,
+}
+
+pub(in crate::sovd::locks) fn validated_expiration(
+    request: &sovd_interfaces::locking::Request,
+) -> Result<ValidatedLockRequest, ApiError> {
+    let metadata = request.metadata.clone();
+    let exclusive = request.x_sovd2uds_isexclusive;
+    let expires_at = validated_expiration_duration(request.lock_expiration)?;
+    Ok(ValidatedLockRequest {
+        metadata,
+        requested_exclusive: exclusive,
+        expires_at,
+    })
+}
+
+fn validated_expiration_duration(lock_expiration: u64) -> Result<SystemTime, ApiError> {
+    if lock_expiration == 0 {
+        return Err(ApiError::BadRequest(
+            "Lock expiration must be greater than zero".to_owned(),
+        ));
+    }
+    let seconds = i64::try_from(lock_expiration)
+        .map_err(|_| ApiError::BadRequest("Lock expiration is too large".to_owned()))?;
+    let duration = chrono::TimeDelta::try_seconds(seconds)
+        .ok_or_else(|| ApiError::BadRequest("Lock expiration is too large".to_owned()))?;
+    let expiration = Utc::now()
+        .checked_add_signed(duration)
+        .ok_or_else(|| ApiError::BadRequest("Lock expiration is too large".to_owned()))?;
+    Ok(SystemTime::from(expiration))
+}
+
+#[tracing::instrument(
+    skip(locks, claims),
+    fields(
+        lock_id,
+        ?scope,
+        dlt_context = dlt_ctx!("SOVD")
+    )
+)]
+pub(crate) async fn delete_handler(
+    locks: &Locks,
+    scope: LockScope,
+    lock_id: &str,
+    claims: &impl Claims,
+    include_schema: bool,
+) -> Response {
+    tracing::info!("Attempting to delete lock");
+    let reservation = locks.core.reserve_transition().await;
+
+    match Locks::delete_defunct(lock_id, &scope, claims, &reservation).await {
+        Ok(true) => {
+            reservation.finish();
+            return StatusCode::NO_CONTENT.into_response();
+        }
+        Err(error) => {
+            reservation.finish();
+            return ErrorWrapper {
+                error,
+                include_schema,
+            }
+            .into_response();
+        }
+        Ok(false) => {}
+    }
+    let removed = {
+        let mut store = reservation.write_store().await;
+        let active = store
+            .state
+            .active_for_scope(&ScopeKey::from(&scope))
+            .cloned();
+        if let Err(error) = validate_claim(Some(lock_id), claims, active.as_ref()) {
+            drop(store);
+            reservation.finish();
+            return ErrorWrapper {
+                error,
+                include_schema,
+            }
+            .into_response();
+        }
+        let Some(active) = active else {
+            drop(store);
+            reservation.finish();
+            return ErrorWrapper {
+                error: ApiError::NotFound(Some("No lock found".to_owned())),
+                include_schema,
+            }
+            .into_response();
+        };
+        match store.state.delete(&active.id) {
+            Ok(removed) => {
+                let cleanups = take_cleanups(&mut store.cleanups, &removed);
+                (removed, cleanups)
+            }
+            Err(error) => {
+                drop(store);
+                reservation.finish();
+                return ErrorWrapper {
+                    error: map_state_error(&error),
+                    include_schema,
+                }
+                .into_response();
+            }
+        }
+    };
+    let (removed, cleanups) = removed;
+    let policy = Arc::clone(&locks.priority_policy);
+    let events: Vec<_> = removed
+        .iter()
+        .map(|lock| LockLifecycleEvent::Released {
+            lock: active_snapshot(lock),
+        })
+        .collect();
+    let sender = locks.lifecycle_sender.clone();
+    let (completion_sender, completion_receiver) = oneshot::channel();
+    // Keep cleanup and reservation release alive if the HTTP request is cancelled.
+    cda_interfaces::spawn_named!("lock-delete-cleanup", async move {
+        run_cleanups(cleanups).await;
+        reservation.finish();
+        for event in events {
+            super::super::enqueue_lock_event(&sender, Arc::clone(&policy), event);
+        }
+        let _ = completion_sender.send(());
+    });
+    let _ = completion_receiver.await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+pub(crate) struct LockContext<'a> {
+    pub(crate) all_locks: &'a Arc<Locks>,
+    pub(crate) acquisition: AcquisitionGuard,
+    pub(crate) pending: Option<PendingPreemption>,
+    pub(crate) coverage: LockCoverage,
+}
+
+pub(crate) struct LockUpdateContext<'a> {
+    pub(crate) all_locks: &'a Locks,
+    pub(crate) scope: LockScope,
+}
+
+fn commit_new_lock(
+    state: &mut LockState,
+    pending: Option<&PendingPreemption>,
+    new_lock: &ActiveLock,
+) -> Result<Vec<ActiveLock>, StateError> {
+    if let Some(pending) = pending {
+        state.commit_replacement(
+            &pending.root_lock_ids,
+            new_lock.clone(),
+            &pending.broken_by,
+            pending.broken_at,
+        )
+    } else if new_lock.scope == ScopeKey::Vehicle {
+        let child_ids = state
+            .active()
+            .filter(|lock| lock.principal.subject == new_lock.principal.subject)
+            .map(|lock| lock.id.clone())
+            .collect::<Vec<_>>();
+        state
+            .insert_vehicle(new_lock.clone(), &child_ids)
+            .map(|()| Vec::new())
+    } else {
+        state.insert_active(new_lock.clone()).map(|()| Vec::new())
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Each argument transfers distinct transaction state into this async task. A \
+              parameter struct would add indirection without creating a reusable abstraction"
+)]
+pub(in crate::sovd::locks) async fn run_acquisition_transaction<T: UdsEcu>(
+    uds: T,
+    locks: Arc<Locks>,
+    acquisition: AcquisitionGuard,
+    mut pending: Option<PendingPreemption>,
+    new_lock: ActiveLock,
+    cleanup: LockCleanupFnHelper,
+    tester_present: Option<TesterPresentType>,
+    expiration_target: Instant,
+) -> Result<String, ApiError> {
+    let evaluation_id = acquisition.evaluation_id.clone();
+    let policy = Arc::clone(&acquisition.policy);
+    let started_tester_present = if let Some(type_) = &tester_present {
+        if uds.check_tester_present_active(type_).await {
+            None
+        } else {
+            if let Err(error) = uds.start_tester_present(type_.clone()).await {
+                if let Some(pending) = pending.take() {
+                    pending.rollback();
+                }
+                acquisition.finish();
+                return Err(ApiError::from(error));
+            }
+            Some(type_.clone())
+        }
+    } else {
+        None
+    };
+    let committed = {
+        let mut store = acquisition.reservation.write_store().await;
+        commit_new_lock(&mut store.state, pending.as_ref(), &new_lock).map(|preempted_locks| {
+            store.cleanups.insert(new_lock.id.clone(), cleanup);
+            let cleanups = take_cleanups(&mut store.cleanups, &preempted_locks);
+            (preempted_locks, cleanups)
+        })
+    };
+    let (preempted_locks, cleanups) = match committed {
+        Ok(committed) => committed,
+        Err(error) => {
+            tracing::error!(%error, "Preflighted lock acquisition failed to commit");
+            if let Some(pending) = pending.take() {
+                pending.rollback();
+            }
+            if let Some(type_) = started_tester_present
+                && let Err(stop_error) = uds.stop_tester_present(type_).await
+            {
+                tracing::error!(%stop_error, "Failed to stop tester present after lock commit failure");
+            }
+            acquisition.finish();
+            return Err(map_state_error(&error));
+        }
+    };
+    if let Some(pending) = &mut pending {
+        pending.disarm();
+    }
+    run_cleanups(cleanups).await;
+    for lock in &preempted_locks {
+        if let Err(error) = locks.schedule_defunct_expiration(lock.expires_at) {
+            tracing::error!(%error, lock_id = %lock.id, "Failed to schedule defunct lock expiration");
+        }
+    }
+    acquisition.finish();
+    finish_acquisition_transaction(
+        &locks,
+        &new_lock,
+        expiration_target,
+        pending.as_ref(),
+        &preempted_locks,
+        evaluation_id,
+        policy,
+    )
+    .await;
+    Ok(new_lock.id.into())
+}
+
+/// Schedules expiration and emits lifecycle events for a committed acquisition.
+async fn finish_acquisition_transaction(
+    locks: &Locks,
+    new_lock: &ActiveLock,
+    expiration_target: Instant,
+    pending: Option<&PendingPreemption>,
+    preempted: &[ActiveLock],
+    evaluation_id: Option<String>,
+    policy: Arc<dyn LockPriorityPolicy>,
+) {
+    locks.schedule_expiration(new_lock, expiration_target).await;
+    if let Some(pending) = pending {
+        locks.notify_lock_event(
+            Arc::clone(&pending.policy),
+            LockLifecycleEvent::Preempted {
+                evaluation_id: pending.evaluation_id.clone(),
+                replacement: active_snapshot(new_lock),
+                broken_by: pending.broken_by.clone(),
+                defunct_lock_ids: preempted.iter().map(|lock| lock.id.clone()).collect(),
+            },
+        );
+    } else {
+        locks.notify_lock_event(
+            policy,
+            LockLifecycleEvent::Created {
+                evaluation_id,
+                lock: active_snapshot(new_lock),
+            },
+        );
+    }
+}
+
+#[tracing::instrument(
+    skip(uds, context, security_plugin),
+    fields(
+        scope = ?request.scope,
+        expires_at = ?request.expires_at,
+        dlt_context = dlt_ctx!("SOVD")
+    )
+)]
+pub(crate) async fn post_handler<T: UdsEcu + Clone>(
+    uds: &T,
+    context: LockContext<'_>,
+    request: LockRequest,
+    lock_collection_path: &str,
+    include_schema: bool,
+    security_plugin: Box<dyn SecurityPlugin>,
+) -> Response {
+    tracing::info!("Attempting to create lock");
+    let existing = context.all_locks.active_for_scope(&request.scope).await;
+    let existing_is_preempted = existing.as_ref().is_some_and(|lock| {
+        context
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.root_lock_ids.contains(&lock.id))
+    });
+    if let Some(existing) = existing.filter(|_| !existing_is_preempted) {
+        return renew_existing_lock(
+            context,
+            existing,
+            request,
+            include_schema,
+            security_plugin.as_auth_plugin().claims().sub(),
+        )
+        .await;
+    }
+    let exclusive = request.exclusive;
+    let locks = Arc::clone(context.all_locks);
+    let acquisition = context.acquisition;
+    let pending = context.pending;
+    let coverage = context.coverage;
+    let uds = uds.clone();
+    let (sender, receiver) = oneshot::channel();
+    // Own transaction guards in a detached task so request cancellation cannot
+    // interrupt commit, rollback, or reservation release.
+    cda_interfaces::spawn_named!("lock-acquisition", async move {
+        let result = match create_lock(&uds, request, &locks, coverage, security_plugin).await {
+            Ok((new_lock, cleanup, tester_present)) => {
+                let expiration_target = match Locks::expiration_target(&new_lock) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        rollback_preemption(pending, &locks).await;
+                        acquisition.finish();
+                        let _ = sender.send(Err(error));
+                        return;
+                    }
+                };
+                run_acquisition_transaction(
+                    uds,
+                    locks,
+                    acquisition,
+                    pending,
+                    new_lock,
+                    cleanup,
+                    tester_present,
+                    expiration_target,
+                )
+                .await
+            }
+            Err(error) => {
+                rollback_preemption(pending, &locks).await;
+                acquisition.finish();
+                Err(error)
+            }
+        };
+        let _ = sender.send(result);
+    });
+    match receiver.await.unwrap_or_else(|_| {
+        Err(ApiError::InternalServerError(Some(
+            "Lock acquisition transaction stopped unexpectedly".to_owned(),
+        )))
+    }) {
+        Ok(lock_id) => (
+            StatusCode::CREATED,
+            [(
+                header::LOCATION,
+                format!("{lock_collection_path}/{lock_id}"),
+            )],
+            Json(sovd_lock_response(&lock_id, exclusive, include_schema)),
+        )
+            .into_response(),
+        Err(error) => ErrorWrapper {
+            error,
+            include_schema,
+        }
+        .into_response(),
+    }
+}
+
+async fn renew_existing_lock(
+    mut context: LockContext<'_>,
+    existing: ActiveLock,
+    request: LockRequest,
+    include_schema: bool,
+    subject: &str,
+) -> Response {
+    let pending = context.pending.take();
+    let error = if existing.principal.subject != subject {
+        Some(ApiError::Locked(
+            "Lock is owned by another client".to_owned(),
+        ))
+    } else if existing.expires_at <= SystemTime::now() {
+        Some(ApiError::Conflict("Lock has expired".to_owned()))
+    } else {
+        None
+    };
+    rollback_preemption(pending, context.all_locks).await;
+    if let Some(error) = error {
+        return ErrorWrapper {
+            error,
+            include_schema,
+        }
+        .into_response();
+    }
+    let existing_id = existing.id.clone();
+    let evaluation_id = context.acquisition.evaluation_id.clone();
+    let policy = Arc::clone(&context.acquisition.policy);
+    let result = renew_lock(
+        &context.acquisition.reservation,
+        &existing_id,
+        request.expires_at,
+        existing,
+    )
+    .await;
+    context.acquisition.finish();
+    match result {
+        Ok(lock) => {
+            let exclusive = lock.exclusive;
+            context.all_locks.notify_lock_event(
+                policy,
+                LockLifecycleEvent::Renewed {
+                    evaluation_id,
+                    lock,
+                },
+            );
+            (
+                StatusCode::OK,
+                Json(sovd_lock_response(&existing_id, exclusive, include_schema)),
+            )
+                .into_response()
+        }
+        Err(error) => ErrorWrapper {
+            error,
+            include_schema,
+        }
+        .into_response(),
+    }
+}
+
+#[tracing::instrument(
+    skip(context, claims, expiration),
+    fields(
+        lock_id,
+        scope = ?context.scope,
+        lock_expiration = %expiration.lock_expiration,
+        dlt_context = dlt_ctx!("SOVD")
+    )
+)]
+pub(crate) async fn put_handler(
+    context: LockUpdateContext<'_>,
+    lock_id: &str,
+    claims: &impl Claims,
+    expiration: sovd_interfaces::locking::UpdateRequest,
+    include_schema: bool,
+) -> Response {
+    tracing::info!("Attempting to update lock");
+    let policy = Arc::clone(&context.all_locks.priority_policy);
+    let reservation = context.all_locks.core.reserve_transition().await;
+
+    if let Some(defunct) = context
+        .all_locks
+        .defunct_by_id(lock_id, &context.scope)
+        .await
+    {
+        if defunct.principal.subject != claims.sub() {
+            reservation.finish();
+            return ErrorWrapper {
+                error: ApiError::Forbidden(Some("lock validation failed".to_owned())),
+                include_schema,
+            }
+            .into_response();
+        }
+        let current_holder = context.all_locks.current_holder(&defunct).await;
+        reservation.finish();
+        return ErrorWrapper {
+            error: defunct.broken_error(&current_holder),
+            include_schema,
+        }
+        .into_response();
+    }
+
+    let expires_at = match validated_expiration_duration(expiration.lock_expiration) {
+        Ok(expires_at) => expires_at,
+        Err(error) => {
+            reservation.finish();
+            return ErrorWrapper {
+                error,
+                include_schema,
+            }
+            .into_response();
+        }
+    };
+    let active = context.all_locks.active_for_scope(&context.scope).await;
+    if let Err(error) = validate_claim(Some(lock_id), claims, active.as_ref()) {
+        reservation.finish();
+        return ErrorWrapper {
+            error,
+            include_schema,
+        }
+        .into_response();
+    }
+    let Some(active) = active else {
+        reservation.finish();
+        return ErrorWrapper {
+            error: ApiError::NotFound(Some("No lock found".to_owned())),
+            include_schema,
+        }
+        .into_response();
+    };
+    if active.expires_at <= SystemTime::now() {
+        reservation.finish();
+        return ErrorWrapper {
+            error: ApiError::Conflict("Lock has expired".to_owned()),
+            include_schema,
+        }
+        .into_response();
+    }
+    let result = renew_lock(&reservation, lock_id, expires_at, active).await;
+    reservation.finish();
+    match result {
+        Ok(lock) => {
+            context.all_locks.notify_lock_event(
+                policy,
+                LockLifecycleEvent::Renewed {
+                    evaluation_id: None,
+                    lock,
+                },
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => ErrorWrapper {
+            error: e,
+            include_schema,
+        }
+        .into_response(),
+    }
+}
+
+async fn renew_lock(
+    reservation: &TransitionReservation,
+    lock_id: &str,
+    expires_at: SystemTime,
+    active: ActiveLock,
+) -> Result<LockSnapshot, ApiError> {
+    let now = SystemTime::now();
+    Locks::expiration_target_at(expires_at, now)?;
+    reservation
+        .write_store()
+        .await
+        .state
+        .renew(lock_id, expires_at, now)
+        .map_err(|error| map_state_error(&error))?;
+    let renewed = ActiveLock {
+        expires_at,
+        ..active
+    };
+    Ok(active_snapshot(&renewed))
+}
+
+#[tracing::instrument(
+    skip(all_locks, claims),
+    fields(?scope, dlt_context = dlt_ctx!("SOVD"))
+)]
+pub(crate) async fn get_handler(
+    all_locks: &Locks,
+    scope: LockScope,
+    claims: &impl Claims,
+    include_schema: bool,
+) -> Response {
+    tracing::info!("Getting locks");
+    let key = ScopeKey::from(&scope);
+    let now = SystemTime::now();
+    all_locks
+        .core
+        .read_store(|store| {
+            let state = &store.state;
+            let mut locks = sovd_interfaces::locking::get::Response {
+                items: state
+                    .defunct()
+                    .filter(|lock| lock.scope == key && lock.original_expires_at > now)
+                    .map(|lock| defunct_to_sovd(lock, state, claims))
+                    .collect(),
+                schema: include_schema
+                    .then(|| crate::sovd::create_schema!(sovd_interfaces::locking::get::Response)),
+            };
+            locks.items.extend(
+                state
+                    .active_for_scope(&key)
+                    .map(|active| active_to_sovd(active, claims)),
+            );
+            (StatusCode::OK, Json(&locks)).into_response()
+        })
+        .await
+}
+
+#[tracing::instrument(
+    skip(all_locks, claims),
+    fields(
+        lock_id = %lock_id,
+        ?scope,
+        dlt_context = dlt_ctx!("SOVD")
+    )
+)]
+pub(crate) async fn get_id_handler(
+    all_locks: &Locks,
+    scope: LockScope,
+    lock_id: &String,
+    claims: &impl Claims,
+    include_schema: bool,
+) -> Response {
+    tracing::info!("Getting active lock by ID");
+    let key = ScopeKey::from(&scope);
+    let now = SystemTime::now();
+    all_locks
+        .core
+        .read_store(|store| {
+            let state = &store.state;
+            if let Some(active) = state
+                .active_by_id(lock_id)
+                .filter(|active| active.scope == key)
+            {
+                let mut response = active_details(active, claims);
+                response.schema = lock_details_schema(include_schema);
+                (StatusCode::OK, Json(response)).into_response()
+            } else if let Some(defunct) = state
+                .defunct_by_id(lock_id)
+                .filter(|defunct| defunct.scope == key && defunct.original_expires_at > now)
+            {
+                let mut response = defunct_details(defunct, state, claims);
+                response.schema = lock_details_schema(include_schema);
+                (StatusCode::OK, Json(response)).into_response()
+            } else {
+                ErrorWrapper {
+                    error: ApiError::NotFound(Some(format!("no lock found with id {lock_id}"))),
+                    include_schema,
+                }
+                .into_response()
+            }
+        })
+        .await
+}
+
+fn sovd_lock(id: &str, exclusive: bool) -> sovd_interfaces::locking::Lock {
+    sovd_interfaces::locking::Lock {
+        id: id.to_owned(),
+        lock_expiration: None,
+        owned: true,
+        x_sovd2uds_isexclusive: exclusive,
+        x_sovd2uds_broken_by: None,
+        x_sovd2uds_broken_at: None,
+        x_sovd2uds_current_holder: None,
+        schema: None,
+    }
+}
+
+pub(in crate::sovd::locks) fn sovd_lock_response(
+    id: &str,
+    exclusive: bool,
+    include_schema: bool,
+) -> sovd_interfaces::locking::Lock {
+    let mut response = sovd_lock(id, exclusive);
+    response.schema = include_schema
+        .then(|| crate::sovd::create_schema!(sovd_interfaces::locking::post_put::Response));
+    response
+}
+
+fn lock_details_schema(include_schema: bool) -> Option<schemars::Schema> {
+    include_schema.then(|| crate::sovd::create_schema!(sovd_interfaces::locking::id::get::Response))
+}
+
+fn active_to_sovd(lock: &ActiveLock, claims: &impl Claims) -> sovd_interfaces::locking::Lock {
+    let mut response = sovd_lock(&lock.id, lock.exclusive);
+    response.lock_expiration =
+        Some(DateTime::<Utc>::from(lock.expires_at).to_rfc3339_opts(SecondsFormat::Secs, true));
+    response.owned = lock.principal.subject == claims.sub();
+    response
+}
+
+fn defunct_to_sovd(
+    lock: &DefunctLock,
+    state: &LockState,
+    claims: &impl Claims,
+) -> sovd_interfaces::locking::Lock {
+    let mut response = lock.to_sovd_lock(claims);
+    response.lock_expiration = Some(
+        DateTime::<Utc>::from(lock.original_expires_at).to_rfc3339_opts(SecondsFormat::Secs, true),
+    );
+    response.x_sovd2uds_current_holder = Some(state.current_holder(lock).to_owned());
+    response
+}
+
+fn active_details(
+    lock: &ActiveLock,
+    claims: &impl Claims,
+) -> sovd_interfaces::locking::id::get::Response {
+    sovd_interfaces::locking::id::get::Response {
+        lock_expiration: DateTime::<Utc>::from(lock.expires_at)
+            .to_rfc3339_opts(SecondsFormat::Secs, true),
+        owned: lock.principal.subject == claims.sub(),
+        x_sovd2uds_isexclusive: lock.exclusive,
+        x_sovd2uds_broken_by: None,
+        x_sovd2uds_broken_at: None,
+        x_sovd2uds_current_holder: None,
+        schema: None,
+    }
+}
+
+fn defunct_details(
+    lock: &DefunctLock,
+    state: &LockState,
+    claims: &impl Claims,
+) -> sovd_interfaces::locking::id::get::Response {
+    let mut response = lock.details(claims);
+    response.x_sovd2uds_current_holder = Some(state.current_holder(lock).to_owned());
+    response
+}

@@ -597,8 +597,9 @@ three lock scopes.
          - Description
        * - POST
          - ``.../locks``
-         - Acquire a lock. If the caller already owns the active lock, extends its expiration
-           instead.
+         - Acquire a lock. For compatibility, if the caller already owns the active lock,
+           extend its expiration and return HTTP 200 instead. Clients should use PUT to modify
+           an existing lock's expiration.
        * - GET
          - ``.../locks``
          - List active and defunct locks for the entity. The ``owned`` flag is relative to
@@ -629,7 +630,7 @@ three lock scopes.
        * - ``break_lock``
          - boolean (optional, default ``false``)
          - Whether an existing lock shall be broken/preempted. See :need:`req~sovd-api-lock-priority`.
-       * - ``x_sov2uds_isexclusive``
+       * - ``x-sovd2uds-isexclusive``
          - boolean (optional, default: configurable)
          - Whether the lock is exclusive. See :need:`req~sovd-api-lock-exclusivity` and
            :need:`req~sovd-api-lock-exclusivity-policy`.
@@ -638,9 +639,11 @@ three lock scopes.
          - Vendor-specific data passed to the vendor specific lock preemption mechanism.
            See :need:`req~sovd-api-lock-priority`.
 
-    The POST response must include ``id`` (UUID string) and ``owned`` (boolean, always
-    ``true`` for the creating client). The GET ``/locks/{id}`` response must include
-    ``lock_expiration`` as an ISO 8601 string.
+    A POST that creates a lock must return HTTP 201 with a ``Location`` header referencing the
+    created lock. A same-owner compatibility renewal must return HTTP 200 without a ``Location``
+    header. Both POST responses must include ``id`` (UUID string) and ``owned`` (boolean, always
+    ``true`` for the requesting client). The GET ``/locks/{id}`` response must include
+    ``lock_expiration`` as an ISO 8601 string and ``owned`` relative to the requesting client.
 
     Keys and Values must be case-insensitive.
 
@@ -655,16 +658,16 @@ three lock scopes.
     :links: arch~sovd-api-lock-exclusivity
     :status: draft
 
-    A lock must be either exclusive or non-exclusive, controlled by the ``x_sovd2uds_isexclusive`` field
+    A lock must be either exclusive or non-exclusive, controlled by the ``x-sovd2uds-isexclusive`` field
     in the POST/PUT request body. When the field is omitted, the configured default applies
     (see :need:`req~sovd-api-lock-exclusivity-policy`).
 
-    **Exclusive lock** (``x_sovd2uds_isexclusive: true``)
+    **Exclusive lock** (``x-sovd2uds-isexclusive: true``)
 
     While an exclusive lock is held, all requests to the locked entity's ECU-communication
     endpoints from clients that do not own the lock must be rejected with HTTP 423.
 
-    **Non-exclusive lock** (``x_sovd2uds_isexclusive: false``)
+    **Non-exclusive lock** (``x-sovd2uds-isexclusive: false``)
 
     While a non-exclusive lock is held:
 
@@ -685,7 +688,7 @@ three lock scopes.
     :status: draft
 
     The CDA must support a global configuration option, ``lock_exclusivity_policy``, that
-    determines the value applied to the ``x_sovd2uds_isexclusive`` field (see
+    determines the value applied to the ``x-sovd2uds-isexclusive`` field (see
     :need:`req~sovd-api-lock-exclusivity`) when a lock POST or PUT request omits it. This
     option is modeled as an enumeration to allow additional exclusivity policies to be
     introduced in the future without renaming or restructuring the configuration option.
@@ -699,13 +702,13 @@ three lock scopes.
        * - Value
          - Behavior
        * - ``exclusive_by_default`` (default)
-         - A lock request that omits ``x_sovd2uds_isexclusive`` is treated as exclusive.
+         - A lock request that omits ``x-sovd2uds-isexclusive`` is treated as exclusive.
        * - ``non_exclusive_by_default``
-         - A lock request that omits ``x_sovd2uds_isexclusive`` is treated as
+         - A lock request that omits ``x-sovd2uds-isexclusive`` is treated as
            non-exclusive.
 
     This option applies globally across all three lock scopes (vehicle, ECU, and
-    functional group). Requests that explicitly set ``x_sovd2uds_isexclusive`` are
+    functional group). Requests that explicitly set ``x-sovd2uds-isexclusive`` are
     unaffected by this option.
 
     **Rationale**
@@ -935,6 +938,10 @@ three lock scopes.
     A lock POST request may include additional fields in the request body, these can be used
     by a vendor specific implementation to allow lock overrides.
 
+    The vendor mechanism shall verify its additional fields before every lock POST request is
+    processed, independently of lock scope and whether another lock is currently held. The CDA
+    shall keep these fields opaque apart from generic transport and resource limits.
+
     Note, the vendor specific implementation must be aware of the current lock holders additional fields,
     since they can impact the priority decision.
 
@@ -955,7 +962,8 @@ three lock scopes.
     the lock.
 
     If no vendor mechanism is configured, or if the mechanism does not grant preemption,
-    conflicting POST requests are rejected with HTTP 423 as normal.
+    conflicting POST requests are rejected with HTTP 423. An explicit vendor-policy denial
+    includes ``vendor_code: lock-priority-denied``.
 
     **Rationale**
 
@@ -980,10 +988,10 @@ three lock scopes.
     - The defunct lock response must include the standard lock fields (``id``, ``owned``,
       ``lock_expiration``) together with the following vendor-prefixed extension fields:
 
-      - ``x_sovd2uds_broken_by`` -- the identity of the preempting client, as returned
+      - ``x-sovd2uds-broken-by`` -- the identity of the preempting client, as returned
         by the vendor mechanism.
-      - ``x_sovd2uds_broken_at`` -- the ISO 8601 timestamp at which preemption occurred.
-      - ``x_sovd2uds_current_holder`` -- identity of the current lock holder
+      - ``x-sovd2uds-broken-at`` -- the ISO 8601 timestamp at which preemption occurred.
+      - ``x-sovd2uds-current-holder`` -- identity of the current lock holder
     - When the defunct lock's original expiration elapses it is silently removed; no
       cleanup is triggered.
     - When the defunct lock is deleted, no cleanup is triggered.

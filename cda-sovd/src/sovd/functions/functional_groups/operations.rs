@@ -27,6 +27,7 @@ use super::WebserverFgState;
 use crate::sovd::{
     create_schema,
     error::{ApiError, ErrorWrapper},
+    locks::validate_fg_read,
 };
 
 pub(crate) async fn get<T: UdsEcu + Clone>(
@@ -37,10 +38,22 @@ pub(crate) async fn get<T: UdsEcu + Clone>(
     >,
     State(WebserverFgState {
         uds,
+        locks,
         functional_group_name,
         ..
     }): State<WebserverFgState<T>>,
 ) -> Response {
+    if let Err(response) = validate_fg_read(
+        &security_plugin.as_auth_plugin().claims(),
+        &functional_group_name,
+        &uds,
+        &locks,
+        query.include_schema,
+    )
+    .await
+    {
+        return response.into_response();
+    }
     let security_plugin: DynamicPlugin = security_plugin;
     match uds
         .get_functional_group_operations_info(&security_plugin, &functional_group_name)
@@ -213,7 +226,7 @@ pub(crate) mod diag_service {
             error::{ApiError, ErrorWrapper, VendorErrorCode},
             functions::functional_groups::{handle_ecu_response, map_to_json},
             get_payload_data, guard_execution,
-            locks::validate_fg_lock,
+            locks::validate_fg_write,
         },
     };
 
@@ -301,17 +314,37 @@ pub(crate) mod diag_service {
         use sovd_interfaces::common::operations::OperationIdItem;
 
         use super::super::super::WebserverFgState;
-        use crate::sovd::{components::ecu::DiagServicePathParam, create_schema, error::ApiError};
+        use crate::sovd::{
+            components::ecu::DiagServicePathParam, create_schema, error::ApiError,
+            locks::validate_fg_read,
+        };
 
         pub(crate) async fn get<T: UdsEcu + Clone>(
-            UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
+            UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             WithRejection(Query(query), _): WithRejection<
                 Query<sovd_interfaces::IncludeSchemaQuery>,
                 ApiError,
             >,
             Path(DiagServicePathParam { service: operation }): Path<DiagServicePathParam>,
-            State(WebserverFgState { fg_executions, .. }): State<WebserverFgState<T>>,
+            State(WebserverFgState {
+                uds,
+                locks,
+                functional_group_name,
+                fg_executions,
+                ..
+            }): State<WebserverFgState<T>>,
         ) -> Response {
+            if let Err(response) = validate_fg_read(
+                &security_plugin.as_auth_plugin().claims(),
+                &functional_group_name,
+                &uds,
+                &locks,
+                query.include_schema,
+            )
+            .await
+            {
+                return response.into_response();
+            }
             let operation = operation.to_lowercase();
             let schema = if query.include_schema {
                 Some(create_schema!(sovd_interfaces::Items<String>))
@@ -351,6 +384,12 @@ pub(crate) mod diag_service {
         clippy::too_many_arguments,
         reason = "Axum extractors cannot be combined without a new custom extractor"
     )]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keeping execution reservation, UDS Start, and reservation rollback together \
+                  makes cleanup on every failure path visible. Splitting the transaction would \
+                  obscure that invariant"
+    )]
     pub(crate) async fn post<T: UdsEcu + Clone>(
         headers: HeaderMap,
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
@@ -373,15 +412,16 @@ pub(crate) mod diag_service {
     ) -> Response {
         let include_schema = query.include_schema;
         let suppress_service = query.suppress_service;
-        if let Some(err_response) = validate_fg_lock(
+        if let Err(response) = validate_fg_write(
             &security_plugin.claims(),
             &functional_group_name,
+            &uds,
             &locks,
             include_schema,
         )
         .await
         {
-            return err_response;
+            return response.into_response();
         }
 
         let security_plugin: DynamicPlugin = security_plugin;
@@ -394,9 +434,8 @@ pub(crate) mod diag_service {
             .into_response();
         }
 
-        // Reserve an execution slot atomically: checks for a running
-        // conflict and, if none, inserts a placeholder so that a second
-        // concurrent POST for the same operation sees 409 Conflict.
+        // Reserve before UDS lookup and dispatch so concurrent POSTs for the
+        // same operation cannot both start an execution.
         let operation_lower = operation.to_lowercase();
         let reservation = match acquire_and_reserve_execution(
             &*communication_access,
@@ -479,14 +518,13 @@ pub(crate) mod diag_service {
                         lookup_name: None,
                         subfunction_id: Some(subfunction_ids::routine::START),
                     },
-                    &(security_plugin as DynamicPlugin),
+                    &security_plugin,
                     data,
                     map_to_json,
                 )
                 .await
             };
 
-        // Collect per-ECU parameters
         let EcuResponsesData {
             response_data,
             errors,
@@ -541,6 +579,12 @@ pub(crate) mod diag_service {
         .with(openapi::error_bad_gateway)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keeping execution guarding, UDS Stop, and execution-state cleanup together \
+                  makes cleanup on every response path visible. Splitting the flow would obscure \
+                  that invariant"
+    )]
     pub(crate) async fn delete<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         Path(OperationAndIdPathParam { operation, id }): Path<OperationAndIdPathParam>,
@@ -560,10 +604,16 @@ pub(crate) mod diag_service {
         let suppress_service = query.suppress_service;
 
         let claims = security_plugin.as_auth_plugin().claims();
-        if let Some(response) =
-            validate_fg_lock(&claims, &functional_group_name, &locks, include_schema).await
+        if let Err(response) = validate_fg_write(
+            &claims,
+            &functional_group_name,
+            &uds,
+            &locks,
+            include_schema,
+        )
+        .await
         {
-            return response;
+            return response.into_response();
         }
 
         let exec_id = match Uuid::parse_str(&id) {
@@ -735,7 +785,7 @@ pub(crate) mod diag_service {
                 FgServiceExecution,
                 error::{ApiError, ErrorWrapper, VendorErrorCode},
                 guard_execution,
-                locks::validate_fg_lock,
+                locks::validate_fg_write,
             },
         };
 
@@ -776,25 +826,24 @@ pub(crate) mod diag_service {
                 ..
             }): State<WebserverFgState<T>>,
         ) -> Response {
-            let include_schema = query.include_schema;
-
-            if let Some(err_response) = validate_fg_lock(
+            if let Err(response) = validate_fg_write(
                 &security_plugin.claims(),
                 &functional_group_name,
+                &uds,
                 &locks,
-                include_schema,
+                query.include_schema,
             )
             .await
             {
-                return err_response;
+                return response.into_response();
             }
 
-            let exec_id = match Uuid::parse_str(&id) {
-                Ok(v) => v,
-                Err(e) => {
+            let exec_id = match parse_execution_id(&id, query.include_schema) {
+                Ok(id) => id,
+                Err(error) => {
                     return ErrorWrapper {
-                        error: ApiError::BadRequest(format!("{e:?}")),
-                        include_schema,
+                        error,
+                        include_schema: query.include_schema,
                     }
                     .into_response();
                 }
@@ -804,26 +853,24 @@ pub(crate) mod diag_service {
                 &fg_executions,
                 &operation,
                 exec_id,
-                include_schema,
+                query.include_schema,
                 &format!("Execution {exec_id} is already in flight"),
             ) {
                 Ok(guard) => guard,
                 Err(error) => return error.into_response(),
             };
 
-            // suppress_service: skip UDS send, return stored state directly.
             if query.suppress_service {
                 return fg_get_by_id_response(
                     stored.snapshot().status.clone(),
                     stored.snapshot().parameters.clone(),
                     vec![],
-                    include_schema,
+                    query.include_schema,
                 );
             }
 
             let security_plugin: DynamicPlugin = security_plugin;
 
-            // Check whether the operation defines a RequestResults subfunction.
             let has_request_results = match uds
                 .get_functional_group_routine_subfunctions(
                     &security_plugin,
@@ -836,14 +883,12 @@ pub(crate) mod diag_service {
                 Err(e) => {
                     return ErrorWrapper {
                         error: e.into(),
-                        include_schema,
+                        include_schema: query.include_schema,
                     }
                     .into_response();
                 }
             };
 
-            // When there is no RequestResults subfunction, return the stored
-            // execution state together with an error entry.
             if !has_request_results {
                 return fg_get_by_id_response(
                     stored.snapshot().status.clone(),
@@ -861,7 +906,7 @@ pub(crate) mod diag_service {
                             schema: None,
                         },
                     }],
-                    include_schema,
+                    query.include_schema,
                 );
             }
 
@@ -873,9 +918,13 @@ pub(crate) mod diag_service {
                 &operation,
                 exec_id,
                 ctx,
-                include_schema,
+                query.include_schema,
             )
             .await
+        }
+
+        fn parse_execution_id(id: &str, _include_schema: bool) -> Result<Uuid, ApiError> {
+            Uuid::parse_str(id).map_err(|error| ApiError::BadRequest(format!("{error:?}")))
         }
 
         /// Context for functional group request results, grouping execution-related state.
@@ -1229,7 +1278,7 @@ pub(crate) mod diag_service {
                     std::marker::PhantomData,
                 ),
                 State(state),
-                Bytes::from_static(b"{\"parameters\":{}}"),
+                Bytes::from_static(b"not valid JSON"),
             )
             .await;
 
@@ -1487,7 +1536,7 @@ pub(crate) mod diag_service {
         }
 
         #[tokio::test]
-        async fn test_fg_delete_no_lock_returns_forbidden() {
+        async fn test_fg_delete_no_lock_returns_conflict() {
             let mock_uds = MockUdsEcu::new();
             // state has no lock set up
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
@@ -1510,7 +1559,7 @@ pub(crate) mod diag_service {
             )
             .await;
 
-            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(response.status(), StatusCode::CONFLICT);
         }
 
         #[tokio::test]

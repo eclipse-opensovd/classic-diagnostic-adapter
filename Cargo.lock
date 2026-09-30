@@ -557,6 +557,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cda-plugin-lock-priority"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cda-interfaces",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "cda-plugin-runtime-update"
 version = "0.1.0"
 dependencies = [
@@ -612,6 +622,7 @@ dependencies = [
  "cda-comm-doip",
  "cda-interfaces",
  "cda-plugin-communication-management",
+ "cda-plugin-lock-priority",
  "cda-plugin-security",
  "chrono",
  "futures",
@@ -1917,6 +1928,7 @@ dependencies = [
  "cda-health",
  "cda-interfaces",
  "cda-plugin-communication-management",
+ "cda-plugin-lock-priority",
  "cda-plugin-security",
  "cda-sovd",
  "cda-tracing",
@@ -2497,6 +2509,7 @@ dependencies = [
  "cda-health",
  "cda-interfaces",
  "cda-plugin-communication-management",
+ "cda-plugin-lock-priority",
  "cda-plugin-runtime-update",
  "cda-plugin-security",
  "cda-sovd",
