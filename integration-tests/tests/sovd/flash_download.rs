@@ -50,15 +50,9 @@ async fn test_flash_download_transfer_sequence() {
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
     // Create and acquire ECU lock
-    let expiration_timeout = Duration::from_secs(120);
-    let lock = Lock::create_with_expiration(
-        locks::ECU_ENDPOINT,
-        expiration_timeout,
-        &runtime.config,
-        &auth,
-    )
-    .await
-    .expect("lock should be created");
+    let lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .expect("lock should be created");
 
     lock_operation(
         locks::ECU_ENDPOINT,
@@ -418,15 +412,9 @@ async fn test_flash_transfer_zero_length_rejected() {
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
     // Create and acquire ECU lock
-    let expiration_timeout = Duration::from_secs(120);
-    let lock = Lock::create_with_expiration(
-        locks::ECU_ENDPOINT,
-        expiration_timeout,
-        &runtime.config,
-        &auth,
-    )
-    .await
-    .expect("lock should be created");
+    let lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .expect("lock should be created");
 
     lock_operation(
         locks::ECU_ENDPOINT,
@@ -650,15 +638,9 @@ async fn test_security_access_supplier_level() {
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
     // Create and acquire ECU lock
-    let expiration_timeout = Duration::from_secs(120);
-    let lock = Lock::create_with_expiration(
-        locks::ECU_ENDPOINT,
-        expiration_timeout,
-        &runtime.config,
-        &auth,
-    )
-    .await
-    .expect("lock should be created");
+    let lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .expect("lock should be created");
 
     lock_operation(
         locks::ECU_ENDPOINT,

@@ -247,15 +247,9 @@ async fn test_ecu_session_switching() {
     .await
     .unwrap();
 
-    let expiration_timeout = Duration::from_secs(60);
-    let lock = Lock::create_with_expiration(
-        locks::ECU_ENDPOINT,
-        expiration_timeout,
-        &runtime.config,
-        &auth,
-    )
-    .await
-    .expect("lock should be created");
+    let lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .expect("lock should be created");
 
     // Lock the ECU
     lock_operation(
@@ -463,14 +457,9 @@ async fn request_seed_forwards_parameters_to_fsnr2000() {
     let ecu_endpoint = sovd::ECU_FSNR2000_ENDPOINT;
     let lock_endpoint = format!("{ecu_endpoint}/locks");
 
-    let lock = Lock::create_with_expiration(
-        &lock_endpoint,
-        Duration::from_secs(60),
-        &runtime.config,
-        &auth,
-    )
-    .await
-    .expect("lock should be created");
+    let lock = Lock::create(&lock_endpoint, &runtime.config, &auth)
+        .await
+        .expect("lock should be created");
     lock_operation(
         &lock_endpoint,
         Some(lock.id()),
@@ -565,14 +554,9 @@ async fn send_key_rejects_request_seed_parameters() {
         .expect("auth header should be obtainable");
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let lock = Lock::create_with_expiration(
-        locks::ECU_ENDPOINT,
-        Duration::from_secs(60),
-        &runtime.config,
-        &auth,
-    )
-    .await
-    .expect("lock should be created");
+    let lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .expect("lock should be created");
     lock_operation(
         locks::ECU_ENDPOINT,
         Some(lock.id()),
@@ -772,15 +756,9 @@ async fn test_communication_control() {
     .unwrap();
 
     // Create and acquire lock
-    let expiration_timeout = Duration::from_secs(60);
-    let lock = Lock::create_with_expiration(
-        locks::ECU_ENDPOINT,
-        expiration_timeout,
-        &runtime.config,
-        &auth,
-    )
-    .await
-    .expect("lock should be created");
+    let lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .expect("lock should be created");
 
     // Sending an invalid value should return BAD_REQUEST with possible values
     sovd::validate_invalid_parameter_error(
@@ -1056,16 +1034,10 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    // Create and acquire lock with 30s timeout
-    let lock_expiration_timeout = Duration::from_secs(30);
-    let _lock = Lock::create_with_expiration(
-        locks::ECU_ENDPOINT,
-        lock_expiration_timeout,
-        &runtime.config,
-        &auth,
-    )
-    .await
-    .expect("lock should be created");
+    // Create and acquire lock
+    let _lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .expect("lock should be created");
 
     // Set session with 2s expiry
     let session_expiration = 2u64;

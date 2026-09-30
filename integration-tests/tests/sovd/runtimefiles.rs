@@ -1099,13 +1099,7 @@ async fn runtimefiles_apply_blocked_by_active_operations() -> Result<(), Testing
     );
 
     // Create functional group lock (same user) to block Apply
-    let fg_lock = Lock::create_with_expiration(
-        locks::FUNCTIONAL_GROUP_ENDPOINT,
-        Duration::from_secs(333),
-        &runtime.config,
-        &auth,
-    )
-    .await?;
+    let fg_lock = Lock::create(locks::FUNCTIONAL_GROUP_ENDPOINT, &runtime.config, &auth).await?;
 
     // Attempt Apply while functional group lock is held - expect 409 Conflict
     let body = mode_json(ExecutionMode::Apply);
@@ -1280,14 +1274,9 @@ async fn upload_mdd_octet_stream(
 
 /// Helper: creates a vehicle lock, which is released when dropped.
 pub(crate) async fn setup_with_lock(config: &Configuration, auth: &http::HeaderMap) -> Lock {
-    Lock::create_with_expiration(
-        locks::VEHICLE_ENDPOINT,
-        Duration::from_secs(333),
-        config,
-        auth,
-    )
-    .await
-    .expect("Failed to create vehicle lock")
+    Lock::create(locks::VEHICLE_ENDPOINT, config, auth)
+        .await
+        .expect("Failed to create vehicle lock")
 }
 
 /// Stages the complete MDD fixture set in `runtimefiles-nextupdate`, so that

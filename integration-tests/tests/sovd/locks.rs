@@ -408,13 +408,7 @@ async fn test_component_ownership_protection_with_vehicle_lock_only() -> Result<
     let auth_owner = auth_header(&runtime.config, None).await?;
 
     // Lock the vehicle as 'owner'
-    let _vehicle_lock = Lock::create_with_expiration(
-        VEHICLE_ENDPOINT,
-        Duration::from_secs(30),
-        &runtime.config,
-        &auth_owner,
-    )
-    .await?;
+    let _vehicle_lock = Lock::create(VEHICLE_ENDPOINT, &runtime.config, &auth_owner).await?;
 
     // Create headers for non_owner using the specific bearer token
     let auth_non_owner = bearer_token_header(NON_OWNER_BEARER_TOKEN);
@@ -491,8 +485,10 @@ pub(crate) async fn create_lock(
     .expect("Failed to create lock")
 }
 
+/// The expiration of the locks tests create. Tests that check lock expiry
+/// pass a shorter one to [`create_lock`].
 pub(crate) fn default_timeout() -> Duration {
-    Duration::from_secs(3600)
+    Duration::from_secs(100)
 }
 
 /// A lock created by a test. It is deleted when dropped, also when the test
@@ -519,20 +515,14 @@ impl Lock {
         config: &Configuration,
         auth: &HeaderMap,
     ) -> Result<Self, TestingError> {
-        Self::create_with_expiration(endpoint, default_timeout(), config, auth).await
-    }
-
-    /// Creates a lock on `endpoint` that expires after `expiration`.
-    ///
-    /// # Errors
-    /// Returns an error if the lock is not created.
-    pub(crate) async fn create_with_expiration(
-        endpoint: &str,
-        expiration: Duration,
-        config: &Configuration,
-        auth: &HeaderMap,
-    ) -> Result<Self, TestingError> {
-        let response = create_lock(expiration, endpoint, StatusCode::CREATED, config, auth).await;
+        let response = create_lock(
+            default_timeout(),
+            endpoint,
+            StatusCode::CREATED,
+            config,
+            auth,
+        )
+        .await;
         let id: String = response_to_json_to_field(&response, "id")?;
         Ok(Self {
             endpoint: endpoint.to_owned(),

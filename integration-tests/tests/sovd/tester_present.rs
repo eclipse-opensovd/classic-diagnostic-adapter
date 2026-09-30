@@ -53,13 +53,7 @@ async fn tester_present_sent_while_ecu_lock_held() -> Result<(), TestingError> {
         .expect("failed to start ECU sim recording");
 
     // Create an ECU lock - this should trigger Tester Present to start
-    let _lock = Lock::create_with_expiration(
-        ECU_LOCK_ENDPOINT,
-        Duration::from_secs(100),
-        &runtime.config,
-        &auth,
-    )
-    .await?;
+    let _lock = Lock::create(ECU_LOCK_ENDPOINT, &runtime.config, &auth).await?;
 
     // Wait long enough for multiple Tester Present intervals.
     // Default TP interval is 2 seconds; waiting 5 seconds should yield at least 2 frames.
@@ -99,13 +93,7 @@ async fn tester_present_sent_after_programming_session_switch() -> Result<(), Te
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
     // Create an ECU lock - this should trigger Tester Present to start
-    let _lock = Lock::create_with_expiration(
-        ECU_LOCK_ENDPOINT,
-        Duration::from_secs(100),
-        &runtime.config,
-        &auth,
-    )
-    .await?;
+    let _lock = Lock::create(ECU_LOCK_ENDPOINT, &runtime.config, &auth).await?;
 
     // Switch the ECU sim to BOOT variant (simulates ECU going into bootloader)
     ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "BOOT")
@@ -184,13 +172,7 @@ async fn tester_present_sent_after_doip_reconnection() -> Result<(), TestingErro
     let auth = auth_header(&runtime.config, None).await?;
 
     // Create an ECU lock - this should trigger Tester Present to start
-    let _lock = Lock::create_with_expiration(
-        ECU_LOCK_ENDPOINT,
-        Duration::from_secs(100),
-        &runtime.config,
-        &auth,
-    )
-    .await?;
+    let _lock = Lock::create(ECU_LOCK_ENDPOINT, &runtime.config, &auth).await?;
 
     // Wait briefly to confirm TP is running before we disconnect
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(3)).await;
@@ -271,13 +253,7 @@ async fn tester_present_resumes_after_network_disconnect() -> Result<(), Testing
         .expect("failed to start ECU sim recording");
 
     // Acquire an ECU lock - this should trigger Tester Present to start.
-    let _lock = Lock::create_with_expiration(
-        ECU_LOCK_ENDPOINT,
-        Duration::from_secs(100),
-        &runtime.config,
-        &auth,
-    )
-    .await?;
+    let _lock = Lock::create(ECU_LOCK_ENDPOINT, &runtime.config, &auth).await?;
 
     // Wait for multiple TP intervals to confirm TP is running before we disconnect.
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(3)).await;

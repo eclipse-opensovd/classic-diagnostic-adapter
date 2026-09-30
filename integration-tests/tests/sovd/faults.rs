@@ -10,8 +10,6 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use std::time::Duration;
-
 use cda_sovd::VendorErrorCode;
 use http::{Method, StatusCode};
 use sovd_interfaces::components::ecu::{
@@ -58,15 +56,9 @@ async fn test_dtc_setting() {
     .unwrap();
 
     // Create and acquire lock
-    let expiration_timeout = Duration::from_secs(60);
-    let lock = Lock::create_with_expiration(
-        locks::ECU_ENDPOINT,
-        expiration_timeout,
-        &runtime.config,
-        &auth,
-    )
-    .await
-    .expect("lock should be created");
+    let lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .expect("lock should be created");
 
     // Test DTC Setting On - without setting session first, this should be not possible
     // as the service has a state precondition for Session == "Extended"
@@ -228,15 +220,9 @@ async fn test_dtc_deletion() {
     let fault_memory = "Standard";
 
     // Create and acquire lock
-    let expiration_timeout = Duration::from_secs(30);
-    let lock = Lock::create_with_expiration(
-        locks::ECU_ENDPOINT,
-        expiration_timeout,
-        &runtime.config,
-        &auth,
-    )
-    .await
-    .expect("lock should be created");
+    let lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .expect("lock should be created");
 
     // Clear any existing DTCs from the simulator
     ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
@@ -1161,15 +1147,9 @@ async fn test_dtc_deletion_user_memory() {
     let scope = &runtime.config.faults.user_memory_scope;
 
     // Create and acquire lock
-    let expiration_timeout = Duration::from_secs(30);
-    let _lock = Lock::create_with_expiration(
-        locks::ECU_ENDPOINT,
-        expiration_timeout,
-        &runtime.config,
-        &auth,
-    )
-    .await
-    .expect("lock should be created");
+    let _lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .expect("lock should be created");
 
     // Clear any existing DTCs from both Standard and Development memories
     ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)

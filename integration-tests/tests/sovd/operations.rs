@@ -10,8 +10,6 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use std::time::Duration;
-
 use cda_interfaces::HashMap;
 use http::{Method, StatusCode};
 use serde::Deserialize;
@@ -881,10 +879,9 @@ async fn acquire_fg_lock(runtime: &TestEnv, auth: &http::HeaderMap) -> Lock {
 }
 
 async fn acquire_lock(runtime: &TestEnv, auth: &http::HeaderMap, endpoint: &str) -> Lock {
-    let lock =
-        Lock::create_with_expiration(endpoint, Duration::from_secs(60), &runtime.config, auth)
-            .await
-            .expect("failed to create lock");
+    let lock = Lock::create(endpoint, &runtime.config, auth)
+        .await
+        .expect("failed to create lock");
 
     lock_operation(
         endpoint,
