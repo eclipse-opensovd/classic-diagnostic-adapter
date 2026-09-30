@@ -2653,3 +2653,299 @@ pub(crate) fn create_ecu_manager_with_phys_const_text_table_service() -> (
 
     (ecu_manager, dc, sid)
 }
+
+/// Compu method of the item count DOP of a dynamic length field built by
+/// [`create_ecu_manager_with_dlf_request_service`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum DlfCountCompu {
+    Identical,
+    /// `phys = offset + factor * coded`
+    Linear {
+        offset: f64,
+        factor: f64,
+    },
+}
+
+/// Repeated item of a dynamic length field built by
+/// [`create_ecu_manager_with_dlf_request_service`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum DlfItemConfig {
+    /// Structure with a single big endian u16 `val` at byte 0.
+    Fixed { byte_size: Option<u32> },
+    /// Structure with a leading-length (8 bit) byte field `data` at byte 0.
+    VariableLength,
+    /// Structure containing a nested dynamic length field `inner`
+    /// (8 bit count at 0, offset 1) whose items are `{ "v": u8 }`.
+    Nested,
+    /// ENV-DATA-DESC selected by the `selector` parameter:
+    /// value 1 -> `{ "a": u8 }`, value 2 -> `{ "b": u16 }`,
+    /// optionally a wildcard `{ "w": u8 }`.
+    EnvDataDesc { wildcard: bool },
+    /// Invalid: both BASIC-STRUCTURE and ENV-DATA-DESC defined.
+    Both,
+    /// Invalid: neither BASIC-STRUCTURE nor ENV-DATA-DESC defined.
+    Neither,
+}
+
+/// Configuration for [`create_ecu_manager_with_dlf_request_service`].
+#[derive(Clone, Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Plain test configuration mirroring independent database attributes"
+)]
+pub(crate) struct DlfRequestConfig {
+    /// Byte position of the `items` param. `None` omits the BYTE-POSITION and adds a
+    /// u8 `sibling` value param at byte 3 in front of it.
+    pub param_byte_pos: Option<u32>,
+    pub offset: u32,
+    pub count_byte_pos: u32,
+    pub count_bit_pos: u32,
+    pub count_bit_len: u32,
+    pub count_high_low: bool,
+    pub count_mask: Option<Vec<u8>>,
+    pub count_condensed: bool,
+    pub count_base_type: DataType,
+    pub count_compu: DlfCountCompu,
+    pub count_lower_limit: Option<Limit>,
+    pub count_upper_limit: Option<Limit>,
+    /// Use a structure instead of a `NormalDOP` as count DOP (invalid database).
+    pub count_dop_is_structure: bool,
+    pub item: DlfItemConfig,
+    pub is_visible: bool,
+    /// Adds a u8 `selector` value param at the given byte position.
+    pub selector_byte_pos: Option<u32>,
+    /// Adds a u8 `trailer` value param at the given byte position. It is placed
+    /// *before* `items` in the parameter list, so it is encoded first.
+    pub trailer_byte_pos: Option<u32>,
+}
+
+impl Default for DlfRequestConfig {
+    fn default() -> Self {
+        Self {
+            param_byte_pos: Some(3),
+            offset: 1,
+            count_byte_pos: 0,
+            count_bit_pos: 0,
+            count_bit_len: 8,
+            count_high_low: true,
+            count_mask: None,
+            count_condensed: false,
+            count_base_type: DataType::UInt32,
+            count_compu: DlfCountCompu::Identical,
+            count_lower_limit: None,
+            count_upper_limit: None,
+            count_dop_is_structure: false,
+            item: DlfItemConfig::Fixed { byte_size: Some(2) },
+            is_visible: true,
+            selector_byte_pos: None,
+            trailer_byte_pos: None,
+        }
+    }
+}
+
+/// Creates an ECU manager with a `WriteDataByIdentifier` service (DID `0x1234`) whose
+/// request (and, for round trip tests, identical positive response) contains a dynamic
+/// length field `items`, configured via [`DlfRequestConfig`].
+///
+/// Layout: `sid` (byte 0), `did` (bytes 1..=2), optional `selector` / `sibling` (u8),
+/// `items` dynamic length field.
+#[allow(
+    clippy::too_many_lines,
+    reason = "Test data creation should be kept together for readability"
+)]
+pub(crate) fn create_ecu_manager_with_dlf_request_service(
+    config: &DlfRequestConfig,
+) -> (
+    crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
+    cda_interfaces::DiagComm,
+    u8,
+) {
+    let mut db_builder = EcuDataBuilder::new();
+    let protocol_name = Protocol::default().to_string();
+    let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
+    let compu_identical =
+        db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
+    let u8_diag_type = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
+    let u16_diag_type = db_builder.create_diag_coded_type_standard_length(16, DataType::UInt32);
+    let u8_dop = db_builder.create_regular_normal_dop("u8_dop", u8_diag_type, compu_identical);
+    let u16_dop = db_builder.create_regular_normal_dop("u16_dop", u16_diag_type, compu_identical);
+
+    // item count DOP
+    let count_dop = if config.count_dop_is_structure {
+        let structure = db_builder.create_structure(None, Some(1), true);
+        db_builder.create_structure_dop("count_dop", structure)
+    } else {
+        let count_diag_type = db_builder.create_diag_coded_type(
+            None,
+            config.count_base_type,
+            config.count_high_low,
+            DiagCodedTypeVariant::StandardLength(datatypes::StandardLengthType {
+                bit_length: config.count_bit_len,
+                bit_mask: config.count_mask.clone(),
+                condensed: config.count_condensed,
+            }),
+        );
+        let count_compu = match config.count_compu {
+            DlfCountCompu::Identical => compu_identical,
+            DlfCountCompu::Linear { offset, factor } => {
+                db_builder.create_linear_compu_method(offset, factor, 1.0)
+            }
+        };
+        let internal_constr =
+            if config.count_lower_limit.is_some() || config.count_upper_limit.is_some() {
+                Some(db_builder.create_internal_constr(
+                    config.count_lower_limit.as_ref(),
+                    config.count_upper_limit.as_ref(),
+                ))
+            } else {
+                None
+            };
+        let specific = db_builder
+            .create_normal_specific_dop_data(
+                Some(count_compu),
+                Some(count_diag_type),
+                None,
+                internal_constr,
+                None,
+                None,
+            )
+            .value_offset();
+        db_builder.create_dop(
+            *DopType::REGULAR,
+            Some("count_dop"),
+            None,
+            *SpecificDOPData::NormalDOP,
+            Some(specific),
+        )
+    };
+
+    // repeated item
+    let fixed_struct_dop = {
+        let val = db_builder.create_value_param("val", u16_dop, 0, 0);
+        let byte_size = match config.item {
+            DlfItemConfig::Fixed { byte_size } => byte_size,
+            _ => Some(2),
+        };
+        let structure = db_builder.create_structure(Some(vec![val]), byte_size, true);
+        db_builder.create_anonymous_structure_dop(structure)
+    };
+    let env_data_desc_dop = {
+        let a = db_builder.create_value_param("a", u8_dop, 0, 0);
+        let b = db_builder.create_value_param("b", u16_dop, 0, 0);
+        let w = db_builder.create_value_param("w", u8_dop, 0, 0);
+        let env_a = db_builder.create_env_data_dop(&[1], &[a]);
+        let env_b = db_builder.create_env_data_dop(&[2], &[b]);
+        let mut env_datas = vec![env_a, env_b];
+        if matches!(config.item, DlfItemConfig::EnvDataDesc { wildcard: true }) {
+            env_datas.push(db_builder.create_env_data_dop(&[], &[w]));
+        }
+        db_builder.create_env_data_desc_dop("env_data_desc_dop", "selector", &env_datas)
+    };
+    let (basic_structure, env_data_desc) = match config.item {
+        DlfItemConfig::Fixed { .. } => (Some(fixed_struct_dop), None),
+        DlfItemConfig::VariableLength => {
+            let leading_length_diag_type = db_builder.create_diag_coded_type(
+                None,
+                DataType::ByteField,
+                true,
+                DiagCodedTypeVariant::LeadingLengthInfo(8),
+            );
+            let data_dop = db_builder.create_regular_normal_dop(
+                "data_dop",
+                leading_length_diag_type,
+                compu_identical,
+            );
+            let data = db_builder.create_value_param("data", data_dop, 0, 0);
+            let structure = db_builder.create_structure(Some(vec![data]), None, true);
+            (
+                Some(db_builder.create_anonymous_structure_dop(structure)),
+                None,
+            )
+        }
+        DlfItemConfig::Nested => {
+            let v = db_builder.create_value_param("v", u8_dop, 0, 0);
+            let inner_item = db_builder.create_structure(Some(vec![v]), None, true);
+            let inner_specific = db_builder
+                .create_dynamic_length_specific_dop_data(1, 0, 0, u8_dop, Some(inner_item))
+                .value_offset();
+            let inner_dop = db_builder.create_dop(
+                *DopType::REGULAR,
+                Some("inner_dlf_dop"),
+                None,
+                *SpecificDOPData::DynamicLengthField,
+                Some(inner_specific),
+            );
+            let inner = db_builder.create_value_param("inner", inner_dop, 0, 0);
+            let structure = db_builder.create_structure(Some(vec![inner]), None, true);
+            (
+                Some(db_builder.create_anonymous_structure_dop(structure)),
+                None,
+            )
+        }
+        DlfItemConfig::EnvDataDesc { .. } => (None, Some(env_data_desc_dop)),
+        DlfItemConfig::Both => (Some(fixed_struct_dop), Some(env_data_desc_dop)),
+        DlfItemConfig::Neither => (None, None),
+    };
+
+    let dlf_specific = db_builder
+        .create_dynamic_length_field_specific_dop_data(
+            &cda_database::datatypes::database_builder::DynamicLengthFieldParams {
+                offset: config.offset,
+                number_of_items_byte_pos: config.count_byte_pos,
+                number_of_items_bit_pos: config.count_bit_pos,
+                number_of_items_dop: count_dop,
+                basic_structure,
+                env_data_desc,
+                is_visible: config.is_visible,
+            },
+        )
+        .value_offset();
+    let dlf_dop = db_builder.create_dop(
+        *DopType::REGULAR,
+        Some("items_dop"),
+        None,
+        *SpecificDOPData::DynamicLengthField,
+        Some(dlf_specific),
+    );
+
+    let sid = service_ids::WRITE_DATA_BY_IDENTIFIER;
+    let dc_name = "TestDlfRequestService";
+    let diag_comm = new_diag_comm!(db_builder, dc_name, protocol);
+
+    let did_param = db_builder.create_coded_const_param("did", "4660", 1, 0, 16, DataType::UInt32);
+    let mut data_params = Vec::new();
+    if let Some(selector_byte_pos) = config.selector_byte_pos {
+        data_params.push(db_builder.create_value_param("selector", u8_dop, selector_byte_pos, 0));
+    }
+    if let Some(trailer_byte_pos) = config.trailer_byte_pos {
+        data_params.push(db_builder.create_value_param("trailer", u8_dop, trailer_byte_pos, 0));
+    }
+    if let Some(byte_pos) = config.param_byte_pos {
+        data_params.push(db_builder.create_value_param("items", dlf_dop, byte_pos, 0));
+    } else {
+        data_params.push(db_builder.create_value_param("sibling", u8_dop, 3, 0));
+        data_params.push(db_builder.create_value_param_no_byte_pos("items", dlf_dop));
+    }
+
+    let request = {
+        let sid_param = create_sid_param!(db_builder, sid);
+        let mut params = vec![sid_param, did_param];
+        params.extend(data_params.iter().copied());
+        db_builder.create_request(Some(params), None)
+    };
+    let pos_response = {
+        let sid_param = create_sid_param!(db_builder, "test_service_pos_sid", sid);
+        let mut params = vec![sid_param, did_param];
+        params.extend(data_params.iter().copied());
+        db_builder.create_response(ResponseType::Positive, Some(params), None)
+    };
+
+    let diag_service =
+        new_diag_service!(db_builder, diag_comm, request, vec![pos_response], vec![]);
+    let db = finish_db!(db_builder, protocol, vec![diag_service]);
+    (
+        new_ecu_manager(db),
+        cda_interfaces::DiagComm::new(dc_name, DiagCommType::Configurations),
+        sid,
+    )
+}

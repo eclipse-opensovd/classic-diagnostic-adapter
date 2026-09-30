@@ -67,7 +67,7 @@ impl<S: SecurityPlugin> EcuSchemas for EcuManager<S> {
                 .next()
                 .and_then(SchemaDescription::into_schema),
             _ => Some(schemars::json_schema!({
-                "any-of": responses.into_iter()
+                "anyOf": responses.into_iter()
                     .filter_map(SchemaDescription::into_schema)
                     .collect::<Vec<_>>(),
                 "type": "array"
@@ -456,7 +456,7 @@ fn dop_variant_to_schema(
         datatypes::DataOperationVariant::EnvDataDesc(env_data_desc_dop) => {
             let variants = env_data_desc_to_variants(&env_data_desc_dop, ctx, ecu_db, request);
             if !variants.is_empty() {
-                schema.insert(name, schemars::json_schema!({ "any-of": variants }).into());
+                schema.insert(name, schemars::json_schema!({ "anyOf": variants }).into());
             }
         }
         datatypes::DataOperationVariant::EnvData(_env_data_dop) => {
@@ -529,14 +529,13 @@ fn map_dynamic_length_field_to_schema(
     ecu_db: &DiagnosticDatabase,
     request: Option<&datatypes::Request<'_>>,
 ) -> Result<Option<serde_json::Value>, DiagServiceError> {
-    if let Some(structure_dop) = dynamic_length_field
+    let items_schema: Option<serde_json::Value> = if let Some(structure_dop) = dynamic_length_field
         .field()
         .and_then(|f| f.basic_structure())
         .and_then(|s| s.specific_data_as_structure())
         .map(datatypes::StructureDop)
     {
-        Ok(map_struct_to_schema(&structure_dop, ctx, ecu_db, request)
-            .map(|s| serde_json::Value::Array(vec![s.into()])))
+        map_struct_to_schema(&structure_dop, ctx, ecu_db, request).map(Into::into)
     } else if let Some(env_data_desc) = dynamic_length_field
         .field()
         .and_then(|f| f.env_data_desc())
@@ -545,18 +544,66 @@ fn map_dynamic_length_field_to_schema(
     {
         let variants = env_data_desc_to_variants(&env_data_desc, ctx, ecu_db, request);
         if variants.is_empty() {
-            Ok(None)
+            None
         } else {
-            Ok(Some(
-                schemars::json_schema!({ "type": "array", "items": { "any-of": variants } }).into(),
-            ))
+            Some(schemars::json_schema!({ "anyOf": variants }).into())
         }
     } else {
-        Err(DiagServiceError::ParameterConversionError(format!(
+        return Err(DiagServiceError::ParameterConversionError(format!(
             "Mapping {ctx}: DynamicLengthField DopField value is neither BasicStruct nor \
              EnvDataDesc."
-        )))
+        )));
+    };
+
+    Ok(items_schema.map(|items| {
+        let mut schema = serde_json::json!({
+            "type": "array",
+            "items": items,
+            "minItems": 0,
+        });
+        if let (Some(max_items), Some(obj)) = (
+            dynamic_length_field_max_items(dynamic_length_field),
+            schema.as_object_mut(),
+        ) {
+            obj.insert("maxItems".to_owned(), serde_json::json!(max_items));
+        }
+        schema
+    }))
+}
+
+/// Maximum number of items that can be represented by the item count of a
+/// dynamic length field. Only determined for count DOPs without a (non-identical)
+/// compu method, as otherwise the physical maximum cannot be derived reliably.
+fn dynamic_length_field_max_items(
+    dynamic_length_field: &datatypes::DynamicLengthDop<'_>,
+) -> Option<u64> {
+    let normal_dop = dynamic_length_field
+        .determine_number_of_items()?
+        .dop()?
+        .specific_data_as_normal_dop()
+        .map(datatypes::NormalDop)?;
+    if normal_dop.compu_method().is_some_and(|cm| {
+        !matches!(
+            datatypes::CompuCategory::from(cm.category()),
+            datatypes::CompuCategory::Identical
+        )
+    }) {
+        return None;
     }
+    let diag_type = normal_dop.diag_coded_type().ok()?;
+    let datatypes::DiagCodedTypeVariant::StandardLength(standard_length) = diag_type.type_() else {
+        return None;
+    };
+    let capacity_bits = match standard_length.bit_mask.as_ref().filter(|m| !m.is_empty()) {
+        Some(mask) if standard_length.condensed => mask
+            .iter()
+            .map(|b| b.count_ones())
+            .sum::<u32>()
+            .min(standard_length.bit_length),
+        _ => standard_length.bit_length,
+    }
+    .min(32);
+    Some((1u64 << capacity_bits).saturating_sub(1))
 }
 
 #[tracing::instrument(skip_all,
@@ -589,7 +636,7 @@ fn map_dop_field_to_schema(
         if variants.is_empty() {
             None
         } else {
-            Some(schemars::json_schema!({ "any-of": variants }))
+            Some(schemars::json_schema!({ "anyOf": variants }))
         }
     } else {
         tracing::trace!(
@@ -612,7 +659,7 @@ fn map_mux_to_schema(
 ) -> schemars::Schema {
     let mut schemas: Vec<serde_json::Value> = Vec::new();
     if let Some(cases) = mux.cases() {
-        // probably an any-of here instead of a list?
+        // probably an anyOf here instead of a list?
         for case in cases {
             let Some(case_struct) = case
                 .structure()
@@ -631,7 +678,7 @@ fn map_mux_to_schema(
         }
     }
     schemars::json_schema!({
-        "any-of": schemas
+        "anyOf": schemas
     })
 }
 
