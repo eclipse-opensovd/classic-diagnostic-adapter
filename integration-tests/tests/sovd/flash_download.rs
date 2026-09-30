@@ -21,7 +21,7 @@ use crate::{
     sovd::{
         self, compute_security_key,
         ecu::switch_session,
-        locks::{self, Lock, lock_operation},
+        locks::{self, Lock},
         put_mode,
     },
     util::{
@@ -50,19 +50,9 @@ async fn test_flash_download_transfer_sequence() {
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
     // Create and acquire ECU lock
-    let lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+    let _lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
         .await
         .expect("lock should be created");
-
-    lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(lock.id()),
-        &runtime.config,
-        &auth,
-        StatusCode::OK,
-        Method::GET,
-    )
-    .await;
 
     // Switch ECU sim to BOOT variant
     ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "BOOT")
@@ -412,19 +402,9 @@ async fn test_flash_transfer_zero_length_rejected() {
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
     // Create and acquire ECU lock
-    let lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+    let _lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
         .await
         .expect("lock should be created");
-
-    lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(lock.id()),
-        &runtime.config,
-        &auth,
-        StatusCode::OK,
-        Method::GET,
-    )
-    .await;
 
     // Switch ECU sim to BOOT variant
     ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "BOOT")
@@ -638,19 +618,9 @@ async fn test_security_access_supplier_level() {
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
     // Create and acquire ECU lock
-    let lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+    let _lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
         .await
         .expect("lock should be created");
-
-    lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(lock.id()),
-        &runtime.config,
-        &auth,
-        StatusCode::OK,
-        Method::GET,
-    )
-    .await;
 
     // Switch ECU sim to BOOT variant (security access services live on the boot variant)
     ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "BOOT")

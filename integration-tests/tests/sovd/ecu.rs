@@ -23,7 +23,7 @@ use sovd_interfaces::components::ecu::modes::{
 use crate::{
     sovd::{
         self, compute_security_key, get_ecu_component,
-        locks::{self, Lock, lock_operation},
+        locks::{self, Lock},
         put_mode,
     },
     util::{
@@ -247,20 +247,9 @@ async fn test_ecu_session_switching() {
     .await
     .unwrap();
 
-    let lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+    let _lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
         .await
         .expect("lock should be created");
-
-    // Lock the ECU
-    lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(lock.id()),
-        &runtime.config,
-        &auth,
-        StatusCode::OK,
-        Method::GET,
-    )
-    .await;
 
     force_variant_detection(&runtime.config, &auth, ecu_endpoint)
         .await
@@ -456,18 +445,9 @@ async fn request_seed_forwards_parameters_to_fsnr2000() {
         .expect("auth header should be obtainable");
     let ecu_endpoint = sovd::ECU_FSNR2000_ENDPOINT;
 
-    let lock = Lock::create(locks::ECU_FSNR2000_ENDPOINT, &runtime.config, &auth)
+    let _lock = Lock::create(locks::ECU_FSNR2000_ENDPOINT, &runtime.config, &auth)
         .await
         .expect("lock should be created");
-    lock_operation(
-        locks::ECU_FSNR2000_ENDPOINT,
-        Some(lock.id()),
-        &runtime.config,
-        &auth,
-        StatusCode::OK,
-        Method::GET,
-    )
-    .await;
 
     ecusim::switch_variant(&runtime.ecu_sim, "FSNR2000", "BOOT")
         .await
@@ -553,18 +533,9 @@ async fn send_key_rejects_request_seed_parameters() {
         .expect("auth header should be obtainable");
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+    let _lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
         .await
         .expect("lock should be created");
-    lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(lock.id()),
-        &runtime.config,
-        &auth,
-        StatusCode::OK,
-        Method::GET,
-    )
-    .await;
 
     let mut parameters = HashMap::new();
     parameters.insert("Foo".to_owned(), json!(90));

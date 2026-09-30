@@ -132,7 +132,7 @@ async fn runtimefiles_requires_lock() -> Result<(), TestingError> {
 async fn runtimefiles_execution_responses_follow_operation_standard() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     let response = send_cda_request(
         &runtime.config,
@@ -220,7 +220,7 @@ async fn runtimefiles_execution_responses_follow_operation_standard() -> Result<
 async fn runtimefiles_bulk_data_responses_follow_standard() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     let upload = upload_mdd(&runtime.config, &auth).await;
     assert_eq!(upload.status(), StatusCode::CREATED);
@@ -333,7 +333,7 @@ async fn runtimefiles_lifecycle() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
 
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     // A new CDA has no current files; start from the whole vehicle, so that
     // Apply takes a non-empty backup, which Rollback needs.
@@ -376,7 +376,7 @@ async fn runtimefiles_lifecycle() -> Result<(), TestingError> {
 async fn runtimefiles_post_delete_forbidden_on_current_and_backup() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     let mdd_bytes = std::fs::read(
         test_container_dir()
@@ -452,7 +452,7 @@ async fn runtimefiles_post_delete_forbidden_on_current_and_backup() -> Result<()
 async fn runtimefiles_non_owner_cannot_delete_backup() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     // Apply over the whole vehicle, so that there is a backup to delete.
     apply_full_database(&runtime.config, &auth).await?;
@@ -539,7 +539,7 @@ async fn runtimefiles_file_retrieval_not_allowed() -> Result<(), TestingError> {
 async fn runtimefiles_delete_nonexistent_file_returns_not_found() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     send_cda_request(
         &runtime.config,
@@ -561,7 +561,7 @@ async fn runtimefiles_delete_nonexistent_file_returns_not_found() -> Result<(), 
 async fn runtimefiles_delete_backup_when_empty() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     execute_mode(&runtime.config, &auth, ExecutionMode::Cleanup).await?;
 
@@ -594,7 +594,7 @@ async fn runtimefiles_delete_backup_when_empty() -> Result<(), TestingError> {
 async fn runtimefiles_execution_mode_case_insensitive() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     // Upload a file so Apply has something to work with
     let upload_response = upload_mdd(&runtime.config, &auth).await;
@@ -649,7 +649,7 @@ async fn runtimefiles_execution_mode_case_insensitive() -> Result<(), TestingErr
 async fn runtimefiles_query_parameters_all_endpoints() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let lock = setup_with_lock(&runtime.config, &auth).await;
+    let lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     // Apply over the whole vehicle, so that the Apply below populates the backup.
     apply_full_database(&runtime.config, &auth).await?;
@@ -689,7 +689,7 @@ async fn runtimefiles_query_parameters_all_endpoints() -> Result<(), TestingErro
     );
 
     // Apply to populate backup
-    let lock = setup_with_lock(&runtime.config, &auth).await;
+    let lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
     execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
     lock.delete().await;
 
@@ -723,7 +723,7 @@ async fn runtimefiles_query_parameters_all_endpoints() -> Result<(), TestingErro
 async fn runtimefiles_upload_multiple_files() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     let mdd_bytes = std::fs::read(
         test_container_dir()
@@ -804,7 +804,7 @@ async fn runtimefiles_upload_multiple_files() -> Result<(), TestingError> {
 async fn runtimefiles_upload_octet_stream() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     let response = upload_mdd_octet_stream(
         &runtime.config,
@@ -847,7 +847,7 @@ async fn runtimefiles_upload_octet_stream() -> Result<(), TestingError> {
 async fn runtimefiles_upload_octet_stream_unquoted_filename() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     let response = upload_mdd_octet_stream(
         &runtime.config,
@@ -873,7 +873,7 @@ async fn runtimefiles_upload_octet_stream_missing_content_disposition() -> Resul
 {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     let response = upload_mdd_octet_stream(&runtime.config, &auth, None).await;
 
@@ -893,7 +893,7 @@ async fn runtimefiles_upload_octet_stream_missing_content_disposition() -> Resul
 async fn runtimefiles_upload_octet_stream_missing_filename_param() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     let response = upload_mdd_octet_stream(&runtime.config, &auth, Some("attachment")).await;
 
@@ -913,7 +913,7 @@ async fn runtimefiles_upload_octet_stream_missing_filename_param() -> Result<(),
 async fn runtimefiles_upload_unsupported_content_type() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     let response = upload_mdd_raw(
         &runtime.config,
@@ -939,7 +939,7 @@ async fn runtimefiles_upload_unsupported_content_type() -> Result<(), TestingErr
 async fn runtimefiles_apply_with_no_pending_changes() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     // Reset nextupdate to current state (spec: DELETE removes all pending changes,
     // resetting nextupdate to the currently active database - not to empty).
@@ -979,7 +979,7 @@ async fn runtimefiles_apply_with_no_pending_changes() -> Result<(), TestingError
 async fn runtimefiles_rollback_with_no_backup() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     // Clear backup
     send_cda_request(
@@ -1031,7 +1031,7 @@ async fn runtimefiles_rollback_with_no_backup() -> Result<(), TestingError> {
 async fn runtimefiles_rollback_clears_nextupdate_with_new_pending() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     // Step 1: Upload and Apply over the whole vehicle to establish a backup
     apply_full_database(&runtime.config, &auth).await?;
@@ -1088,7 +1088,7 @@ async fn runtimefiles_apply_blocked_by_active_operations() -> Result<(), Testing
     let auth = auth_header(&runtime.config, None).await?;
 
     // Create vehicle lock (required for runtimefiles mutations)
-    let _vehicle_lock = setup_with_lock(&runtime.config, &auth).await;
+    let _vehicle_lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     // Upload a file so Apply has something to work with
     let upload_response = upload_mdd(&runtime.config, &auth).await;
@@ -1270,13 +1270,6 @@ async fn upload_mdd_octet_stream(
         content_disposition,
     )
     .await
-}
-
-/// Helper: creates a vehicle lock, which is released when dropped.
-pub(crate) async fn setup_with_lock(config: &Configuration, auth: &http::HeaderMap) -> Lock {
-    Lock::create(locks::VEHICLE_ENDPOINT, config, auth)
-        .await
-        .expect("Failed to create vehicle lock")
 }
 
 /// Stages the complete MDD fixture set in `runtimefiles-nextupdate`, so that
@@ -1677,7 +1670,7 @@ async fn assert_ecu_routes_after_apply(
 async fn runtimefiles_delete_nextupdate_clears_pending() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     let upload_response = upload_mdd(&runtime.config, &auth).await;
     assert_eq!(upload_response.status(), StatusCode::CREATED);
@@ -1721,7 +1714,7 @@ async fn runtimefiles_delete_nextupdate_clears_pending() -> Result<(), TestingEr
 async fn runtimefiles_delete_nextupdate_by_id() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     let upload_response = upload_mdd(&runtime.config, &auth).await;
     assert_eq!(upload_response.status(), StatusCode::CREATED);
@@ -1776,7 +1769,7 @@ async fn runtimefiles_delete_nextupdate_by_id() -> Result<(), TestingError> {
 async fn runtimefiles_delete_backup() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     // Apply over the whole vehicle, so that the Apply below takes a backup.
     apply_full_database(&runtime.config, &auth).await?;
@@ -1829,7 +1822,7 @@ async fn runtimefiles_delete_backup() -> Result<(), TestingError> {
 async fn runtimefiles_case_insensitive_filenames() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     let upload_response = upload_mdd_with_filename(&runtime.config, &auth, "FLXC1000.MDD").await;
     assert_eq!(upload_response.status(), StatusCode::CREATED);
@@ -1905,7 +1898,7 @@ async fn runtimefiles_query_parameters() -> Result<(), TestingError> {
 
     // The storage of a new CDA is empty; fill the current collection. Reads
     // do not need the lock.
-    let lock = setup_with_lock(&runtime.config, &auth).await;
+    let lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
     apply_full_database(&runtime.config, &auth).await?;
     lock.delete().await;
 
@@ -1985,7 +1978,7 @@ async fn runtimefiles_query_parameters() -> Result<(), TestingError> {
 async fn runtimefiles_only_lock_holder_can_mutate() -> Result<(), TestingError> {
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     let non_owner_auth = bearer_token_header(NON_OWNER_BEARER_TOKEN);
 
@@ -2101,7 +2094,7 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
     .await?;
 
     // All mutating runtimefiles endpoints require a vehicle lock.
-    let _lock = setup_with_lock(&runtime.config, &auth).await;
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     // The storage of a new CDA is empty; fill the current collection.
     apply_full_database(&runtime.config, &auth).await?;
@@ -2171,7 +2164,7 @@ async fn runtimefiles_apply_blocked_by_vehicle_and_ecu_lock() -> Result<(), Test
     let auth = auth_header(&runtime.config, None).await?;
 
     // All mutating runtimefiles endpoints require a vehicle lock.
-    let _vehicle_lock = setup_with_lock(&runtime.config, &auth).await;
+    let _vehicle_lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &auth).await?;
 
     // Apply is a snapshot swap; staging the whole vehicle keeps it intact.
     stage_full_database(&runtime.config, &auth).await?;

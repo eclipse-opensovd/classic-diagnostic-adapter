@@ -28,7 +28,7 @@ struct AsyncPostBody {
 use crate::{
     sovd::{
         self,
-        locks::{self, Lock, lock_operation},
+        locks::{self, Lock},
     },
     util::{
         ecusim,
@@ -36,7 +36,7 @@ use crate::{
             QueryParams, auth_header, extract_field_from_json, response_to_json, response_to_t,
             send_cda_request,
         },
-        test_env::{TestEnv, setup_integration_test},
+        test_env::setup_integration_test,
     },
 };
 
@@ -114,7 +114,9 @@ async fn test_async_operation_delete_no_lock() {
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let lock = acquire_ecu_lock(&runtime, &auth).await;
+    let lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .unwrap();
 
     // Start async operation while holding the lock
     let post_response = send_cda_request(
@@ -148,7 +150,9 @@ async fn test_async_operation_delete_no_lock() {
     .unwrap();
 
     // Re-acquire lock for cleanup
-    let _lock = acquire_ecu_lock(&runtime, &auth).await;
+    let _lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .unwrap();
     let query_params = QueryParams(HashMap::from_iter([(
         "x-sovd2uds-force".to_string(),
         "true".to_string(),
@@ -173,7 +177,9 @@ async fn test_sync_operation() {
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let _lock = acquire_ecu_lock(&runtime, &auth).await;
+    let _lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .unwrap();
 
     send_cda_request(
         &runtime.config,
@@ -194,7 +200,9 @@ async fn test_async_operation_lifecycle() {
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let _lock = acquire_ecu_lock(&runtime, &auth).await;
+    let _lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .unwrap();
 
     // Start the async calibration - expect 202 Accepted
     let post_response = send_cda_request(
@@ -278,7 +286,9 @@ async fn test_async_operation_get_results_after_stop() {
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let _lock = acquire_ecu_lock(&runtime, &auth).await;
+    let _lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .unwrap();
 
     // Start async operation
     let post_response = send_cda_request(
@@ -328,7 +338,9 @@ async fn test_async_operation_not_found() {
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let _lock = acquire_ecu_lock(&runtime, &auth).await;
+    let _lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .unwrap();
 
     send_cda_request(
         &runtime.config,
@@ -349,7 +361,9 @@ async fn test_async_operation_in_flight_conflict() {
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let _lock = acquire_ecu_lock(&runtime, &auth).await;
+    let _lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .unwrap();
 
     // First POST - should succeed with 202
     let post_response = send_cda_request(
@@ -404,7 +418,9 @@ async fn test_sync_operation_sends_correct_uds_frame() {
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let _lock = acquire_ecu_lock(&runtime, &auth).await;
+    let _lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .unwrap();
 
     ecusim::start_recording(&runtime.ecu_sim, "flxc1000")
         .await
@@ -439,7 +455,9 @@ async fn test_async_operation_sends_correct_uds_frames() {
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let _lock = acquire_ecu_lock(&runtime, &auth).await;
+    let _lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .unwrap();
 
     ecusim::start_recording(&runtime.ecu_sim, "flxc1000")
         .await
@@ -558,7 +576,9 @@ async fn test_time_circuits_lifecycle() {
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let _lock = acquire_ecu_lock(&runtime, &auth).await;
+    let _lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .unwrap();
 
     // Start with the default ("PresentDay") travel method - travelMethod (the
     // TABLE-KEY row selector) and travelMethodData (the TABLE-STRUCT
@@ -659,7 +679,9 @@ async fn test_time_circuits_sends_correct_uds_frames() {
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let _lock = acquire_ecu_lock(&runtime, &auth).await;
+    let _lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .unwrap();
 
     ecusim::start_recording(&runtime.ecu_sim, "flxc1000")
         .await
@@ -740,7 +762,9 @@ async fn test_time_circuits_manual_entry_uds_frame() {
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let _lock = acquire_ecu_lock(&runtime, &auth).await;
+    let _lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .unwrap();
 
     ecusim::start_recording(&runtime.ecu_sim, "flxc1000")
         .await
@@ -808,7 +832,9 @@ async fn test_time_circuits_preset_destination_uds_frame() {
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let _lock = acquire_ecu_lock(&runtime, &auth).await;
+    let _lock = Lock::create(locks::ECU_ENDPOINT, &runtime.config, &auth)
+        .await
+        .unwrap();
 
     ecusim::start_recording(&runtime.ecu_sim, "flxc1000")
         .await
@@ -866,32 +892,6 @@ async fn test_time_circuits_preset_destination_uds_frame() {
         "expected TimeCircuits PresetDestination Start frame '{expected_start}', got: \
          {recordings:?}"
     );
-}
-
-async fn acquire_ecu_lock(runtime: &TestEnv, auth: &http::HeaderMap) -> Lock {
-    acquire_lock(runtime, auth, locks::ECU_ENDPOINT).await
-}
-
-async fn acquire_fg_lock(runtime: &TestEnv, auth: &http::HeaderMap) -> Lock {
-    acquire_lock(runtime, auth, locks::FUNCTIONAL_GROUP_ENDPOINT).await
-}
-
-async fn acquire_lock(runtime: &TestEnv, auth: &http::HeaderMap, endpoint: &str) -> Lock {
-    let lock = Lock::create(endpoint, &runtime.config, auth)
-        .await
-        .expect("failed to create lock");
-
-    lock_operation(
-        endpoint,
-        Some(lock.id()),
-        &runtime.config,
-        auth,
-        StatusCode::OK,
-        Method::GET,
-    )
-    .await;
-
-    lock
 }
 
 /// Verify that listing operations on a functional group includes
@@ -963,7 +963,9 @@ async fn test_functional_operation_lifecycle_no_request_results() {
     let runtime = setup_integration_test().await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
 
-    let _lock = acquire_fg_lock(&runtime, &auth).await;
+    let _lock = Lock::create(locks::FUNCTIONAL_GROUP_ENDPOINT, &runtime.config, &auth)
+        .await
+        .unwrap();
 
     // 1. POST (Start) -> 202 Accepted
     let post_response = send_cda_request(
