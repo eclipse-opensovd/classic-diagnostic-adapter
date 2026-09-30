@@ -428,10 +428,13 @@ async fn test_component_ownership_protection_with_vehicle_lock_only() -> Result<
 }
 
 pub(crate) const FUNCTIONAL_GROUP_ENDPOINT: &str =
-    "functions/functionalgroups/fgl_uds_ethernet_doip_dobt/locks";
+    const_format::formatcp!("{}/locks", sovd::FUNCTIONAL_GROUP_DOIP_ENDPOINT);
 
 pub(crate) const ECU_ENDPOINT: &str =
     const_format::formatcp!("{}/locks", sovd::ECU_FLXC1000_ENDPOINT);
+
+pub(crate) const ECU_FSNR2000_ENDPOINT: &str =
+    const_format::formatcp!("{}/locks", sovd::ECU_FSNR2000_ENDPOINT);
 
 pub(crate) const VEHICLE_ENDPOINT: &str = "locks";
 

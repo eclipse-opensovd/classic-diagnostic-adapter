@@ -872,8 +872,6 @@ async fn acquire_ecu_lock(runtime: &TestEnv, auth: &http::HeaderMap) -> Lock {
     acquire_lock(runtime, auth, locks::ECU_ENDPOINT).await
 }
 
-const FG_ENDPOINT: &str = "functions/functionalgroups/fgl_uds_ethernet_doip_dobt";
-
 async fn acquire_fg_lock(runtime: &TestEnv, auth: &http::HeaderMap) -> Lock {
     acquire_lock(runtime, auth, locks::FUNCTIONAL_GROUP_ENDPOINT).await
 }
@@ -905,7 +903,7 @@ async fn test_functional_operation_list() {
 
     let response = send_cda_request(
         &runtime.config,
-        &format!("{FG_ENDPOINT}/operations"),
+        &format!("{}/operations", sovd::FUNCTIONAL_GROUP_DOIP_ENDPOINT),
         StatusCode::OK,
         Method::GET,
         None,
@@ -941,7 +939,10 @@ async fn test_functional_operation_post_no_lock() {
 
     send_cda_request(
         &runtime.config,
-        &format!("{FG_ENDPOINT}/operations/engage_safety_squints/executions"),
+        &format!(
+            "{}/operations/engage_safety_squints/executions",
+            sovd::FUNCTIONAL_GROUP_DOIP_ENDPOINT
+        ),
         StatusCode::FORBIDDEN,
         Method::POST,
         Some(r#"{"parameters":{"SquintSlitWidth":2.5}}"#),
@@ -967,7 +968,10 @@ async fn test_functional_operation_lifecycle_no_request_results() {
     // 1. POST (Start) -> 202 Accepted
     let post_response = send_cda_request(
         &runtime.config,
-        &format!("{FG_ENDPOINT}/operations/engage_safety_squints/executions"),
+        &format!(
+            "{}/operations/engage_safety_squints/executions",
+            sovd::FUNCTIONAL_GROUP_DOIP_ENDPOINT
+        ),
         StatusCode::ACCEPTED,
         Method::POST,
         Some(r#"{"parameters":{"SquintSlitWidth":2.5}}"#),
@@ -986,7 +990,10 @@ async fn test_functional_operation_lifecycle_no_request_results() {
     //    at path "/")
     let get_response = send_cda_request(
         &runtime.config,
-        &format!("{FG_ENDPOINT}/operations/engage_safety_squints/executions/{execution_id}"),
+        &format!(
+            "{}/operations/engage_safety_squints/executions/{execution_id}",
+            sovd::FUNCTIONAL_GROUP_DOIP_ENDPOINT
+        ),
         StatusCode::OK,
         Method::GET,
         None,
@@ -1025,7 +1032,10 @@ async fn test_functional_operation_lifecycle_no_request_results() {
     // 3. DELETE (Stop) -> 204 No Content
     send_cda_request(
         &runtime.config,
-        &format!("{FG_ENDPOINT}/operations/engage_safety_squints/executions/{execution_id}"),
+        &format!(
+            "{}/operations/engage_safety_squints/executions/{execution_id}",
+            sovd::FUNCTIONAL_GROUP_DOIP_ENDPOINT
+        ),
         StatusCode::NO_CONTENT,
         Method::DELETE,
         None,

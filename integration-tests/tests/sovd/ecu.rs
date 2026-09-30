@@ -455,13 +455,12 @@ async fn request_seed_forwards_parameters_to_fsnr2000() {
         .await
         .expect("auth header should be obtainable");
     let ecu_endpoint = sovd::ECU_FSNR2000_ENDPOINT;
-    let lock_endpoint = format!("{ecu_endpoint}/locks");
 
-    let lock = Lock::create(&lock_endpoint, &runtime.config, &auth)
+    let lock = Lock::create(locks::ECU_FSNR2000_ENDPOINT, &runtime.config, &auth)
         .await
         .expect("lock should be created");
     lock_operation(
-        &lock_endpoint,
+        locks::ECU_FSNR2000_ENDPOINT,
         Some(lock.id()),
         &runtime.config,
         &auth,

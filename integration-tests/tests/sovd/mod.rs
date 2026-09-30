@@ -51,6 +51,8 @@ pub(crate) const ECU_FLXCNG1000_ENDPOINT: &str = "components/flxcng1000";
 pub(crate) const ECU_FSNR2000_ENDPOINT: &str = "components/fsnr2000";
 pub(crate) const ECU_TMCC3000_ENDPOINT: &str = "components/tmcc3000";
 pub(crate) const ECU_HOVR4000_ENDPOINT: &str = "components/hovr4000";
+pub(crate) const FUNCTIONAL_GROUP_DOIP_ENDPOINT: &str =
+    "functions/functionalgroups/fgl_uds_ethernet_doip_dobt";
 pub(crate) const ECU_JGWT5000_ENDPOINT: &str = "components/jgwt5000";
 
 pub(crate) async fn put_mode<T: DeserializeOwned, S: Serialize>(
