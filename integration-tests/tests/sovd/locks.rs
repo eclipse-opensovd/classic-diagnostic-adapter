@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use http::{HeaderMap, Method, StatusCode};
@@ -547,17 +547,14 @@ impl Lock {
     }
 
     /// Deletes the lock and asserts that the CDA answers `204 No Content`.
+    ///
+    /// Waits out an installed runtime update protection first, see
+    /// [`delete_lock`].
     pub(crate) async fn delete(mut self) {
         let id = self.id.take().expect("a lock has its id until deleted");
-        lock_operation(
-            &self.endpoint,
-            Some(&id),
-            &self.config,
-            &self.auth,
-            StatusCode::NO_CONTENT,
-            Method::DELETE,
-        )
-        .await;
+        if let Err(e) = delete_lock(&self.endpoint, &id, &self.config, &self.auth).await {
+            panic!("Failed to delete lock {id}: {e}");
+        }
     }
 }
 
@@ -566,26 +563,18 @@ impl Drop for Lock {
         let Some(id) = self.id.take() else {
             return;
         };
-        let endpoint = format!("{}/{id}", self.endpoint);
+        let endpoint = self.endpoint.clone();
+        let lock_id = id.clone();
         let config = self.config.clone();
         let auth = self.auth.clone();
         let result = block_on_shared_runtime(async move {
-            send_cda_request(
-                &config,
-                &endpoint,
-                StatusCode::NO_CONTENT,
-                Method::DELETE,
-                None,
-                Some(&auth),
-                None,
-            )
-            .await
+            delete_lock(&endpoint, &lock_id, &config, &auth).await
         });
         // A lock that expired or was removed with a higher lock is gone
         // already, which is fine here.
         match result {
             Some(
-                Ok(_)
+                Ok(())
                 | Err(TestingError::UnexpectedResponse {
                     actual: StatusCode::NOT_FOUND,
                     ..
@@ -596,6 +585,55 @@ impl Drop for Lock {
         }
     }
 }
+
+/// Deletes the lock `id` on `endpoint`, expecting `204 No Content`.
+///
+/// A runtime update installs an HTTP protection that answers every request
+/// not on its exempt list with `409 Update in progress`, and it outlives the
+/// update execution for a moment. Deleting a lock is not exempt, so while the
+/// protection is installed, the request is repeated until it is lifted, for
+/// at most [`UPDATE_PROTECTION_TIMEOUT`].
+async fn delete_lock(
+    endpoint: &str,
+    id: &str,
+    config: &Configuration,
+    auth: &HeaderMap,
+) -> Result<(), TestingError> {
+    let deadline = Instant::now()
+        .checked_add(UPDATE_PROTECTION_TIMEOUT)
+        .expect("deadline must not overflow");
+    let lock_endpoint = format!("{endpoint}/{id}");
+    loop {
+        match send_cda_request(
+            config,
+            &lock_endpoint,
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+            None,
+            Some(auth),
+            None,
+        )
+        .await
+        {
+            Err(TestingError::UnexpectedResponse {
+                actual: StatusCode::CONFLICT,
+                body: Some(body),
+                ..
+            }) if body.contains(UPDATE_IN_PROGRESS) && Instant::now() < deadline => {
+                cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(100)).await;
+            }
+            result => return result.map(|_| ()),
+        }
+    }
+}
+
+/// The message of the `409 Conflict` answered while a runtime update
+/// protection is installed.
+const UPDATE_IN_PROGRESS: &str = "Update in progress";
+
+/// How long [`delete_lock`] waits for a runtime update protection to be
+/// lifted. Generous, as it is lifted only after the database is reloaded.
+const UPDATE_PROTECTION_TIMEOUT: Duration = Duration::from_secs(60);
 
 async fn lock_expiration(
     cfg: &Configuration,
