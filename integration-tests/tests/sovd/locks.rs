@@ -497,6 +497,7 @@ pub(crate) fn default_timeout() -> Duration {
 /// Use [`Lock::delete`] to delete it at a specific point and check that this
 /// succeeds. Dropping a lock the CDA has removed by itself, e.g. because it
 /// expired or its vehicle lock was deleted, is fine.
+#[must_use = "the lock is deleted as soon as it is dropped"]
 pub(crate) struct Lock {
     endpoint: String,
     /// `None` once deleted.

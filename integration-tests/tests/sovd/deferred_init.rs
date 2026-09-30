@@ -23,7 +23,11 @@ use sovd_interfaces::{
 };
 
 use crate::{
-    sovd::{ECU_FLXC1000_ENDPOINT, runtimefiles},
+    sovd::{
+        ECU_FLXC1000_ENDPOINT,
+        locks::{self, Lock},
+        runtimefiles,
+    },
     util::{
         ecusim,
         http::{auth_header, response_to_t, send_cda_request},
@@ -351,9 +355,10 @@ async fn post_update_deferred_mode_returns_503_until_triggered() {
     );
 
     // Step c: perform a runtime update. Mutating runtime files needs a
-    // vehicle lock. The update and the lock go with the CDA container when
-    // the lease ends.
-    runtimefiles::setup_with_lock(&runtime.config, &headers).await;
+    // vehicle lock, held until the end of the test.
+    let _lock = Lock::create(locks::VEHICLE_ENDPOINT, &runtime.config, &headers)
+        .await
+        .expect("Failed to create vehicle lock");
 
     // Apply is a snapshot swap. Staging the complete fixture set keeps
     // this update from changing the "vehicle".
