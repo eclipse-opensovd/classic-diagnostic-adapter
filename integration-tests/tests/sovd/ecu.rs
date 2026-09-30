@@ -23,16 +23,13 @@ use sovd_interfaces::components::ecu::modes::{
 use crate::{
     sovd::{
         self, compute_security_key, get_ecu_component,
-        locks::{self, create_lock, lock_operation},
+        locks::{self, Lock, lock_operation},
         put_mode,
     },
     util::{
         TestingError,
         ecusim::{self},
-        http::{
-            QueryParams, auth_header, extract_field_from_json, response_to_json, response_to_t,
-            send_cda_request,
-        },
+        http::{QueryParams, auth_header, response_to_json, response_to_t, send_cda_request},
         test_env::{TestEnv, setup_integration_test, skip_for_can, skip_for_doip},
     },
 };
@@ -251,21 +248,19 @@ async fn test_ecu_session_switching() {
     .unwrap();
 
     let expiration_timeout = Duration::from_secs(60);
-    let ecu_lock = create_lock(
-        expiration_timeout,
+    let lock = Lock::create_with_expiration(
         locks::ECU_ENDPOINT,
-        StatusCode::CREATED,
+        expiration_timeout,
         &runtime.config,
         &auth,
     )
-    .await;
-    let lock_id =
-        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+    .await
+    .expect("lock should be created");
 
     // Lock the ECU
     lock_operation(
         locks::ECU_ENDPOINT,
-        Some(&lock_id),
+        Some(lock.id()),
         &runtime.config,
         &auth,
         StatusCode::OK,
@@ -446,17 +441,6 @@ async fn test_ecu_session_switching() {
         .unwrap();
     assert_eq!(security_result.value, Some("Level_5".to_owned()));
     assert_eq!(security_result.name, Some("Security access".to_owned()));
-
-    // Delete the ECU lock
-    lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(&lock_id),
-        &runtime.config,
-        &auth,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
 }
 
 /// A `RequestSeed` parameter must be encoded into the UDS request; FSNR2000's
@@ -479,22 +463,17 @@ async fn request_seed_forwards_parameters_to_fsnr2000() {
     let ecu_endpoint = sovd::ECU_FSNR2000_ENDPOINT;
     let lock_endpoint = format!("{ecu_endpoint}/locks");
 
-    let ecu_lock = create_lock(
-        Duration::from_secs(60),
+    let lock = Lock::create_with_expiration(
         &lock_endpoint,
-        StatusCode::CREATED,
+        Duration::from_secs(60),
         &runtime.config,
         &auth,
     )
-    .await;
-    let lock_id = extract_field_from_json::<String>(
-        &response_to_json(&ecu_lock).expect("lock response should be JSON"),
-        "id",
-    )
-    .expect("lock response should contain an id");
+    .await
+    .expect("lock should be created");
     lock_operation(
         &lock_endpoint,
-        Some(&lock_id),
+        Some(lock.id()),
         &runtime.config,
         &auth,
         StatusCode::OK,
@@ -586,22 +565,17 @@ async fn send_key_rejects_request_seed_parameters() {
         .expect("auth header should be obtainable");
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    let ecu_lock = create_lock(
-        Duration::from_secs(60),
+    let lock = Lock::create_with_expiration(
         locks::ECU_ENDPOINT,
-        StatusCode::CREATED,
+        Duration::from_secs(60),
         &runtime.config,
         &auth,
     )
-    .await;
-    let lock_id = extract_field_from_json::<String>(
-        &response_to_json(&ecu_lock).expect("lock response should be JSON"),
-        "id",
-    )
-    .expect("lock response should contain an id");
+    .await
+    .expect("lock should be created");
     lock_operation(
         locks::ECU_ENDPOINT,
-        Some(&lock_id),
+        Some(lock.id()),
         &runtime.config,
         &auth,
         StatusCode::OK,
@@ -632,16 +606,6 @@ async fn send_key_rejects_request_seed_parameters() {
         response.is_none(),
         "a rejected SendKey should not return a body"
     );
-
-    lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(&lock_id),
-        &runtime.config,
-        &auth,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
 }
 
 #[tokio::test]
@@ -809,16 +773,14 @@ async fn test_communication_control() {
 
     // Create and acquire lock
     let expiration_timeout = Duration::from_secs(60);
-    let ecu_lock = create_lock(
-        expiration_timeout,
+    let lock = Lock::create_with_expiration(
         locks::ECU_ENDPOINT,
-        StatusCode::CREATED,
+        expiration_timeout,
         &runtime.config,
         &auth,
     )
-    .await;
-    let lock_id =
-        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+    .await
+    .expect("lock should be created");
 
     // Sending an invalid value should return BAD_REQUEST with possible values
     sovd::validate_invalid_parameter_error(
@@ -1024,15 +986,7 @@ async fn test_communication_control() {
     );
 
     // Delete the ECU lock
-    lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(&lock_id),
-        &runtime.config,
-        &auth,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    lock.delete().await;
 
     // After deleting lock, we should not be able to set comm control
     set_comm_control(
@@ -1109,16 +1063,14 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
 
     // Create and acquire lock with 30s timeout
     let lock_expiration_timeout = Duration::from_secs(30);
-    let ecu_lock = create_lock(
-        lock_expiration_timeout,
+    let _lock = Lock::create_with_expiration(
         locks::ECU_ENDPOINT,
-        StatusCode::CREATED,
+        lock_expiration_timeout,
         &runtime.config,
         &auth,
     )
-    .await;
-    let lock_id =
-        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+    .await
+    .expect("lock should be created");
 
     // Set session with 2s expiry
     let session_expiration = 2u64;
@@ -1168,17 +1120,6 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
         session_result_after.value.map(|s| s.to_lowercase()),
         Some("default".to_owned())
     );
-
-    // Delete the lock
-    lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(&lock_id),
-        &runtime.config,
-        &auth,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
 }
 
 /// [[ itest~sovd-api-component-sdgsd, ECU-level SDG retrieval, itest ]]

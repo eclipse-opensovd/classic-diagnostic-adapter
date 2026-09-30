@@ -594,22 +594,8 @@ impl Drop for TestEnv {
             return;
         }
         let coverage = self.spec.variant.coverage;
-        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
-        TOKIO_RUNTIME.spawn(async move {
-            remove_containers(containers, coverage).await;
-            let _ = done_tx.send(());
-        });
-        // Wait, so the environment is gone when the test ends. `recv` also
-        // returns when the task panicked.
-        let wait = move || {
-            let _ = done_rx.recv();
-        };
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-                tokio::task::block_in_place(wait);
-            }
-            _ => wait(),
-        }
+        // Wait, so the environment is gone when the test ends.
+        block_on_shared_runtime(remove_containers(containers, coverage));
     }
 }
 
@@ -975,6 +961,28 @@ fn pool(transport: Transport) -> &'static Pool {
 }
 
 /// Runs `future` on the shared [`TOKIO_RUNTIME`], see the module docs.
+/// Runs `future` on the shared runtime and blocks the calling thread until it
+/// completes, for `Drop` implementations, which cannot await. Works from inside
+/// a runtime of either flavor. Returns `None` if the future panicked.
+pub(crate) fn block_on_shared_runtime<F>(future: F) -> Option<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    TOKIO_RUNTIME.spawn(async move {
+        let _ = done_tx.send(future.await);
+    });
+    // `recv` also returns when the task panicked and dropped the sender.
+    let wait = move || done_rx.recv().ok();
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(wait)
+        }
+        _ => wait(),
+    }
+}
+
 async fn on_shared_runtime<T, F>(future: F) -> Result<T, TestingError>
 where
     T: Send + 'static,

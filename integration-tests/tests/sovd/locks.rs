@@ -27,7 +27,7 @@ use crate::{
             Response, auth_header, extract_field_from_json, response_to_json,
             response_to_json_to_field, send_cda_json_request, send_cda_request,
         },
-        test_env::{TestEnv, setup_integration_test},
+        test_env::{TestEnv, block_on_shared_runtime, setup_integration_test},
     },
 };
 
@@ -103,19 +103,10 @@ async fn lock_unlock() -> Result<(), TestingError> {
         // Test if creating a lock twice extends the expiration time on the same lock
         // instead of creating a new lock or returning an error.
         {
-            let create_first = create_lock(
-                default_timeout(),
-                endpoint,
-                StatusCode::CREATED,
-                &runtime.config,
-                &auth,
-            )
-            .await;
-            let create_first_json = response_to_json(&create_first)?;
-            let lock_id = extract_field_from_json::<String>(&create_first_json, "id")?;
+            let lock = Lock::create(endpoint, &runtime.config, &auth).await?;
 
             let expiration_first =
-                lock_expiration(&runtime.config, &auth, endpoint, &lock_id).await?;
+                lock_expiration(&runtime.config, &auth, endpoint, lock.id()).await?;
 
             cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(2)).await;
 
@@ -128,23 +119,15 @@ async fn lock_unlock() -> Result<(), TestingError> {
             )
             .await;
 
-            let create_second_json = response_to_json(&create_second)?;
             let expiration_second =
-                lock_expiration(&runtime.config, &auth, endpoint, &lock_id).await?;
+                lock_expiration(&runtime.config, &auth, endpoint, lock.id()).await?;
 
             assert!(expiration_first < expiration_second);
 
             // second call extended the lock but ids stayed the same.
-            assert_eq!(create_first_json, create_second_json);
-            lock_operation(
-                endpoint,
-                Some(&lock_id),
-                &runtime.config,
-                &auth,
-                StatusCode::NO_CONTENT,
-                Method::DELETE,
-            )
-            .await;
+            let second_id: String = response_to_json_to_field(&create_second, "id")?;
+            assert_eq!(lock.id(), second_id);
+            lock.delete().await;
         }
     }
 
@@ -156,15 +139,7 @@ async fn cannot_lock_ecu_with_existing_functional_log() -> Result<(), TestingErr
     let runtime = setup_integration_test().await?;
     let auth = auth_header(&runtime.config, None).await?;
 
-    let func_lock_response = create_lock(
-        default_timeout(),
-        FUNCTIONAL_GROUP_ENDPOINT,
-        StatusCode::CREATED,
-        &runtime.config,
-        &auth,
-    )
-    .await;
-    let lock_id: String = response_to_json_to_field(&func_lock_response, "id")?;
+    let _func_lock = Lock::create(FUNCTIONAL_GROUP_ENDPOINT, &runtime.config, &auth).await?;
 
     create_lock(
         default_timeout(),
@@ -172,16 +147,6 @@ async fn cannot_lock_ecu_with_existing_functional_log() -> Result<(), TestingErr
         StatusCode::CONFLICT,
         &runtime.config,
         &auth,
-    )
-    .await;
-
-    lock_operation(
-        FUNCTIONAL_GROUP_ENDPOINT,
-        Some(&lock_id),
-        &runtime.config,
-        &auth,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
     )
     .await;
 
@@ -206,17 +171,8 @@ async fn ownership() -> Result<(), TestingError> {
     let auth_other = auth_header(&runtime.config, Some("ownership-test")).await?;
 
     for endpoint in ENDPOINTS {
-        let lock_id: String = response_to_json_to_field(
-            &create_lock(
-                default_timeout(),
-                endpoint,
-                StatusCode::CREATED,
-                &runtime.config,
-                &auth_owner,
-            )
-            .await,
-            "id",
-        )?;
+        let lock = Lock::create(endpoint, &runtime.config, &auth_owner).await?;
+        let lock_id = lock.id().to_owned();
 
         let get_lock_list = async |auth: &HeaderMap| {
             serde_json::from_value(response_to_json(
@@ -253,44 +209,18 @@ async fn ownership() -> Result<(), TestingError> {
         assert!(item_user_1.owned);
         assert!(!item_user_2.owned);
 
-        lock_operation(
-            endpoint,
-            Some(&lock_id),
-            &runtime.config,
-            &auth_owner,
-            StatusCode::NO_CONTENT,
-            Method::DELETE,
-        )
-        .await;
+        lock.delete().await;
 
-        let lock_id: String = response_to_json_to_field(
-            &create_lock(
-                default_timeout(),
-                endpoint,
-                StatusCode::CREATED,
-                &runtime.config,
-                &auth_other,
-            )
-            .await,
-            "id",
-        )?;
+        let lock = Lock::create(endpoint, &runtime.config, &auth_other).await?;
         let lock_list_user_2: LockList = get_lock_list(&auth_other).await?;
         let item_user_2 = lock_list_user_2
             .items
             .iter()
-            .find(|e| e.id == lock_id)
-            .unwrap_or_else(|| panic!("After delete, user 2 lock id {lock_id} not found"));
+            .find(|e| e.id == lock.id())
+            .unwrap_or_else(|| panic!("After delete, user 2 lock id {} not found", lock.id()));
         assert!(item_user_2.owned);
 
-        lock_operation(
-            endpoint,
-            Some(&lock_id),
-            &runtime.config,
-            &auth_other,
-            StatusCode::NO_CONTENT,
-            Method::DELETE,
-        )
-        .await;
+        lock.delete().await;
     }
 
     Ok(())
@@ -303,17 +233,7 @@ async fn test_vehicle_locking_blocked_by_other() -> Result<(), TestingError> {
     let auth_user2 = auth_header(&runtime.config, Some("user2")).await?;
 
     // User1 creates a functional lock
-    let func_lock_id: String = response_to_json_to_field(
-        &create_lock(
-            default_timeout(),
-            FUNCTIONAL_GROUP_ENDPOINT,
-            StatusCode::CREATED,
-            &runtime.config,
-            &auth_user1,
-        )
-        .await,
-        "id",
-    )?;
+    let _func_lock = Lock::create(FUNCTIONAL_GROUP_ENDPOINT, &runtime.config, &auth_user1).await?;
 
     // User2 cannot create a vehicle lock because user1 holds a lock
     create_lock(
@@ -322,17 +242,6 @@ async fn test_vehicle_locking_blocked_by_other() -> Result<(), TestingError> {
         StatusCode::FORBIDDEN,
         &runtime.config,
         &auth_user2,
-    )
-    .await;
-
-    // Cleanup
-    lock_operation(
-        FUNCTIONAL_GROUP_ENDPOINT,
-        Some(&func_lock_id),
-        &runtime.config,
-        &auth_user1,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
     )
     .await;
 
@@ -463,22 +372,12 @@ async fn test_vehicle_lock_cannot_be_deleted_by_non_owner() -> Result<(), Testin
     let auth_other = auth_header(&runtime.config, Some("other-user")).await?;
 
     // Owner creates vehicle lock
-    let vehicle_lock_id: String = response_to_json_to_field(
-        &create_lock(
-            default_timeout(),
-            VEHICLE_ENDPOINT,
-            StatusCode::CREATED,
-            &runtime.config,
-            &auth_owner,
-        )
-        .await,
-        "id",
-    )?;
+    let vehicle_lock = Lock::create(VEHICLE_ENDPOINT, &runtime.config, &auth_owner).await?;
 
     // Other user cannot delete the vehicle lock
     lock_operation(
         VEHICLE_ENDPOINT,
-        Some(&vehicle_lock_id),
+        Some(vehicle_lock.id()),
         &runtime.config,
         &auth_other,
         StatusCode::FORBIDDEN,
@@ -489,7 +388,7 @@ async fn test_vehicle_lock_cannot_be_deleted_by_non_owner() -> Result<(), Testin
     // Verify lock still exists
     lock_operation(
         VEHICLE_ENDPOINT,
-        Some(&vehicle_lock_id),
+        Some(vehicle_lock.id()),
         &runtime.config,
         &auth_owner,
         StatusCode::OK,
@@ -498,15 +397,7 @@ async fn test_vehicle_lock_cannot_be_deleted_by_non_owner() -> Result<(), Testin
     .await;
 
     // Owner can delete their own lock
-    lock_operation(
-        VEHICLE_ENDPOINT,
-        Some(&vehicle_lock_id),
-        &runtime.config,
-        &auth_owner,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    vehicle_lock.delete().await;
 
     Ok(())
 }
@@ -517,16 +408,13 @@ async fn test_component_ownership_protection_with_vehicle_lock_only() -> Result<
     let auth_owner = auth_header(&runtime.config, None).await?;
 
     // Lock the vehicle as 'owner'
-    let expiration_timeout = Duration::from_secs(30);
-    let ecu_lock = create_lock(
-        expiration_timeout,
+    let _vehicle_lock = Lock::create_with_expiration(
         VEHICLE_ENDPOINT,
-        StatusCode::CREATED,
+        Duration::from_secs(30),
         &runtime.config,
         &auth_owner,
     )
-    .await;
-    let lock_id = extract_field_from_json::<String>(&response_to_json(&ecu_lock)?, "id")?;
+    .await?;
 
     // Create headers for non_owner using the specific bearer token
     let auth_non_owner = bearer_token_header(NON_OWNER_BEARER_TOKEN);
@@ -541,17 +429,6 @@ async fn test_component_ownership_protection_with_vehicle_lock_only() -> Result<
         StatusCode::FORBIDDEN,
     )
     .await?;
-
-    // Cleanup: delete the lock as owner
-    lock_operation(
-        VEHICLE_ENDPOINT,
-        Some(&lock_id),
-        &runtime.config,
-        &auth_owner,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
 
     Ok(())
 }
@@ -616,6 +493,108 @@ pub(crate) async fn create_lock(
 
 pub(crate) fn default_timeout() -> Duration {
     Duration::from_secs(3600)
+}
+
+/// A lock created by a test. It is deleted when dropped, also when the test
+/// fails, so tests do not have to clean up.
+///
+/// Use [`Lock::delete`] to delete it at a specific point and check that this
+/// succeeds. Dropping a lock the CDA has removed by itself, e.g. because it
+/// expired or its vehicle lock was deleted, is fine.
+pub(crate) struct Lock {
+    endpoint: String,
+    /// `None` once deleted.
+    id: Option<String>,
+    config: Configuration,
+    auth: HeaderMap,
+}
+
+impl Lock {
+    /// Creates a lock on `endpoint` that expires after [`default_timeout`].
+    ///
+    /// # Errors
+    /// Returns an error if the lock is not created.
+    pub(crate) async fn create(
+        endpoint: &str,
+        config: &Configuration,
+        auth: &HeaderMap,
+    ) -> Result<Self, TestingError> {
+        Self::create_with_expiration(endpoint, default_timeout(), config, auth).await
+    }
+
+    /// Creates a lock on `endpoint` that expires after `expiration`.
+    ///
+    /// # Errors
+    /// Returns an error if the lock is not created.
+    pub(crate) async fn create_with_expiration(
+        endpoint: &str,
+        expiration: Duration,
+        config: &Configuration,
+        auth: &HeaderMap,
+    ) -> Result<Self, TestingError> {
+        let response = create_lock(expiration, endpoint, StatusCode::CREATED, config, auth).await;
+        let id: String = response_to_json_to_field(&response, "id")?;
+        Ok(Self {
+            endpoint: endpoint.to_owned(),
+            id: Some(id),
+            config: config.clone(),
+            auth: auth.clone(),
+        })
+    }
+
+    pub(crate) fn id(&self) -> &str {
+        self.id.as_deref().expect("a lock has its id until deleted")
+    }
+
+    /// Deletes the lock and asserts that the CDA answers `204 No Content`.
+    pub(crate) async fn delete(mut self) {
+        let id = self.id.take().expect("a lock has its id until deleted");
+        lock_operation(
+            &self.endpoint,
+            Some(&id),
+            &self.config,
+            &self.auth,
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+        )
+        .await;
+    }
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let Some(id) = self.id.take() else {
+            return;
+        };
+        let endpoint = format!("{}/{id}", self.endpoint);
+        let config = self.config.clone();
+        let auth = self.auth.clone();
+        let result = block_on_shared_runtime(async move {
+            send_cda_request(
+                &config,
+                &endpoint,
+                StatusCode::NO_CONTENT,
+                Method::DELETE,
+                None,
+                Some(&auth),
+                None,
+            )
+            .await
+        });
+        // A lock that expired or was removed with a higher lock is gone
+        // already, which is fine here.
+        match result {
+            Some(
+                Ok(_)
+                | Err(TestingError::UnexpectedResponse {
+                    actual: StatusCode::NOT_FOUND,
+                    ..
+                }),
+            ) => {}
+            Some(Err(e)) => eprintln!("Failed to delete lock {id} on drop: {e}"),
+            None => eprintln!("Failed to delete lock {id} on drop: the request panicked"),
+        }
+    }
 }
 
 async fn lock_expiration(

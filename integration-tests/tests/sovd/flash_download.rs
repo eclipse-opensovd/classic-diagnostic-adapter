@@ -21,15 +21,13 @@ use crate::{
     sovd::{
         self, compute_security_key,
         ecu::switch_session,
-        locks::{self, create_lock, lock_operation},
+        locks::{self, Lock, lock_operation},
         put_mode,
     },
     util::{
         TestingError,
         ecusim::{self, EcuSim},
-        http::{
-            auth_header, extract_field_from_json, response_to_json, response_to_t, send_cda_request,
-        },
+        http::{auth_header, response_to_json, response_to_t, send_cda_request},
         test_env::setup_integration_test,
     },
 };
@@ -53,20 +51,18 @@ async fn test_flash_download_transfer_sequence() {
 
     // Create and acquire ECU lock
     let expiration_timeout = Duration::from_secs(120);
-    let ecu_lock = create_lock(
-        expiration_timeout,
+    let lock = Lock::create_with_expiration(
         locks::ECU_ENDPOINT,
-        StatusCode::CREATED,
+        expiration_timeout,
         &runtime.config,
         &auth,
     )
-    .await;
-    let lock_id =
-        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+    .await
+    .expect("lock should be created");
 
     lock_operation(
         locks::ECU_ENDPOINT,
-        Some(&lock_id),
+        Some(lock.id()),
         &runtime.config,
         &auth,
         StatusCode::OK,
@@ -407,17 +403,6 @@ async fn test_flash_download_transfer_sequence() {
         "Expected a checksum after transfer completion"
     );
 
-    // Cleanup: delete lock
-    lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(&lock_id),
-        &runtime.config,
-        &auth,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
-
     // Reset ECU sim back to APPLICATION variant for other tests
     ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
         .await
@@ -439,20 +424,18 @@ async fn test_flash_transfer_zero_length_rejected() {
 
     // Create and acquire ECU lock
     let expiration_timeout = Duration::from_secs(120);
-    let ecu_lock = create_lock(
-        expiration_timeout,
+    let lock = Lock::create_with_expiration(
         locks::ECU_ENDPOINT,
-        StatusCode::CREATED,
+        expiration_timeout,
         &runtime.config,
         &auth,
     )
-    .await;
-    let lock_id =
-        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+    .await
+    .expect("lock should be created");
 
     lock_operation(
         locks::ECU_ENDPOINT,
-        Some(&lock_id),
+        Some(lock.id()),
         &runtime.config,
         &auth,
         StatusCode::OK,
@@ -651,16 +634,6 @@ async fn test_flash_transfer_zero_length_rejected() {
     .unwrap();
 
     // Cleanup
-    lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(&lock_id),
-        &runtime.config,
-        &auth,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
-
     ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
         .await
         .unwrap();
@@ -688,20 +661,18 @@ async fn test_security_access_supplier_level() {
 
     // Create and acquire ECU lock
     let expiration_timeout = Duration::from_secs(120);
-    let ecu_lock = create_lock(
-        expiration_timeout,
+    let lock = Lock::create_with_expiration(
         locks::ECU_ENDPOINT,
-        StatusCode::CREATED,
+        expiration_timeout,
         &runtime.config,
         &auth,
     )
-    .await;
-    let lock_id =
-        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+    .await
+    .expect("lock should be created");
 
     lock_operation(
         locks::ECU_ENDPOINT,
-        Some(&lock_id),
+        Some(lock.id()),
         &runtime.config,
         &auth,
         StatusCode::OK,
@@ -830,16 +801,6 @@ async fn test_security_access_supplier_level() {
     );
 
     // Cleanup
-    lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(&lock_id),
-        &runtime.config,
-        &auth,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
-
     ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
         .await
         .unwrap();
