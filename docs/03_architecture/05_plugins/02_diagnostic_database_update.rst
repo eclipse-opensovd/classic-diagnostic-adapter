@@ -96,8 +96,15 @@ Diagnostic Database Update Plugin
     The runtime update plugin accepts MDD database files (``.mdd``). CDA configuration files cannot
     be updated through the runtime-files endpoints.
 
-    CDA can be started with MDD files provided in a directory. If any MDD files are uploaded via the Update plugin,
-    then the MDD files in the directory are ignored.
+    CDA can be started with MDD files provided in a directory (``database.dir``). Startup only reads it, so the
+    storage stays untouched. The storage is seeded from ``database.dir`` on the first update, by the first upload
+    or delete in ``runtimefiles-nextupdate``, so the update, its backup and the rollback start from the loaded
+    databases. Until then, ``runtimefiles-current`` and ``runtimefiles-nextupdate`` list the databases in
+    ``database.dir``. From then on the storage is used and the directory is ignored, even when an update removed
+    every database.
+
+    Custom update plugins must seed the storage the same way before their first write of an update, by calling
+    ``cda_database::storage::seed_if_nonexistent``.
 
     **Limitations to bulk-data operations**
 

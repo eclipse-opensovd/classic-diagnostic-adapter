@@ -11,14 +11,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use http::StatusCode;
-use opensovd_cda_lib::config::configfile::Configuration;
 use testcontainers::{ImageExt, runners::AsyncRunner};
 
 use crate::{
-    sovd::{ECU_FLXC1000_ENDPOINT, get_ecu_component},
+    sovd::{
+        ECU_FLXC1000_ENDPOINT, get_ecu_component,
+        runtimefiles::{setup_with_lock, upload_mdd},
+    },
     util::{
         TestingError,
-        test_containers::{CDA_HTTP_PORT, cda_container},
+        http::auth_header,
+        test_containers::{cda_container, cda_container_config},
     },
 };
 
@@ -34,18 +37,46 @@ async fn cda_should_work_on_a_read_only_partition() -> Result<(), TestingError> 
         .await
         .map_err(|e| TestingError::SetupError(format!("Failed to start CDA container: {e}")))?;
 
-    let mut config = Configuration::default();
-    config.server.address = cda
-        .get_host()
-        .await
-        .map_err(|e| TestingError::SetupError(format!("Failed to get CDA host: {e}")))?
-        .to_string();
-    config.server.port = cda
-        .get_host_port_ipv4(CDA_HTTP_PORT)
-        .await
-        .map_err(|e| TestingError::SetupError(format!("Failed to get CDA port: {e}")))?;
+    let config = cda_container_config(&cda).await?;
 
     // Served from the databases loaded out of the read-only directory.
+    get_ecu_component(&config, ECU_FLXC1000_ENDPOINT, StatusCode::OK, None).await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn database_update_on_read_only_partition_returns_read_only_error() -> Result<(), TestingError>
+{
+    let cda = cda_container()
+        .await?
+        .with_readonly_rootfs(true)
+        .start()
+        .await
+        .map_err(|e| TestingError::SetupError(format!("Failed to start CDA container: {e}")))?;
+
+    let config = cda_container_config(&cda).await?;
+    let auth = auth_header(&config, None).await?;
+    let _lock_id = setup_with_lock(&config, &auth).await;
+
+    let response = upload_mdd(&config, &auth).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = response
+        .text()
+        .await
+        .map_err(|e| TestingError::InvalidData(format!("Could not read storage error: {e}")))?;
+    let error: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        TestingError::InvalidData(format!("Expected a JSON storage error response: {e}"))
+    })?;
+    assert!(
+        error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|message| message.starts_with("Storage error: Storage is read-only:")),
+        "Expected a read-only storage error, got {error}"
+    );
+
+    // The failed write must not bring down the CDA or prevent further reads.
     get_ecu_component(&config, ECU_FLXC1000_ENDPOINT, StatusCode::OK, None).await?;
 
     Ok(())

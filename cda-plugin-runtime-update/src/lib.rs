@@ -44,6 +44,13 @@ pub(crate) mod test_utils {
     };
     use cda_storage::LocalStorage;
 
+    /// An empty `database.dir`, for tests that start from an empty storage.
+    pub(crate) fn empty_database_dir() -> &'static std::path::Path {
+        static DIR: std::sync::LazyLock<tempfile::TempDir> =
+            std::sync::LazyLock::new(|| tempfile::tempdir().expect("empty database dir"));
+        DIR.path()
+    }
+
     pub(crate) struct StubTransport {
         state: tokio::sync::Mutex<TransportState>,
     }

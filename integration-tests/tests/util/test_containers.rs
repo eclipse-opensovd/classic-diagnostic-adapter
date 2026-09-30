@@ -21,14 +21,18 @@
 //! [`CDA_TEST_IMAGE_NAME`] and [`CDA_TEST_IMAGE_TAG`], e.g. the image CI has
 //! already built.
 
+use opensovd_cda_lib::config::configfile::{Configuration, ServerTransport};
 use testcontainers::{
-    ContainerRequest, GenericBuildableImage, GenericImage, Image, ImageExt,
+    ContainerAsync, ContainerRequest, GenericBuildableImage, GenericImage, Image, ImageExt,
     core::{AccessMode, IntoContainerPort, Mount, WaitFor, logs::LogFrame},
     runners::AsyncBuilder,
 };
 use tokio::sync::OnceCell;
 
-use crate::util::{TestingError, runtime::mdd_file_path};
+use crate::util::{
+    TestingError,
+    runtime::{mdd_file_path, wait_for_cda_online},
+};
 
 /// Port the CDA serves HTTP on inside its container.
 pub(crate) const CDA_HTTP_PORT: u16 = 20002;
@@ -96,6 +100,57 @@ pub(crate) async fn cda_container() -> Result<CdaContainer, TestingError> {
     }
 
     Ok(container)
+}
+
+/// Client configuration pointing at the CDA running in `cda`.
+///
+/// # Errors
+/// Returns [`TestingError::SetupError`] if the host or the published port of
+/// [`CDA_HTTP_PORT`] cannot be determined.
+pub(crate) async fn cda_container_config(
+    cda: &ContainerAsync<GenericImage>,
+) -> Result<Configuration, TestingError> {
+    let mut config = Configuration::default();
+    let address = cda
+        .get_host()
+        .await
+        .map_err(|e| TestingError::SetupError(format!("Failed to get CDA host: {e}")))?
+        .to_string();
+    let port = cda
+        .get_host_port_ipv4(CDA_HTTP_PORT)
+        .await
+        .map_err(|e| TestingError::SetupError(format!("Failed to get CDA port: {e}")))?;
+    config.server = ServerTransport::Tcp {
+        address,
+        port,
+        unix_socket: None,
+    };
+    Ok(config)
+}
+
+/// Restarts the CDA running in `cda`, keeping its storage, and waits until it
+/// is ready again. Unlike [`runtime::restart_cda`](crate::util::runtime::restart_cda),
+/// this restarts a test's own container, not the shared CDA.
+///
+/// Returns a new configuration, as the published port may change.
+///
+/// # Errors
+/// Returns [`TestingError`] if the container cannot be restarted or the CDA
+/// does not come back online.
+pub(crate) async fn restart_cda_container(
+    cda: &ContainerAsync<GenericImage>,
+) -> Result<Configuration, TestingError> {
+    cda.stop()
+        .await
+        .map_err(|e| TestingError::SetupError(format!("Failed to stop CDA container: {e}")))?;
+    // Unlike the first start, this does not wait for the container to be ready.
+    cda.start()
+        .await
+        .map_err(|e| TestingError::SetupError(format!("Failed to restart CDA container: {e}")))?;
+
+    let config = cda_container_config(cda).await?;
+    wait_for_cda_online(&config.server).await?;
+    Ok(config)
 }
 
 /// The name of the running test, for labels and log prefixes.

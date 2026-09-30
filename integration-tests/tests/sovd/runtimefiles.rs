@@ -25,6 +25,7 @@ use sovd_interfaces::{
     locking::post_put::Response as LockResponse,
     sovd2uds::BulkDataDescriptor,
 };
+use testcontainers::{ContainerAsync, GenericImage, runners::AsyncRunner};
 
 use crate::{
     sovd,
@@ -38,7 +39,10 @@ use crate::{
     util::{
         TestingError,
         http::{QueryParams, auth_header, response_to_json, response_to_t, send_cda_request},
-        runtime::{setup_integration_test, test_container_dir, wait_for_ecus_online},
+        runtime::{
+            mdd_file_path, setup_integration_test, test_container_dir, wait_for_ecus_online,
+        },
+        test_containers::{cda_container, cda_container_config, restart_cda_container},
     },
 };
 
@@ -1233,7 +1237,10 @@ async fn runtimefiles_apply_blocked_by_active_operations() -> Result<(), Testing
 }
 
 /// Helper: uploads the MDD fixture to nextupdate and returns the raw reqwest response.
-async fn upload_mdd(config: &Configuration, auth: &http::HeaderMap) -> reqwest::Response {
+pub(crate) async fn upload_mdd(
+    config: &Configuration,
+    auth: &http::HeaderMap,
+) -> reqwest::Response {
     let mdd_bytes = std::fs::read(
         test_container_dir()
             .expect("testcontainer dir")
@@ -1422,51 +1429,13 @@ pub(crate) async fn teardown_lock(config: &Configuration, auth: &http::HeaderMap
     .expect("Failed to release lock");
 }
 
-/// Stages the complete MDD fixture set in `runtimefiles-nextupdate`, so that
-/// applying that snapshot reproduces the database the CDA is already running.
-///
-/// Apply is a snapshot swap. The staged collection replaces the active one and
-/// anything missing from it is dropped. Uploading a single MDD and letting
-/// `init_collection_from_copy_if_missing` seed the rest needs a populated
-/// `runtimefiles-current`, which a fresh test container does not have, so it
-/// would apply a one-ECU snapshot to the whole shared suite.
-///
-/// Requires the caller to hold the vehicle lock.
-pub(crate) async fn stage_full_database(
-    config: &Configuration,
-    auth: &http::HeaderMap,
-) -> Result<(), TestingError> {
-    // Start from an empty staging collection so the applied snapshot is exactly
-    // the fixture set, not whatever a previous test left pending.
-    send_cda_request(
-        config,
-        RUNTIMEFILES_NEXTUPDATE,
-        StatusCode::OK,
-        Method::DELETE,
-        None,
-        Some(auth),
-        None,
-    )
-    .await?;
-
-    for name in mdd_file_names() {
-        let response = upload_mdd_by_name(config, auth, &name).await;
-        assert_eq!(
-            response.status(),
-            StatusCode::CREATED,
-            "Precondition: staging {name} must succeed"
-        );
-    }
-    Ok(())
-}
-
 /// The file names of every MDD the test container ships, i.e. the whole vehicle.
 ///
-/// Read from disk rather than hard-coded, so that a fixture added later ends up
-/// in the staged snapshot instead of silently disappearing from the vehicle.
+/// Read from disk rather than hard-coded, so that a fixture added later is
+/// expected in the seeded database as well.
 fn mdd_file_names() -> Vec<String> {
-    let odx_dir = test_container_dir().expect("testcontainer dir").join("odx");
-    let names: Vec<String> = std::fs::read_dir(&odx_dir)
+    let mdd_dir = std::path::PathBuf::from(mdd_file_path().expect("MDD directory"));
+    let names: Vec<String> = std::fs::read_dir(&mdd_dir)
         .expect("MDD directory not readable")
         .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
         .filter(|name| name.to_lowercase().ends_with(".mdd"))
@@ -1474,7 +1443,7 @@ fn mdd_file_names() -> Vec<String> {
     assert!(
         names.len() > 1,
         "expected the MDD directory {} to hold the whole vehicle, found {names:?}",
-        odx_dir.display()
+        mdd_dir.display()
     );
     names
 }
@@ -2310,9 +2279,14 @@ async fn runtimefiles_apply_blocked_by_vehicle_and_ecu_lock() -> Result<(), Test
     // All mutating runtimefiles endpoints require a vehicle lock.
     let vehicle_lock_id = setup_with_lock(&runtime.config, &auth).await;
 
-    // Apply is a snapshot swap, so a one-file upload would leave the shared CDA
-    // serving a one-ECU vehicle to every later test.
-    stage_full_database(&runtime.config, &auth).await?;
+    // The update starts from the running databases, so re-uploading one of them
+    // keeps the vehicle unchanged for every later test.
+    let response = upload_mdd(&runtime.config, &auth).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "upload FLXC1000.mdd"
+    );
 
     // Creating an ECU lock while the vehicle lock is already held is allowed,
     // but it must block any subsequent Apply/Rollback/Cleanup execution.
@@ -2351,12 +2325,195 @@ async fn runtimefiles_apply_blocked_by_vehicle_and_ecu_lock() -> Result<(), Test
     .await;
 
     // With only the vehicle lock held, the database swap is safe to proceed.
-    // No Rollback afterwards, because the staged snapshot was the active
-    // database. On a pristine container the backup Apply takes is empty, so
-    // Rollback would answer 404 and abort before the vehicle lock is released.
+    // No Rollback afterwards, because the update did not change the vehicle.
     execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
 
     teardown_lock(&runtime.config, &auth, &vehicle_lock_id).await;
 
     Ok(())
+}
+
+// The databases in `database.dir` are the starting point of the first update.
+//
+// Startup never writes to the storage. The first write of an update seeds the
+// storage from `database.dir`, exactly once: an update that deliberately
+// removes every database must not be undone by seeding again, neither by the
+// next update nor by a restart.
+//
+// The following tests run their own CDA container with writable storage,
+// because applying updates would otherwise change the database of the shared
+// test CDA.
+
+/// Uploading a single database on a fresh system must stage it on top of the
+/// databases loaded from `database.dir`, not replace them.
+#[tokio::test]
+async fn runtimefiles_first_update_starts_from_database_dir() -> Result<(), TestingError> {
+    let cda = start_cda().await?;
+    let config = cda_container_config(&cda).await?;
+    let auth = auth_header(&config, None).await?;
+    let dir_ids = database_dir_ids();
+
+    // Precondition: running from database.dir.
+    assert_route(&config, &auth, ECU_FSNR2000_ENDPOINT, StatusCode::OK).await?;
+
+    let lock_id = setup_with_lock(&config, &auth).await;
+
+    let response = upload_mdd_by_name(&config, &auth, "FLXC1000.mdd").await;
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "upload FLXC1000.mdd"
+    );
+
+    assert_eq!(
+        ids(&config, &auth, RUNTIMEFILES_NEXTUPDATE).await?,
+        dir_ids,
+        "the first update must start from the databases in database.dir"
+    );
+
+    execute_mode(&config, &auth, ExecutionMode::Apply).await?;
+
+    assert_eq!(
+        ids(&config, &auth, RUNTIMEFILES_CURRENT).await?,
+        dir_ids,
+        "applying the first update must keep the databases from database.dir"
+    );
+    assert_eq!(
+        ids(&config, &auth, RUNTIMEFILES_BACKUP).await?,
+        dir_ids,
+        "the backup of the first update must be the databases from database.dir"
+    );
+    // An ECU that was not part of the upload keeps its routes.
+    assert_route(&config, &auth, ECU_FSNR2000_ENDPOINT, StatusCode::OK).await?;
+
+    execute_mode(&config, &auth, ExecutionMode::Rollback).await?;
+
+    assert_eq!(
+        ids(&config, &auth, RUNTIMEFILES_CURRENT).await?,
+        dir_ids,
+        "rolling back the first update must restore the databases from database.dir"
+    );
+    assert_route(&config, &auth, ECU_FSNR2000_ENDPOINT, StatusCode::OK).await?;
+
+    teardown_lock(&config, &auth, &lock_id).await;
+    Ok(())
+}
+
+/// Deleting every database is a deliberate, empty data set. Neither the next
+/// update nor a restart may seed `database.dir` again.
+#[tokio::test]
+async fn runtimefiles_deleting_all_databases_is_not_undone_by_seeding() -> Result<(), TestingError>
+{
+    let cda = start_cda().await?;
+    let config = cda_container_config(&cda).await?;
+    let auth = auth_header(&config, None).await?;
+    let dir_ids = database_dir_ids();
+
+    let lock_id = setup_with_lock(&config, &auth).await;
+
+    // The first write of the update is a delete. It has to seed first, so the
+    // databases from database.dir exist in the update and can be deleted.
+    for id in &dir_ids {
+        send_cda_request(
+            &config,
+            &format!("{RUNTIMEFILES_NEXTUPDATE}/{id}"),
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+            None,
+            Some(&auth),
+            None,
+        )
+        .await?;
+    }
+    assert_eq!(
+        ids(&config, &auth, RUNTIMEFILES_NEXTUPDATE).await?,
+        Vec::<String>::new(),
+        "every database from database.dir was deleted from the update"
+    );
+
+    execute_mode(&config, &auth, ExecutionMode::Apply).await?;
+
+    assert_eq!(
+        ids(&config, &auth, RUNTIMEFILES_CURRENT).await?,
+        Vec::<String>::new(),
+        "applying the update must leave no databases"
+    );
+    assert_route(&config, &auth, ECU_FLXC1000_ENDPOINT, StatusCode::NOT_FOUND).await?;
+    teardown_lock(&config, &auth, &lock_id).await;
+
+    // The empty data set must survive a restart: the storage exists, so
+    // database.dir must not be loaded again.
+    let config = restart_cda_container(&cda).await?;
+    let auth = auth_header(&config, None).await?;
+    assert_route(&config, &auth, ECU_FLXC1000_ENDPOINT, StatusCode::NOT_FOUND).await?;
+    assert_route(&config, &auth, ECU_FSNR2000_ENDPOINT, StatusCode::NOT_FOUND).await?;
+
+    // The next update starts from the empty data set, not from database.dir.
+    let lock_id = setup_with_lock(&config, &auth).await;
+    let response = upload_mdd_by_name(&config, &auth, "FLXC1000.mdd").await;
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "upload FLXC1000.mdd"
+    );
+    assert_eq!(
+        ids(&config, &auth, RUNTIMEFILES_NEXTUPDATE).await?,
+        vec!["flxc1000.mdd".to_owned()],
+        "the storage was seeded before, so it must not be seeded again"
+    );
+
+    execute_mode(&config, &auth, ExecutionMode::Apply).await?;
+    assert_route(&config, &auth, ECU_FLXC1000_ENDPOINT, StatusCode::OK).await?;
+    assert_route(&config, &auth, ECU_FSNR2000_ENDPOINT, StatusCode::NOT_FOUND).await?;
+
+    teardown_lock(&config, &auth, &lock_id).await;
+    Ok(())
+}
+
+/// A CDA with the test databases in `database.dir` and writable, empty storage.
+async fn start_cda() -> Result<ContainerAsync<GenericImage>, TestingError> {
+    cda_container()
+        .await?
+        // Returns once the CDA reports ready, i.e. has loaded its databases.
+        .start()
+        .await
+        .map_err(|e| TestingError::SetupError(format!("Failed to start CDA container: {e}")))
+}
+
+/// The ids the databases in `database.dir` have in the update endpoints.
+fn database_dir_ids() -> Vec<String> {
+    let mut ids: Vec<String> = mdd_file_names()
+        .into_iter()
+        .map(|name| name.to_lowercase())
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// The sorted, lowercased ids listed by a runtime files endpoint.
+async fn ids(
+    config: &Configuration,
+    auth: &http::HeaderMap,
+    endpoint: &str,
+) -> Result<Vec<String>, TestingError> {
+    Ok(ids_of(&get_file_list(config, auth, endpoint).await?.items))
+}
+
+async fn assert_route(
+    config: &Configuration,
+    auth: &http::HeaderMap,
+    endpoint: &str,
+    expected: StatusCode,
+) -> Result<(), TestingError> {
+    send_cda_request(
+        config,
+        endpoint,
+        expected,
+        Method::GET,
+        None,
+        Some(auth),
+        None,
+    )
+    .await
+    .map(|_| ())
 }

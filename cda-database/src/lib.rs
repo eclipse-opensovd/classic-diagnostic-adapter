@@ -15,6 +15,7 @@ pub mod datatypes;
 pub(crate) mod flatbuf;
 pub(crate) mod mdd_data;
 pub(crate) mod proto;
+pub mod storage;
 
 use cda_interfaces::datatypes::DatabaseNamingConvention;
 pub use mdd_data::{

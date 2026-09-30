@@ -12,20 +12,23 @@
  */
 
 use std::{
-    fs::ReadDir,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use cda_core::{EcuManager, EcuManagerConfig};
-use cda_database::{FileManager, ProtoLoadConfig, update_mdd_uncompressed};
+use cda_database::{
+    FileManager, ProtoLoadConfig,
+    storage::{DatabaseLocation, current_database_location},
+    update_mdd_uncompressed,
+};
 use cda_interfaces::{
     EcuAddresses, EcuManager as EcuManagerTrait, EcuManagerType, FunctionalDescriptionConfig,
     HashMap, HashMapEntry, HashMapExtensions, HashSet, Protocol,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     file_manager::{Chunk, ChunkType},
     health::HealthProvider,
-    storage_api::{Collection, CollectionName, DirectFileAccess, Storage, StorageError},
+    storage_api::{Collection, DirectFileAccess},
 };
 use cda_plugin_security::SecurityPlugin;
 use cda_storage::LocalStorage;
@@ -98,25 +101,6 @@ struct EcuLoadResult<S: SecurityPlugin> {
 }
 
 pub(crate) type LoadedEcuMap<S> = HashMap<String, (EcuManager<S>, EcuMetadata)>;
-
-fn get_mdd_files_and_size(files: ReadDir) -> Vec<(PathBuf, u64)> {
-    let mut files = files
-        .filter_map(|entry| {
-            entry.ok().and_then(|entry| {
-                let path = entry.path();
-                if path.is_file() && path.extension().is_some_and(|ext| ext == "mdd") {
-                    let filesize = std::fs::metadata(&path).ok().map_or(0u64, |m| m.len());
-                    Some((path, filesize))
-                } else {
-                    None
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-
-    files.sort_by_key(|b| std::cmp::Reverse(b.1));
-    files
-}
 
 /// Loads MDD database files into memory and returns the database and file-manager maps.
 ///
@@ -219,74 +203,69 @@ pub async fn load_databases<S: SecurityPlugin>(
     Ok((databases, file_managers))
 }
 
-/// Returns paths to MDD files, preferring files found in the CDA `storage`.
-/// Falls back to the configured `database.dir` when storage holds no databases.
+/// Returns paths to the current MDD files, see
+/// [`current_databases`](current_database_location): the storage once
+/// an update seeded it, even when it is empty, otherwise the configured `database.dir`.
 pub async fn resolve_mdd_paths(storage: &LocalStorage, database_dir: &str) -> Vec<PathBuf> {
-    if let Some(storage_paths) = load_mdd_paths_from_storage(storage).await
-        && !storage_paths.is_empty()
-    {
-        tracing::info!(
-            count = storage_paths.len(),
-            "Using MDD files from CDA storage (overrides configured database dir)."
-        );
-        return storage_paths;
-    }
-
-    tracing::info!(
-        database_dir = %database_dir,
-        "No MDD files found in storage, falling back to configured database dir."
-    );
-
-    match std::fs::read_dir(database_dir) {
-        Ok(files) => get_mdd_files_and_size(files)
-            .into_iter()
-            .map(|(p, _)| p)
-            .collect(),
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to read database directory.");
-            vec![]
+    let paths = match current_database_location(storage, Path::new(database_dir)).await {
+        Ok(DatabaseLocation::Storage(collection)) => {
+            let paths = mdd_paths_in_collection(&*collection).await;
+            tracing::info!(
+                count = paths.len(),
+                "Using MDD files from CDA storage (overrides configured database dir)."
+            );
+            paths
         }
-    }
-}
-
-/// Returns paths to all MDD files found in the CDA `storage`, or `None` when the
-/// collection does not exist or cannot be read.
-async fn load_mdd_paths_from_storage(storage: &LocalStorage) -> Option<Vec<PathBuf>> {
-    let collection = match storage
-        .get_collection(&CollectionName::DiagnosticDatabase)
-        .await
-    {
-        Ok(c) => c,
-        Err(StorageError::CollectionNotFound(_)) => {
-            tracing::debug!("Storage has no DiagnosticDatabase collection yet");
-            return None;
+        Ok(DatabaseLocation::Dir(paths)) => {
+            tracing::info!(
+                database_dir = %database_dir,
+                "Storage not seeded yet, using configured database dir."
+            );
+            paths
         }
         Err(e) => {
-            tracing::error!(error = %e, "Cannot access DiagnosticDatabase collection");
-            return None;
+            tracing::error!(error = %e, "Failed to determine the current MDD files.");
+            return vec![];
         }
     };
+    sort_by_largest_first(paths)
+}
 
+/// Returns the paths of all MDD files in `collection`, skipping those that cannot be resolved.
+async fn mdd_paths_in_collection(
+    collection: &(impl Collection + DirectFileAccess),
+) -> Vec<PathBuf> {
     let keys = match collection.list().await {
         Ok(k) => k,
         Err(e) => {
             tracing::error!(error = %e, "Failed to list DiagnosticDatabase collection");
-            return None;
+            return vec![];
         }
     };
 
-    Some(
-        keys.iter()
-            .filter_map(|k| match collection.file_path(k) {
-                Ok(p) => Some(p),
-                Err(e) => {
-                    tracing::warn!(key = %k, error = %e,
-                    "Failed to resolve MDD path in storage, skipping");
-                    None
-                }
-            })
-            .collect(),
-    )
+    keys.iter()
+        .filter_map(|k| match collection.file_path(k) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!(key = %k, error = %e,
+                "Failed to resolve MDD path in storage, skipping");
+                None
+            }
+        })
+        .collect()
+}
+
+/// Sorts `paths` by file size, largest first.
+fn sort_by_largest_first(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut sized: Vec<(PathBuf, u64)> = paths
+        .into_iter()
+        .map(|path| {
+            let size = std::fs::metadata(&path).map_or(0, |m| m.len());
+            (path, size)
+        })
+        .collect();
+    sized.sort_by_key(|(_, size)| std::cmp::Reverse(*size));
+    sized.into_iter().map(|(path, _)| path).collect()
 }
 
 pub(crate) fn handle_ecu_config_keys<S: SecurityPlugin>(
@@ -630,6 +609,7 @@ fn insert_or_update_ecu<S: SecurityPlugin>(
 
 #[cfg(test)]
 mod tests {
+    use cda_interfaces::storage_api::{CollectionName, Storage};
     use tempfile::TempDir;
 
     use super::*;
@@ -665,6 +645,63 @@ mod tests {
             first.starts_with(fixture.db_dir.path()),
             "Path should come from database dir when storage is nonexistent: {}",
             first.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_mdd_paths_uses_empty_storage_collection() {
+        let fixture = Fixture::new_with_mdd_files(&[("ECU.mdd", b"DATA")]);
+        let mut tx = fixture.storage.begin_transaction().unwrap();
+        fixture
+            .storage
+            .create_collection(&mut tx, &CollectionName::DiagnosticDatabase)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let paths =
+            resolve_mdd_paths(&fixture.storage, fixture.db_dir.path().to_str().unwrap()).await;
+
+        assert!(
+            paths.is_empty(),
+            "An empty database collection is a deliberate empty data set, not a reason to load \
+             the database dir: {paths:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_mdd_paths_loads_nothing_from_a_missing_dir() {
+        let fixture = Fixture::new_with_mdd_files(&[]);
+        let missing = fixture.db_dir.path().join("missing");
+
+        let paths = resolve_mdd_paths(&fixture.storage, missing.to_str().unwrap()).await;
+
+        assert!(paths.is_empty(), "{paths:?}");
+    }
+
+    #[tokio::test]
+    async fn resolve_mdd_paths_sorts_storage_paths_largest_first() {
+        let fixture = Fixture::new_with_mdd_files(&[]);
+        let collection = fixture
+            .storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
+            .await
+            .unwrap();
+        for (key, data) in [("small.mdd", &b"S"[..]), ("large.mdd", &b"LARGE"[..])] {
+            let mut tx = fixture.storage.begin_transaction().unwrap();
+            let mut data = data;
+            collection.write(&mut tx, key, &mut data).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+
+        let paths =
+            resolve_mdd_paths(&fixture.storage, fixture.db_dir.path().to_str().unwrap()).await;
+
+        let names: Vec<_> = paths.iter().map(|p| p.file_name().unwrap()).collect();
+        assert_eq!(
+            names,
+            vec!["large.mdd", "small.mdd"],
+            "storage and database.dir must load in the same order"
         );
     }
 
