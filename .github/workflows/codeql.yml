@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: CodeQL
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  detect-native-sources:
+    runs-on: ubuntu-latest
+    outputs:
+      languages: ${{ steps.detect.outputs.languages }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Detect C/C++ sources
+        id: detect
+        run: |
+          if [ -n "$(git ls-files -- '*.c' '*.cc' '*.cpp' '*.cxx' '*.c++' '*.C')" ]; then
+            echo 'languages=["rust","c-cpp"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'languages=["rust"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  analyze:
+    needs: detect-native-sources
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ${{ fromJSON(needs.detect-native-sources.outputs.languages) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+      - uses: github/codeql-action/analyze@v4
