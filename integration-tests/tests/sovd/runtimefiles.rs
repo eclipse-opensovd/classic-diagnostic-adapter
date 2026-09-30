@@ -45,54 +45,6 @@ const RUNTIMEFILES_BACKUP: &str = "apps/sovd2uds/bulk-data/runtimefiles-backup";
 const RUNTIMEFILES_UPDATE_EXECUTIONS: &str =
     "apps/sovd2uds/operations/runtimefilesupdate/executions";
 
-/// Polls `GET /executions/{id}` until the execution reaches a terminal status
-/// (`completed` or `failed`), giving up after `timeout`, and returns the final
-/// response body.
-///
-/// Runtime-file update executions run asynchronously: `POST /executions`
-/// returns `202` immediately while a background task performs the work and
-/// only then clears the update-in-progress guard. Until that guard clears,
-/// non-exempt requests (e.g. deleting the vehicle lock) are rejected with
-/// `409 Conflict`. Tests must therefore wait for a terminal status before
-/// issuing such follow-up requests, otherwise they race the background task.
-async fn wait_for_execution_terminal(
-    config: &Configuration,
-    auth: &http::HeaderMap,
-    execution_id: &str,
-    timeout: Duration,
-) -> Result<serde_json::Value, TestingError> {
-    const POLL_INTERVAL: Duration = Duration::from_millis(100);
-
-    let deadline = std::time::Instant::now()
-        .checked_add(timeout)
-        .expect("deadline must not overflow");
-
-    loop {
-        let response = send_cda_request(
-            config,
-            &format!("{RUNTIMEFILES_UPDATE_EXECUTIONS}/{execution_id}"),
-            StatusCode::OK,
-            Method::GET,
-            None,
-            Some(auth),
-            None,
-        )
-        .await?;
-        let execution = response_to_json(&response)?;
-        if let Some("completed" | "failed") =
-            execution.get("status").and_then(serde_json::Value::as_str)
-        {
-            return Ok(execution);
-        }
-
-        assert!(
-            std::time::Instant::now() < deadline,
-            "execution {execution_id} did not reach a terminal status within {timeout:?}"
-        );
-        cda_interfaces::util::tokio_ext::sleep_for(POLL_INTERVAL).await;
-    }
-}
-
 /// Tests that mutating endpoints return 403 Forbidden without a vehicle lock.
 #[tokio::test]
 async fn runtimefiles_requires_lock() -> Result<(), TestingError> {
@@ -222,17 +174,20 @@ async fn runtimefiles_execution_responses_follow_operation_standard() -> Result<
         "execution collection items must contain only their identifiers"
     );
 
-    // Poll until the async execution reaches a terminal status. Reading the
-    // status only once here would race the background task and could leave the
-    // update-in-progress guard set, causing the lock deletion below to fail
-    // with 409 Conflict.
-    let execution = wait_for_execution_terminal(
-        &runtime.config,
-        &auth,
-        &execution_id,
-        Duration::from_secs(10),
-    )
-    .await?;
+    // Reading the status only once would race the background task.
+    wait_for_execution_completion(&runtime.config, &auth, &execution_id).await?;
+    let execution = response_to_json(
+        &send_cda_request(
+            &runtime.config,
+            &format!("{RUNTIMEFILES_UPDATE_EXECUTIONS}/{execution_id}"),
+            StatusCode::OK,
+            Method::GET,
+            None,
+            Some(&auth),
+            None,
+        )
+        .await?,
+    )?;
     assert_eq!(
         execution.get("status").and_then(serde_json::Value::as_str),
         Some("completed"),
@@ -1037,7 +992,6 @@ async fn runtimefiles_rollback_with_no_backup() -> Result<(), TestingError> {
         None,
     )
     .await?;
-    cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(1)).await;
 
     // Verify backup is empty
     let backup_response = send_cda_request(
@@ -1461,9 +1415,8 @@ pub(crate) async fn execute_mode(
 ///
 /// Waiting for `completed` alone is not enough. The update task publishes that
 /// status, then re-enables communication, and only then drops the protection.
-/// Until it does, every non-exempt route answers `409 Update in progress`,
-/// including `DELETE /vehicle/v15/locks/{id}`, so a test returning inside that
-/// window cannot release its own vehicle lock.
+/// Until it does, every non-exempt route answers `409 Update in progress`, so
+/// the next request of the test would fail.
 ///
 /// The execution resource stays readable throughout, being on the exempt list.
 async fn wait_for_execution_completion(
