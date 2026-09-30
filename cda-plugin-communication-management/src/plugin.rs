@@ -15,7 +15,7 @@
 
 pub mod default;
 
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use cda_interfaces::communication_control::{

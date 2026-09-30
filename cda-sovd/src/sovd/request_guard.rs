@@ -26,7 +26,6 @@
 //! [`HttpRestrictionLayer`] to any Tower service.
 
 use std::{
-    future::Future,
     pin::Pin,
     task::{Context, Poll},
 };

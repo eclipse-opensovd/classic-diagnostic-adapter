@@ -23,7 +23,7 @@
 //!
 //! [`RuntimeFilesUpdatePlugin`]: cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin
 
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use cda_comm_can::CanDiagGateway;
 use cda_comm_doip::DoipDiagGateway;
