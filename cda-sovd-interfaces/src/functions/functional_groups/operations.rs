@@ -20,7 +20,7 @@ pub mod service {
     pub use crate::common::operations::OperationQuery as Query;
 
     /// Request payload for functional group operations
-    #[derive(Deserialize, schemars::JsonSchema)]
+    #[derive(Debug, Deserialize, schemars::JsonSchema, serde::Serialize)]
     pub struct Request {
         pub parameters: HashMap<String, serde_json::Value>,
     }
@@ -33,13 +33,16 @@ pub mod service {
 
     /// Response for functional group operation POST operations
     /// Returns parameters keyed by ECU name at the top level
-    #[derive(Serialize, schemars::JsonSchema)]
+    #[derive(Debug, Serialize, schemars::JsonSchema, serde::Deserialize)]
+    // Without the explicit bound, `#[serde(default)]` makes serde require
+    // `Default` for the type parameters when deserializing.
+    #[serde(bound(deserialize = "T: serde::Deserialize<'de>"))]
     pub struct Response<T> {
         /// Parameter results per ECU - key is ECU name, value is the parameters result
         pub parameters: HashMap<String, serde_json::Map<String, serde_json::Value>>,
         /// Errors that occurred during the operation
         /// JSON pointers reference /parameters/{ecu-name} or /parameters/{ecu-name}/{field}
-        #[serde(skip_serializing_if = "Vec::is_empty")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub errors: Vec<DataError<T>>,
         #[schemars(skip)]
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,14 +58,17 @@ pub mod get {
 ///
 /// Mirrors `AsyncGetByIdResponse` from the component ECU operations, but uses ECU-keyed
 /// parameters (one entry per ECU in the group)
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, schemars::JsonSchema, serde::Deserialize)]
+// Without the explicit bound, `#[serde(default)]` makes serde require
+// `Default` for the type parameters when deserializing.
+#[serde(bound(deserialize = "T: serde::Deserialize<'de>"))]
 pub struct FgAsyncGetByIdResponse<T> {
     /// Status of the executed operation.
     pub status: crate::components::ecu::operations::ExecutionStatus,
     /// Capability executed at the moment (always `execute` for CDA routines).
     pub capability: crate::components::ecu::operations::GetByIdCapability,
     /// Response parameters per ECU - key is ECU name, value is the parameters map.
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub parameters: HashMap<String, serde_json::Map<String, serde_json::Value>>,
     /// Errors that occurred during execution, with JSON pointers to per-ECU entries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
