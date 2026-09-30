@@ -362,11 +362,14 @@ async fn post_update_deferred_mode_returns_503_until_triggered() {
             // vehicle lock.
             let lock_id = runtimefiles::setup_with_lock(&runtime.config, &headers).await;
 
-            // Apply is a snapshot swap. Staging the complete fixture set keeps
-            // this update from changing the "vehicle".
-            runtimefiles::stage_full_database(&runtime.config, &headers)
-                .await
-                .expect("Failed to stage the database for the update");
+            // The update starts from the running databases, so re-uploading
+            // one of them keeps this update from changing the "vehicle".
+            let response = runtimefiles::upload_mdd(&runtime.config, &headers).await;
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::CREATED,
+                "Failed to upload the database for the update"
+            );
 
             runtimefiles::execute_mode(&runtime.config, &headers, ExecutionMode::Apply)
                 .await

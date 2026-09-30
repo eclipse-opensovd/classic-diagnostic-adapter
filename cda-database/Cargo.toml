@@ -34,7 +34,7 @@ flatbuffers = { workspace = true }
 memmap2 = { workspace = true }
 ouroboros = { workspace = true }
 # tokio
-tokio = { workspace = true, features = ["rt", "sync", "io-util", "time"] }
+tokio = { workspace = true, features = ["rt", "sync", "io-util", "time", "fs"] }
 # v4 - Version 4 UUIDs with random data.
 uuid = { workspace = true, features = ["v4"] }
 sha2 = { workspace = true }
@@ -56,6 +56,9 @@ toml = { workspace = true }
 
 [dev-dependencies]
 cda-database = { workspace = true, features = ["database-builder"] }
+cda-storage = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros"] }
 
 [features]
 default = []

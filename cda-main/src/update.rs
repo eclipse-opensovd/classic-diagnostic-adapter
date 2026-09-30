@@ -10,7 +10,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use cda_comm_can::CanDiagGateway;
 use cda_comm_doip::DoipDiagGateway;
@@ -132,6 +132,7 @@ where
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
 {
+    let database_dir = PathBuf::from(&infra.config.read().await.database.dir);
     let health_for_factory = infra.health.clone();
     let factory = Arc::new(CdaMainVehicleFactory::<SP>::new(
         health_for_factory,
@@ -168,6 +169,7 @@ where
 
     Ok(DefaultRuntimeUpdatePlugin::new(
         Arc::clone(&infra.storage),
+        database_dir,
         reloader_plugin,
         Arc::new(DefaultUpdateSecurityHandler::new()),
         Arc::clone(&infra.lock_provider),

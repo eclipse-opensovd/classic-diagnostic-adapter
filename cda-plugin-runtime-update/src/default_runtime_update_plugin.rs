@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use cda_interfaces::{
@@ -36,6 +36,8 @@ pub struct DefaultRuntimeUpdatePlugin<
 > {
     /// Access to the persistent storage layer (all mutations go through this)
     storage: Arc<Store>,
+    /// The configured `database.dir`, seeded into storage by the first write of an update
+    database_dir: PathBuf,
     /// Hot-reload notification handler
     reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
     /// Security and file integrity handler
@@ -65,6 +67,8 @@ impl<
     ///
     /// # Arguments
     /// * `storage` - Persistent storage backend for update files
+    /// * `database_dir` - The configured `database.dir`, the databases loaded while the storage
+    ///   holds none. The first write of an update seeds the storage from it.
     /// * `reload_handler` - Notified after apply/rollback to hot-reload databases
     /// * `security_handler` - Validates authorization and file integrity
     /// * `lock_provider` - Provides lock state for security validation
@@ -81,6 +85,7 @@ impl<
     )]
     pub fn new(
         storage: Arc<Store>,
+        database_dir: PathBuf,
         reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
         security_handler: Arc<UpdateSecurityPlugin>,
         lock_provider: Arc<Lock>,
@@ -93,6 +98,7 @@ impl<
     ) -> Self {
         Self {
             storage,
+            database_dir,
             reloader_plugin,
             security_handler,
             lock_provider,
@@ -118,14 +124,14 @@ impl<
         &self,
         query: &RuntimeFilesQuery,
     ) -> Result<BulkDataList, RuntimeUpdateError> {
-        crate::storage::list_current_files(&*self.storage, query).await
+        crate::storage::list_current_files(&*self.storage, &self.database_dir, query).await
     }
 
     async fn list_nextupdate(
         &self,
         query: &RuntimeFilesQuery,
     ) -> Result<BulkDataList, RuntimeUpdateError> {
-        crate::storage::compute_nextupdate_state(&*self.storage, query).await
+        crate::storage::compute_nextupdate_state(&*self.storage, &self.database_dir, query).await
     }
 
     async fn list_backup(
@@ -139,7 +145,13 @@ impl<
         &self,
         files: Vec<UploadFile>,
     ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
-        crate::storage::upload_files(&*self.storage, &*self.security_handler, files).await
+        crate::storage::upload_files(
+            &*self.storage,
+            &*self.security_handler,
+            &self.database_dir,
+            files,
+        )
+        .await
     }
 
     async fn delete_nextupdate(&self) -> Result<Vec<String>, RuntimeUpdateError> {
@@ -147,7 +159,7 @@ impl<
     }
 
     async fn delete_nextupdate_by_id(&self, file_id: &str) -> Result<(), RuntimeUpdateError> {
-        crate::storage::delete_nextupdate_file(&*self.storage, file_id).await
+        crate::storage::delete_nextupdate_file(&*self.storage, &self.database_dir, file_id).await
     }
 
     async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
@@ -203,8 +215,9 @@ mod tests {
     use crate::{
         DefaultRuntimeUpdatePlugin,
         test_utils::{
-            MockLockProvider, MockSecurityHandler, NoopReloadHandler, StubTransport, make_storage,
-            make_upload_files, make_valid_config, write_test_file,
+            MockLockProvider, MockSecurityHandler, NoopReloadHandler, StubTransport,
+            empty_database_dir, make_storage, make_upload_files, make_valid_config,
+            write_test_file,
         },
     };
 
@@ -229,6 +242,7 @@ mod tests {
 
         let plugin = DefaultRuntimeUpdatePlugin::new(
             Arc::new(storage),
+            empty_database_dir().to_path_buf(),
             Arc::new(NoopReloadHandler),
             Arc::new(MockSecurityHandler::new()),
             Arc::new(MockLockProvider {

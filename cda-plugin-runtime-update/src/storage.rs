@@ -11,8 +11,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{fmt::Write, sync::Arc};
+use std::{
+    fmt::Write,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
+use cda_database::storage::{DatabaseLocation, current_database_location, database_name};
 use cda_interfaces::{
     runtime_update_api::{
         BulkDataCreated, BulkDataCreatedList, BulkDataDescriptor, BulkDataList, HashAlgorithm,
@@ -41,7 +46,7 @@ pub(crate) async fn init_collection_from_copy_if_missing(
     }
     match storage.copy_collection(tx, source, destination).await {
         Ok(()) | Err(StorageError::CollectionNotFound(_)) => {
-            // Fresh system: no current collection to init from - skip.
+            // No current collection to init from - skip.
         }
         Err(e) => return Err(e.into()),
     }
@@ -67,12 +72,41 @@ pub(crate) fn compute_sha256(data: &impl RandomAccessData) -> Result<String, Run
         offset = offset.saturating_add(read as u64);
     }
 
-    let digest = hasher.finalize();
+    Ok(to_hex(&hasher.finalize()))
+}
+
+fn to_hex(digest: &[u8]) -> String {
     let mut out = String::with_capacity(digest.len().saturating_mul(2));
     for byte in digest {
         let _ = write!(&mut out, "{byte:02x}");
     }
-    Ok(out)
+    out
+}
+
+/// A descriptor of the database `key`, without the optional metadata.
+fn new_descriptor(key: &str) -> BulkDataDescriptor {
+    BulkDataDescriptor {
+        id: key.to_owned(),
+        mimetype: "application/octet-stream".to_owned(),
+        name: Some(key.to_owned()),
+        size: None,
+        hash: None,
+        hash_algorithm: None,
+        origin_path: None,
+        revision: None,
+    }
+}
+
+/// The revision recorded in the MDD file of `key` at `path`, if it has one.
+fn mdd_revision(key: &str, path: &Path) -> Result<Option<String>, RuntimeUpdateError> {
+    let path_str = path.to_str().ok_or_else(|| {
+        RuntimeUpdateError::StorageError(StorageError::Other(format!(
+            "file path for key '{key}' is not valid UTF-8"
+        )))
+    })?;
+    Ok(cda_database::mmap_and_decode_mdd(path_str)
+        .ok()
+        .and_then(|mdd| mdd.revision))
 }
 
 /// Lists all files in a collection, optionally enriching each item with size and hash metadata.
@@ -84,16 +118,7 @@ pub(crate) async fn list_collection_files(
     let mut items = Vec::with_capacity(keys.len());
 
     for key in &keys {
-        let mut item = BulkDataDescriptor {
-            id: key.clone(),
-            mimetype: "application/octet-stream".to_owned(),
-            name: Some(key.clone()),
-            size: None,
-            hash: None,
-            hash_algorithm: None,
-            origin_path: None,
-            revision: None,
-        };
+        let mut item = new_descriptor(key);
 
         if query.include_file_size {
             match collection.metadata(key).await {
@@ -121,15 +146,7 @@ pub(crate) async fn list_collection_files(
         }
 
         if query.include_revision {
-            let path = collection.file_path(key)?;
-            let path_str = path.to_str().ok_or_else(|| {
-                RuntimeUpdateError::StorageError(StorageError::Other(format!(
-                    "file path for key '{key}' is not valid UTF-8"
-                )))
-            })?;
-            item.revision = cda_database::mmap_and_decode_mdd(path_str)
-                .ok()
-                .and_then(|mdd| mdd.revision);
+            item.revision = mdd_revision(key, &collection.file_path(key)?)?;
         }
 
         items.push(item);
@@ -141,11 +158,76 @@ pub(crate) async fn list_collection_files(
     })
 }
 
+/// Describes the MDD files at `paths` in `database.dir` like [`list_collection_files`]
+/// describes a collection, keyed like the seed keys them.
+async fn describe_database_dir_files(
+    paths: &[PathBuf],
+    query: &RuntimeFilesQuery,
+) -> Result<Vec<BulkDataDescriptor>, RuntimeUpdateError> {
+    let mut items = Vec::with_capacity(paths.len());
+    for path in paths {
+        let key = database_name(path)?;
+        let mut item = new_descriptor(&key);
+
+        if query.include_file_size {
+            match tokio::fs::metadata(path).await {
+                Ok(meta) => item.size = Some(meta.len()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::warn!(path = %path.display(), "File vanished during iteration, skipping");
+                    continue;
+                }
+                Err(e) => return Err(StorageError::from(e).into()),
+            }
+        }
+
+        if let Some(hash) = query.include_hash {
+            match hash {
+                HashAlgorithm::Sha256 => {
+                    let data = match tokio::fs::read(path).await {
+                        Ok(data) => data,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            tracing::warn!(path = %path.display(), "File vanished during iteration, skipping");
+                            continue;
+                        }
+                        Err(e) => return Err(StorageError::from(e).into()),
+                    };
+                    item.hash = Some(to_hex(&Sha256::digest(&data)));
+                    item.hash_algorithm = Some(HashAlgorithm::Sha256);
+                }
+            }
+        }
+
+        if query.include_revision {
+            item.revision = mdd_revision(&key, path)?;
+        }
+
+        items.push(item);
+    }
+
+    Ok(items)
+}
+
+/// Returns the current databases, see [`current_database_location`].
+async fn get_current_items(
+    storage: &impl Storage,
+    database_dir: &Path,
+    query: &RuntimeFilesQuery,
+) -> Result<Vec<BulkDataDescriptor>, RuntimeUpdateError> {
+    match current_database_location(storage, database_dir).await? {
+        DatabaseLocation::Storage(collection) => {
+            Ok(list_collection_files(&*collection, query).await?.items)
+        }
+        DatabaseLocation::Dir(paths) => describe_database_dir_files(&paths, query).await,
+    }
+}
+
+/// Lists the current databases, see [`get_current_items`]. This is a read-only operation.
 pub(crate) async fn list_current_files(
     storage: &impl Storage,
+    database_dir: &Path,
     query: &RuntimeFilesQuery,
 ) -> Result<BulkDataList, RuntimeUpdateError> {
-    let items = get_collection_items(storage, &CollectionName::DiagnosticDatabase, query).await?;
+    let items = get_current_items(storage, database_dir, query).await?;
     Ok(BulkDataList {
         items,
         schema: None,
@@ -171,10 +253,14 @@ pub(crate) async fn list_backup_files(
 /// files which are only part of `runtimefiles-current` can still be deleted from the pending
 /// next-update state.
 ///
+/// On a fresh system, `DiagnosticDatabase` is seeded from `database_dir` first, see
+/// [`seed_if_nonexistent`](cda_database::storage::seed_if_nonexistent).
+///
 /// Returns [`RuntimeUpdateError::FileNotFound`] if the key does not exist in the `NextUpdate`
 /// collection (nor, when freshly initialized, in the current collection).
 pub(crate) async fn delete_nextupdate_file(
     storage: &(impl Storage + 'static),
+    database_dir: &Path,
     file_id: &str,
 ) -> Result<(), RuntimeUpdateError> {
     let key = file_id.to_lowercase();
@@ -191,6 +277,8 @@ pub(crate) async fn delete_nextupdate_file(
         ),
         _ => return Err(RuntimeUpdateError::InvalidFileType(file_id.to_string())),
     };
+
+    cda_database::storage::seed_if_nonexistent(storage, database_dir).await?;
 
     let next_already_exists = match storage.get_collection(&next_collection_name).await {
         Ok(_) => true,
@@ -282,8 +370,9 @@ pub(crate) async fn delete_all_backup(
 /// The logic is:
 /// - If the `NextUpdate` collection **exists** (even if empty), its contents represent the target
 ///   state - an empty `NextUpdate` means "delete all".
-/// - If the `NextUpdate` collection **does not exist** (`CollectionNotFound`), the contents of the
-///   current `DiagnosticDatabase` collection are returned instead.
+/// - If the `NextUpdate` collection **does not exist** (`CollectionNotFound`), the current
+///   databases are returned instead: the `DiagnosticDatabase` collection, or the files in
+///   `database_dir` while the storage has not been seeded yet.
 ///
 /// This is a **read-only** operation - no writes or transactions are performed.
 ///
@@ -292,16 +381,20 @@ pub(crate) async fn delete_all_backup(
 /// Returns [`RuntimeUpdateError`] if storage operations fail when reading collections.
 pub async fn compute_nextupdate_state(
     storage: &impl Storage,
+    database_dir: &Path,
     query: &RuntimeFilesQuery,
 ) -> Result<BulkDataList, RuntimeUpdateError> {
-    let mdd_items = get_nextupdate_or_current_items(
-        storage,
-        &CollectionName::DiagnosticDatabaseNextUpdate,
-        &CollectionName::DiagnosticDatabase,
-        query,
-    )
-    .await?;
-    let mut items = mdd_items;
+    let mut items = match storage
+        .get_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
+        .await
+    {
+        Ok(collection) => list_collection_files(&*collection, query).await?.items,
+        // No update staged yet: the next update mirrors the current databases.
+        Err(StorageError::CollectionNotFound(_)) => {
+            get_current_items(storage, database_dir, query).await?
+        }
+        Err(e) => return Err(RuntimeUpdateError::from(e)),
+    };
     items.sort_by(|a, b| a.id.cmp(&b.id));
 
     Ok(BulkDataList {
@@ -310,30 +403,12 @@ pub async fn compute_nextupdate_state(
     })
 }
 
-/// Returns the items of `next_collection` if it exists, otherwise falls back to the items of
-/// `current_collection`.
-///
-/// If no update has been staged yet (`next_collection` doesn't exist), the next update mirrors
-/// the currently active database.
-async fn get_nextupdate_or_current_items(
-    storage: &impl Storage,
-    next_collection: &CollectionName,
-    current_collection: &CollectionName,
-    query: &RuntimeFilesQuery,
-) -> Result<Vec<BulkDataDescriptor>, RuntimeUpdateError> {
-    match storage.get_collection(next_collection).await {
-        Ok(collection) => Ok(list_collection_files(&*collection, query).await?.items),
-        Err(StorageError::CollectionNotFound(_)) => {
-            get_collection_items(storage, current_collection, query).await
-        }
-        Err(e) => Err(RuntimeUpdateError::from(e)),
-    }
-}
-
 /// Upload MDD files into `DiagnosticDatabaseNextUpdate`.
 ///
-/// The collection is lazily initialized from the current database on first write. All other file
-/// types, including TOML configuration files, are rejected.
+/// The collection is lazily initialized from the current database on first write. On a fresh
+/// system, the current database is seeded from `database_dir` first, see
+/// [`seed_if_nonexistent`](cda_database::storage::seed_if_nonexistent). All other file types, including TOML
+/// configuration files, are rejected.
 ///
 /// Each file is written and committed individually. Immediately after each commit, the file's
 /// integrity is verified via `security_handler`. If verification fails, the failing file is
@@ -345,6 +420,7 @@ pub(crate) async fn upload_files<
 >(
     storage: &S,
     security_handler: &T,
+    database_dir: &Path,
     files: Vec<UploadFile>,
 ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
     let mut result = BulkDataCreatedList::default();
@@ -357,6 +433,8 @@ pub(crate) async fn upload_files<
     }) {
         return Err(RuntimeUpdateError::InvalidFileType(file.filename.clone()));
     }
+
+    cda_database::storage::seed_if_nonexistent(storage, database_dir).await?;
 
     // Check existence BEFORE begin_transaction (disk reads).
     let mdd_already_exists = storage
@@ -492,15 +570,17 @@ mod tests {
         runtime_update_api::{
             BulkDataCreatedList, HashAlgorithm, RuntimeFilesQuery, RuntimeUpdateError, UploadFile,
         },
-        storage_api::{Collection, CollectionName, RandomAccessData, Storage, StorageError},
+        storage_api::{
+            Collection, CollectionName, DirectFileAccess, RandomAccessData, Storage, StorageError,
+        },
     };
     use cda_storage::LocalStorage;
     use sha2::{Digest, Sha256};
 
     use super::{compute_nextupdate_state, compute_sha256, list_collection_files, upload_files};
     use crate::test_utils::{
-        MockLockProvider, MockSecurityHandler, make_storage, make_upload_files, make_valid_mdd,
-        make_valid_mdd_with_revision, write_file,
+        MockLockProvider, MockSecurityHandler, empty_database_dir, make_storage, make_upload_files,
+        make_valid_mdd, make_valid_mdd_with_revision, write_file,
     };
 
     async fn upload<S: cda_interfaces::storage_api::Storage + 'static>(
@@ -510,6 +590,7 @@ mod tests {
         upload_files::<S, MockSecurityHandler, MockLockProvider>(
             storage,
             &MockSecurityHandler::new(),
+            empty_database_dir(),
             files,
         )
         .await
@@ -566,6 +647,7 @@ mod tests {
             &RejectingSecurityHandler {
                 reject_type: reject_kind,
             },
+            empty_database_dir(),
             files,
         )
         .await
@@ -615,6 +697,7 @@ mod tests {
         upload_files::<S, RejectingByNameSecurityHandler, MockLockProvider>(
             storage,
             &RejectingByNameSecurityHandler { reject_filename },
+            empty_database_dir(),
             files,
         )
         .await
@@ -995,7 +1078,9 @@ mod tests {
         let (storage, _dir) = make_storage();
         let query = RuntimeFilesQuery::default();
 
-        let result = compute_nextupdate_state(&storage, &query).await.unwrap();
+        let result = compute_nextupdate_state(&storage, empty_database_dir(), &query)
+            .await
+            .unwrap();
 
         assert!(result.items.is_empty());
     }
@@ -1012,7 +1097,9 @@ mod tests {
         write_test_file_by_name(&storage, &*collection, "beta.mdd", b"beta content").await;
 
         let query = RuntimeFilesQuery::default();
-        let result = compute_nextupdate_state(&storage, &query).await.unwrap();
+        let result = compute_nextupdate_state(&storage, empty_database_dir(), &query)
+            .await
+            .unwrap();
 
         let mut ids: Vec<_> = result.items.iter().map(|i| i.id.clone()).collect();
         ids.sort();
@@ -1044,7 +1131,9 @@ mod tests {
             include_file_size: true,
             ..Default::default()
         };
-        let result = compute_nextupdate_state(&storage, &query).await.unwrap();
+        let result = compute_nextupdate_state(&storage, empty_database_dir(), &query)
+            .await
+            .unwrap();
 
         // NextUpdate exists -> only NextUpdate content is shown (snapshot model)
         assert_eq!(result.items.len(), 1);
@@ -1069,7 +1158,9 @@ mod tests {
         write_test_file_by_name(&storage, &*pending, "new_file.mdd", b"brand new").await;
 
         let query = RuntimeFilesQuery::default();
-        let result = compute_nextupdate_state(&storage, &query).await.unwrap();
+        let result = compute_nextupdate_state(&storage, empty_database_dir(), &query)
+            .await
+            .unwrap();
 
         // NextUpdate exists -> only NextUpdate content is shown (snapshot model)
         assert_eq!(result.items.len(), 1);
@@ -1099,7 +1190,9 @@ mod tests {
             include_hash: Some(HashAlgorithm::Sha256),
             ..Default::default()
         };
-        let result = compute_nextupdate_state(&storage, &query).await.unwrap();
+        let result = compute_nextupdate_state(&storage, empty_database_dir(), &query)
+            .await
+            .unwrap();
 
         assert_eq!(result.items.len(), 1);
         let Some(item) = result.items.first() else {
@@ -1125,7 +1218,9 @@ mod tests {
             .unwrap();
 
         let query = RuntimeFilesQuery::default();
-        let result = compute_nextupdate_state(&storage, &query).await.unwrap();
+        let result = compute_nextupdate_state(&storage, empty_database_dir(), &query)
+            .await
+            .unwrap();
         let mdd_ids: Vec<&str> = result
             .items
             .iter()
@@ -1152,12 +1247,14 @@ mod tests {
         write_test_file_by_name(&storage, &*db, "ecu1.mdd", b"data1").await;
         write_test_file_by_name(&storage, &*db, "ecu2.mdd", b"data2").await;
 
-        super::delete_nextupdate_file(&storage, "ecu1.mdd")
+        super::delete_nextupdate_file(&storage, empty_database_dir(), "ecu1.mdd")
             .await
             .expect("delete should succeed by initializing NextUpdate from current first");
 
         let query = RuntimeFilesQuery::default();
-        let result = compute_nextupdate_state(&storage, &query).await.unwrap();
+        let result = compute_nextupdate_state(&storage, empty_database_dir(), &query)
+            .await
+            .unwrap();
         let ids: Vec<&str> = result.items.iter().map(|i| i.id.as_str()).collect();
         assert!(
             !ids.contains(&"ecu1.mdd"),
@@ -1177,7 +1274,8 @@ mod tests {
             .await
             .unwrap();
 
-        let result = super::delete_nextupdate_file(&storage, "ghost.mdd").await;
+        let result =
+            super::delete_nextupdate_file(&storage, empty_database_dir(), "ghost.mdd").await;
         assert!(matches!(result, Err(RuntimeUpdateError::FileNotFound(_))));
     }
 
@@ -1191,7 +1289,7 @@ mod tests {
         write_test_file_by_name(&storage, &*next, "ecu1.mdd", b"data1").await;
         write_test_file_by_name(&storage, &*next, "ecu2.mdd", b"data2").await;
 
-        super::delete_nextupdate_file(&storage, "ecu1.mdd")
+        super::delete_nextupdate_file(&storage, empty_database_dir(), "ecu1.mdd")
             .await
             .unwrap();
 
@@ -1202,7 +1300,8 @@ mod tests {
     #[tokio::test]
     async fn delete_nextupdate_invalid_extension_returns_error() {
         let (storage, _dir) = make_storage();
-        let result = super::delete_nextupdate_file(&storage, "file.txt").await;
+        let result =
+            super::delete_nextupdate_file(&storage, empty_database_dir(), "file.txt").await;
         assert!(matches!(
             result,
             Err(RuntimeUpdateError::InvalidFileType(_))
@@ -1490,5 +1589,268 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, RuntimeUpdateError::ValidationFailed(_)));
+    }
+
+    /// A file in the test `database.dir`.
+    struct DirFile {
+        name: &'static str,
+        content: &'static [u8],
+    }
+
+    /// A `database.dir` holding `files`, plus a non-MDD file that must not be seeded.
+    fn database_dir_with(files: &[DirFile]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("database dir");
+        for file in files {
+            std::fs::write(dir.path().join(file.name), file.content).expect("write MDD file");
+        }
+        std::fs::write(dir.path().join("readme.txt"), b"not a database").expect("write file");
+        dir
+    }
+
+    async fn sorted_keys(storage: &LocalStorage, name: &CollectionName) -> Vec<String> {
+        let mut keys = storage
+            .get_collection(name)
+            .await
+            .expect("collection exists")
+            .list()
+            .await
+            .unwrap();
+        keys.sort();
+        keys
+    }
+
+    #[tokio::test]
+    async fn upload_seeds_current_from_database_dir() {
+        let (storage, _dir) = make_storage();
+        let database_dir = database_dir_with(&[
+            DirFile {
+                name: "ECU_A.mdd",
+                content: b"A",
+            },
+            DirFile {
+                name: "ecu_b.mdd",
+                content: b"B",
+            },
+        ]);
+
+        let mdd = make_valid_mdd("C");
+        upload_files::<_, MockSecurityHandler, MockLockProvider>(
+            &storage,
+            &MockSecurityHandler::new(),
+            database_dir.path(),
+            make_upload_files(&[("ecu_c.mdd", &mdd)]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            sorted_keys(&storage, &CollectionName::DiagnosticDatabase).await,
+            vec!["ecu_a.mdd", "ecu_b.mdd"],
+            "current must hold the databases loaded from database.dir"
+        );
+        assert_eq!(
+            sorted_keys(&storage, &CollectionName::DiagnosticDatabaseNextUpdate).await,
+            vec!["ecu_a.mdd", "ecu_b.mdd", "ecu_c.mdd"],
+            "the update must start from the databases loaded from database.dir"
+        );
+        let current = storage
+            .get_collection(&CollectionName::DiagnosticDatabase)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(current.file_path("ecu_a.mdd").unwrap()).unwrap(),
+            b"A",
+            "seeding must preserve the file content"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_nextupdate_seeds_current_from_database_dir() {
+        let (storage, _dir) = make_storage();
+        let database_dir = database_dir_with(&[
+            DirFile {
+                name: "ecu_a.mdd",
+                content: b"A",
+            },
+            DirFile {
+                name: "ecu_b.mdd",
+                content: b"B",
+            },
+        ]);
+
+        super::delete_nextupdate_file(&storage, database_dir.path(), "ecu_a.mdd")
+            .await
+            .expect("a database from database.dir can be deleted from the first update");
+
+        assert_eq!(
+            sorted_keys(&storage, &CollectionName::DiagnosticDatabase).await,
+            vec!["ecu_a.mdd", "ecu_b.mdd"]
+        );
+        assert_eq!(
+            sorted_keys(&storage, &CollectionName::DiagnosticDatabaseNextUpdate).await,
+            vec!["ecu_b.mdd"]
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_upload_does_not_seed() {
+        let (storage, _dir) = make_storage();
+        let database_dir = database_dir_with(&[DirFile {
+            name: "ecu_a.mdd",
+            content: b"A",
+        }]);
+
+        let result = upload_files::<_, MockSecurityHandler, MockLockProvider>(
+            &storage,
+            &MockSecurityHandler::new(),
+            database_dir.path(),
+            make_upload_files(&[("bad.txt", b"not an mdd")]),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(RuntimeUpdateError::InvalidFileType(_))
+        ));
+        assert!(matches!(
+            storage
+                .get_collection(&CollectionName::DiagnosticDatabase)
+                .await,
+            Err(StorageError::CollectionNotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn listings_show_database_dir_until_seeded() {
+        let (storage, _dir) = make_storage();
+        let database_dir = database_dir_with(&[DirFile {
+            name: "ECU_A.mdd",
+            content: b"A",
+        }]);
+        let query = RuntimeFilesQuery {
+            include_file_size: true,
+            include_hash: Some(HashAlgorithm::Sha256),
+            ..Default::default()
+        };
+
+        let current = super::list_current_files(&storage, database_dir.path(), &query)
+            .await
+            .unwrap();
+        let [item] = current.items.as_slice() else {
+            panic!("current must list the database from database.dir: {current:?}");
+        };
+        assert_eq!(item.id, "ecu_a.mdd");
+        assert_eq!(item.size, Some(1));
+        assert_eq!(
+            item.hash.as_deref(),
+            Some(format!("{:x}", Sha256::digest(b"A")).as_str())
+        );
+        let next = compute_nextupdate_state(&storage, database_dir.path(), &query)
+            .await
+            .unwrap();
+        let ids = |list: &super::BulkDataList| {
+            list.items.iter().map(|i| i.id.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&next), ids(&current), "nextupdate must mirror current");
+
+        // Once seeded, the storage is listed, even when it is empty.
+        let mut tx = storage.begin_transaction().unwrap();
+        storage
+            .create_collection(&mut tx, &CollectionName::DiagnosticDatabase)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let current = super::list_current_files(&storage, database_dir.path(), &query)
+            .await
+            .unwrap();
+        assert!(current.items.is_empty(), "{current:?}");
+    }
+
+    #[tokio::test]
+    async fn dir_listing_skips_vanished_files() {
+        let database_dir = database_dir_with(&[DirFile {
+            name: "ecu_a.mdd",
+            content: b"A",
+        }]);
+        let vanished = database_dir.path().join("vanished.mdd");
+        let query = RuntimeFilesQuery {
+            include_file_size: true,
+            ..Default::default()
+        };
+
+        let items = super::describe_database_dir_files(
+            &[database_dir.path().join("ecu_a.mdd"), vanished],
+            &query,
+        )
+        .await
+        .unwrap();
+
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["ecu_a.mdd"]);
+    }
+
+    #[tokio::test]
+    async fn upload_with_missing_database_dir_fails_without_seeding() {
+        let (storage, _dir) = make_storage();
+        let missing = std::path::Path::new("/nonexistent/cda-database-dir");
+        let mdd = make_valid_mdd("A");
+
+        let result = upload_files::<_, MockSecurityHandler, MockLockProvider>(
+            &storage,
+            &MockSecurityHandler::new(),
+            missing,
+            make_upload_files(&[("ecu_a.mdd", &mdd)]),
+        )
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(RuntimeUpdateError::StorageError(StorageError::Io(ref e)))
+                    if e.kind() == std::io::ErrorKind::NotFound
+            ),
+            "{result:?}"
+        );
+        for name in [
+            CollectionName::DiagnosticDatabase,
+            CollectionName::DiagnosticDatabaseNextUpdate,
+        ] {
+            assert!(
+                matches!(
+                    storage.get_collection(&name).await,
+                    Err(StorageError::CollectionNotFound(_))
+                ),
+                "{name} must not exist, so the seed runs once the directory appears"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_nextupdate_with_missing_database_dir_fails_without_seeding() {
+        let (storage, _dir) = make_storage();
+        let missing = std::path::Path::new("/nonexistent/cda-database-dir");
+
+        let result = super::delete_nextupdate_file(&storage, missing, "ecu_a.mdd").await;
+
+        assert!(
+            matches!(
+                result,
+                Err(RuntimeUpdateError::StorageError(StorageError::Io(ref e)))
+                    if e.kind() == std::io::ErrorKind::NotFound
+            ),
+            "{result:?}"
+        );
+        for name in [
+            CollectionName::DiagnosticDatabase,
+            CollectionName::DiagnosticDatabaseNextUpdate,
+        ] {
+            assert!(
+                matches!(
+                    storage.get_collection(&name).await,
+                    Err(StorageError::CollectionNotFound(_))
+                ),
+                "{name} must not exist, so the seed runs once the directory appears"
+            );
+        }
     }
 }
