@@ -2412,6 +2412,109 @@ pub(crate) fn create_ecu_manager_with_routine_control_service()
     new_ecu_manager(db)
 }
 
+/// Creates an ECU manager whose database contains two `RoutineControl` (SID 0x31) `Start`
+/// services whose short names collide under a `starts_with` prefix match, but not under an
+/// exact match of the trimmed base name:
+/// - `FluxCapacitor_Start` with routine identifier `0x0271`
+/// - `FluxCapacitorOverdrive_Start` with routine identifier `0x0700`
+///
+/// Used to regression-test that `lookup_diag_service` resolves the routine by exact
+/// (trimmed) name rather than by prefix, since `"FluxCapacitorOverdrive_Start"` starts with
+/// `"FluxCapacitor"`.
+pub(crate) fn create_ecu_manager_with_colliding_routine_control_services()
+-> crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData> {
+    const SERVICE_ID: u8 = 0x31;
+
+    let mut db_builder = EcuDataBuilder::new();
+    let protocol_name = Protocol::default().to_string();
+    let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
+
+    // Service 1: "FluxCapacitorOverdrive_Start" (RID 0x0700) - the colliding superstring,
+    // built first so a naive `starts_with` match would encounter it before the intended
+    // service below.
+    let sid_param = db_builder.create_coded_const_param(
+        "SID_RQ",
+        &SERVICE_ID.to_string(),
+        0,
+        0,
+        8,
+        DataType::UInt32,
+    );
+    let subfunction_param = db_builder.create_coded_const_param(
+        "RoutineControlType",
+        &subfunction_ids::routine::START.to_string(),
+        1,
+        0,
+        8,
+        DataType::UInt32,
+    );
+    let routine_id_param = db_builder.create_coded_const_param(
+        "RoutineIdentifier",
+        &0x0700u16.to_string(),
+        2,
+        0,
+        16,
+        DataType::UInt32,
+    );
+    let request = db_builder.create_request(
+        Some(vec![sid_param, subfunction_param, routine_id_param]),
+        None,
+    );
+    let diag_comm = db_builder.create_diag_comm(DiagCommParams {
+        short_name: "FluxCapacitorOverdrive_Start",
+        diag_class_type: DiagClassType::START_COMM,
+        protocols: Some(vec![protocol]),
+        ..Default::default()
+    });
+    let flux_capacitor_overdrive =
+        new_diag_service!(db_builder, diag_comm, request, vec![], vec![]);
+
+    // Service 2: "FluxCapacitor_Start" (RID 0x0271) - the intended target of a lookup for
+    // base name "fluxcapacitor".
+    let sid_param = db_builder.create_coded_const_param(
+        "SID_RQ",
+        &SERVICE_ID.to_string(),
+        0,
+        0,
+        8,
+        DataType::UInt32,
+    );
+    let subfunction_param = db_builder.create_coded_const_param(
+        "RoutineControlType",
+        &subfunction_ids::routine::START.to_string(),
+        1,
+        0,
+        8,
+        DataType::UInt32,
+    );
+    let routine_id_param = db_builder.create_coded_const_param(
+        "RoutineIdentifier",
+        &0x0271u16.to_string(),
+        2,
+        0,
+        16,
+        DataType::UInt32,
+    );
+    let request = db_builder.create_request(
+        Some(vec![sid_param, subfunction_param, routine_id_param]),
+        None,
+    );
+    let diag_comm = db_builder.create_diag_comm(DiagCommParams {
+        short_name: "FluxCapacitor_Start",
+        diag_class_type: DiagClassType::START_COMM,
+        protocols: Some(vec![protocol]),
+        ..Default::default()
+    });
+    let flux_capacitor = new_diag_service!(db_builder, diag_comm, request, vec![], vec![]);
+
+    let db = finish_db!(
+        db_builder,
+        protocol,
+        vec![flux_capacitor_overdrive, flux_capacitor]
+    );
+    new_ecu_manager(db)
+}
+
 /// Build an ECU manager with two SID 0x27 (`SecurityAccess`) `RequestSeed` services,
 /// one `SendKey` service, and a SECURITY state chart.
 ///
