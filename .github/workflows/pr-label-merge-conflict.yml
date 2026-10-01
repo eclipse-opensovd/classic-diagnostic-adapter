@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: PR Merge Conflict Label
+
+on:
+  push:
+    branches: [main, 'release/**']
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+    branches: [main, 'release/**']
+  schedule:
+    - cron: "30 3 * * *" # Daily at 03:30 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: merge-conflict-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  update-merge-conflict-label:
+    runs-on: ubuntu-latest
+    name: "Update merge conflict label"
+    steps:
+      - name: Update merge conflict label
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const MERGE_CONFLICT = 'merge conflict';
+            const MAX_ATTEMPTS = 6;
+            const RETRY_DELAY_MS = 5000;
+            const { owner, repo } = context.repo;
+
+            const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+            async function addLabel(prNumber, label) {
+              try {
+                await github.rest.issues.addLabels({
+                  owner, repo, issue_number: prNumber, labels: [label],
+                });
+                core.info(`#${prNumber}: added label "${label}"`);
+              } catch (e) {
+                core.warning(`#${prNumber}: failed to add label "${label}": ${e.message}`);
+              }
+            }
+
+            async function removeLabel(prNumber, label) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner, repo, issue_number: prNumber, name: label,
+                });
+                core.info(`#${prNumber}: removed label "${label}"`);
+              } catch (e) {
+                if (e.status !== 404) {
+                  core.warning(`#${prNumber}: failed to remove label "${label}": ${e.message}`);
+                }
+              }
+            }
+
+            async function getMergeableState(prNumber) {
+              for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+                const { repository } = await github.graphql(`
+                  query($owner: String!, $repo: String!, $pr: Int!) {
+                    repository(owner: $owner, name: $repo) {
+                      pullRequest(number: $pr) { mergeable }
+                    }
+                  }
+                `, { owner, repo, pr: prNumber });
+
+                const state = repository.pullRequest.mergeable;
+                if (state !== 'UNKNOWN') return state;
+
+                core.info(`#${prNumber}: mergeable state UNKNOWN (attempt ${attempt}/${MAX_ATTEMPTS})`);
+                if (attempt < MAX_ATTEMPTS) await sleep(RETRY_DELAY_MS);
+              }
+              return 'UNKNOWN';
+            }
+
+            async function listOpenPrs(base) {
+              return github.paginate(github.rest.pulls.list, {
+                owner, repo, state: 'open', base, per_page: 100,
+              });
+            }
+
+            let prNumbers = [];
+            if (context.eventName === 'pull_request_target') {
+              prNumbers = [context.payload.pull_request.number];
+            } else if (context.eventName === 'push') {
+              const base = context.ref.replace(/^refs\/heads\//, '');
+              prNumbers = (await listOpenPrs(base)).map(pr => pr.number);
+            } else {
+              const all = await github.paginate(github.rest.pulls.list, {
+                owner, repo, state: 'open', per_page: 100,
+              });
+              prNumbers = all
+                .filter(pr => pr.base.ref === 'main' || pr.base.ref.startsWith('release/'))
+                .map(pr => pr.number);
+            }
+
+            core.info(`Checking ${prNumbers.length} PR(s): ${prNumbers.join(', ')}`);
+
+            for (const prNumber of prNumbers) {
+              const state = await getMergeableState(prNumber);
+              if (state === 'CONFLICTING') {
+                await addLabel(prNumber, MERGE_CONFLICT);
+              } else if (state === 'MERGEABLE') {
+                await removeLabel(prNumber, MERGE_CONFLICT);
+              } else {
+                core.warning(`#${prNumber}: mergeable state still UNKNOWN, leaving label unchanged`);
+              }
+            }
