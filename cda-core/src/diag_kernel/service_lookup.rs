@@ -18,9 +18,7 @@
 //! traversing the diagnostic database hierarchy and resolving services.
 
 use cda_database::datatypes;
-use cda_interfaces::{
-    DiagServiceError, HashMap, STRINGS, StringId, util::starts_with_ignore_ascii_case,
-};
+use cda_interfaces::{DiagServiceError, HashMap, STRINGS, StringId};
 use cda_plugin_security::SecurityPlugin;
 use tokio::sync::RwLock;
 
@@ -47,13 +45,10 @@ struct CachedService {
     location: Option<CacheLocation>,
 }
 
-fn diag_comm_short_name_starts_with(
-    service: &datatypes::DiagService<'_>,
-    name_prefix: &str,
-) -> bool {
+fn diag_comm_short_name_matches(service: &datatypes::DiagService<'_>, name: &str) -> bool {
     service.diag_comm().is_some_and(|dc| {
         dc.short_name()
-            .is_some_and(|name| starts_with_ignore_ascii_case(name, name_prefix))
+            .is_some_and(|short_name| short_name.eq_ignore_ascii_case(name))
     })
 }
 
@@ -69,6 +64,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
     /// `DiagComm::subfunction_id` and the database service's subfunction value
     /// before comparing.  When it is `None`, [`DEFAULT_SUBFUNCTION_MASK`] (`0x7F`) is
     /// used, which masks out the suppress-positive-response bit (bit 7).
+    ///
+    /// When `diag_comm.subfunction_id` is `Some`, `diag_comm.name` must be the
+    /// routine's base name: it is compared exactly (case-insensitive) against each
+    /// service's short name after stripping affixes via `trim_routine_name`.
+    /// Otherwise the full expected short name (`lookup_name` or the name with its
+    /// action affix applied) must match exactly (case-insensitive).
     pub(in crate::diag_kernel) async fn lookup_diag_service(
         &self,
         diag_comm: &cda_interfaces::DiagComm,
@@ -87,13 +88,20 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
             let prefixes = diag_comm.type_.service_prefixes();
             let predicate = |service: &datatypes::DiagService<'_>| {
-                diag_comm_short_name_starts_with(service, &base_name)
-                    && service
-                        .request_id()
-                        .is_some_and(|sid| prefixes.contains(&sid))
-                    && service
-                        .request_sub_function_id()
-                        .is_some_and(|(id, _)| (id & mask_u32) == (u32::from(sf_id) & mask_u32))
+                let (Some(name), Some(sid), Some((service_sf_id, _))) = (
+                    service.diag_comm().and_then(|dc| dc.short_name()),
+                    service.request_id(),
+                    service.request_sub_function_id(),
+                ) else {
+                    return false;
+                };
+
+                prefixes.contains(&sid)
+                    && (service_sf_id & mask_u32) == (u32::from(sf_id) & mask_u32)
+                    && self
+                        .database_naming_convention
+                        .trim_routine_name(name)
+                        .eq_ignore_ascii_case(&base_name)
             };
 
             if let Some(fg_name) = functional_group_name {
@@ -158,9 +166,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
             })
             .to_lowercase();
 
+        // `lookup_name` is the full expected short name of the target service. An exact
+        // (case-insensitive) match is required to avoid ambiguity with similarly named services.
         let prefixes = diag_comm.type_.service_prefixes();
         let predicate = |service: &datatypes::DiagService<'_>| {
-            diag_comm_short_name_starts_with(service, &lookup_name)
+            diag_comm_short_name_matches(service, &lookup_name)
                 && service
                     .request_id()
                     .is_some_and(|sid| prefixes.contains(&sid))
@@ -796,7 +806,9 @@ mod tests {
 
     use super::*;
     use crate::diag_kernel::test_utils::ecu_manager_builder::{
-        create_ecu_manager_variant_detection, create_ecu_manager_with_routine_control_service,
+        create_ecu_manager_variant_detection,
+        create_ecu_manager_with_colliding_routine_control_services,
+        create_ecu_manager_with_routine_control_service,
     };
 
     #[tokio::test]
@@ -1014,5 +1026,39 @@ mod tests {
             }
             other => panic!("Expected NotFound error, got: {other:?}"),
         }
+    }
+
+    /// Regression test for a routine-name prefix collision: `lookup_diag_service` must
+    /// resolve a routine by its exact (affix-trimmed) short name rather than by a
+    /// `starts_with` prefix match. Without this, looking up `"fluxcapacitor"` could
+    /// incorrectly resolve to `FluxCapacitorOverdrive_Start` (RID `0x0700`) instead of the
+    /// intended `FluxCapacitor_Start` (RID `0x0271`), since the former's short name starts
+    /// with the latter's base name.
+    #[tokio::test]
+    async fn test_lookup_diag_service_routine_name_prefix_collision() {
+        let ecu_manager = create_ecu_manager_with_colliding_routine_control_services();
+
+        let diag_comm = DiagComm {
+            name: "fluxcapacitor".to_owned(),
+            type_: cda_interfaces::DiagCommType::Operations,
+            subfunction_id: Some(subfunction_ids::routine::START),
+            lookup_name: None,
+        };
+
+        let service = ecu_manager
+            .lookup_diag_service(&diag_comm, None, None)
+            .await
+            .expect("Expected lookup to succeed");
+
+        let resolved_short_name = service
+            .diag_comm()
+            .and_then(|dc| dc.short_name())
+            .expect("Expected resolved service to have a short name");
+
+        assert_eq!(
+            resolved_short_name, "FluxCapacitor_Start",
+            "Expected lookup to resolve FluxCapacitor_Start (RID 0x0271), not the colliding \
+             FluxCapacitorOverdrive_Start (RID 0x0700)"
+        );
     }
 }
