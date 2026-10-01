@@ -31,7 +31,7 @@ pub trait Payload {
     fn get_data_map(&self) -> HashMap<String, serde_json::Value>;
 }
 
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, schemars::JsonSchema, serde::Deserialize)]
 pub struct Resource {
     pub href: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -56,7 +56,7 @@ impl<T> Default for Items<T> {
     }
 }
 
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, schemars::JsonSchema, serde::Deserialize)]
 pub struct ResourceResponse {
     pub items: Vec<Resource>,
     #[schemars(skip)]
@@ -64,11 +64,14 @@ pub struct ResourceResponse {
     pub schema: Option<schemars::Schema>,
 }
 
-#[derive(Serialize, Debug, schemars::JsonSchema)]
+#[derive(Serialize, Debug, schemars::JsonSchema, serde::Deserialize)]
+// Without the explicit bound, `#[serde(default)]` makes serde require
+// `Default` for the type parameters when deserializing.
+#[serde(bound(deserialize = "T: serde::Deserialize<'de>"))]
 pub struct ObjectDataItem<T> {
     pub id: String,
     pub data: serde_json::Map<String, serde_json::Value>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<DataError<T>>,
     #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,7 +84,7 @@ pub struct ArrayDataItem {
     pub data: Vec<serde_json::Value>,
 }
 
-#[derive(Deserialize, Debug, schemars::JsonSchema)]
+#[derive(Deserialize, Debug, schemars::JsonSchema, serde::Serialize)]
 pub struct IncludeSchemaQuery {
     #[serde(rename = "include-schema", default)]
     pub include_schema: bool,
@@ -93,7 +96,7 @@ pub mod sovd2uds {
     pub use cda_interfaces::runtime_update_api::{BulkDataDescriptor, HashAlgorithm};
     use serde::Serialize;
 
-    #[derive(Serialize, schemars::JsonSchema)]
+    #[derive(Debug, Serialize, schemars::JsonSchema, serde::Deserialize)]
     pub struct FileList {
         #[serde(rename = "items")]
         pub files: Vec<BulkDataDescriptor>,
@@ -110,14 +113,14 @@ pub mod common {
         use serde::{Deserialize, Serialize};
 
         /// A single item in an operation IDs collection.
-        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         pub struct OperationIdItem {
             pub id: String,
         }
 
         /// A single item in an operations collection.
         /// Spec Table 169 (`OperationDescription`).
-        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         pub struct OperationCollectionItem {
             /// Trimmed short-name used as the service identifier.
             pub id: String,
@@ -134,7 +137,7 @@ pub mod common {
         /// Query parameters for
         /// - `POST .../operations/{service}/executions`.
         /// - `GET .../operations/{service}/executions/{id}`.
-        #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Default, Deserialize, schemars::JsonSchema, serde::Serialize)]
         pub struct OperationQuery {
             #[serde(rename = "include-schema", default)]
             pub include_schema: bool,
@@ -144,7 +147,7 @@ pub mod common {
         }
 
         /// Query parameters for `DELETE .../operations/{service}/executions/{id}`.
-        #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Default, Deserialize, schemars::JsonSchema, serde::Serialize)]
         pub struct OperationDeleteQuery {
             #[serde(rename = "include-schema", default)]
             pub include_schema: bool,
@@ -176,7 +179,7 @@ pub mod common {
             use crate::Items;
 
             /// Used in the GET `/components/ecu/{ecu_id|functional_group}/modes/{mode_id}` endpoint
-            #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+            #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
             pub struct Mode<T> {
                 /// The name of the mode, optional in accordance with sovd standard
                 pub name: Option<String>,
@@ -192,7 +195,7 @@ pub mod common {
                 pub schema: Option<schemars::Schema>,
             }
 
-            #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+            #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
             pub struct ModeCollectionItem {
                 /// The resource identifier of the mode on an entity
                 pub id: String,

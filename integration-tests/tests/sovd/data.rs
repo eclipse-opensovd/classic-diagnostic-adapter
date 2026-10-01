@@ -11,13 +11,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use http::{Method, StatusCode};
+use http::StatusCode;
 
 use crate::{
-    sovd::{ECU_FLXC1000_DATA_ENDPOINT, ECU_FLXC1000_VIN_ENDPOINT},
+    sovd::ECU_FLXC1000,
     util::{
         ecusim::{self, EcuSim},
-        http::send_authenticated_cda_request,
         test_env::TestEnv,
     },
 };
@@ -55,19 +54,17 @@ async fn test_wrong_did_in_response_returns_504() {
 
     // Attempt to read the VIN data from FLXC1000.
     // CDA should detect the DID mismatch and return 504 Gateway Timeout.
-    let result = send_authenticated_cda_request(
-        &test_env,
-        ECU_FLXC1000_VIN_ENDPOINT,
-        StatusCode::GATEWAY_TIMEOUT,
-        Method::GET,
-        None,
-        None,
-    )
-    .await;
-
-    assert!(
-        result.is_ok(),
-        "Expected 504 Gateway Timeout when ECU responds with wrong DID, got: {result:?}"
+    let err = test_env
+        .client()
+        .component(ECU_FLXC1000)
+        .data("vindataidentifier")
+        .get()
+        .await
+        .expect_err("the CDA accepted an ECU response with a wrong DID");
+    assert_eq!(
+        err.status(),
+        Some(StatusCode::GATEWAY_TIMEOUT),
+        "Expected 504 Gateway Timeout when ECU responds with wrong DID, got: {err}"
     );
 
     cleanup(&test_env.ecu_sim).await;
@@ -106,19 +103,17 @@ async fn test_short_ecu_response_returns_error() {
 
     // Attempt to read the FluxCapacitorPowerConsumption data from FLXC1000.
     // CDA should detect the truncated payload and return an error, not 204 No Content.
-    let result = send_authenticated_cda_request(
-        &test_env,
-        &format!("{ECU_FLXC1000_DATA_ENDPOINT}/fluxcapacitorpowerconsumption"),
-        StatusCode::BAD_REQUEST,
-        Method::GET,
-        None,
-        None,
-    )
-    .await;
-
-    assert!(
-        result.is_ok(),
-        "Expected 400 Bad Request when ECU responds with truncated payload, got: {result:?}"
+    let err = test_env
+        .client()
+        .component(ECU_FLXC1000)
+        .data("fluxcapacitorpowerconsumption")
+        .get()
+        .await
+        .expect_err("the CDA accepted a truncated ECU response");
+    assert_eq!(
+        err.status(),
+        Some(StatusCode::BAD_REQUEST),
+        "Expected 400 Bad Request when ECU responds with truncated payload, got: {err}"
     );
 
     cleanup_truncated(&test_env.ecu_sim).await;

@@ -12,27 +12,34 @@
  */
 use std::{collections::HashMap, time::Duration};
 
-use http::{Method, StatusCode};
-use serde::de::DeserializeOwned;
+use http::StatusCode;
 use serde_json::json;
-use sovd_interfaces::components::ecu::modes::{
-    self, dtcsetting, security_and_session::put::RequestSeedResponse,
+use sovd_interfaces::{
+    common::modes::{COMM_CONTROL_ID, SECURITY_ID, SESSION_ID},
+    components::{
+        ComponentQuery,
+        ecu::{
+            Ecu, SdSdg, ServicesSdgs, State,
+            modes::{
+                commctrl,
+                security_and_session::{
+                    self,
+                    put::{ModeKey, RequestSeedResponse, SessionRequest},
+                },
+            },
+        },
+    },
 };
 
 use crate::{
+    client::{self, components::Component},
     sovd::{
         self, ECU_FLXC1000, ECU_FSNR2000, ECU_HOVR4000, ECU_JGWT5000, ECU_TMCC3000,
-        compute_security_key, ecu_status, force_variant_detection, get_ecu_component, put_mode,
+        compute_security_key,
     },
     util::{
-        TestingError,
         ecusim::{self},
-        endpoints::SOVD2UDS_NETWORK_STRUCTURE,
-        http::{
-            QueryParams, extract_field_from_json, response_to_json, response_to_t,
-            send_authenticated_cda_request, send_cda_request,
-        },
-        locks::{self, create_lock, lock_operation},
+        endpoints::ECU_FLXCNG1000,
         test_env::{TestEnv, skip_for_can, skip_for_doip},
     },
 };
@@ -41,21 +48,20 @@ use crate::{
 /// component listing (served from the loaded MDD even when the ECU is dead),
 /// this request only succeeds if the ECU actually answers on the bus, so it
 /// proves end-to-end liveness.
-async fn assert_ecu_answers_on_bus(test_env: &TestEnv, ecu_endpoint: &str) {
-    let response = send_authenticated_cda_request(
-        test_env,
-        &format!("{ecu_endpoint}/data/identification"),
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await
-    .expect("live Identification read over the bus should succeed");
-    let json = response_to_json(&response).expect("data response should be JSON");
+async fn assert_ecu_answers_on_bus(test_env: &TestEnv, ecu: &str) {
+    let item = test_env
+        .client()
+        .component(ecu)
+        .data("identification")
+        .get()
+        .await
+        .expect("live Identification read over the bus should succeed")
+        .expect_status(StatusCode::OK)
+        .into_body();
+    let data = serde_json::Value::Object(item.data);
     assert!(
-        json.to_string().contains("Identification"),
-        "data response should contain the Identification parameter: {json}"
+        data.to_string().contains("Identification"),
+        "data response should contain the Identification parameter: {data}"
     );
 }
 
@@ -65,26 +71,20 @@ async fn assert_ecu_answers_on_bus(test_env: &TestEnv, ecu_endpoint: &str) {
 async fn test_tmcc3000_ecu_online() {
     let test_env = TestEnv::builder().await.unwrap();
 
-    let json = get_ecu_component(
-        &test_env.config,
-        sovd::ECU_TMCC3000_ENDPOINT,
-        StatusCode::OK,
-        None,
-    )
-    .await
-    .expect("TMCC3000 component should be reachable via SOVD API");
-
-    let name = json
-        .get("name")
-        .and_then(|v| v.as_str())
-        .expect("Response should contain 'name' field");
+    let ecu = test_env
+        .client()
+        .component(ECU_TMCC3000)
+        .get()
+        .await
+        .expect("TMCC3000 component should be reachable via SOVD API")
+        .expect_status(StatusCode::OK);
     assert_eq!(
-        name.to_lowercase(),
+        ecu.name.to_lowercase(),
         ECU_TMCC3000,
         "Component name should be tmcc3000"
     );
 
-    assert_ecu_answers_on_bus(&test_env, sovd::ECU_TMCC3000_ENDPOINT).await;
+    assert_ecu_answers_on_bus(&test_env, ECU_TMCC3000).await;
 }
 
 /// HOVR4000 uses a non-default protocol (`DMC_DoIP`) in its MDD. The global
@@ -95,26 +95,20 @@ async fn test_tmcc3000_ecu_online() {
 async fn test_hovr4000_per_ecu_protocol_override() {
     let test_env = TestEnv::builder().await.unwrap();
 
-    let json = get_ecu_component(
-        &test_env.config,
-        sovd::ECU_HOVR4000_ENDPOINT,
-        StatusCode::OK,
-        None,
-    )
-    .await
-    .expect("HOVR4000 component should be reachable when per-ECU protocol override is set");
-
-    let name = json
-        .get("name")
-        .and_then(|v| v.as_str())
-        .expect("Response should contain 'name' field");
+    let ecu = test_env
+        .client()
+        .component(ECU_HOVR4000)
+        .get()
+        .await
+        .expect("HOVR4000 component should be reachable when per-ECU protocol override is set")
+        .expect_status(StatusCode::OK);
     assert_eq!(
-        name.to_lowercase(),
+        ecu.name.to_lowercase(),
         ECU_HOVR4000,
         "Component name should be hovr4000"
     );
 
-    assert_ecu_answers_on_bus(&test_env, sovd::ECU_HOVR4000_ENDPOINT).await;
+    assert_ecu_answers_on_bus(&test_env, ECU_HOVR4000).await;
 }
 
 /// JGWT5000 has a non-default protocol (`DMC_DoIP`) in its MDD but no per-ECU
@@ -124,26 +118,22 @@ async fn test_hovr4000_per_ecu_protocol_override() {
 async fn test_jgwt5000_ignore_protocol_with_db_protocol() {
     let test_env = TestEnv::builder().await.unwrap();
 
-    let json = get_ecu_component(
-        &test_env.config,
-        sovd::ECU_JGWT5000_ENDPOINT,
-        StatusCode::OK,
-        None,
-    )
-    .await
-    .expect("JGWT5000 component should be reachable with ignore_protocol and no protocol override");
-
-    let name = json
-        .get("name")
-        .and_then(|v| v.as_str())
-        .expect("Response should contain 'name' field");
+    let ecu = test_env
+        .client()
+        .component(ECU_JGWT5000)
+        .get()
+        .await
+        .expect(
+            "JGWT5000 component should be reachable with ignore_protocol and no protocol override",
+        )
+        .expect_status(StatusCode::OK);
     assert_eq!(
-        name.to_lowercase(),
+        ecu.name.to_lowercase(),
         ECU_JGWT5000,
         "Component name should be jgwt5000"
     );
 
-    assert_ecu_answers_on_bus(&test_env, sovd::ECU_JGWT5000_ENDPOINT).await;
+    assert_ecu_answers_on_bus(&test_env, ECU_JGWT5000).await;
 }
 
 /// A CAN-only ECU must be usable purely from configuration: TMCC3000's MDD
@@ -163,51 +153,41 @@ async fn test_can_only_ecu_from_configuration() {
     let test_env = TestEnv::builder().await.unwrap();
 
     // Live read proves the ECU answers on the bus at all.
-    assert_ecu_answers_on_bus(&test_env, sovd::ECU_TMCC3000_ENDPOINT).await;
+    assert_ecu_answers_on_bus(&test_env, ECU_TMCC3000).await;
 
     // The network structure must serve TMCC3000 behind a CAN network address
     // (can:// scheme) carrying the configured request/response CAN IDs.
-    let response = send_cda_request(
-        &test_env.config,
-        SOVD2UDS_NETWORK_STRUCTURE,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-        None,
-    )
-    .await
-    .expect("network structure should be readable");
-    let json = response_to_json(&response).expect("network structure should be JSON");
-    let gateways: Vec<&serde_json::Value> = json
-        .get("data")
-        .and_then(|d| d.as_array())
-        .map(|structures| {
-            structures
-                .iter()
-                .filter_map(|ns| ns.get("Gateways").and_then(|g| g.as_array()))
-                .flatten()
-                .collect()
-        })
-        .unwrap_or_default();
+    let network_structure = test_env
+        .anonymous_client()
+        .sovd2uds()
+        .network_structure()
+        .await
+        .expect("network structure should be readable")
+        .expect_status(StatusCode::OK);
+    let gateways: Vec<_> = network_structure
+        .data
+        .iter()
+        .flat_map(|structure| &structure.gateways)
+        .collect();
     let tmcc3000_gateway = gateways
         .iter()
-        .find(|gw| {
-            gw.get("Ecus")
-                .and_then(|ecus| ecus.as_array())
-                .is_some_and(|ecus| {
-                    ecus.iter().any(|ecu| {
-                        ecu.get("Qualifier")
-                            .and_then(|q| q.as_str())
-                            .is_some_and(|q| q.eq_ignore_ascii_case(ECU_TMCC3000))
-                    })
-                })
+        .find(|gateway| {
+            gateway
+                .ecus
+                .iter()
+                .any(|ecu| ecu.qualifier.eq_ignore_ascii_case(ECU_TMCC3000))
         })
-        .unwrap_or_else(|| panic!("TMCC3000 missing from network structure: {json}"));
-    let network_address = tmcc3000_gateway
-        .get("NetworkAddress")
-        .and_then(|a| a.as_str())
-        .expect("gateway should have a network address");
+        .unwrap_or_else(|| {
+            let gateways: Vec<_> = gateways
+                .iter()
+                .map(|gateway| {
+                    let ecus: Vec<_> = gateway.ecus.iter().map(|ecu| &ecu.qualifier).collect();
+                    format!("{} {ecus:?}", gateway.name)
+                })
+                .collect();
+            panic!("TMCC3000 missing from network structure, gateways: {gateways:?}")
+        });
+    let network_address = &tmcc3000_gateway.network_address;
     assert!(
         network_address.starts_with("can://"),
         "TMCC3000 should be served over CAN, got network address {network_address}"
@@ -231,65 +211,52 @@ async fn test_ecu_session_switching() {
         return;
     }
     let test_env = TestEnv::builder().await.unwrap();
-    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let component = test_env.client().component(ECU_FLXC1000);
 
     // We have no lock yet, thus the CDA should reject the request to send the key.
-    send_key(
-        "Level_5".to_owned(),
-        "0x42".to_owned(),
-        &test_env,
-        ecu_endpoint,
-        StatusCode::CONFLICT,
-    )
-    .await
-    .unwrap();
+    let error = send_key(&component, "0x42".to_owned())
+        .await
+        .expect_err("the CDA should reject sending a key without a lock");
+    assert_eq!(error.status(), Some(StatusCode::CONFLICT), "{error}");
 
     let expiration_timeout = Duration::from_secs(60);
-    let ecu_lock = create_lock(
-        expiration_timeout,
-        locks::ECU_ENDPOINT,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
-    let lock_id =
-        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+    let ecu_lock = component
+        .locks()
+        .create(expiration_timeout)
+        .await
+        .expect("Failed to create lock")
+        .expect_status(StatusCode::CREATED)
+        .into_body();
 
     // Lock the ECU
-    lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::OK,
-        Method::GET,
-    )
-    .await;
-
-    force_variant_detection(&test_env, ecu_endpoint)
+    ecu_lock
+        .handle()
+        .get()
         .await
-        .unwrap();
+        .expect("lock operation failed")
+        .expect_status(StatusCode::OK);
 
-    let ecu = ecu_status(&test_env, ecu_endpoint).await.unwrap();
+    component
+        .detect_variant()
+        .await
+        .unwrap()
+        .expect_status(StatusCode::CREATED);
+
+    let ecu = component.get().await.unwrap().expect_status(StatusCode::OK);
     assert!(ecu.name.eq_ignore_ascii_case(ECU_FLXC1000));
     assert_eq!(ecu.variant.name, "FLXC1000_App_0101".to_string());
 
-    switch_session(
-        "this status does not exist",
-        &test_env,
-        ecu_endpoint,
-        StatusCode::NOT_FOUND,
-    )
-    .await
-    .unwrap();
+    let error = switch_session(&component, "this status does not exist")
+        .await
+        .expect_err("the CDA should reject an unknown session");
+    assert_eq!(error.status(), Some(StatusCode::NOT_FOUND), "{error}");
 
     // Get the active diagnostic session using the Configuration GET method.
-    let get_config_result = get_configurations(
-        &test_env,
-        ecu_endpoint,
-        "activediagnosticsessiondataidentifier",
-    )
-    .await
-    .unwrap();
+    let get_config_result = component
+        .configuration("activediagnosticsessiondataidentifier")
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 
     assert_eq!(
         get_config_result.id,
@@ -302,12 +269,18 @@ async fn test_ecu_session_switching() {
         .expect("Missing or invalid EcuSessionType");
     assert_eq!(session_type, "Default");
 
-    let switch_session_result = switch_session("extended", &test_env, ecu_endpoint, StatusCode::OK)
+    let switch_session_result = switch_session(&component, "extended")
         .await
         .unwrap()
-        .unwrap();
+        .expect_status(StatusCode::OK);
     assert_eq!(switch_session_result.value.to_lowercase(), "extended");
-    let session_result = session(&test_env, ecu_endpoint).await.unwrap();
+    let session_result = component
+        .mode(SESSION_ID)
+        .get::<security_and_session::get::Response>()
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK)
+        .into_body();
     assert_eq!(
         session_result.value.map(|s| s.to_lowercase()),
         Some("extended".to_owned())
@@ -315,13 +288,11 @@ async fn test_ecu_session_switching() {
     assert_eq!(session_result.name, Some("Diagnostic session".to_owned()));
 
     // After switching to extended session, fetch again using configuraion GET and verify.
-    let get_config_result = get_configurations(
-        &test_env,
-        ecu_endpoint,
-        "activediagnosticsessiondataidentifier",
-    )
-    .await
-    .unwrap();
+    let get_config_result = component
+        .configuration("activediagnosticsessiondataidentifier")
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 
     assert_eq!(
         get_config_result.id,
@@ -335,11 +306,20 @@ async fn test_ecu_session_switching() {
     assert_eq!(session_type, "Extended");
 
     // Reset the ECU using the reset service and verify the session goes back to default
-    reset_ecu("hardreset", &test_env, ecu_endpoint, StatusCode::NO_CONTENT)
+    component
+        .operation("reset")
+        .start(&json!({ "parameters": { "value": "hardreset" } }))
         .await
-        .unwrap();
+        .unwrap()
+        .expect_status(StatusCode::NO_CONTENT);
 
-    let session_result_after_reset = session(&test_env, ecu_endpoint).await.unwrap();
+    let session_result_after_reset = component
+        .mode(SESSION_ID)
+        .get::<security_and_session::get::Response>()
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK)
+        .into_body();
     assert_eq!(
         session_result_after_reset.value.map(|s| s.to_lowercase()),
         Some("default".to_owned()),
@@ -347,72 +327,62 @@ async fn test_ecu_session_switching() {
     );
 
     // Switch back to extended session so the remaining test steps work
-    let switch_back_result = switch_session("extended", &test_env, ecu_endpoint, StatusCode::OK)
+    let switch_back_result = switch_session(&component, "extended")
         .await
         .unwrap()
-        .unwrap();
+        .expect_status(StatusCode::OK);
     assert_eq!(switch_back_result.value.to_lowercase(), "extended");
 
     // switch ECU sim state to BOOT
     ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "BOOT")
         .await
         .unwrap();
-    force_variant_detection(&test_env, ecu_endpoint)
-        .await
-        .unwrap();
-    let ecu = ecu_status(&test_env, ecu_endpoint).await.unwrap();
-    assert_eq!(ecu.variant.name, "FLXC1000_Boot_Variant".to_string());
-
-    let seed_response = request_seed("Level_5_RequestSeed".to_owned(), &test_env, ecu_endpoint)
+    component
+        .detect_variant()
         .await
         .unwrap()
-        .unwrap();
+        .expect_status(StatusCode::CREATED);
+    let ecu = component.get().await.unwrap().expect_status(StatusCode::OK);
+    assert_eq!(ecu.variant.name, "FLXC1000_Boot_Variant".to_string());
+
+    let seed_response = request_seed(&component, None)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 
     // Key is too short
-    send_key(
-        "Level_5".to_owned(),
-        "0x42".to_owned(),
-        &test_env,
-        ecu_endpoint,
-        StatusCode::BAD_GATEWAY,
-    )
-    .await
-    .unwrap();
+    let error = send_key(&component, "0x42".to_owned())
+        .await
+        .expect_err("the ECU should reject a key that is too short");
+    assert_eq!(error.status(), Some(StatusCode::BAD_GATEWAY), "{error}");
 
-    send_key(
-        "Level_5".to_owned(),
-        seed_response.seed.request_seed.clone(),
-        &test_env,
-        ecu_endpoint,
-        StatusCode::BAD_GATEWAY,
-    )
-    .await
-    .unwrap();
+    let error = send_key(&component, seed_response.seed.request_seed.clone())
+        .await
+        .expect_err("the ECU should reject the seed as key");
+    assert_eq!(error.status(), Some(StatusCode::BAD_GATEWAY), "{error}");
 
     let key = compute_security_key(&seed_response.seed.request_seed);
 
-    send_key(
-        "Level_5".to_owned(),
-        key,
-        &test_env,
-        ecu_endpoint,
-        StatusCode::OK,
-    )
-    .await
-    .unwrap();
-    let security_result = security(&test_env, ecu_endpoint).await.unwrap();
+    send_key(&component, key)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
+    let security_result = component
+        .mode(SECURITY_ID)
+        .get::<security_and_session::get::Response>()
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK)
+        .into_body();
     assert_eq!(security_result.value, Some("Level_5".to_owned()));
     assert_eq!(security_result.name, Some("Security access".to_owned()));
 
     // Delete the ECU lock
-    lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    ecu_lock
+        .release()
+        .await
+        .expect("lock operation failed")
+        .expect_status(StatusCode::NO_CONTENT);
 }
 
 /// A `RequestSeed` parameter must be encoded into the UDS request; FSNR2000's
@@ -429,58 +399,40 @@ async fn request_seed_forwards_parameters_to_fsnr2000() {
     let test_env = TestEnv::builder()
         .await
         .expect("test environment should start");
-    let ecu_endpoint = sovd::ECU_FSNR2000_ENDPOINT;
-    let lock_endpoint = format!("{ecu_endpoint}/locks");
+    let component = test_env.client().component(ECU_FSNR2000);
 
-    let ecu_lock = create_lock(
-        Duration::from_secs(60),
-        &lock_endpoint,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
-    let lock_id = extract_field_from_json::<String>(
-        &response_to_json(&ecu_lock).expect("lock response should be JSON"),
-        "id",
-    )
-    .expect("lock response should contain an id");
-    lock_operation(
-        &lock_endpoint,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::OK,
-        Method::GET,
-    )
-    .await;
+    let ecu_lock = component
+        .locks()
+        .create(Duration::from_secs(60))
+        .await
+        .expect("Failed to create lock")
+        .expect_status(StatusCode::CREATED)
+        .into_body();
+    ecu_lock
+        .handle()
+        .get()
+        .await
+        .expect("lock operation failed")
+        .expect_status(StatusCode::OK);
 
     ecusim::switch_variant(&test_env.ecu_sim, "FSNR2000", "BOOT")
         .await
         .expect("FSNR2000 should switch to the boot variant");
-    force_variant_detection(&test_env, ecu_endpoint)
+    component
+        .detect_variant()
         .await
-        .expect("FSNR2000 boot variant should be detected");
+        .expect("FSNR2000 boot variant should be detected")
+        .expect_status(StatusCode::CREATED);
 
-    assert_request_seed_rejected(&test_env, ecu_endpoint, None, StatusCode::BAD_REQUEST).await;
+    assert_request_seed_rejected(&component, None, StatusCode::BAD_REQUEST).await;
 
     let mut parameters = HashMap::new();
     parameters.insert("Invalid".to_owned(), json!(0x5A));
-    assert_request_seed_rejected(
-        &test_env,
-        ecu_endpoint,
-        Some(parameters),
-        StatusCode::BAD_REQUEST,
-    )
-    .await;
+    assert_request_seed_rejected(&component, Some(parameters), StatusCode::BAD_REQUEST).await;
 
     let mut parameters = HashMap::new();
     parameters.insert("SeedRequestParameter".to_owned(), json!(0x5B));
-    assert_request_seed_rejected(
-        &test_env,
-        ecu_endpoint,
-        Some(parameters),
-        StatusCode::BAD_GATEWAY,
-    )
-    .await;
+    assert_request_seed_rejected(&component, Some(parameters), StatusCode::BAD_GATEWAY).await;
 
     let recorder = test_env
         .record(ECU_FSNR2000)
@@ -489,21 +441,10 @@ async fn request_seed_forwards_parameters_to_fsnr2000() {
 
     let mut parameters = HashMap::new();
     parameters.insert("SeedRequestParameter".to_owned(), json!(0x5A));
-    let response: Option<RequestSeedResponse> = put_mode(
-        &test_env,
-        ecu_endpoint,
-        "security",
-        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
-            value: "Level_5_RequestSeed".to_owned(),
-            mode_expiration: None,
-            key: None,
-            parameters: Some(parameters),
-        },
-        StatusCode::OK,
-    )
-    .await
-    .expect("RequestSeed with parameters should succeed");
-    assert!(response.is_some(), "RequestSeed should return a seed");
+    request_seed(&component, Some(parameters))
+        .await
+        .expect("RequestSeed with parameters should return a seed")
+        .expect_status(StatusCode::OK);
 
     let frames = recorder
         .stop()
@@ -524,60 +465,43 @@ async fn send_key_rejects_request_seed_parameters() {
         return;
     }
     let test_env = TestEnv::builder().await.unwrap();
-    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let component = test_env.client().component(ECU_FLXC1000);
 
-    let ecu_lock = create_lock(
-        Duration::from_secs(60),
-        locks::ECU_ENDPOINT,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
-    let lock_id = extract_field_from_json::<String>(
-        &response_to_json(&ecu_lock).expect("lock response should be JSON"),
-        "id",
-    )
-    .expect("lock response should contain an id");
-    lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::OK,
-        Method::GET,
-    )
-    .await;
+    let ecu_lock = component
+        .locks()
+        .create(Duration::from_secs(60))
+        .await
+        .expect("Failed to create lock")
+        .expect_status(StatusCode::CREATED)
+        .into_body();
+    ecu_lock
+        .handle()
+        .get()
+        .await
+        .expect("lock operation failed")
+        .expect_status(StatusCode::OK);
 
     let mut parameters = HashMap::new();
     parameters.insert("Foo".to_owned(), json!(90));
-    let response: Option<modes::security_and_session::put::Response<String>> = put_mode(
-        &test_env,
-        ecu_endpoint,
-        "security",
-        modes::security_and_session::put::SecurityRequest {
+    let error = component
+        .mode(SECURITY_ID)
+        .put::<security_and_session::put::Response<String>>(&security_and_session::put::Request {
             value: "Level_5".to_owned(),
             mode_expiration: None,
-            key: Some(modes::security_and_session::put::ModeKey {
+            key: Some(ModeKey {
                 send_key: "0x12 0x34".to_owned(),
             }),
             parameters: Some(parameters),
-        },
-        StatusCode::BAD_REQUEST,
-    )
-    .await
-    .expect("SendKey with RequestSeed parameters should be rejected");
-    assert!(
-        response.is_none(),
-        "a rejected SendKey should not return a body"
-    );
+        })
+        .await
+        .expect_err("SendKey with RequestSeed parameters should be rejected");
+    assert_eq!(error.status(), Some(StatusCode::BAD_REQUEST), "{error}");
 
-    lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    ecu_lock
+        .release()
+        .await
+        .expect("lock operation failed")
+        .expect_status(StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]
@@ -597,93 +521,58 @@ async fn test_variant_detection_duplicates() {
     ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "APPLICATION")
         .await
         .unwrap();
-    force_variant_detection(&test_env, sovd::ECU_FLXC1000_ENDPOINT)
+    let component = test_env.client().component(ECU_FLXC1000);
+    component
+        .detect_variant()
         .await
-        .unwrap();
-    let ecu = ecu_status(&test_env, sovd::ECU_FLXC1000_ENDPOINT)
-        .await
-        .unwrap();
-    assert_eq!(
-        ecu.variant.state,
-        sovd_interfaces::components::ecu::State::Online
-    );
+        .unwrap()
+        .expect_status(StatusCode::CREATED);
+    let ecu = component.get().await.unwrap().expect_status(StatusCode::OK);
+    assert_eq!(ecu.variant.state, State::Online);
     assert_eq!(ecu.variant.logical_address, "0x1000");
 
     // Switch variant, and check if the NG variant is now online.
     ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "APPLICATION2")
         .await
         .unwrap();
-    force_variant_detection(&test_env, sovd::ECU_FLXC1000_ENDPOINT)
+    component
+        .detect_variant()
         .await
-        .unwrap();
+        .unwrap()
+        .expect_status(StatusCode::CREATED);
 
-    validate_ecu_state(
-        &test_env,
-        sovd::ECU_FLXC1000_ENDPOINT,
-        sovd_interfaces::components::ecu::State::Duplicate,
-    )
-    .await;
-
-    validate_ecu_state(
-        &test_env,
-        sovd::ECU_FLXCNG1000_ENDPOINT,
-        sovd_interfaces::components::ecu::State::Online,
-    )
-    .await;
+    validate_ecu_state(&test_env, ECU_FLXC1000, State::Duplicate).await;
+    validate_ecu_state(&test_env, ECU_FLXCNG1000, State::Online).await;
 
     // No variant associated with APPLICATION3, check if both ECUs are marked as NoVariantDetected
     ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "APPLICATION3")
         .await
         .unwrap();
-    force_variant_detection(&test_env, sovd::ECU_FLXC1000_ENDPOINT)
+    component
+        .detect_variant()
         .await
-        .unwrap();
-    validate_ecu_state(
-        &test_env,
-        sovd::ECU_FLXC1000_ENDPOINT,
-        sovd_interfaces::components::ecu::State::NoVariantDetected,
-    )
-    .await;
-    validate_ecu_state(
-        &test_env,
-        sovd::ECU_FLXCNG1000_ENDPOINT,
-        sovd_interfaces::components::ecu::State::NoVariantDetected,
-    )
-    .await;
+        .unwrap()
+        .expect_status(StatusCode::CREATED);
+    validate_ecu_state(&test_env, ECU_FLXC1000, State::NoVariantDetected).await;
+    validate_ecu_state(&test_env, ECU_FLXCNG1000, State::NoVariantDetected).await;
 
     // Stop sim and check if ECUs are marked as disconnected after variant detection
     test_env.stop_ecu_sim().await.unwrap();
-    force_variant_detection(&test_env, sovd::ECU_FLXCNG1000_ENDPOINT)
+    test_env
+        .client()
+        .component(ECU_FLXCNG1000)
+        .detect_variant()
         .await
-        .unwrap();
+        .unwrap()
+        .expect_status(StatusCode::CREATED);
 
-    validate_ecu_state(
-        &test_env,
-        sovd::ECU_FLXC1000_ENDPOINT,
-        sovd_interfaces::components::ecu::State::Disconnected,
-    )
-    .await;
-    validate_ecu_state(
-        &test_env,
-        sovd::ECU_FLXCNG1000_ENDPOINT,
-        sovd_interfaces::components::ecu::State::Disconnected,
-    )
-    .await;
+    validate_ecu_state(&test_env, ECU_FLXC1000, State::Disconnected).await;
+    validate_ecu_state(&test_env, ECU_FLXCNG1000, State::Disconnected).await;
 
     // restart CDA while sim is offline and check if ECUs are marked as offline
     test_env.restart_cda_with_config(|_| {}).await.unwrap();
-    validate_ecu_state(
-        &test_env,
-        sovd::ECU_FLXC1000_ENDPOINT,
-        sovd_interfaces::components::ecu::State::Offline,
-    )
-    .await;
-    validate_ecu_state(
-        &test_env,
-        sovd::ECU_FLXCNG1000_ENDPOINT,
-        sovd_interfaces::components::ecu::State::Offline,
-    )
-    .await;
+    validate_ecu_state(&test_env, ECU_FLXC1000, State::Offline).await;
+    validate_ecu_state(&test_env, ECU_FLXCNG1000, State::Offline).await;
 
     // restart sim and wait for ECUs to come online,
     // status should be detected without manual variant detection
@@ -691,11 +580,15 @@ async fn test_variant_detection_duplicates() {
 
     // wait in loop, to check if the CDA receives the spontaneous VAM when is online
     for attempt in 0..=5 {
-        let status = ecu_status(&test_env, sovd::ECU_FLXC1000_ENDPOINT)
+        let status = test_env
+            .client()
+            .component(ECU_FLXC1000)
+            .get()
             .await
-            .expect("failed to get ecu status");
+            .expect("failed to get ecu status")
+            .expect_status(StatusCode::OK);
 
-        if status.variant.state == sovd_interfaces::components::ecu::State::Online {
+        if status.variant.state == State::Online {
             break;
         }
 
@@ -706,49 +599,35 @@ async fn test_variant_detection_duplicates() {
         cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(1)).await;
     }
 
-    validate_ecu_state(
-        &test_env,
-        sovd::ECU_FLXCNG1000_ENDPOINT,
-        sovd_interfaces::components::ecu::State::Duplicate,
-    )
-    .await;
+    validate_ecu_state(&test_env, ECU_FLXCNG1000, State::Duplicate).await;
 }
 
 #[tokio::test]
 #[allow(clippy::too_many_lines, reason = "Keep the test together")]
 async fn test_communication_control() {
     let test_env = TestEnv::builder().await.unwrap();
-    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let component = test_env.client().component(ECU_FLXC1000);
 
     // Without lock, the CDA should reject the request
-    set_comm_control(
-        "EnableRxAndEnableTx",
-        None,
-        &test_env,
-        ecu_endpoint,
-        StatusCode::CONFLICT,
-    )
-    .await
-    .unwrap();
+    let error = set_comm_control(&component, "EnableRxAndEnableTx", None)
+        .await
+        .expect_err("the CDA should reject comm control without a lock");
+    assert_eq!(error.status(), Some(StatusCode::CONFLICT), "{error}");
 
     // Create and acquire lock
     let expiration_timeout = Duration::from_secs(60);
-    let ecu_lock = create_lock(
-        expiration_timeout,
-        locks::ECU_ENDPOINT,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
-    let lock_id =
-        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+    let ecu_lock = component
+        .locks()
+        .create(expiration_timeout)
+        .await
+        .expect("Failed to create lock")
+        .expect_status(StatusCode::CREATED)
+        .into_body();
 
     // Sending an invalid value should return BAD_REQUEST with possible values
     sovd::validate_invalid_parameter_error(
-        &test_env,
-        ecu_endpoint,
-        "commctrl",
-        modes::commctrl::put::Request {
+        &component.mode(COMM_CONTROL_ID),
+        &commctrl::put::Request {
             value: "invalid-value".to_owned(),
             parameters: None,
         },
@@ -766,76 +645,64 @@ async fn test_communication_control() {
     .unwrap();
 
     let enable_rx_and_enable_tx = "enablerxandenabletx";
-    let result = set_comm_control(
-        "EnableRxAndEnableTx",
-        None,
-        &test_env,
-        ecu_endpoint,
-        StatusCode::OK,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let result = set_comm_control(&component, "EnableRxAndEnableTx", None)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
     assert_eq!(result.value, "EnableRxAndEnableTx");
 
-    let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
+    let current_state = get_comm_control(&component)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
     assert_eq!(
         current_state.value.as_ref().map(|s| s.to_lowercase()),
         Some(enable_rx_and_enable_tx.to_owned())
     );
 
     let enable_rx_and_disable_tx = "enablerxanddisabletx";
-    let result = set_comm_control(
-        "EnableRxAndDisableTx",
-        None,
-        &test_env,
-        ecu_endpoint,
-        StatusCode::OK,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let result = set_comm_control(&component, "EnableRxAndDisableTx", None)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
     assert_eq!(result.value, "EnableRxAndDisableTx");
 
-    let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
+    let current_state = get_comm_control(&component)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
     assert_eq!(
         current_state.value.as_ref().map(|s| s.to_lowercase()),
         Some(enable_rx_and_disable_tx.to_owned())
     );
 
     let disable_rx_and_enable_tx = "disablerxandenabletx";
-    let result = set_comm_control(
-        "DisableRxAndEnableTx",
-        None,
-        &test_env,
-        ecu_endpoint,
-        StatusCode::OK,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let result = set_comm_control(&component, "DisableRxAndEnableTx", None)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
     assert_eq!(result.value, "DisableRxAndEnableTx");
 
-    let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
+    let current_state = get_comm_control(&component)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
     assert_eq!(
         current_state.value.as_ref().map(|s| s.to_lowercase()),
         Some(disable_rx_and_enable_tx.to_owned())
     );
 
     let disable_rx_and_disable_tx = "disablerxanddisabletx";
-    let result = set_comm_control(
-        "DisableRxAndDisableTx",
-        None,
-        &test_env,
-        ecu_endpoint,
-        StatusCode::OK,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let result = set_comm_control(&component, "DisableRxAndDisableTx", None)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
     assert_eq!(result.value, "DisableRxAndDisableTx");
 
-    let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
+    let current_state = get_comm_control(&component)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
     assert_eq!(
         current_state.value.as_ref().map(|s| s.to_lowercase()),
         Some(disable_rx_and_disable_tx.to_owned())
@@ -844,21 +711,22 @@ async fn test_communication_control() {
     let enable_rx_and_disable_tx_with_enhanced =
         "enablerxanddisabletxwithenhancedaddressinformation";
     let result = set_comm_control(
+        &component,
         "EnableRxAndDisableTxWithEnhancedAddressInformation",
         None,
-        &test_env,
-        ecu_endpoint,
-        StatusCode::OK,
     )
     .await
     .unwrap()
-    .unwrap();
+    .expect_status(StatusCode::OK);
     assert_eq!(
         result.value,
         "EnableRxAndDisableTxWithEnhancedAddressInformation"
     );
 
-    let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
+    let current_state = get_comm_control(&component)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
     assert_eq!(
         current_state.value.as_ref().map(|s| s.to_lowercase()),
         Some(enable_rx_and_disable_tx_with_enhanced.to_owned())
@@ -866,18 +734,19 @@ async fn test_communication_control() {
 
     let enable_rx_and_tx_with_enhanced = "enablerxandtxwithenhancedaddressinformation";
     let result = set_comm_control(
+        &component,
         "EnableRxAndTxWithEnhancedAddressInformation",
         None,
-        &test_env,
-        ecu_endpoint,
-        StatusCode::OK,
     )
     .await
     .unwrap()
-    .unwrap();
+    .expect_status(StatusCode::OK);
     assert_eq!(result.value, "EnableRxAndTxWithEnhancedAddressInformation");
 
-    let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
+    let current_state = get_comm_control(&component)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
     assert_eq!(
         current_state.value.as_ref().map(|s| s.to_lowercase()),
         Some(enable_rx_and_tx_with_enhanced.to_owned())
@@ -886,25 +755,19 @@ async fn test_communication_control() {
     // VendorSpecific (custom TemporalSync 0x88)
     let temporal_era_id: i32 = -1_373_112_000;
     let mut parameters = cda_interfaces::HashMap::default();
-    parameters.insert(
-        "temporalEraId".to_string(),
-        serde_json::json!(temporal_era_id),
-    );
+    parameters.insert("temporalEraId".to_string(), json!(temporal_era_id));
 
     let temporal_sync = "temporalsync";
-    let result = set_comm_control(
-        "TemporalSync",
-        Some(parameters),
-        &test_env,
-        ecu_endpoint,
-        StatusCode::OK,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let result = set_comm_control(&component, "TemporalSync", Some(parameters))
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
     assert_eq!(result.value, "TemporalSync");
 
-    let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
+    let current_state = get_comm_control(&component)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
     assert_eq!(
         current_state.value.as_ref().map(|s| s.to_lowercase()),
         Some(temporal_sync.to_owned())
@@ -925,44 +788,42 @@ async fn test_communication_control() {
     );
 
     // Delete the ECU lock
-    lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    ecu_lock
+        .release()
+        .await
+        .expect("lock operation failed")
+        .expect_status(StatusCode::NO_CONTENT);
 
     // After deleting lock, we should not be able to set comm control
-    set_comm_control(
-        "EnableRxAndEnableTx",
-        None,
-        &test_env,
-        ecu_endpoint,
-        StatusCode::CONFLICT,
-    )
-    .await
-    .unwrap();
+    let error = set_comm_control(&component, "EnableRxAndEnableTx", None)
+        .await
+        .expect_err("the CDA should reject comm control after the lock is deleted");
+    assert_eq!(error.status(), Some(StatusCode::CONFLICT), "{error}");
 }
 
 #[tokio::test]
 async fn test_boot_variant_service_inheritance() {
     let test_env = TestEnv::builder().await.unwrap();
-    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let component = test_env.client().component(ECU_FLXC1000);
 
     // Switch ECU sim to BOOT variant
     ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "BOOT")
         .await
         .unwrap();
-    force_variant_detection(&test_env, ecu_endpoint)
+    component
+        .detect_variant()
         .await
-        .unwrap();
+        .unwrap()
+        .expect_status(StatusCode::CREATED);
 
-    let ecu = ecu_status(&test_env, ecu_endpoint).await.unwrap();
+    let ecu = component.get().await.unwrap().expect_status(StatusCode::OK);
     assert_eq!(ecu.variant.name, "FLXC1000_Boot_Variant".to_string());
 
-    let data_services = get_data_services(&test_env, ecu_endpoint).await.unwrap();
+    let data_services = component
+        .data_list()
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
     let service_ids: Vec<_> = data_services
         .items
         .iter()
@@ -998,35 +859,29 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
         return;
     }
     let test_env = TestEnv::builder().await.unwrap();
-    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let component = test_env.client().component(ECU_FLXC1000);
 
     // Create and acquire lock with 30s timeout
     let lock_expiration_timeout = Duration::from_secs(30);
-    let ecu_lock = create_lock(
-        lock_expiration_timeout,
-        locks::ECU_ENDPOINT,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
-    let lock_id =
-        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+    let ecu_lock = component
+        .locks()
+        .create(lock_expiration_timeout)
+        .await
+        .expect("Failed to create lock")
+        .expect_status(StatusCode::CREATED)
+        .into_body();
 
     // Set session with 2s expiry
     let session_expiration = 2u64;
-    let switch_session_result: modes::security_and_session::put::Response<String> = put_mode(
-        &test_env,
-        ecu_endpoint,
-        "session",
-        modes::security_and_session::put::SessionRequest {
+    let switch_session_result = component
+        .mode(SESSION_ID)
+        .put::<security_and_session::put::Response<String>>(&SessionRequest {
             value: "extended".to_owned(),
             mode_expiration: Some(session_expiration),
-        },
-        StatusCode::OK,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+        })
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
     assert_eq!(switch_session_result.value.to_lowercase(), "extended");
 
     // Verify ECU sim is in extended session
@@ -1054,173 +909,167 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
     );
 
     // Also verify through CDA API
-    let session_result_after = session(&test_env, ecu_endpoint).await.unwrap();
+    let session_result_after = component
+        .mode(SESSION_ID)
+        .get::<security_and_session::get::Response>()
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK)
+        .into_body();
     assert_eq!(
         session_result_after.value.map(|s| s.to_lowercase()),
         Some("default".to_owned())
     );
 
     // Delete the lock
-    lock_operation(
-        locks::ECU_ENDPOINT,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    ecu_lock
+        .release()
+        .await
+        .expect("lock operation failed")
+        .expect_status(StatusCode::NO_CONTENT);
+}
+
+/// The caption, SI and nested SDGs of `sdg`.
+///
+/// # Panics
+/// If `sdg` is a single SD.
+fn expect_sdg(sdg: &SdSdg) -> (Option<&str>, Option<&str>, &[SdSdg]) {
+    match sdg {
+        SdSdg::Sdg { caption, si, sdgs } => (caption.as_deref(), si.as_deref(), sdgs),
+        SdSdg::Sd { .. } => panic!("expected an SDG, got {sdg:?}"),
+    }
+}
+
+/// The SI and value of `sd`.
+///
+/// # Panics
+/// If `sd` is an SDG.
+fn expect_sd(sd: &SdSdg) -> (Option<&str>, Option<&str>) {
+    match sd {
+        SdSdg::Sd { value, si, ti: _ } => (si.as_deref(), value.as_deref()),
+        SdSdg::Sdg { .. } => panic!("expected an SD, got {sd:?}"),
+    }
+}
+
+/// Checks the SDGs of FLXC1000: one SDG `default_sdg` with the single SD
+/// `power_requirement_max`.
+fn assert_flxc1000_sdgs(ecu: &Ecu) {
+    let sdgs = ecu.sdgs.as_deref().expect("sdgs should be present");
+    assert_eq!(sdgs.len(), 1);
+
+    let (caption, si, inner) = expect_sdg(sdgs.first().expect("sdgs should have one element"));
+    assert_eq!(caption, Some("default_sdg"));
+    assert_eq!(si, Some("default"));
+    assert_eq!(inner.len(), 1);
+
+    let (si, value) = expect_sd(inner.first().expect("nested sdgs should have one element"));
+    assert_eq!(si, Some("power_requirement_max"));
+    assert_eq!(value, Some("1.21GW"));
 }
 
 /// [[ itest~sovd-api-component-sdgsd, ECU-level SDG retrieval, itest ]]
 #[tokio::test]
 async fn test_ecu_sdg_retrieval() {
     let test_env = TestEnv::builder().await.unwrap();
-    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
     // Retrieve sdgs and verify contents
-    let params = QueryParams(HashMap::from_iter([(
-        "x-sovd2uds-includesdgs".to_string(),
-        "true".to_string(),
-    )]));
-    let data = get_ecu_component(
-        &test_env.config,
-        ecu_endpoint,
-        StatusCode::OK,
-        Some(&params),
-    )
-    .await
-    .unwrap();
+    let ecu = test_env
+        .client()
+        .component(ECU_FLXC1000)
+        .get_with(&ComponentQuery {
+            include_sdgs: true,
+            include_schema: false,
+        })
+        .await
+        .expect("Failed to get the component with SDGs")
+        .expect_status(StatusCode::OK);
 
-    let d = data
-        .get("data")
-        .unwrap()
-        .as_str()
-        .expect("should contain data");
     assert_eq!(
-        d,
+        ecu.data,
         "http://localhost:20002/vehicle/v15/components/flxc1000/data"
     );
-
-    let operations = data
-        .get("operations")
-        .unwrap()
-        .as_str()
-        .expect("should contain operations");
     assert_eq!(
-        operations,
+        ecu.operations,
         "http://localhost:20002/vehicle/v15/components/flxc1000/operations"
     );
-
-    let configurations = data
-        .get("configurations")
-        .unwrap()
-        .as_str()
-        .expect("should contain configurations");
     assert_eq!(
-        configurations,
+        ecu.configurations,
         "http://localhost:20002/vehicle/v15/components/flxc1000/configurations"
     );
-
-    let modes = data
-        .get("modes")
-        .unwrap()
-        .as_str()
-        .expect("should contain modes");
     assert_eq!(
-        modes,
+        ecu.modes,
         "http://localhost:20002/vehicle/v15/components/flxc1000/modes"
     );
-
-    let locks = data
-        .get("locks")
-        .unwrap()
-        .as_str()
-        .expect("should contain locks");
     assert_eq!(
-        locks,
+        ecu.locks,
         "http://localhost:20002/vehicle/v15/components/flxc1000/locks"
     );
-
-    let faults = data
-        .get("faults")
-        .unwrap()
-        .as_str()
-        .expect("should contain faults");
     assert_eq!(
-        faults,
+        ecu.faults,
         "http://localhost:20002/vehicle/v15/components/flxc1000/faults"
     );
 
-    let sdgs = data
-        .get("sdgs")
-        .unwrap()
-        .as_array()
-        .expect("sdgs should be an array");
-    assert_eq!(sdgs.len(), 1);
-
-    let sdg = &sdgs.first().unwrap();
-    assert_eq!(sdg.get("caption").unwrap().as_str(), Some("default_sdg"));
-    assert_eq!(sdg.get("si").unwrap().as_str(), Some("default"));
-
-    let inner = sdg
-        .get("sdgs")
-        .unwrap()
-        .as_array()
-        .expect("nested sdgs should be an array");
-    assert_eq!(inner.len(), 1);
-
-    let sd = &inner.first().unwrap();
-    assert_eq!(
-        sd.get("si").unwrap().as_str(),
-        Some("power_requirement_max")
-    );
-    assert_eq!(sd.get("value").unwrap().as_str(), Some("1.21GW"));
+    assert_flxc1000_sdgs(&ecu);
 }
 
 /// [[ itest~sovd-api-component-alias-sdgsd, ECU-level SDG retrieval (alias param), itest ]]
 #[tokio::test]
 async fn test_ecu_sdg_retrieval_alias() {
     let test_env = TestEnv::builder().await.unwrap();
-    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    // Retrieve sdgs and verify contents
-    let params = QueryParams(HashMap::from_iter([(
-        "x-include-sdgs".to_string(),
-        "true".to_string(),
-    )]));
-    let data = get_ecu_component(
-        &test_env.config,
-        ecu_endpoint,
-        StatusCode::OK,
-        Some(&params),
-    )
-    .await
-    .unwrap();
+    // Retrieve sdgs and verify contents. `ComponentQuery` serializes the
+    // canonical name only, so the alias goes as JSON.
+    let ecu = test_env
+        .client()
+        .component(ECU_FLXC1000)
+        .get_with(&json!({ "x-include-sdgs": true }))
+        .await
+        .expect("Failed to get the component with SDGs")
+        .expect_status(StatusCode::OK);
 
-    let sdgs = data
-        .get("sdgs")
-        .unwrap()
-        .as_array()
-        .expect("sdgs should be an array");
-    assert_eq!(sdgs.len(), 1);
+    assert_flxc1000_sdgs(&ecu);
+}
 
-    let sdg = &sdgs.first().unwrap();
-    assert_eq!(sdg.get("caption").unwrap().as_str(), Some("default_sdg"));
-    assert_eq!(sdg.get("si").unwrap().as_str(), Some("default"));
+/// Checks that `services_sdgs` has at least one entry, whose first SDG is
+/// `caption`/`si` with the single SD `sd_si` = `sd_value`.
+fn assert_first_service_sdg(
+    services_sdgs: &ServicesSdgs,
+    caption: &str,
+    si: &str,
+    sd_si: &str,
+    sd_value: &str,
+) {
+    assert!(
+        !services_sdgs.items.is_empty(),
+        "items map should contain at least one entry"
+    );
 
-    let inner = sdg
-        .get("sdgs")
-        .unwrap()
-        .as_array()
-        .expect("nested sdgs should be an array");
+    // Find the entry - key format is "{service_name}_{action:?}" lowercased
+    let entry = services_sdgs
+        .items
+        .values()
+        .next()
+        .expect("should have at least one service SDG entry");
+
+    assert!(!entry.sdgs.is_empty(), "sdgs array should not be empty");
+
+    let (actual_caption, actual_si, inner) = expect_sdg(
+        entry
+            .sdgs
+            .first()
+            .expect("sdgs array should have at least one element"),
+    );
+    assert_eq!(actual_caption, Some(caption));
+    assert_eq!(actual_si, Some(si));
     assert_eq!(inner.len(), 1);
 
-    let sd = &inner.first().unwrap();
-    assert_eq!(
-        sd.get("si").unwrap().as_str(),
-        Some("power_requirement_max")
+    let (actual_sd_si, actual_sd_value) = expect_sd(
+        inner
+            .first()
+            .expect("inner sdgs should have at least one element"),
     );
-    assert_eq!(sd.get("value").unwrap().as_str(), Some("1.21GW"));
+    assert_eq!(actual_sd_si, Some(sd_si));
+    assert_eq!(actual_sd_value, Some(sd_value));
 }
 
 /// [[ itest~sovd-api-component-data-sdgsd, Data-level SDG retrieval, itest ]]
@@ -1228,73 +1077,22 @@ async fn test_ecu_sdg_retrieval_alias() {
 async fn test_data_sdg_retrieval() {
     let test_env = TestEnv::builder().await.unwrap();
 
-    let params = QueryParams(HashMap::from_iter([(
-        "x-sovd2uds-includesdgs".to_string(),
-        "true".to_string(),
-    )]));
-    let response = send_authenticated_cda_request(
-        &test_env,
-        &format!(
-            "{}/data/FluxCapacitorPowerConsumption",
-            sovd::ECU_FLXC1000_ENDPOINT
-        ),
-        StatusCode::OK,
-        Method::GET,
-        None,
-        Some(&params),
-    )
-    .await
-    .expect("Failed to get data SDGs");
+    let services_sdgs = test_env
+        .client()
+        .component(ECU_FLXC1000)
+        .data("FluxCapacitorPowerConsumption")
+        .sdgs()
+        .await
+        .expect("Failed to get data SDGs")
+        .expect_status(StatusCode::OK);
 
-    let data = response_to_json(&response).unwrap();
-
-    // The response should be a ServicesSdgs with an "items" map
-    let items = data
-        .get("items")
-        .expect("response should contain 'items'")
-        .as_object()
-        .expect("items should be an object");
-
-    assert!(
-        !items.is_empty(),
-        "items map should contain at least one entry"
+    assert_first_service_sdg(
+        &services_sdgs,
+        "flux_capacitor_sdg",
+        "sensor_metadata",
+        "measurement_unit",
+        "gigawatts",
     );
-
-    // Find the entry - key format is "{service_name}_{action:?}" lowercased
-    let entry = items
-        .values()
-        .next()
-        .expect("should have at least one service SDG entry");
-
-    let sdgs = entry
-        .get("sdgs")
-        .expect("entry should have 'sdgs'")
-        .as_array()
-        .expect("sdgs should be an array");
-
-    assert!(!sdgs.is_empty(), "sdgs array should not be empty");
-
-    let sdg = sdgs
-        .first()
-        .expect("sdgs array should have at least one element");
-    assert_eq!(
-        sdg.get("caption").unwrap().as_str(),
-        Some("flux_capacitor_sdg")
-    );
-    assert_eq!(sdg.get("si").unwrap().as_str(), Some("sensor_metadata"));
-
-    let inner = sdg
-        .get("sdgs")
-        .unwrap()
-        .as_array()
-        .expect("nested sdgs should be an array");
-    assert_eq!(inner.len(), 1);
-
-    let sd = inner
-        .first()
-        .expect("inner sdgs should have at least one element");
-    assert_eq!(sd.get("si").unwrap().as_str(), Some("measurement_unit"));
-    assert_eq!(sd.get("value").unwrap().as_str(), Some("gigawatts"));
 }
 
 /// [[ itest~sovd-api-component-operations-sdgsd, Operation-level SDG retrieval, itest ]]
@@ -1302,67 +1100,22 @@ async fn test_data_sdg_retrieval() {
 async fn test_operation_sdg_retrieval() {
     let test_env = TestEnv::builder().await.unwrap();
 
-    let params = QueryParams(HashMap::from_iter([(
-        "x-sovd2uds-includesdgs".to_string(),
-        "true".to_string(),
-    )]));
-    let response = send_authenticated_cda_request(
-        &test_env,
-        &format!("{}/operations/SelfTest", sovd::ECU_FLXC1000_ENDPOINT),
-        StatusCode::OK,
-        Method::GET,
-        None,
-        Some(&params),
-    )
-    .await
-    .expect("Failed to get operation SDGs");
+    let services_sdgs = test_env
+        .client()
+        .component(ECU_FLXC1000)
+        .operation("SelfTest")
+        .sdgs()
+        .await
+        .expect("Failed to get operation SDGs")
+        .expect_status(StatusCode::OK);
 
-    let data = response_to_json(&response).unwrap();
-
-    // The response should be a ServicesSdgs with an "items" map
-    let items = data
-        .get("items")
-        .expect("response should contain 'items'")
-        .as_object()
-        .expect("items should be an object");
-
-    assert!(
-        !items.is_empty(),
-        "items map should contain at least one entry"
+    assert_first_service_sdg(
+        &services_sdgs,
+        "self_test_sdg",
+        "routine_metadata",
+        "expected_duration_ms",
+        "5000",
     );
-
-    // Find the entry
-    let entry = items
-        .values()
-        .next()
-        .expect("should have at least one service SDG entry");
-
-    let sdgs = entry
-        .get("sdgs")
-        .expect("entry should have 'sdgs'")
-        .as_array()
-        .expect("sdgs should be an array");
-
-    assert!(!sdgs.is_empty(), "sdgs array should not be empty");
-
-    let sdg = sdgs
-        .first()
-        .expect("sdgs array should have at least one element");
-    assert_eq!(sdg.get("caption").unwrap().as_str(), Some("self_test_sdg"));
-    assert_eq!(sdg.get("si").unwrap().as_str(), Some("routine_metadata"));
-
-    let inner = sdg
-        .get("sdgs")
-        .unwrap()
-        .as_array()
-        .expect("nested sdgs should be an array");
-    assert_eq!(inner.len(), 1);
-
-    let sd = inner
-        .first()
-        .expect("inner sdgs should have at least one element");
-    assert_eq!(sd.get("si").unwrap().as_str(), Some("expected_duration_ms"));
-    assert_eq!(sd.get("value").unwrap().as_str(), Some("5000"));
 }
 
 /// Polls until the ECU reaches the expected state, then asserts.
@@ -1371,20 +1124,21 @@ async fn test_operation_sdg_retrieval() {
 /// ECU on its transport, with per-probe timeouts), so a one-shot check races
 /// the startup/detection loop - especially in mixed mode where undetected
 /// CAN-mapped ECUs cost a probe timeout each before the loop moves on.
-async fn validate_ecu_state(
-    test_env: &TestEnv,
-    ecu: &str,
-    expected_state: sovd_interfaces::components::ecu::State,
-) {
+async fn validate_ecu_state(test_env: &TestEnv, ecu: &str, expected_state: State) {
+    let component = test_env.client().component(ecu);
     let started = std::time::Instant::now();
-    let mut status = ecu_status(test_env, ecu)
+    let mut status = component
+        .get()
         .await
-        .expect("failed to get ecu status");
+        .expect("failed to get ecu status")
+        .expect_status(StatusCode::OK);
     while status.variant.state != expected_state && started.elapsed() < Duration::from_secs(10) {
         cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(200)).await;
-        status = ecu_status(test_env, ecu)
+        status = component
+            .get()
             .await
-            .expect("failed to get ecu status");
+            .expect("failed to get ecu status")
+            .expect_status(StatusCode::OK);
     }
     assert_eq!(
         status.variant.state, expected_state,
@@ -1392,229 +1146,83 @@ async fn validate_ecu_state(
     );
 }
 
-async fn session(
-    test_env: &TestEnv,
-    ecu_endpoint: &str,
-) -> Result<
-    sovd_interfaces::components::ecu::modes::security_and_session::get::Response,
-    TestingError,
-> {
-    get_mode(test_env, ecu_endpoint, "session").await
-}
-
-async fn security(
-    test_env: &TestEnv,
-    ecu_endpoint: &str,
-) -> Result<
-    sovd_interfaces::components::ecu::modes::security_and_session::get::Response,
-    TestingError,
-> {
-    get_mode(test_env, ecu_endpoint, "security").await
-}
-
-pub(crate) async fn switch_session(
+/// Switches the session of `component` to `name`.
+///
+/// # Errors
+/// See [`ModeHandle::put`](crate::client::components::modes::ModeHandle::put).
+async fn switch_session(
+    component: &Component<'_>,
     name: &str,
-    test_env: &TestEnv,
-    ecu_endpoint: &str,
-    expected_status: StatusCode,
-) -> Result<
-    Option<sovd_interfaces::components::ecu::modes::security_and_session::put::Response<String>>,
-    TestingError,
-> {
-    put_mode(
-        test_env,
-        ecu_endpoint,
-        "session",
-        sovd_interfaces::components::ecu::modes::security_and_session::put::SessionRequest {
+) -> client::Result<client::Response<security_and_session::put::Response<String>>> {
+    component
+        .mode(SESSION_ID)
+        .put(&SessionRequest {
             value: name.to_owned(),
             mode_expiration: None,
-        },
-        expected_status,
-    )
-    .await
+        })
+        .await
 }
 
+/// Requests a seed for the security level `Level_5_RequestSeed`, with the
+/// `RequestSeed` parameters `parameters`.
 async fn request_seed(
-    name: String,
-    test_env: &TestEnv,
-    ecu_endpoint: &str,
-) -> Result<
-    Option<sovd_interfaces::components::ecu::modes::security_and_session::put::RequestSeedResponse>,
-    TestingError,
-> {
-    put_mode(
-        test_env,
-        ecu_endpoint,
-        "security",
-        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
-            value: name,
-            mode_expiration: None,
-            key: None,
-            parameters: None,
-        },
-        StatusCode::OK,
-    )
-    .await
-}
-
-async fn assert_request_seed_rejected(
-    test_env: &TestEnv,
-    ecu_endpoint: &str,
+    component: &Component<'_>,
     parameters: Option<HashMap<String, serde_json::Value>>,
-    expected_status: StatusCode,
-) {
-    let response: Option<RequestSeedResponse> = put_mode(
-        test_env,
-        ecu_endpoint,
-        "security",
-        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
+) -> client::Result<client::Response<RequestSeedResponse>> {
+    component
+        .mode(SECURITY_ID)
+        .put(&security_and_session::put::Request {
             value: "Level_5_RequestSeed".to_owned(),
             mode_expiration: None,
             key: None,
             parameters,
-        },
-        expected_status,
-    )
-    .await
-    .expect("RequestSeed should be rejected");
-    assert!(
-        response.is_none(),
-        "a rejected RequestSeed should not return a body"
-    );
+        })
+        .await
 }
 
+async fn assert_request_seed_rejected(
+    component: &Component<'_>,
+    parameters: Option<HashMap<String, serde_json::Value>>,
+    expected_status: StatusCode,
+) {
+    let Err(error) = request_seed(component, parameters).await else {
+        panic!("RequestSeed should be rejected");
+    };
+    assert_eq!(error.status(), Some(expected_status), "{error}");
+}
+
+/// Sends `key` for the security level `Level_5`.
 async fn send_key(
-    name: String,
+    component: &Component<'_>,
     key: String,
-    test_env: &TestEnv,
-    ecu_endpoint: &str,
-    excepted_status: StatusCode,
-) -> Result<
-    Option<sovd_interfaces::components::ecu::modes::security_and_session::put::Response<String>>,
-    TestingError,
-> {
-    put_mode(
-        test_env,
-        ecu_endpoint,
-        "security",
-        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
-            value: name,
+) -> client::Result<client::Response<security_and_session::put::Response<String>>> {
+    component
+        .mode(SECURITY_ID)
+        .put(&security_and_session::put::Request {
+            value: "Level_5".to_owned(),
             mode_expiration: None,
-            key: Some(
-                sovd_interfaces::components::ecu::modes::security_and_session::put::ModeKey {
-                    send_key: key,
-                },
-            ),
+            key: Some(ModeKey { send_key: key }),
             parameters: None,
-        },
-        excepted_status,
-    )
-    .await
-}
-
-async fn get_mode<T: DeserializeOwned>(
-    test_env: &TestEnv,
-    ecu_endpoint: &str,
-    sub_path: &str,
-) -> Result<T, TestingError> {
-    let http_response = send_authenticated_cda_request(
-        test_env,
-        &format!("{ecu_endpoint}/modes/{sub_path}"),
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await?;
-    response_to_t(&http_response)
+        })
+        .await
 }
 
 async fn get_comm_control(
-    test_env: &TestEnv,
-    ecu_endpoint: &str,
-) -> Result<modes::commctrl::get::Response, TestingError> {
-    get_mode(test_env, ecu_endpoint, "commctrl").await
+    component: &Component<'_>,
+) -> client::Result<client::Response<commctrl::get::Response>> {
+    component.mode(COMM_CONTROL_ID).get().await
 }
 
 async fn set_comm_control(
+    component: &Component<'_>,
     value: &str,
     parameters: Option<cda_interfaces::HashMap<String, serde_json::Value>>,
-    test_env: &TestEnv,
-    ecu_endpoint: &str,
-    expected_status: StatusCode,
-) -> Result<Option<sovd_interfaces::components::ecu::modes::commctrl::put::Response>, TestingError>
-{
-    put_mode(
-        test_env,
-        ecu_endpoint,
-        "commctrl",
-        modes::commctrl::put::Request {
+) -> client::Result<client::Response<commctrl::put::Response>> {
+    component
+        .mode(COMM_CONTROL_ID)
+        .put(&commctrl::put::Request {
             value: value.to_owned(),
             parameters,
-        },
-        expected_status,
-    )
-    .await
-}
-
-pub(crate) async fn get_dtc_setting(
-    test_env: &TestEnv,
-    ecu_endpoint: &str,
-) -> Result<dtcsetting::get::Response, TestingError> {
-    get_mode(test_env, ecu_endpoint, "dtcsetting").await
-}
-
-async fn get_configurations(
-    test_env: &TestEnv,
-    ecu_endpoint: &str,
-    service: &str,
-) -> Result<sovd_interfaces::components::ecu::configurations::ServiceResponse, TestingError> {
-    let http_response = send_authenticated_cda_request(
-        test_env,
-        &format!("{ecu_endpoint}/configurations/{service}"),
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await?;
-    response_to_t(&http_response)
-}
-
-async fn reset_ecu(
-    value: &str,
-    test_env: &TestEnv,
-    ecu_endpoint: &str,
-    expected_status: StatusCode,
-) -> Result<(), TestingError> {
-    let body = serde_json::json!({
-        "parameters": {"value": value}
-    })
-    .to_string();
-    send_authenticated_cda_request(
-        test_env,
-        &format!("{ecu_endpoint}/operations/reset/executions"),
-        expected_status,
-        Method::POST,
-        Some(&body),
-        None,
-    )
-    .await?;
-    Ok(())
-}
-
-async fn get_data_services(
-    test_env: &TestEnv,
-    ecu_endpoint: &str,
-) -> Result<sovd_interfaces::components::ecu::data::get::Response, TestingError> {
-    let http_response = send_authenticated_cda_request(
-        test_env,
-        &format!("{ecu_endpoint}/data"),
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await?;
-    response_to_t(&http_response)
+        })
+        .await
 }

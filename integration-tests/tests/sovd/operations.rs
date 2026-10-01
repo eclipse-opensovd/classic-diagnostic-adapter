@@ -12,72 +12,100 @@
  */
 use std::time::Duration;
 
-use cda_interfaces::HashMap;
-use const_format::formatcp;
-use http::{Method, StatusCode};
-use serde::Deserialize;
-use sovd_interfaces::{
-    Items,
-    components::ecu::operations::{AsyncGetByIdResponse, ExecutionStatus, OperationCollectionItem},
+use http::StatusCode;
+use serde::de::DeserializeOwned;
+use sovd_interfaces::components::ecu::operations::{
+    ExecutionStatus, OperationDeleteQuery, service::executions,
 };
-
-/// Local deserializable mirror of `AsyncPostResponse` (the interface type is serialize-only).
-#[derive(Debug, Deserialize)]
-struct AsyncPostBody {
-    pub id: String,
-    pub status: ExecutionStatus,
-}
 
 use crate::{
-    sovd::{ECU_FLXC1000, ECU_FLXC1000_ENDPOINT, FUNCTIONAL_GROUP_ENDPOINT},
-    util::{
-        http::{
-            QueryParams, extract_field_from_json, response_to_json, response_to_t,
-            send_authenticated_cda_request,
-        },
-        locks::{self, Lock},
-        test_env::TestEnv,
+    client::{
+        self,
+        components::operations::ExecutionHandle,
+        locks::{Lock, Locks},
     },
+    sovd::{ECU_FLXC1000, FUNCTIONAL_GROUP},
+    util::test_env::TestEnv,
 };
 
-/// The operations of FLXC1000.
-const FLXC1000_OPERATIONS: &str = formatcp!("{}/operations", ECU_FLXC1000_ENDPOINT);
-/// The self test of FLXC1000.
-const SELF_TEST: &str = formatcp!("{}/selftest", FLXC1000_OPERATIONS);
-/// Executions of [`SELF_TEST`].
-const SELF_TEST_EXECUTIONS: &str = formatcp!("{}/executions", SELF_TEST);
-/// Executions of the sensor calibration of FLXC1000.
-const CALIBRATE_SENSORS_EXECUTIONS: &str =
-    formatcp!("{}/calibratesensors/executions", FLXC1000_OPERATIONS);
-/// Executions of the time circuits of FLXC1000.
-const TIME_CIRCUITS_EXECUTIONS: &str = formatcp!("{}/timecircuits/executions", FLXC1000_OPERATIONS);
-/// The operations of the functional group.
-const FUNCTIONAL_GROUP_OPERATIONS: &str = formatcp!("{}/operations", FUNCTIONAL_GROUP_ENDPOINT);
-/// Executions of the safety squints of the functional group.
-const ENGAGE_SAFETY_SQUINTS_EXECUTIONS: &str = formatcp!(
-    "{}/engage_safety_squints/executions",
-    FUNCTIONAL_GROUP_OPERATIONS
-);
+/// The self test of FLXC1000, a synchronous operation.
+const SELF_TEST: &str = "selftest";
+/// The sensor calibration of FLXC1000, an asynchronous operation.
+const CALIBRATE_SENSORS: &str = "calibratesensors";
+/// The time circuits of FLXC1000, an asynchronous operation.
+const TIME_CIRCUITS: &str = "timecircuits";
+/// The safety squints of the functional group, an asynchronous operation.
+const ENGAGE_SAFETY_SQUINTS: &str = "engage_safety_squints";
 
 /// Expiration of the locks the tests acquire.
 const LOCK_EXPIRATION: Duration = Duration::from_secs(60);
+
+/// A start request without parameters, the empty JSON object `{}`.
+/// [`executions::Request`] would send `{"parameters":null}` instead.
+fn no_parameters() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+/// A start request with `parameters`, a JSON object.
+fn with_parameters(parameters: serde_json::Value) -> executions::Request {
+    let serde_json::Value::Object(parameters) = parameters else {
+        panic!("parameters must be a JSON object, got {parameters}");
+    };
+    executions::Request {
+        timeout: None,
+        parameters: Some(parameters.into_iter().collect()),
+    }
+}
+
+/// Stops `execution`, with `x-sovd2uds-force=true` if `force`, and without
+/// query parameters otherwise.
+async fn stop<E: DeserializeOwned>(
+    execution: &ExecutionHandle<'_, E>,
+    force: bool,
+) -> client::Result<client::Response<Option<E>>> {
+    if force {
+        execution
+            .delete_with(&OperationDeleteQuery {
+                force: true,
+                ..Default::default()
+            })
+            .await
+    } else {
+        execution.delete().await
+    }
+}
+
+/// Acquires a lock in `locks` expiring after [`LOCK_EXPIRATION`], and checks
+/// that it can be read back.
+///
+/// # Panics
+/// If the lock is not created (`201 Created`) or cannot be read back.
+async fn acquire_lock(locks: Locks<'_>) -> Lock {
+    let lock = locks
+        .create(LOCK_EXPIRATION)
+        .await
+        .expect("failed to create lock")
+        .expect_status(StatusCode::CREATED)
+        .into_body();
+    lock.handle()
+        .get()
+        .await
+        .expect("failed to read back lock")
+        .expect_status(StatusCode::OK);
+    lock
+}
 
 #[tokio::test]
 async fn test_list_operations() {
     let test_env = TestEnv::builder().await.unwrap();
 
-    let response = send_authenticated_cda_request(
-        &test_env,
-        FLXC1000_OPERATIONS,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let list: Items<OperationCollectionItem> = response_to_t(&response).unwrap();
+    let list = test_env
+        .client()
+        .component(ECU_FLXC1000)
+        .operations()
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 
     let selftest = list
         .items
@@ -112,296 +140,211 @@ async fn test_list_operations() {
 async fn test_sync_operation_requires_lock() {
     let test_env = TestEnv::builder().await.unwrap();
 
-    send_authenticated_cda_request(
-        &test_env,
-        SELF_TEST_EXECUTIONS,
-        StatusCode::CONFLICT,
-        Method::POST,
-        Some("{}"),
-        None,
-    )
-    .await
-    .unwrap();
+    let err = test_env
+        .client()
+        .component(ECU_FLXC1000)
+        .operation(SELF_TEST)
+        .start(&no_parameters())
+        .await
+        .expect_err("starting an operation without a lock must fail");
+    assert_eq!(err.status(), Some(StatusCode::CONFLICT));
 }
 
 #[tokio::test]
 async fn test_async_operation_delete_after_lock_release() {
     let test_env = TestEnv::builder().await.unwrap();
+    let ecu = test_env.client().component(ECU_FLXC1000);
+    let operation = ecu.operation(CALIBRATE_SENSORS);
 
-    let lock = Lock::acquire(&test_env, locks::ECU_ENDPOINT, LOCK_EXPIRATION).await;
+    let lock = acquire_lock(ecu.locks()).await;
 
     // Start async operation while holding the lock
-    let post_response = send_authenticated_cda_request(
-        &test_env,
-        CALIBRATE_SENSORS_EXECUTIONS,
-        StatusCode::ACCEPTED,
-        Method::POST,
-        Some("{}"),
-        None,
-    )
-    .await
-    .unwrap();
-    let post_body: AsyncPostBody = response_to_t(&post_response).unwrap();
-    let execution_id = post_body.id.clone();
+    let started = operation
+        .start(&no_parameters())
+        .await
+        .unwrap()
+        .expect_status(StatusCode::ACCEPTED)
+        .into_body()
+        .started();
+    let execution = operation.execution(&started.id);
 
     // Release the lock before attempting DELETE
-    lock.release().await;
+    lock.release()
+        .await
+        .unwrap()
+        .expect_status(StatusCode::NO_CONTENT);
 
     // DELETE is a write operation and requires a currently active lock.
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{CALIBRATE_SENSORS_EXECUTIONS}/{execution_id}"),
-        StatusCode::CONFLICT,
-        Method::DELETE,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let Err(err) = stop(&execution, false).await else {
+        panic!("stopping an execution without a lock must fail");
+    };
+    assert_eq!(err.status(), Some(StatusCode::CONFLICT));
 
-    let _cleanup_lock = Lock::acquire(&test_env, locks::ECU_ENDPOINT, LOCK_EXPIRATION).await;
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{CALIBRATE_SENSORS_EXECUTIONS}/{execution_id}"),
-        StatusCode::OK,
-        Method::DELETE,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let _cleanup_lock = acquire_lock(ecu.locks()).await;
+    stop(&execution, false)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 }
 
 #[tokio::test]
 async fn test_sync_operation() {
     let test_env = TestEnv::builder().await.unwrap();
+    let ecu = test_env.client().component(ECU_FLXC1000);
 
-    let _lock = Lock::acquire(&test_env, locks::ECU_ENDPOINT, LOCK_EXPIRATION).await;
+    let _lock = acquire_lock(ecu.locks()).await;
 
-    send_authenticated_cda_request(
-        &test_env,
-        SELF_TEST_EXECUTIONS,
-        StatusCode::OK,
-        Method::POST,
-        Some("{}"),
-        None,
-    )
-    .await
-    .unwrap();
+    ecu.operation(SELF_TEST)
+        .start(&no_parameters())
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .completed();
 }
 
 #[tokio::test]
 async fn test_async_operation_lifecycle() {
     let test_env = TestEnv::builder().await.unwrap();
+    let ecu = test_env.client().component(ECU_FLXC1000);
+    let operation = ecu.operation(CALIBRATE_SENSORS);
 
-    let _lock = Lock::acquire(&test_env, locks::ECU_ENDPOINT, LOCK_EXPIRATION).await;
+    let _lock = acquire_lock(ecu.locks()).await;
 
     // Start the async calibration - expect 202 Accepted
-    let post_response = send_authenticated_cda_request(
-        &test_env,
-        CALIBRATE_SENSORS_EXECUTIONS,
-        StatusCode::ACCEPTED,
-        Method::POST,
-        Some("{}"),
-        None,
-    )
-    .await
-    .unwrap();
-
-    let post_body: AsyncPostBody = response_to_t(&post_response).unwrap();
-    assert_eq!(post_body.status, ExecutionStatus::Running);
-    let execution_id = post_body.id.clone();
+    let started = operation
+        .start(&no_parameters())
+        .await
+        .unwrap()
+        .expect_status(StatusCode::ACCEPTED)
+        .into_body()
+        .started();
+    assert_eq!(started.status, Some(ExecutionStatus::Running));
+    let execution_id = started.id;
 
     // GET the list of executions - should contain our id
-    let list_response = send_authenticated_cda_request(
-        &test_env,
-        CALIBRATE_SENSORS_EXECUTIONS,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let list_json = response_to_json(&list_response).unwrap();
-    let items = extract_field_from_json::<Vec<serde_json::Value>>(&list_json, "items").unwrap();
+    let executions = operation
+        .executions()
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
     assert!(
-        items.iter().any(|item| item
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|id| id == execution_id)),
+        executions.items.iter().any(|item| item.id == execution_id),
         "execution id {execution_id} not found in list"
     );
 
     // GET by id - triggers RequestResults, handler marks Completed on positive response
-    let get_response = send_authenticated_cda_request(
-        &test_env,
-        &format!("{CALIBRATE_SENSORS_EXECUTIONS}/{execution_id}"),
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let get_body: AsyncGetByIdResponse<serde_json::Value> = response_to_t(&get_response).unwrap();
+    let execution = operation.execution(&execution_id);
+    let state = execution.get().await.unwrap().expect_status(StatusCode::OK);
     assert_eq!(
-        get_body.status,
+        state.status,
         ExecutionStatus::Completed,
         "status should be completed after RequestResults positive response"
     );
 
-    let query_params = QueryParams(HashMap::from_iter([(
-        "x-sovd2uds-force".to_string(),
-        "true".to_string(),
-    )]));
     // Clean up - stop the operation
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{CALIBRATE_SENSORS_EXECUTIONS}/{execution_id}"),
-        StatusCode::OK,
-        Method::DELETE,
-        None,
-        Some(&query_params),
-    )
-    .await
-    .unwrap();
+    stop(&execution, true)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 }
 
 #[tokio::test]
 async fn test_async_operation_get_results_after_stop() {
     let test_env = TestEnv::builder().await.unwrap();
+    let ecu = test_env.client().component(ECU_FLXC1000);
+    let operation = ecu.operation(CALIBRATE_SENSORS);
 
-    let _lock = Lock::acquire(&test_env, locks::ECU_ENDPOINT, LOCK_EXPIRATION).await;
+    let _lock = acquire_lock(ecu.locks()).await;
 
     // Start async operation
-    let post_response = send_authenticated_cda_request(
-        &test_env,
-        CALIBRATE_SENSORS_EXECUTIONS,
-        StatusCode::ACCEPTED,
-        Method::POST,
-        Some("{}"),
-        None,
-    )
-    .await
-    .unwrap();
-    let post_body: AsyncPostBody = response_to_t(&post_response).unwrap();
-    let execution_id = post_body.id.clone();
+    let started = operation
+        .start(&no_parameters())
+        .await
+        .unwrap()
+        .expect_status(StatusCode::ACCEPTED)
+        .into_body()
+        .started();
+    let execution = operation.execution(&started.id);
 
     // Stop it - CalibrateSensors Stop echoes RoutineId (semantic="DATA") -> 200 with stopped body
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{CALIBRATE_SENSORS_EXECUTIONS}/{execution_id}"),
-        StatusCode::OK,
-        Method::DELETE,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    stop(&execution, false)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 
     // After Stop, the execution is removed - a GET by id should return 404
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{CALIBRATE_SENSORS_EXECUTIONS}/{execution_id}"),
-        StatusCode::NOT_FOUND,
-        Method::GET,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let Err(err) = execution.get().await else {
+        panic!("a stopped execution must be gone");
+    };
+    assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
 }
 
 #[tokio::test]
 async fn test_async_operation_not_found() {
     let test_env = TestEnv::builder().await.unwrap();
+    let ecu = test_env.client().component(ECU_FLXC1000);
 
-    let _lock = Lock::acquire(&test_env, locks::ECU_ENDPOINT, LOCK_EXPIRATION).await;
+    let _lock = acquire_lock(ecu.locks()).await;
 
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{FLXC1000_OPERATIONS}/nonexistentoperation/executions"),
-        StatusCode::NOT_FOUND,
-        Method::POST,
-        Some("{}"),
-        None,
-    )
-    .await
-    .unwrap();
+    let err = ecu
+        .operation("nonexistentoperation")
+        .start(&no_parameters())
+        .await
+        .expect_err("starting an unknown operation must fail");
+    assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
 }
 
 #[tokio::test]
 async fn test_async_operation_in_flight_conflict() {
     let test_env = TestEnv::builder().await.unwrap();
+    let ecu = test_env.client().component(ECU_FLXC1000);
+    let operation = ecu.operation(CALIBRATE_SENSORS);
 
-    let _lock = Lock::acquire(&test_env, locks::ECU_ENDPOINT, LOCK_EXPIRATION).await;
+    let _lock = acquire_lock(ecu.locks()).await;
 
     // First POST - should succeed with 202
-    let post_response = send_authenticated_cda_request(
-        &test_env,
-        CALIBRATE_SENSORS_EXECUTIONS,
-        StatusCode::ACCEPTED,
-        Method::POST,
-        Some("{}"),
-        None,
-    )
-    .await
-    .unwrap();
-    let post_body: AsyncPostBody = response_to_t(&post_response).unwrap();
-    let execution_id = post_body.id.clone();
+    let started = operation
+        .start(&no_parameters())
+        .await
+        .unwrap()
+        .expect_status(StatusCode::ACCEPTED)
+        .into_body()
+        .started();
 
     // Second POST while first is still running - rejected with 409 Conflict
-    send_authenticated_cda_request(
-        &test_env,
-        CALIBRATE_SENSORS_EXECUTIONS,
-        StatusCode::CONFLICT,
-        Method::POST,
-        Some("{}"),
-        None,
-    )
-    .await
-    .unwrap();
-
-    let query_params = QueryParams(HashMap::from_iter([(
-        "x-sovd2uds-force".to_string(),
-        "true".to_string(),
-    )]));
+    let err = operation
+        .start(&no_parameters())
+        .await
+        .expect_err("a second execution must be rejected while the first runs");
+    assert_eq!(err.status(), Some(StatusCode::CONFLICT));
 
     // Clean up the first execution using force=true
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{CALIBRATE_SENSORS_EXECUTIONS}/{execution_id}"),
-        StatusCode::OK,
-        Method::DELETE,
-        None,
-        Some(&query_params),
-    )
-    .await
-    .unwrap();
+    stop(&operation.execution(&started.id), true)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 }
 
 #[tokio::test]
 async fn test_sync_operation_sends_correct_uds_frame() {
     let test_env = TestEnv::builder().await.unwrap();
+    let ecu = test_env.client().component(ECU_FLXC1000);
 
-    let _lock = Lock::acquire(&test_env, locks::ECU_ENDPOINT, LOCK_EXPIRATION).await;
+    let _lock = acquire_lock(ecu.locks()).await;
 
     let recorder = test_env
         .record(ECU_FLXC1000)
         .await
         .expect("failed to start recording");
 
-    send_authenticated_cda_request(
-        &test_env,
-        SELF_TEST_EXECUTIONS,
-        StatusCode::OK,
-        Method::POST,
-        Some("{}"),
-        None,
-    )
-    .await
-    .unwrap();
+    ecu.operation(SELF_TEST)
+        .start(&no_parameters())
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .completed();
 
     let recordings = recorder.stop().await.expect("failed to stop recording");
 
@@ -415,8 +358,10 @@ async fn test_sync_operation_sends_correct_uds_frame() {
 #[tokio::test]
 async fn test_async_operation_sends_correct_uds_frames() {
     let test_env = TestEnv::builder().await.unwrap();
+    let ecu = test_env.client().component(ECU_FLXC1000);
+    let operation = ecu.operation(CALIBRATE_SENSORS);
 
-    let _lock = Lock::acquire(&test_env, locks::ECU_ENDPOINT, LOCK_EXPIRATION).await;
+    let _lock = acquire_lock(ecu.locks()).await;
 
     let recorder = test_env
         .record(ECU_FLXC1000)
@@ -424,46 +369,23 @@ async fn test_async_operation_sends_correct_uds_frames() {
         .expect("failed to start recording");
 
     // Start - triggers CalibrateSensors Start (31 01 10 02)
-    let post_response = send_authenticated_cda_request(
-        &test_env,
-        CALIBRATE_SENSORS_EXECUTIONS,
-        StatusCode::ACCEPTED,
-        Method::POST,
-        Some("{}"),
-        None,
-    )
-    .await
-    .unwrap();
-    let post_body: AsyncPostBody = response_to_t(&post_response).unwrap();
-    let execution_id = post_body.id.clone();
+    let started = operation
+        .start(&no_parameters())
+        .await
+        .unwrap()
+        .expect_status(StatusCode::ACCEPTED)
+        .into_body()
+        .started();
+    let execution = operation.execution(&started.id);
 
     // GET by id - triggers CalibrateSensors RequestResults (31 03 10 02)
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{CALIBRATE_SENSORS_EXECUTIONS}/{execution_id}"),
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    execution.get().await.unwrap().expect_status(StatusCode::OK);
 
-    let query_params = QueryParams(HashMap::from_iter([(
-        "x-sovd2uds-force".to_string(),
-        "true".to_string(),
-    )]));
     // DELETE - triggers CalibrateSensors Stop (31 02 10 02)
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{CALIBRATE_SENSORS_EXECUTIONS}/{execution_id}"),
-        StatusCode::OK,
-        Method::DELETE,
-        None,
-        Some(&query_params),
-    )
-    .await
-    .unwrap();
+    stop(&execution, true)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 
     let recordings = recorder.stop().await.expect("failed to stop recording");
 
@@ -490,18 +412,13 @@ async fn test_async_operation_sends_correct_uds_frames() {
 async fn test_time_circuits_operation_listed() {
     let test_env = TestEnv::builder().await.unwrap();
 
-    let response = send_authenticated_cda_request(
-        &test_env,
-        FLXC1000_OPERATIONS,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let list: Items<OperationCollectionItem> = response_to_t(&response).unwrap();
+    let list = test_env
+        .client()
+        .component(ECU_FLXC1000)
+        .operations()
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 
     let time_circuits = list
         .items
@@ -525,25 +442,26 @@ async fn test_time_circuits_operation_listed() {
 #[tokio::test]
 async fn test_time_circuits_lifecycle() {
     let test_env = TestEnv::builder().await.unwrap();
+    let ecu = test_env.client().component(ECU_FLXC1000);
+    let operation = ecu.operation(TIME_CIRCUITS);
 
-    let _lock = Lock::acquire(&test_env, locks::ECU_ENDPOINT, LOCK_EXPIRATION).await;
+    let _lock = acquire_lock(ecu.locks()).await;
 
     // Start with the default ("PresentDay") travel method - travelMethod (the
     // TABLE-KEY row selector) and travelMethodData (the TABLE-STRUCT
     // dependent data, empty for this row) must both be present.
-    let post_response = send_authenticated_cda_request(
-        &test_env,
-        TIME_CIRCUITS_EXECUTIONS,
-        StatusCode::ACCEPTED,
-        Method::POST,
-        Some(r#"{"parameters":{"travelMethod":"PresentDay","travelMethodData":{}}}"#),
-        None,
-    )
-    .await
-    .unwrap();
-    let post_body: AsyncPostBody = response_to_t(&post_response).unwrap();
-    assert_eq!(post_body.status, ExecutionStatus::Running);
-    let execution_id = post_body.id.clone();
+    let started = operation
+        .start(&with_parameters(serde_json::json!({
+            "travelMethod": "PresentDay",
+            "travelMethodData": {}
+        })))
+        .await
+        .unwrap()
+        .expect_status(StatusCode::ACCEPTED)
+        .into_body()
+        .started();
+    assert_eq!(started.status, Some(ExecutionStatus::Running));
+    let execution = operation.execution(&started.id);
 
     // Poll RequestResults - each GET advances the simulated progress by 25%.
     // percentComplete goes 25 -> 50 -> 75 -> 100 (step Arrived on the 4th call).
@@ -554,19 +472,14 @@ async fn test_time_circuits_lifecycle() {
         .zip(expected_steps.iter())
         .enumerate()
     {
-        let get_response = send_authenticated_cda_request(
-            &test_env,
-            &format!("{TIME_CIRCUITS_EXECUTIONS}/{execution_id}"),
-            StatusCode::OK,
-            Method::GET,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        let get_json = response_to_json(&get_response).unwrap();
-        let parameters = get_json
-            .get("parameters")
+        let state = execution
+            .get()
+            .await
+            .unwrap()
+            .expect_status(StatusCode::OK)
+            .into_body();
+        let parameters = state
+            .parameters
             .unwrap_or_else(|| panic!("call {i}: response must contain 'parameters'"));
         let percent_complete = parameters
             .get("percentComplete")
@@ -600,20 +513,10 @@ async fn test_time_circuits_lifecycle() {
     }
 
     // Clean up - stop the operation
-    let query_params = QueryParams(HashMap::from_iter([(
-        "x-sovd2uds-force".to_string(),
-        "true".to_string(),
-    )]));
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{TIME_CIRCUITS_EXECUTIONS}/{execution_id}"),
-        StatusCode::OK,
-        Method::DELETE,
-        None,
-        Some(&query_params),
-    )
-    .await
-    .unwrap();
+    stop(&execution, true)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 }
 
 /// Verify the exact UDS frames sent for the `TimeCircuits` Start/RequestResults/Stop
@@ -621,8 +524,10 @@ async fn test_time_circuits_lifecycle() {
 #[tokio::test]
 async fn test_time_circuits_sends_correct_uds_frames() {
     let test_env = TestEnv::builder().await.unwrap();
+    let ecu = test_env.client().component(ECU_FLXC1000);
+    let operation = ecu.operation(TIME_CIRCUITS);
 
-    let _lock = Lock::acquire(&test_env, locks::ECU_ENDPOINT, LOCK_EXPIRATION).await;
+    let _lock = acquire_lock(ecu.locks()).await;
 
     let recorder = test_env
         .record(ECU_FLXC1000)
@@ -630,46 +535,26 @@ async fn test_time_circuits_sends_correct_uds_frames() {
         .expect("failed to start recording");
 
     // Start - triggers TimeCircuits Start (31 01 10 03), default/PresentDay travel method
-    let post_response = send_authenticated_cda_request(
-        &test_env,
-        TIME_CIRCUITS_EXECUTIONS,
-        StatusCode::ACCEPTED,
-        Method::POST,
-        Some(r#"{"parameters":{"travelMethod":"PresentDay","travelMethodData":{}}}"#),
-        None,
-    )
-    .await
-    .unwrap();
-    let post_body: AsyncPostBody = response_to_t(&post_response).unwrap();
-    let execution_id = post_body.id.clone();
+    let started = operation
+        .start(&with_parameters(serde_json::json!({
+            "travelMethod": "PresentDay",
+            "travelMethodData": {}
+        })))
+        .await
+        .unwrap()
+        .expect_status(StatusCode::ACCEPTED)
+        .into_body()
+        .started();
+    let execution = operation.execution(&started.id);
 
     // GET by id - triggers TimeCircuits RequestResults (31 03 10 03)
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{TIME_CIRCUITS_EXECUTIONS}/{execution_id}"),
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    execution.get().await.unwrap().expect_status(StatusCode::OK);
 
-    let query_params = QueryParams(HashMap::from_iter([(
-        "x-sovd2uds-force".to_string(),
-        "true".to_string(),
-    )]));
     // DELETE - triggers TimeCircuits Stop (31 02 10 03)
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{TIME_CIRCUITS_EXECUTIONS}/{execution_id}"),
-        StatusCode::OK,
-        Method::DELETE,
-        None,
-        Some(&query_params),
-    )
-    .await
-    .unwrap();
+    stop(&execution, true)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 
     let recordings = recorder.stop().await.expect("failed to stop recording");
 
@@ -696,8 +581,10 @@ async fn test_time_circuits_sends_correct_uds_frames() {
 #[tokio::test]
 async fn test_time_circuits_manual_entry_uds_frame() {
     let test_env = TestEnv::builder().await.unwrap();
+    let ecu = test_env.client().component(ECU_FLXC1000);
+    let operation = ecu.operation(TIME_CIRCUITS);
 
-    let _lock = Lock::acquire(&test_env, locks::ECU_ENDPOINT, LOCK_EXPIRATION).await;
+    let _lock = acquire_lock(ecu.locks()).await;
 
     let recorder = test_env
         .record(ECU_FLXC1000)
@@ -705,36 +592,28 @@ async fn test_time_circuits_manual_entry_uds_frame() {
         .expect("failed to start recording");
 
     // Start with ManualEntry: year=1985, month=10, day=26
-    let post_response = send_authenticated_cda_request(
-        &test_env,
-        TIME_CIRCUITS_EXECUTIONS,
-        StatusCode::ACCEPTED,
-        Method::POST,
-        Some(
-            r#"{"parameters":{"travelMethod":"ManualEntry","travelMethodData":{"ManualEntry":{"destinationYear":1985,"destinationMonth":10,"destinationDay":26}}}}"#,
-        ),
-        None,
-    )
-    .await
-    .unwrap();
-    let post_body: AsyncPostBody = response_to_t(&post_response).unwrap();
-    let execution_id = post_body.id.clone();
+    let started = operation
+        .start(&with_parameters(serde_json::json!({
+            "travelMethod": "ManualEntry",
+            "travelMethodData": {
+                "ManualEntry": {
+                    "destinationYear": 1985,
+                    "destinationMonth": 10,
+                    "destinationDay": 26
+                }
+            }
+        })))
+        .await
+        .unwrap()
+        .expect_status(StatusCode::ACCEPTED)
+        .into_body()
+        .started();
 
     // Stop the operation
-    let query_params = QueryParams(HashMap::from_iter([(
-        "x-sovd2uds-force".to_string(),
-        "true".to_string(),
-    )]));
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{TIME_CIRCUITS_EXECUTIONS}/{execution_id}"),
-        StatusCode::OK,
-        Method::DELETE,
-        None,
-        Some(&query_params),
-    )
-    .await
-    .unwrap();
+    stop(&operation.execution(&started.id), true)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 
     let recordings = recorder.stop().await.expect("failed to stop recording");
 
@@ -759,8 +638,10 @@ async fn test_time_circuits_manual_entry_uds_frame() {
 #[tokio::test]
 async fn test_time_circuits_preset_destination_uds_frame() {
     let test_env = TestEnv::builder().await.unwrap();
+    let ecu = test_env.client().component(ECU_FLXC1000);
+    let operation = ecu.operation(TIME_CIRCUITS);
 
-    let _lock = Lock::acquire(&test_env, locks::ECU_ENDPOINT, LOCK_EXPIRATION).await;
+    let _lock = acquire_lock(ecu.locks()).await;
 
     let recorder = test_env
         .record(ECU_FLXC1000)
@@ -768,36 +649,24 @@ async fn test_time_circuits_preset_destination_uds_frame() {
         .expect("failed to start recording");
 
     // Start with PresetDestination: presetId="2015-10-21_HillValley" (coded value 3)
-    let post_response = send_authenticated_cda_request(
-        &test_env,
-        TIME_CIRCUITS_EXECUTIONS,
-        StatusCode::ACCEPTED,
-        Method::POST,
-        Some(
-            r#"{"parameters":{"travelMethod":"PresetDestination","travelMethodData":{"PresetDestination":{"presetId":"2015-10-21_HillValley"}}}}"#,
-        ),
-        None,
-    )
-    .await
-    .unwrap();
-    let post_body: AsyncPostBody = response_to_t(&post_response).unwrap();
-    let execution_id = post_body.id.clone();
+    let started = operation
+        .start(&with_parameters(serde_json::json!({
+            "travelMethod": "PresetDestination",
+            "travelMethodData": {
+                "PresetDestination": { "presetId": "2015-10-21_HillValley" }
+            }
+        })))
+        .await
+        .unwrap()
+        .expect_status(StatusCode::ACCEPTED)
+        .into_body()
+        .started();
 
     // Stop the operation
-    let query_params = QueryParams(HashMap::from_iter([(
-        "x-sovd2uds-force".to_string(),
-        "true".to_string(),
-    )]));
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{TIME_CIRCUITS_EXECUTIONS}/{execution_id}"),
-        StatusCode::OK,
-        Method::DELETE,
-        None,
-        Some(&query_params),
-    )
-    .await
-    .unwrap();
+    stop(&operation.execution(&started.id), true)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 
     let recordings = recorder.stop().await.expect("failed to stop recording");
 
@@ -823,18 +692,13 @@ async fn test_time_circuits_preset_destination_uds_frame() {
 async fn test_functional_operation_list() {
     let test_env = TestEnv::builder().await.unwrap();
 
-    let response = send_authenticated_cda_request(
-        &test_env,
-        FUNCTIONAL_GROUP_OPERATIONS,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let list: Items<OperationCollectionItem> = response_to_t(&response).unwrap();
+    let list = test_env
+        .client()
+        .functional_group(FUNCTIONAL_GROUP)
+        .operations()
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 
     let squints = list
         .items
@@ -857,16 +721,16 @@ async fn test_functional_operation_list() {
 async fn test_functional_operation_post_no_lock() {
     let test_env = TestEnv::builder().await.unwrap();
 
-    send_authenticated_cda_request(
-        &test_env,
-        ENGAGE_SAFETY_SQUINTS_EXECUTIONS,
-        StatusCode::CONFLICT,
-        Method::POST,
-        Some(r#"{"parameters":{"SquintSlitWidth":2.5}}"#),
-        None,
-    )
-    .await
-    .unwrap();
+    let err = test_env
+        .client()
+        .functional_group(FUNCTIONAL_GROUP)
+        .operation(ENGAGE_SAFETY_SQUINTS)
+        .start(&with_parameters(
+            serde_json::json!({ "SquintSlitWidth": 2.5 }),
+        ))
+        .await
+        .expect_err("starting a functional operation without a lock must fail");
+    assert_eq!(err.status(), Some(StatusCode::CONFLICT));
 }
 
 /// Full lifecycle for a functional-group operation without `RequestResults`:
@@ -877,76 +741,50 @@ async fn test_functional_operation_post_no_lock() {
 #[tokio::test]
 async fn test_functional_operation_lifecycle_no_request_results() {
     let test_env = TestEnv::builder().await.unwrap();
+    let group = test_env.client().functional_group(FUNCTIONAL_GROUP);
+    let operation = group.operation(ENGAGE_SAFETY_SQUINTS);
 
-    let _lock = Lock::acquire(&test_env, locks::FUNCTIONAL_GROUP_ENDPOINT, LOCK_EXPIRATION).await;
+    let _lock = acquire_lock(group.locks()).await;
 
     // 1. POST (Start) -> 202 Accepted
-    let post_response = send_authenticated_cda_request(
-        &test_env,
-        ENGAGE_SAFETY_SQUINTS_EXECUTIONS,
-        StatusCode::ACCEPTED,
-        Method::POST,
-        Some(r#"{"parameters":{"SquintSlitWidth":2.5}}"#),
-        None,
-    )
-    .await
-    .unwrap();
-
-    let post_body: AsyncPostBody = response_to_t(&post_response).unwrap();
-    assert_eq!(post_body.status, ExecutionStatus::Running);
-    let execution_id = post_body.id.clone();
+    let started = operation
+        .start(&with_parameters(
+            serde_json::json!({ "SquintSlitWidth": 2.5 }),
+        ))
+        .await
+        .unwrap()
+        .expect_status(StatusCode::ACCEPTED)
+        .into_body()
+        .started();
+    assert_eq!(started.status, Some(ExecutionStatus::Running));
+    let execution = operation.execution(&started.id);
 
     // 2. GET by execution id -> 200 with execution status + errors array
     //    (operation has no RequestResults, so the response carries a DataError
     //    at path "/")
-    let get_response = send_authenticated_cda_request(
-        &test_env,
-        &format!("{ENGAGE_SAFETY_SQUINTS_EXECUTIONS}/{execution_id}"),
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let get_json = response_to_json(&get_response).unwrap();
-    let status = extract_field_from_json::<String>(&get_json, "status")
-        .expect("response must contain 'status'");
+    let state = execution.get().await.unwrap().expect_status(StatusCode::OK);
     assert_eq!(
-        status, "running",
+        state.status,
+        ExecutionStatus::Running,
         "execution should still be running (Stop not called yet)"
     );
-    let errors = extract_field_from_json::<Vec<serde_json::Value>>(&get_json, "errors")
-        .expect("response must contain 'errors' when RequestResults is not supported");
-    assert_eq!(errors.len(), 1, "expected exactly one error entry");
-    let data_error = errors.first().expect("errors array must not be empty");
-    assert_eq!(
-        data_error.get("path"),
-        Some(&serde_json::json!("/")),
-        "error path must be '/'"
-    );
-    let message = data_error
-        .get("error")
-        .and_then(|e| e.get("message"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
+    assert_eq!(state.errors.len(), 1, "expected exactly one error entry");
+    let data_error = state
+        .errors
+        .first()
+        .expect("errors array must not be empty");
+    assert_eq!(data_error.path, "/", "error path must be '/'");
+    let message = &data_error.error.message;
     assert!(
         message.contains("RequestResults"),
         "error message should mention RequestResults, got: {message}"
     );
 
     // 3. DELETE (Stop) -> 204 No Content
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{ENGAGE_SAFETY_SQUINTS_EXECUTIONS}/{execution_id}"),
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    stop(&execution, false)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::NO_CONTENT);
 }
 
 /// Verify that GET `{ecu}/operations/{op}` returns 200 OK with the correct operation info even
@@ -958,16 +796,14 @@ async fn test_get_operation_info_before_variant_detection() {
     // Use ecusim recording to prove no UDS frame is sent for a pure info GET.
     let recorder = test_env.record(ECU_FLXC1000).await.unwrap();
 
-    let response = send_authenticated_cda_request(
-        &test_env,
-        SELF_TEST,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let description = test_env
+        .client()
+        .component(ECU_FLXC1000)
+        .operation(SELF_TEST)
+        .get()
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 
     let frames = recorder.stop().await.unwrap();
     assert!(
@@ -975,7 +811,7 @@ async fn test_get_operation_info_before_variant_detection() {
         "Expected no UDS frames for a pure info GET, but got: {frames:?}"
     );
 
-    let list: Items<OperationCollectionItem> = response_to_t(&response).unwrap();
+    let list = description.into_body();
     assert_eq!(list.items.len(), 1, "Expected exactly one item in response");
     let op = list.items.first().expect("Expected one operation item");
     assert!(

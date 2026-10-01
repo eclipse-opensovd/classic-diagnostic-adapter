@@ -26,37 +26,45 @@ use cda_interfaces::communication_control::{
     CommunicationInitMode, CommunicationSettings, PostUpdateCommunicationMode, VariantDetectionMode,
 };
 use futures::FutureExt;
-use http::{Method, StatusCode};
+use http::{StatusCode, header::RETRY_AFTER};
 use opensovd_cda_lib::config::configfile::Configuration;
-use sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response as NetworkStructureResponse;
+use sovd_interfaces::components::ecu::data as ecu_data;
 
 use super::{Pool, TestEnv, Transport, skip_for_doip, wait_for_ecus_online};
 use crate::{
-    sovd::{ECU_FLXC1000, ECU_FLXC1000_DATA_ENDPOINT, ECU_TMCC3000_ENDPOINT},
-    util::{
-        TestingError, ecusim,
-        endpoints::SOVD2UDS_NETWORK_STRUCTURE,
-        http::{response_to_t, send_authenticated_cda_request, send_cda_request},
-    },
+    client::{self, SovdTestClient, components::data::DataItem},
+    sovd::{ECU_FLXC1000, ECU_TMCC3000},
+    util::{TestingError, ecusim},
 };
 
 /// Retry-After of the on-demand configuration, distinct from any default.
 const ON_DEMAND_RETRY_AFTER_SECONDS: u64 = 7;
 
-/// A diagnostic request that reaches FLXC1000, expecting `status`.
+/// A diagnostic request that reaches FLXC1000.
 async fn read_flxc1000_data(
     env: &TestEnv,
-    status: StatusCode,
-) -> Result<crate::util::http::Response, TestingError> {
-    send_authenticated_cda_request(
-        env,
-        ECU_FLXC1000_DATA_ENDPOINT,
-        status,
-        Method::GET,
-        None,
-        None,
-    )
-    .await
+) -> client::Result<client::Response<ecu_data::get::Response>> {
+    env.client().component(ECU_FLXC1000).data_list().await
+}
+
+/// Checks that the CDA of `env` serves [`read_flxc1000_data`] with `200 OK`.
+async fn assert_serves_flxc1000_data(env: &TestEnv) -> Result<(), TestingError> {
+    read_flxc1000_data(env).await?.expect_status(StatusCode::OK);
+    Ok(())
+}
+
+/// Checks that no CDA answers at the address of `env`: the diagnostic request
+/// of [`read_flxc1000_data`] gets no response at all.
+async fn assert_no_cda_answers(env: &TestEnv, message: &str) {
+    match env
+        .anonymous_client()
+        .component(ECU_FLXC1000)
+        .data_list()
+        .await
+    {
+        Err(err) => assert_eq!(err.status(), None, "{message}: {err}"),
+        Ok(_) => panic!("{message}"),
+    }
 }
 
 /// Changes `config` to on-demand communication, observable as a `503` with
@@ -90,14 +98,21 @@ async fn assert_runs_default(env: &TestEnv) -> Result<(), TestingError> {
         "the environment does not report the default configuration"
     );
     wait_for_ecus_online(&env.config).await?;
-    read_flxc1000_data(env, StatusCode::OK).await?;
+    assert_serves_flxc1000_data(env).await?;
     Ok(())
 }
 
 async fn assert_runs_on_demand(env: &TestEnv) -> Result<(), TestingError> {
-    let response = read_flxc1000_data(env, StatusCode::SERVICE_UNAVAILABLE).await?;
-    let retry_after = response
-        .header(reqwest::header::RETRY_AFTER)
+    let Err(err) = read_flxc1000_data(env).await else {
+        panic!("the CDA served a diagnostic request before communication was requested");
+    };
+    assert_eq!(
+        err.status(),
+        Some(StatusCode::SERVICE_UNAVAILABLE),
+        "the CDA does not run with the on-demand configuration: {err}"
+    );
+    let retry_after = err
+        .header(RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned);
     assert_eq!(
@@ -128,16 +143,13 @@ async fn wait_for_log_frames(env: &TestEnv, frames: u64) -> Result<(), TestingEr
 async fn env_lifecycle() -> Result<(), TestingError> {
     let mut env = TestEnv::builder().without_cda().await?;
     ecusim::get_ecu_state(&env.ecu_sim, ECU_FLXC1000).await?;
-    assert!(
-        read_flxc1000_data(&env, StatusCode::OK).await.is_err(),
-        "a CDA answers although none was started"
-    );
+    assert_no_cda_answers(&env, "a CDA answers although none was started").await;
     let server = env.config.server.clone();
 
     let default_config = env.default_config().clone();
     env.restart_cda(&default_config).await?;
     wait_for_ecus_online(&env.config).await?;
-    read_flxc1000_data(&env, StatusCode::OK).await?;
+    assert_serves_flxc1000_data(&env).await?;
 
     // A new CDA container with another configuration, reached through the
     // host port Docker published it on.
@@ -146,14 +158,11 @@ async fn env_lifecycle() -> Result<(), TestingError> {
     assert_runs_on_demand(&env).await?;
 
     env.stop_cda().await?;
-    assert!(
-        read_flxc1000_data(&env, StatusCode::OK).await.is_err(),
-        "the CDA still answers after stop_cda"
-    );
+    assert_no_cda_answers(&env, "the CDA still answers after stop_cda").await;
 
     env.restart_cda(&default_config).await?;
     wait_for_ecus_online(&env.config).await?;
-    read_flxc1000_data(&env, StatusCode::OK).await?;
+    assert_serves_flxc1000_data(&env).await?;
 
     // ecu-sim stops and comes back, reached through its possibly new control
     // port, with its output still printed.
@@ -172,7 +181,7 @@ async fn env_lifecycle() -> Result<(), TestingError> {
     // budget of wait_for_ecus_online, so start a fresh one.
     env.restart_cda(&default_config).await?;
     wait_for_ecus_online(&env.config).await?;
-    read_flxc1000_data(&env, StatusCode::OK).await?;
+    assert_serves_flxc1000_data(&env).await?;
 
     Ok(())
 }
@@ -181,7 +190,7 @@ async fn env_lifecycle() -> Result<(), TestingError> {
 async fn leased_env_serves_requests() -> Result<(), TestingError> {
     let env = TestEnv::builder().await?;
     wait_for_ecus_online(&env.config).await?;
-    read_flxc1000_data(&env, StatusCode::OK).await?;
+    assert_serves_flxc1000_data(&env).await?;
     Ok(())
 }
 
@@ -282,7 +291,7 @@ async fn lease_single_env_pool() -> Result<(), TestingError> {
     // Restored: ecu-sim runs, and the CDA runs with the default configuration.
     ecusim::get_ecu_state(&env.ecu_sim, ECU_FLXC1000).await?;
     wait_for_ecus_online(&env.config).await?;
-    read_flxc1000_data(&env, StatusCode::OK).await?;
+    assert_serves_flxc1000_data(&env).await?;
 
     // One line each from the CDA restored for this test, and from ecu-sim,
     // whose log consumer was started by the first test.
@@ -310,17 +319,11 @@ async fn second_pooled_lease() -> Result<(), TestingError> {
 
 /// The ECUs a CDA discovered, as `(gateway address, ECU)`.
 async fn discovered_ecus(config: &Configuration) -> Result<Vec<(String, String)>, TestingError> {
-    let response = send_cda_request(
-        config,
-        SOVD2UDS_NETWORK_STRUCTURE,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-        None,
-    )
-    .await?;
-    let structure: NetworkStructureResponse = response_to_t(&response)?;
+    let structure = SovdTestClient::new(config)
+        .sovd2uds()
+        .network_structure()
+        .await?
+        .expect_status(StatusCode::OK);
     let mut ecus: Vec<_> = structure
         .data
         .iter()
@@ -384,18 +387,12 @@ async fn parallel_doip_envs_discover_only_their_own_ecus() -> Result<(), Testing
 
 /// A live read of TMCC3000 through the CDA of `env`. TMCC3000 is served over
 /// CAN in pure-CAN and in mixed mode.
-async fn read_tmcc3000_identification(
-    env: &TestEnv,
-) -> Result<crate::util::http::Response, TestingError> {
-    send_authenticated_cda_request(
-        env,
-        &format!("{ECU_TMCC3000_ENDPOINT}/data/identification"),
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await
+async fn read_tmcc3000_identification(env: &TestEnv) -> client::Result<client::Response<DataItem>> {
+    env.client()
+        .component(ECU_TMCC3000)
+        .data("identification")
+        .get()
+        .await
 }
 
 /// Every CAN environment has a socketcand, and thus a `vcan0`, of its own:
@@ -416,12 +413,16 @@ async fn parallel_can_envs_have_their_own_bus() -> Result<(), TestingError> {
         TestEnv::builder().dedicated()
     );
     let (mut first, second) = (first?, second?);
-    read_tmcc3000_identification(&first).await?;
-    read_tmcc3000_identification(&second).await?;
+    read_tmcc3000_identification(&first)
+        .await?
+        .expect_status(StatusCode::OK);
+    read_tmcc3000_identification(&second)
+        .await?
+        .expect_status(StatusCode::OK);
 
     first.stop_ecu_sim().await?;
     match read_tmcc3000_identification(&first).await {
-        Err(TestingError::UnexpectedResponse { actual, .. }) => {
+        Err(client::Error::Api { status: actual, .. }) => {
             eprintln!("{} answers {actual} with its ecu-sim stopped", first.name());
         }
         other => panic!(
@@ -429,7 +430,9 @@ async fn parallel_can_envs_have_their_own_bus() -> Result<(), TestingError> {
             first.name()
         ),
     }
-    read_tmcc3000_identification(&second).await?;
+    read_tmcc3000_identification(&second)
+        .await?
+        .expect_status(StatusCode::OK);
 
     Ok(())
 }
