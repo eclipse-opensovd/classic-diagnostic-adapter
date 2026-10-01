@@ -49,18 +49,29 @@ pub(super) async fn create_lock<T: UdsEcu + Clone>(
             })
             .await
     };
-    let (tester_present, cleanup_fn) = match &scope {
-        LockScope::Ecu { name } => {
-            let ecu_name = name.to_lowercase();
+    let scope_key = ScopeKey::from(&scope);
+    // Decided from the lock state, so a component lock under a functional-group
+    // lock of the same client starts no physical tester present (see
+    // `LockState::tester_present_for`). Releasing, expiring, or preempting
+    // that functional-group lock releases the component lock too (see
+    // `LockState::covered_narrow_locks`), and releasing the component lock on
+    // its own while the functional-group lock survives skips its cleanup.
+    let tester_present = locks
+        .core
+        .read_store(|store| {
+            store
+                .state
+                .tester_present_for(&principal.subject, &scope_key)
+        })
+        .await;
+    let cleanup_fn = match &scope_key {
+        ScopeKey::Ecu(ecu_name) => {
+            let ecu_name = ecu_name.clone();
             let tp_type = TesterPresentType::Ecu(ecu_name.clone());
-            let cleanup_tp_type = tp_type.clone();
             let uds = (*uds).clone();
-            let cleanup = LockCleanupFnHelper::new(async move || {
-                if let Err(e) = uds.stop_tester_present(cleanup_tp_type).await {
-                    tracing::error!("Failed to stop tester present for lock cleanup: {e}");
-                } else {
-                    tracing::info!("Tester present stopped for ECU lock cleanup");
-                }
+            let locks = Arc::clone(locks);
+            LockCleanupFnHelper::new(async move || {
+                stop_tester_present_unless_needed(&uds, &locks, tp_type).await;
                 reset_ecu_session_and_security(
                     &uds,
                     &ecu_name,
@@ -68,20 +79,15 @@ pub(super) async fn create_lock<T: UdsEcu + Clone>(
                     &(security_plugin as DynamicPlugin),
                 )
                 .await;
-            });
-            (Some(tp_type), cleanup)
+            })
         }
-        LockScope::FunctionalGroup { name } => {
-            let functional_group_name = name.to_lowercase();
-            let tp_type = TesterPresentType::Functional(functional_group_name.clone());
+        ScopeKey::FunctionalGroup(group) => {
+            let tp_type = TesterPresentType::Functional(group.clone());
             let covered_ecus = coverage.covered_ecus();
-            let cleanup_tp_type = tp_type.clone();
             let uds = (*uds).clone();
-            let cleanup = LockCleanupFnHelper::new(async move || {
-                if let Err(e) = uds.stop_tester_present(cleanup_tp_type).await {
-                    tracing::error!("Failed to stop tester present for lock cleanup: {e}");
-                }
-                tracing::info!("Tester present stopped for functional group lock cleanup");
+            let locks = Arc::clone(locks);
+            LockCleanupFnHelper::new(async move || {
+                stop_tester_present_unless_needed(&uds, &locks, tp_type).await;
                 let sec = &(security_plugin as DynamicPlugin);
                 for ecu in covered_ecus {
                     reset_ecu_session_and_security(
@@ -92,24 +98,22 @@ pub(super) async fn create_lock<T: UdsEcu + Clone>(
                     )
                     .await;
                 }
-            });
-            (Some(tp_type), cleanup)
+            })
         }
-        LockScope::Vehicle => {
+        ScopeKey::Vehicle => {
             let uds = (*uds).clone();
-            let cleanup = LockCleanupFnHelper::new(async move || {
+            LockCleanupFnHelper::new(async move || {
                 let sec = &(security_plugin as DynamicPlugin);
                 for ecu in uds.get_ecus().await {
                     reset_ecu_session_and_security(&uds, &ecu, "vehicle lock cleanup", sec).await;
                 }
-            });
-            (None, cleanup)
+            })
         }
     };
     Ok((
         ActiveLock {
             id: id.into(),
-            scope: ScopeKey::from(&scope),
+            scope: scope_key,
             coverage,
             principal,
             metadata: request.metadata,
@@ -120,4 +124,33 @@ pub(super) async fn create_lock<T: UdsEcu + Clone>(
         cleanup_fn,
         tester_present,
     ))
+}
+
+/// Stops `type_` for a lock's cleanup, unless an active lock still needs it.
+///
+/// The cleanup runs after the state change that removed its lock, so after a
+/// preemption on the same scope the new lock already needs `type_`: its tester
+/// present is handed over, running or suspended, instead of being stopped and
+/// restarted.
+pub(super) async fn stop_tester_present_unless_needed<T: UdsEcu>(
+    uds: &T,
+    locks: &Locks,
+    type_: TesterPresentType,
+) {
+    if locks
+        .core
+        .read_store(|store| store.state.tester_present_needed(&type_))
+        .await
+    {
+        tracing::info!(
+            ?type_,
+            "Tester present still needed by an active lock; handing it over"
+        );
+        return;
+    }
+    if let Err(e) = uds.stop_tester_present(type_).await {
+        tracing::error!("Failed to stop tester present for lock cleanup: {e}");
+    } else {
+        tracing::info!("Tester present stopped for lock cleanup");
+    }
 }

@@ -20,7 +20,9 @@ use cda_interfaces::{
 use futures::FutureExt;
 use tokio::time::{Instant, sleep_until};
 
-use super::{ActiveLock, ApiError, Locks, active_snapshot, enqueue_lock_event};
+use super::{
+    ActiveLock, ApiError, LockState, Locks, ScopeKey, active_snapshot, enqueue_lock_event,
+};
 use crate::sovd::lock_state::ExpirationStart;
 
 /// Type alias for the async cleanup closure called when dropping a lock
@@ -82,7 +84,9 @@ impl Locks {
                     let mut store = reservation.write_store().await;
                     match store.state.begin_expiration(&lock_id, SystemTime::now()) {
                         Ok(ExpirationStart::Expired(removed)) => {
-                            let cleanups = take_cleanups(&mut store.cleanups, &removed);
+                            let store = &mut *store;
+                            let cleanups =
+                                take_cleanups(&store.state, &mut store.cleanups, &removed);
                             Ok(Some((removed, cleanups)))
                         }
                         Ok(ExpirationStart::Stale) => Ok(None),
@@ -166,12 +170,31 @@ pub(super) async fn run_cleanups(pending: Vec<LockCleanupFnHelper>) {
 }
 
 pub(super) fn take_cleanups(
+    state: &LockState,
     cleanups: &mut HashMap<LockId, LockCleanupFnHelper>,
     removed: &[ActiveLock],
 ) -> Vec<LockCleanupFnHelper> {
     removed
         .iter()
-        .filter_map(|lock| cleanups.remove(&lock.id))
+        .filter_map(|lock| {
+            let cleanup = cleanups.remove(&lock.id)?;
+            let ScopeKey::Ecu(ecu_name) = &lock.scope else {
+                return Some(cleanup);
+            };
+            if state
+                .covering_functional_group(&lock.principal.subject, ecu_name)
+                .is_some()
+            {
+                // A functional-group lock of the same client still covers
+                // this ECU: it still owns the ECU's tester present and
+                // session/security state, and releasing it will run this
+                // cleanup later. Running it now would stop tester present
+                // and reset state the functional-group lock still needs.
+                None
+            } else {
+                Some(cleanup)
+            }
+        })
         .collect()
 }
 
