@@ -158,9 +158,17 @@ impl<S: SecurityPlugin> EcuManager<S> {
             })
             .to_lowercase();
 
+        // Needed for service that do not contain any configured affix.
+        let exact_lookup_name = diag_comm
+            .lookup_name
+            .is_none()
+            .then(|| diag_comm.name.to_lowercase());
         let prefixes = diag_comm.type_.service_prefixes();
         let predicate = |service: &datatypes::DiagService<'_>| {
-            diag_comm_short_name_starts_with(service, &lookup_name)
+            (diag_comm_short_name_starts_with(service, &lookup_name)
+                || exact_lookup_name
+                    .as_ref()
+                    .is_some_and(|name| diag_comm_short_name_starts_with(service, name)))
                 && service
                     .request_id()
                     .is_some_and(|sid| prefixes.contains(&sid))
