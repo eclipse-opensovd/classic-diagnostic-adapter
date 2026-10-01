@@ -94,7 +94,8 @@ async fn commit_pending_preemption(
                 pending.broken_at,
             )
             .expect("Preemption commit should succeed");
-        let cleanups = take_cleanups(&mut store.cleanups, &removed);
+        let store = &mut *store;
+        let cleanups = take_cleanups(&store.state, &mut store.cleanups, &removed);
         (removed, cleanups)
     };
     pending.disarm();

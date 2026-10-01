@@ -18,7 +18,10 @@ use std::{
     time::SystemTime,
 };
 
-use cda_interfaces::lock_priority_api::{LockId, LockPrincipal, LockScope};
+use cda_interfaces::{
+    TesterPresentType,
+    lock_priority_api::{LockId, LockPrincipal, LockScope},
+};
 use serde_json::{Map, Value};
 
 /// Canonical, case-insensitive lock scope key.
@@ -106,7 +109,6 @@ impl LockCoverage {
         }
     }
 }
-
 /// Canonical active lock record.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ActiveLock {
@@ -216,6 +218,89 @@ impl LockState {
     /// Finds a defunct lock by ID.
     pub(super) fn defunct_by_id(&self, lock_id: &str) -> Option<&DefunctLock> {
         self.defunct_by_id.get(lock_id)
+    }
+
+    /// Narrow (ECU-scope) locks of the same client covered by a
+    /// functional-group lock's coverage.
+    ///
+    /// Acquiring a functional-group lock permanently replaces the tester
+    /// present of these ECU locks; releasing, expiring, or preempting the
+    /// functional-group lock releases them too, so [`LockState::delete`],
+    /// [`LockState::begin_expiration`], and [`LockState::commit_replacement`]
+    /// all route through [`LockState::remove_active_tree_uncommitted`],
+    /// which calls this for every functional-group root it removes.
+    ///
+    /// Returns an empty `Vec` for any other scope.
+    pub(super) fn covered_narrow_locks(&self, broad: &ActiveLock) -> Vec<LockId> {
+        let ScopeKey::FunctionalGroup(_) = &broad.scope else {
+            return Vec::new();
+        };
+        self.active_by_id
+            .values()
+            .filter(|candidate| match &candidate.scope {
+                ScopeKey::Ecu(ecu_name) => {
+                    candidate.principal.subject == broad.principal.subject
+                        && broad.coverage.contains_ecu(ecu_name)
+                }
+                ScopeKey::Vehicle | ScopeKey::FunctionalGroup(_) => false,
+            })
+            .map(|candidate| candidate.id.clone())
+            .collect()
+    }
+
+    /// The active functional-group lock of `subject` that covers `ecu_name`,
+    /// if any.
+    ///
+    /// An ECU lock created while the same client already holds such a lock
+    /// must not start its own physical tester present: the functional-group
+    /// lock already covers that ECU with functional tester present, and
+    /// starting a physical task too would violate the one-task-per-ECU
+    /// invariant.
+    pub(super) fn covering_functional_group(
+        &self,
+        subject: &str,
+        ecu_name: &str,
+    ) -> Option<&ActiveLock> {
+        self.active_by_id.values().find(|candidate| {
+            matches!(candidate.scope, ScopeKey::FunctionalGroup(_))
+                && candidate.principal.subject == subject
+                && candidate.coverage.contains_ecu(ecu_name)
+        })
+    }
+
+    /// The tester present a lock of `subject` on `scope` needs.
+    ///
+    /// A functional-group lock needs functional tester present for its group,
+    /// a vehicle lock needs none. A component lock needs physical tester
+    /// present for its ECU, unless a functional-group lock of the same client
+    /// covers that ECU: that lock already sends functional tester present to
+    /// it, and only one tester-present task may run per ECU.
+    pub(super) fn tester_present_for(
+        &self,
+        subject: &str,
+        scope: &ScopeKey,
+    ) -> Option<TesterPresentType> {
+        match scope {
+            ScopeKey::Ecu(ecu_name) => self
+                .covering_functional_group(subject, ecu_name)
+                .is_none()
+                .then(|| TesterPresentType::Ecu(ecu_name.clone())),
+            ScopeKey::FunctionalGroup(group) => Some(TesterPresentType::Functional(group.clone())),
+            ScopeKey::Vehicle => None,
+        }
+    }
+
+    /// Whether an active lock still needs `type_`.
+    ///
+    /// A lock's cleanup runs after the state change that removed it, so after a
+    /// preemption on the same scope the new lock is already active here: the
+    /// cleanup then hands the tester present over instead of stopping it.
+    pub(super) fn tester_present_needed(&self, type_: &TesterPresentType) -> bool {
+        self.active().any(|lock| {
+            self.tester_present_for(&lock.principal.subject, &lock.scope)
+                .as_ref()
+                == Some(type_)
+        })
     }
 
     /// Inserts one active lock.
@@ -599,6 +684,21 @@ impl LockState {
             .into_iter()
             .filter_map(|child_id| self.remove_active_uncommitted(&child_id))
             .collect();
+
+        // A functional-group lock permanently replaces the tester present of
+        // the same client's ECU locks it covers (`covered_narrow_locks`);
+        // releasing it releases those ECU locks too, so each gets its own
+        // cleanup instead of being left behind, claimed by a functional-group
+        // lock that no longer exists. Cloned so the immutable borrow of
+        // `active_by_id` ends before the removal calls below need `&mut self`.
+        if let Some(root) = self.active_by_id.get(lock_id).cloned() {
+            for covered_id in self.covered_narrow_locks(&root) {
+                if let Some(lock) = self.remove_active_uncommitted(&covered_id) {
+                    removed.push(lock);
+                }
+            }
+        }
+
         if let Some(lock) = self.remove_active_uncommitted(lock_id) {
             removed.push(lock);
         }
@@ -608,13 +708,15 @@ impl LockState {
     fn expand_active_trees(&self, lock_ids: &[LockId]) -> Result<BTreeSet<LockId>, StateError> {
         let roots: BTreeSet<_> = lock_ids.iter().cloned().collect();
         let mut expanded = roots.clone();
-        for id in roots {
-            if !self.active_by_id.contains_key(&id) {
-                return Err(StateError::ActiveLockNotFound(id));
-            }
-            if let Some(children) = self.children_by_vehicle.get(&id) {
+        for id in &roots {
+            let lock = self
+                .active_by_id
+                .get(id)
+                .ok_or_else(|| StateError::ActiveLockNotFound(id.clone()))?;
+            if let Some(children) = self.children_by_vehicle.get(id) {
                 expanded.extend(children.iter().cloned());
             }
+            expanded.extend(self.covered_narrow_locks(lock));
         }
         Ok(expanded)
     }
@@ -799,6 +901,319 @@ mod tests {
             .expect("Same-owner overlapping coverage should succeed");
 
         assert_eq!(state.active().count(), 2);
+    }
+
+    #[test]
+    fn covered_narrow_locks_includes_same_owner_ecu_lock_in_coverage() {
+        let mut state = LockState::default();
+        state
+            .insert_active(active_lock(
+                "engine",
+                ScopeKey::Ecu("engine".to_owned()),
+                &["engine"],
+                None,
+            ))
+            .expect("ECU lock insertion should succeed");
+        state
+            .insert_active(active_lock(
+                "powertrain",
+                ScopeKey::FunctionalGroup("powertrain".to_owned()),
+                &["engine", "transmission"],
+                None,
+            ))
+            .expect("Functional-group lock insertion should succeed");
+
+        let broad = state
+            .active_by_id("powertrain")
+            .expect("Functional-group lock should exist");
+        assert_eq!(
+            state.covered_narrow_locks(broad),
+            vec![LockId::from("engine")]
+        );
+    }
+
+    /// A component lock needs physical tester present for its ECU, unless a
+    /// functional-group lock of the same client covers that ECU; a
+    /// functional-group lock needs functional tester present; a vehicle lock
+    /// needs none.
+    #[test]
+    fn tester_present_for_follows_scope_and_functional_group_coverage() {
+        let mut state = LockState::default();
+        let engine = ScopeKey::Ecu("engine".to_owned());
+        assert_eq!(
+            state.tester_present_for("owner", &engine),
+            Some(TesterPresentType::Ecu("engine".to_owned()))
+        );
+        assert_eq!(state.tester_present_for("owner", &ScopeKey::Vehicle), None);
+
+        state
+            .insert_active(active_lock(
+                "powertrain",
+                ScopeKey::FunctionalGroup("powertrain".to_owned()),
+                &["engine"],
+                None,
+            ))
+            .expect("Functional-group lock insertion should succeed");
+
+        assert_eq!(state.tester_present_for("owner", &engine), None);
+        assert_eq!(
+            state.tester_present_for("other", &engine),
+            Some(TesterPresentType::Ecu("engine".to_owned())),
+            "another client's functional-group lock does not cover this lock"
+        );
+        assert_eq!(
+            state.tester_present_for("owner", &ScopeKey::FunctionalGroup("powertrain".to_owned())),
+            Some(TesterPresentType::Functional("powertrain".to_owned()))
+        );
+    }
+
+    /// `tester_present_needed` reports a type only while an active lock still
+    /// needs it, so a cleanup stops it once its lock was the last one.
+    #[test]
+    fn tester_present_needed_tracks_active_locks() {
+        let mut state = LockState::default();
+        let engine_tp = TesterPresentType::Ecu("engine".to_owned());
+        assert!(!state.tester_present_needed(&engine_tp));
+
+        state
+            .insert_active(active_lock(
+                "engine",
+                ScopeKey::Ecu("engine".to_owned()),
+                &["engine"],
+                None,
+            ))
+            .expect("ECU lock insertion should succeed");
+        assert!(state.tester_present_needed(&engine_tp));
+        assert!(!state.tester_present_needed(&TesterPresentType::Ecu("other".to_owned())));
+
+        state
+            .delete(&LockId::from("engine"))
+            .expect("ECU lock deletion should succeed");
+        assert!(!state.tester_present_needed(&engine_tp));
+    }
+
+    #[test]
+    fn covered_narrow_locks_excludes_foreign_owner_and_uncovered_ecu() {
+        // `powertrain` is built standalone, not inserted: the coverage-conflict
+        // check in `insert_active_uncommitted` already rejects a
+        // functional-group lock whose coverage overlaps a different owner's
+        // ECU lock, so a foreign-owned "engine" lock under "powertrain" could
+        // never coexist through normal insertion. `covered_narrow_locks` is
+        // tested here as a defensive guard regardless.
+        let mut foreign_engine = active_lock(
+            "engine",
+            ScopeKey::Ecu("engine".to_owned()),
+            &["engine"],
+            None,
+        );
+        foreign_engine.principal = principal("someone-else");
+        let body = active_lock("body", ScopeKey::Ecu("body".to_owned()), &["body"], None);
+        let powertrain = active_lock(
+            "powertrain",
+            ScopeKey::FunctionalGroup("powertrain".to_owned()),
+            &["engine", "transmission"],
+            None,
+        );
+
+        let mut state = LockState::default();
+        state
+            .active_by_scope
+            .insert(foreign_engine.scope.clone(), foreign_engine.id.clone());
+        state
+            .active_by_id
+            .insert(foreign_engine.id.clone(), foreign_engine);
+        state
+            .active_by_scope
+            .insert(body.scope.clone(), body.id.clone());
+        state.active_by_id.insert(body.id.clone(), body);
+
+        // "engine" is covered but owned by a different client; "body" is the
+        // same owner as "powertrain" but outside its coverage. Neither
+        // qualifies.
+        assert!(state.covered_narrow_locks(&powertrain).is_empty());
+    }
+
+    #[test]
+    fn covered_narrow_locks_is_empty_for_non_functional_group_scope() {
+        let mut state = LockState::default();
+        state
+            .insert_active(active_lock(
+                "engine",
+                ScopeKey::Ecu("engine".to_owned()),
+                &["engine"],
+                None,
+            ))
+            .expect("ECU lock insertion should succeed");
+
+        let ecu_lock = state.active_by_id("engine").expect("ECU lock should exist");
+        assert!(state.covered_narrow_locks(ecu_lock).is_empty());
+
+        let vehicle = active_lock("vehicle-only", ScopeKey::Vehicle, &["engine"], None);
+        assert!(state.covered_narrow_locks(&vehicle).is_empty());
+    }
+
+    #[test]
+    fn covering_functional_group_finds_surviving_functional_group() {
+        let mut state = LockState::default();
+        state
+            .insert_active(active_lock(
+                "engine",
+                ScopeKey::Ecu("engine".to_owned()),
+                &["engine"],
+                None,
+            ))
+            .expect("ECU lock insertion should succeed");
+        state
+            .insert_active(active_lock(
+                "powertrain",
+                ScopeKey::FunctionalGroup("powertrain".to_owned()),
+                &["engine", "transmission"],
+                None,
+            ))
+            .expect("Functional-group lock insertion should succeed");
+
+        assert_eq!(
+            state
+                .covering_functional_group("owner", "engine")
+                .map(|lock| lock.id.as_str()),
+            Some("powertrain")
+        );
+    }
+
+    #[test]
+    fn covering_functional_group_returns_none_without_a_surviving_match() {
+        let mut state = LockState::default();
+        state
+            .insert_active(active_lock(
+                "engine",
+                ScopeKey::Ecu("engine".to_owned()),
+                &["engine"],
+                None,
+            ))
+            .expect("ECU lock insertion should succeed");
+
+        assert!(state.covering_functional_group("owner", "engine").is_none());
+    }
+
+    #[test]
+    fn functional_delete_also_removes_same_owner_covered_ecu_lock() {
+        let mut state = LockState::default();
+        state
+            .insert_active(active_lock(
+                "engine",
+                ScopeKey::Ecu("engine".to_owned()),
+                &["engine"],
+                None,
+            ))
+            .expect("ECU lock insertion should succeed");
+        state
+            .insert_active(active_lock(
+                "powertrain",
+                ScopeKey::FunctionalGroup("powertrain".to_owned()),
+                &["engine", "transmission"],
+                None,
+            ))
+            .expect("Functional-group lock insertion should succeed");
+
+        let removed = state
+            .delete("powertrain")
+            .expect("Functional-group deletion should succeed");
+
+        let removed_ids: BTreeSet<_> = removed.iter().map(|lock| lock.id.clone()).collect();
+        assert_eq!(
+            removed_ids,
+            BTreeSet::from(["powertrain".into(), "engine".into()])
+        );
+        assert_eq!(state.active().count(), 0);
+    }
+
+    #[test]
+    fn ecu_delete_alone_does_not_touch_a_surviving_covering_functional_group() {
+        let mut state = LockState::default();
+        state
+            .insert_active(active_lock(
+                "engine",
+                ScopeKey::Ecu("engine".to_owned()),
+                &["engine"],
+                None,
+            ))
+            .expect("ECU lock insertion should succeed");
+        state
+            .insert_active(active_lock(
+                "powertrain",
+                ScopeKey::FunctionalGroup("powertrain".to_owned()),
+                &["engine", "transmission"],
+                None,
+            ))
+            .expect("Functional-group lock insertion should succeed");
+
+        let removed = state
+            .delete("engine")
+            .expect("ECU-lock deletion should succeed");
+
+        assert_eq!(
+            removed
+                .iter()
+                .map(|lock| lock.id.clone())
+                .collect::<Vec<_>>(),
+            vec![LockId::from("engine")]
+        );
+        assert!(state.active_by_id("powertrain").is_some());
+    }
+
+    #[test]
+    fn functional_preemption_also_marks_covered_ecu_lock_defunct() {
+        let mut state = LockState::default();
+        state
+            .insert_active(active_lock(
+                "engine",
+                ScopeKey::Ecu("engine".to_owned()),
+                &["engine"],
+                None,
+            ))
+            .expect("ECU lock insertion should succeed");
+        state
+            .insert_active(active_lock(
+                "powertrain",
+                ScopeKey::FunctionalGroup("powertrain".to_owned()),
+                &["engine", "transmission"],
+                None,
+            ))
+            .expect("Functional-group lock insertion should succeed");
+
+        let mut replacement = active_lock(
+            "replacement",
+            ScopeKey::FunctionalGroup("powertrain".to_owned()),
+            &["engine", "transmission"],
+            None,
+        );
+        replacement.principal = principal("new-owner");
+
+        let removed = state
+            .commit_replacement(
+                &["powertrain".into()],
+                replacement,
+                "priority-app",
+                SystemTime::UNIX_EPOCH,
+            )
+            .expect("Preemption should commit");
+
+        let removed_ids: BTreeSet<_> = removed.iter().map(|lock| lock.id.clone()).collect();
+        assert_eq!(
+            removed_ids,
+            BTreeSet::from(["powertrain".into(), "engine".into()])
+        );
+        assert_eq!(
+            state
+                .defunct()
+                .map(|lock| lock.id.clone())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["powertrain".into(), "engine".into()])
+        );
+        assert_eq!(state.active().count(), 1);
+        state
+            .validate_invariants()
+            .expect("State should remain valid");
     }
 
     #[test]

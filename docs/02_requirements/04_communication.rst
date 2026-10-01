@@ -775,10 +775,25 @@ Tester Present
       physical tester present task for that ECU, sending to the ECU's physical address.
     - **Functional group lock**: Acquiring a functional group lock shall start functional
       tester present tasks for each gateway ECU in the group, sending to each gateway's
-      functional address.
+      functional address. For every covered ECU on which the same client already holds a
+      component lock, the functional tester present permanently replaces that component
+      lock's physical tester present.
     - **Vehicle lock**: Shall not start any tester present tasks.
+    - **Component lock under an owned functional group lock**: A component lock created
+      while the same client already holds a functional group lock covering that ECU shall
+      not start its own physical tester present task; the functional group lock's
+      functional tester present already covers it.
     - **Lock release**: Releasing a lock shall stop all associated tester present tasks
       and reset the ECU's session and security access state.
+    - **Functional group lock release**: Releasing, expiring, or preempting a functional
+      group lock shall also release every component lock of the same client that it
+      replaced the physical tester present of, including their tester present stop and
+      session/security reset.
+    - **Component lock release under a surviving functional group lock**: Releasing or
+      expiring a component lock on its own while a functional group lock of the same
+      client still covers that ECU shall not stop any tester present task and shall not
+      reset the ECU's session or security access state; the functional group lock
+      continues to own both until it is itself released.
 
     **Tester Present Deduplication**
 

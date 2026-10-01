@@ -615,14 +615,28 @@ Tester Present
       tester present task for that ECU, sending to the ECU's physical address.
     - **Functional group lock**: Acquiring a lock on a functional group starts
       **functional** tester present tasks for each gateway ECU in the group, sending to
-      each gateway's functional address.
+      each gateway's functional address. For every covered ECU on which the same client
+      already holds a component lock, the component lock's physical tester present task
+      is stopped once the functional group lock's acquisition commits, and the component
+      lock is permanently handed to the functional group lock: it is released together
+      with the functional group lock (see below) rather than starting its own physical
+      tester present again.
     - **Vehicle lock**: Does not start any tester present tasks.
+    - **Component lock under an owned functional group lock**: A component lock created
+      while the same client already holds a functional group lock covering that ECU
+      starts no physical tester present task.
 
     If ``CP_TesterPresentHandling`` is set to "Disabled" (0) for an ECU, no tester present
     task is started for that ECU regardless of the lock type.
 
     When a lock is released, the associated tester present tasks are stopped and the
-    ECU's session and security access state are reset.
+    ECU's session and security access state are reset. Releasing, expiring, or preempting
+    a functional group lock also releases every component lock of the same client whose
+    physical tester present it replaced, running their tester present stop and
+    session/security reset as well. Releasing or expiring one of those component locks on
+    its own, while the functional group lock still covers that ECU, stops no tester
+    present task and resets no session/security state; the functional group lock still
+    owns both until it is itself released.
 
     **Duplicate Prevention**
 
@@ -630,7 +644,9 @@ Tester Present
     entry is either actively running or suspended (see **Communication Disable and
     Re-enable** below). Before starting a new task, the system checks whether an entry
     already exists for that key. Only one tester present task (physical or functional) can
-    be active per ECU at any time.
+    be active per ECU at any time; acquiring a functional group lock enforces this by
+    stopping the component lock's entry for a covered ECU once the functional group's own
+    entry is running.
 
     **Task Implementation**
 
