@@ -785,6 +785,18 @@ Tester Present
     - Only one tester present task (physical or functional) shall be active per ECU at
       any time.
 
+    **Communication Disable and Re-enable**
+
+    - While diagnostic communication is disabled, tester present tasks required by locks
+      that are still held shall not send messages, but shall resume automatically, without
+      a new lock action, once diagnostic communication is enabled again.
+    - A lock released while diagnostic communication is disabled shall not have its tester
+      present resume when diagnostic communication is enabled again.
+    - A lock released while diagnostic communication is disabled shall have the ECU's
+      session and security access reset once diagnostic communication is enabled again,
+      unless they are set again before that. The pending reset shall not itself enable
+      diagnostic communication.
+
     **Message Format and Timing**
 
     - The CDA shall send the ECU-specific ``CP_TesterPresentMessage`` resolved from that

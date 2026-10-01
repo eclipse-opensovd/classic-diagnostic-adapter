@@ -362,7 +362,15 @@ impl EcuStateManager for TestEcuDb {
     }
 
     fn session(&self) -> impl Future<Output = Result<String, DiagServiceError>> + Send {
-        std::future::ready(Ok("default".to_string()))
+        let states = &self.service_states;
+        async move {
+            Ok(states
+                .lock()
+                .await
+                .get(&service_ids::SESSION_CONTROL)
+                .cloned()
+                .unwrap_or_else(|| "default".to_string()))
+        }
     }
 
     fn default_session(&self) -> Result<String, DiagServiceError> {
@@ -370,7 +378,15 @@ impl EcuStateManager for TestEcuDb {
     }
 
     fn security_access(&self) -> impl Future<Output = Result<String, DiagServiceError>> + Send {
-        std::future::ready(Ok("locked".to_string()))
+        let states = &self.service_states;
+        async move {
+            Ok(states
+                .lock()
+                .await
+                .get(&service_ids::SECURITY_ACCESS)
+                .cloned()
+                .unwrap_or_else(|| "locked".to_string()))
+        }
     }
 
     fn lookup_session_change(

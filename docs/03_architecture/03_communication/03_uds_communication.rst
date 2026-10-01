@@ -626,10 +626,11 @@ Tester Present
 
     **Duplicate Prevention**
 
-    Active tester present tasks are tracked in a HashMap keyed by ECU name. Before
-    starting a new task, the system checks whether a task already exists for that ECU.
-    Only one tester present task (physical or functional) can be active per ECU at any
-    time.
+    Tester present state is tracked in a single map, keyed by `(type, ECU)`, where each
+    entry is either actively running or suspended (see **Communication Disable and
+    Re-enable** below). Before starting a new task, the system checks whether an entry
+    already exists for that key. Only one tester present task (physical or functional) can
+    be active per ECU at any time.
 
     **Task Implementation**
 
@@ -713,6 +714,43 @@ Tester Present
     - ``CP_TesterPresentExpNegResp`` -- Expected negative response prefix (default:
       ``[0x7F, 0x3E]``). When a negative response is received, it is logged but does not
       cause the tester present task to stop.
+
+    **Communication Disable and Re-enable**
+
+    The tester present map (see **Duplicate Prevention** above) is the single record of
+    tester present state: there is no separate snapshot. Each entry is either `Running`
+    (the task is actively sending) or `Suspended` (communication is disabled, so nothing
+    is sent, but the entry is kept so the task can be resumed).
+
+    When communication is disabled, the ``deinitialize`` lifecycle hook aborts every
+    `Running` entry's task and turns the entry `Suspended`; no entry is ever removed by
+    this step. When a lock is released while communication is disabled, its entries are
+    removed regardless of whether they are `Running` or `Suspended`, which is what makes
+    the release effective immediately: a later resume only ever considers entries still
+    present in the map.
+
+    Suspended entries are not resumed by the ``initialize`` lifecycle hook: the
+    communication state is still `Enabling` at that point, so a send would be refused as
+    not-ready. They are resumed by the ``on_enabled`` lifecycle hook, which the
+    communication lifecycle runs only after it has published `Enabled`, and always before
+    it processes any later lifecycle operation. A disable requested in the meantime
+    therefore suspends the entries only after the resume has finished. The resume reads
+    the map under its lock and resumes only the entries that are still `Suspended`, so a
+    lock released while communication was disabled or still enabling is honored. If the
+    activation never reaches `Enabled`, or a disable has already been claimed when
+    ``on_enabled`` runs, the entries are left `Suspended` for the next activation.
+    Shutting the UDS manager down clears the map, so nothing is resumed afterwards.
+
+    Session and security access resets follow the same pattern. Pending resets are kept
+    per ECU, each either `Scheduled` (a task resets the ECU once its delay has passed) or
+    `Deferred`. A reset that is due while communication is not enabled, for example
+    because a lock expired, sends nothing and requests no activation; it is recorded as
+    `Deferred` and reported to the caller as deferred. ``on_enabled`` turns every
+    `Deferred` reset into a `Scheduled` one without delay, so the UDS round-trips do not
+    hold up the communication lifecycle; if communication is disabled again before it
+    runs, the reset is deferred again. Setting the session or security access
+    successfully discards a `Deferred` reset for that ECU, so a stale reset cannot
+    overwrite a newer state.
 
     .. note::
 

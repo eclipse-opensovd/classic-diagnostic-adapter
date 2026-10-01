@@ -943,13 +943,15 @@ pub(crate) mod send_tests {
     };
 
     use cda_interfaces::{
-        DiagServiceError, EcuAddresses, EcuGateway, EcuRuntimeState, EcuStateManager,
-        FunctionalTransport, HashMap, HashMapExtensions, NetworkTopology, PendingNrc,
-        PhysicalTransport, ServicePayload, TesterPresentType, TransmissionParameters,
-        TransportResponse, UDS_ID_RESPONSE_BITMASK, UdsTesterPresent, VariantDetection,
+        DiagServiceError, DynamicPlugin, EcuAddresses, EcuGateway, EcuRuntimeState,
+        EcuStateManager, FunctionalTransport, HashMap, HashMapExtensions, NetworkTopology,
+        PendingNrc, PhysicalTransport, ResetOutcome, ServicePayload, TesterPresentType,
+        TransmissionParameters, TransportResponse, UDS_ID_RESPONSE_BITMASK, UdsSecurity,
+        UdsSession, UdsTesterPresent, VariantDetection,
         communication_control::{
             ActivationCause, CommunicationAccess, CommunicationError, CommunicationGuard,
-            CommunicationOperation, CommunicationState, VariantDetectionMode,
+            CommunicationLifecycle, CommunicationOperation, CommunicationState,
+            VariantDetectionMode,
         },
         datatypes::FaultConfig,
         service_ids,
@@ -965,6 +967,8 @@ pub(crate) mod send_tests {
         UdsEcuDb, UdsManager,
         state_coordinator::EcuStateCoordinator,
         test_helpers::{TestEcuDb, TestGateway},
+        tester_present::TesterPresentTask,
+        types::{ResetTask, TesterPresentTaskId},
     };
 
     const TEST_COMMUNICATION_RETRY_AFTER: Duration = Duration::from_secs(2);
@@ -1003,8 +1007,6 @@ pub(crate) mod send_tests {
                 communication_retry_after: TEST_COMMUNICATION_RETRY_AFTER,
                 variant_detection_receiver: Arc::new(Mutex::new(None)),
                 variant_detection_listener: Arc::new(Mutex::new(None)),
-                tester_present_snapshot: Arc::new(Mutex::new(Vec::new())),
-                tester_present_restart_task: Arc::new(Mutex::new(None)),
             }
         }
     }
@@ -1037,6 +1039,7 @@ pub(crate) mod send_tests {
         Off,
         Enabling,
         Enabled,
+        Disabling,
     }
 
     /// A `CommunicationAccess` fake with controllable `acquire` and
@@ -1083,7 +1086,8 @@ pub(crate) mod send_tests {
             self.set_phase(CommunicationPhase::Enabling);
         }
 
-        /// Models the activation reaching `Enabled`.
+        /// Models the lifecycle worker publishing `Enabled`, which it does
+        /// before calling any hook's `on_enabled`.
         fn finish_enabling(&self) {
             self.set_phase(CommunicationPhase::Enabled);
         }
@@ -1091,6 +1095,20 @@ pub(crate) mod send_tests {
         /// Models the activation ending without ever reaching `Enabled`, as
         /// happens when a later lifecycle hook or variant detection fails.
         fn abort_enabling(&self) {
+            self.set_phase(CommunicationPhase::Off);
+        }
+
+        /// Models a disable being claimed. The controller moves the state to
+        /// `Disabling` synchronously, before the worker deinitializes any hook,
+        /// so once `Enabled` is published this can happen before the worker
+        /// has called `on_enabled`.
+        fn begin_disabling(&self) {
+            self.set_phase(CommunicationPhase::Disabling);
+        }
+
+        /// Models the worker finishing a disable, after every hook's
+        /// `deinitialize`.
+        fn finish_disabling(&self) {
             self.set_phase(CommunicationPhase::Off);
         }
     }
@@ -1103,6 +1121,7 @@ pub(crate) mod send_tests {
                     CommunicationState::Enabling(CommunicationOperation::EnableAndDetect)
                 }
                 CommunicationPhase::Off => CommunicationState::Disabled,
+                CommunicationPhase::Disabling => CommunicationState::Disabling,
             }
         }
 
@@ -1111,6 +1130,7 @@ pub(crate) mod send_tests {
                 CommunicationPhase::Enabled => self.real.acquire(),
                 CommunicationPhase::Enabling => Err(CommunicationError::Enabling),
                 CommunicationPhase::Off => Err(CommunicationError::Disabled),
+                CommunicationPhase::Disabling => Err(CommunicationError::Disabling),
             }
         }
 
@@ -2707,90 +2727,616 @@ pub(crate) mod send_tests {
         manager.stop_tester_present(type_).await.unwrap();
     }
 
-    /// Waits for `type_` to become active, or panics.
-    async fn await_tester_present_active(
-        manager: &UdsManager<TestGateway, TestEcuDb>,
-        type_: &TesterPresentType,
-        context: &str,
-    ) {
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !manager.check_tester_present_active(type_).await {
-                cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("{context}"));
+    /// The state of a [`TesterPresentTask`] without its task handle, which can
+    /// be neither cloned nor compared.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TesterPresentState {
+        Running,
+        Suspended,
     }
 
-    /// A snapshot restart must not start tester-present tasks while the
-    /// activation that triggered it is still `Enabling`. Their first interval
-    /// tick fires immediately, so the send would be refused as not-ready and
-    /// would request an activation on top of the one already in flight.
+    impl From<&TesterPresentTask> for TesterPresentState {
+        fn from(task: &TesterPresentTask) -> Self {
+            match task {
+                TesterPresentTask::Running(_) => Self::Running,
+                TesterPresentTask::Suspended => Self::Suspended,
+            }
+        }
+    }
+
+    /// Reads whether `(type_, ecu)` is `Running`, `Suspended` or has no entry
+    /// at all.
+    ///
+    /// `check_tester_present_active` intentionally treats `Suspended` the same
+    /// as `Running` (a lock that wants tester present must not see it as
+    /// absent just because communication is currently disabled), so tests
+    /// that assert on the *actual* send state read the map directly instead.
+    async fn tester_present_state(
+        manager: &UdsManager<TestGateway, TestEcuDb>,
+        type_: &TesterPresentType,
+        ecu: &str,
+    ) -> Option<TesterPresentState> {
+        let tasks = manager.tester_present_tasks.read().await;
+        tasks
+            .get(&TesterPresentTaskId {
+                type_: type_.clone(),
+                ecu: ecu.to_owned(),
+            })
+            .map(TesterPresentState::from)
+    }
+
+    /// Disables communication the way the lifecycle worker does: the disable
+    /// is claimed (`Disabling`), every hook is deinitialized, then the state
+    /// settles at `Disabled`.
+    async fn disable_communication(
+        manager: &UdsManager<TestGateway, TestEcuDb>,
+        access: &FakeCommunicationAccess,
+    ) {
+        access.begin_disabling();
+        manager.deinitialize().await;
+        access.finish_disabling();
+    }
+
+    /// Runs a successful activation the way the lifecycle worker does:
+    /// `initialize` while `Enabling`, then `Enabled` is published, then
+    /// `on_enabled`.
+    async fn enable_communication(
+        manager: &UdsManager<TestGateway, TestEcuDb>,
+        access: &FakeCommunicationAccess,
+    ) {
+        access.begin_enabling();
+        manager.initialize().await.unwrap();
+        access.finish_enabling();
+        manager.on_enabled().await;
+    }
+
+    /// `initialize()` only (re)starts the variant-detection listener; it must
+    /// not resume tester present. Resuming happens later, from `on_enabled()`,
+    /// once the state is actually `Enabled`.
     #[tokio::test]
-    async fn snapshot_tester_present_restart_waits_until_communication_is_enabled() {
+    async fn initialize_does_not_resume_tester_present() {
         let access = FakeCommunicationAccess::new(true, true);
         let manager = make_manager_with_ecu_and_access(make_gateway(), Arc::clone(&access) as _);
         let type_ = TesterPresentType::Ecu("TestECU".to_owned());
 
         manager.start_tester_present(type_.clone()).await.unwrap();
-        manager.snapshot_and_abort_tester_present().await;
+        disable_communication(&manager, &access).await;
 
-        // `initialize` runs here, while the activation is still in flight.
+        access.finish_enabling();
+        manager.initialize().await.unwrap();
+
+        assert_eq!(
+            tester_present_state(&manager, &type_, "TestECU").await,
+            Some(TesterPresentState::Suspended),
+            "initialize() must not resume tester present"
+        );
+
+        manager.stop_tester_present(type_).await.unwrap();
+    }
+
+    /// A disable -> enable cycle resumes every suspended entry by the time
+    /// `on_enabled()` returns: no task, no wait.
+    #[tokio::test]
+    async fn on_enabled_resumes_suspended_entries() {
+        let access = FakeCommunicationAccess::new(true, true);
+        let manager = make_manager_with_ecu_and_access(make_gateway(), Arc::clone(&access) as _);
+        let type_ = TesterPresentType::Ecu("TestECU".to_owned());
+
+        manager.start_tester_present(type_.clone()).await.unwrap();
+        disable_communication(&manager, &access).await;
+        assert_eq!(
+            tester_present_state(&manager, &type_, "TestECU").await,
+            Some(TesterPresentState::Suspended)
+        );
+
+        enable_communication(&manager, &access).await;
+
+        assert_eq!(
+            tester_present_state(&manager, &type_, "TestECU").await,
+            Some(TesterPresentState::Running),
+            "on_enabled() must resume a suspended entry once Enabled"
+        );
+
+        manager.stop_tester_present(type_).await.unwrap();
+    }
+
+    /// `Enabled` is published before the worker calls `on_enabled()`, so a
+    /// disable can be claimed in between. `acquire()` then fails with
+    /// `Disabling`, and the suspended entries are left alone for the next
+    /// activation to resume.
+    #[tokio::test]
+    async fn on_enabled_keeps_entries_suspended_when_disable_is_claimed_first() {
+        let access = FakeCommunicationAccess::new(true, true);
+        let manager = make_manager_with_ecu_and_access(make_gateway(), Arc::clone(&access) as _);
+        let type_ = TesterPresentType::Ecu("TestECU".to_owned());
+
+        manager.start_tester_present(type_.clone()).await.unwrap();
+        disable_communication(&manager, &access).await;
+
         access.begin_enabling();
-        manager.restart_tester_present_snapshot().await;
-        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(30)).await;
+        manager.initialize().await.unwrap();
+        access.finish_enabling();
+        access.begin_disabling();
+        manager.on_enabled().await;
 
-        assert!(!manager.check_tester_present_active(&type_).await);
+        assert_eq!(
+            tester_present_state(&manager, &type_, "TestECU").await,
+            Some(TesterPresentState::Suspended),
+            "on_enabled() must not resume while a disable is in progress"
+        );
+
+        manager.deinitialize().await;
+        access.finish_disabling();
+        enable_communication(&manager, &access).await;
+
+        assert_eq!(
+            tester_present_state(&manager, &type_, "TestECU").await,
+            Some(TesterPresentState::Running),
+            "the next successful activation must resume the entry"
+        );
+
+        manager.stop_tester_present(type_).await.unwrap();
+    }
+
+    /// A lock released while communication is disabled must not
+    /// get its tester present back once communication is re-enabled. The
+    /// suspended entry is the only record of tester-present state, removing it
+    /// via `stop_tester_present` must take effect even though communication is
+    /// disabled at the time.
+    #[tokio::test]
+    async fn stopped_while_suspended_is_not_resumed() {
+        let access = FakeCommunicationAccess::new(true, true);
+        let manager = make_manager_with_ecu_and_access(make_gateway(), Arc::clone(&access) as _);
+        let type_ = TesterPresentType::Ecu("TestECU".to_owned());
+
+        manager.start_tester_present(type_.clone()).await.unwrap();
+        disable_communication(&manager, &access).await;
+
+        // The lock expires (or is deleted) while communication is disabled.
+        manager.stop_tester_present(type_.clone()).await.unwrap();
+
+        enable_communication(&manager, &access).await;
+
+        assert_eq!(
+            tester_present_state(&manager, &type_, "TestECU").await,
+            None,
+            "a lock released while communication was disabled must not get tester present back"
+        );
+    }
+
+    /// Same as [`stopped_while_suspended_is_not_resumed`], but the lock is
+    /// released while the activation is still `Enabling`, after `initialize`
+    /// already ran. The stop must win: `on_enabled` must not bring it back.
+    #[tokio::test]
+    async fn stop_during_enabling_wins_over_resume() {
+        let access = FakeCommunicationAccess::new(true, true);
+        let manager = make_manager_with_ecu_and_access(make_gateway(), Arc::clone(&access) as _);
+        let type_ = TesterPresentType::Ecu("TestECU".to_owned());
+
+        manager.start_tester_present(type_.clone()).await.unwrap();
+        disable_communication(&manager, &access).await;
+
+        access.begin_enabling();
+        manager.initialize().await.unwrap();
+        manager.stop_tester_present(type_.clone()).await.unwrap();
+        access.finish_enabling();
+        manager.on_enabled().await;
+
+        assert_eq!(
+            tester_present_state(&manager, &type_, "TestECU").await,
+            None,
+            "a stop that arrives while communication is Enabling must win over the resume"
+        );
+    }
+
+    /// An activation can end after `initialize` ran but before it reaches
+    /// `Enabled`, when a later lifecycle hook or whole-vehicle detection fails
+    /// and the worker deinitializes every hook that already ran. `on_enabled`
+    /// is then never called for that activation, but the suspended entry it
+    /// would have resumed must survive for the next one.
+    #[tokio::test]
+    async fn suspended_entry_survives_an_activation_that_never_reaches_enabled() {
+        let access = FakeCommunicationAccess::new(true, true);
+        let manager = make_manager_with_ecu_and_access(make_gateway(), Arc::clone(&access) as _);
+        let type_ = TesterPresentType::Ecu("TestECU".to_owned());
+
+        manager.start_tester_present(type_.clone()).await.unwrap();
+        disable_communication(&manager, &access).await;
+
+        // First activation fails after `initialize`: no `on_enabled`, and
+        // every hook that already ran is deinitialized.
+        access.begin_enabling();
+        manager.initialize().await.unwrap();
+        manager.deinitialize().await;
+        access.abort_enabling();
+        assert_eq!(
+            tester_present_state(&manager, &type_, "TestECU").await,
+            Some(TesterPresentState::Suspended)
+        );
+
+        // Second activation reaches `Enabled`.
+        enable_communication(&manager, &access).await;
+
+        assert_eq!(
+            tester_present_state(&manager, &type_, "TestECU").await,
+            Some(TesterPresentState::Running),
+            "tester present must be resumed by the next successful activation"
+        );
+
+        manager.stop_tester_present(type_).await.unwrap();
+    }
+
+    /// `start_tester_present` must resume an entry that is `Suspended` rather
+    /// than leaving it suspended or spawning a duplicate task, so a lock
+    /// acquired again after `Enabled` is published but before the worker has
+    /// called `on_enabled` still gets working tester present. The later
+    /// `on_enabled` must then leave that running task alone.
+    #[tokio::test]
+    async fn start_on_suspended_resumes_entry() {
+        let access = FakeCommunicationAccess::new(true, true);
+        let manager = make_manager_with_ecu_and_access(make_gateway(), Arc::clone(&access) as _);
+        let type_ = TesterPresentType::Ecu("TestECU".to_owned());
+        let key = TesterPresentTaskId {
+            type_: type_.clone(),
+            ecu: "TestECU".to_owned(),
+        };
+        let running_task_id =
+            |tasks: &HashMap<TesterPresentTaskId, TesterPresentTask>| match tasks.get(&key) {
+                Some(TesterPresentTask::Running(handle)) => handle.id(),
+                _ => panic!("expected a running entry"),
+            };
+
+        manager.start_tester_present(type_.clone()).await.unwrap();
+        disable_communication(&manager, &access).await;
+
+        access.begin_enabling();
+        manager.initialize().await.unwrap();
+        access.finish_enabling();
+
+        manager.start_tester_present(type_.clone()).await.unwrap();
+        let started = running_task_id(&*manager.tester_present_tasks.read().await);
+
+        manager.on_enabled().await;
+        let after_on_enabled = running_task_id(&*manager.tester_present_tasks.read().await);
+
+        assert_eq!(
+            started, after_on_enabled,
+            "on_enabled must not replace a task start_tester_present already resumed"
+        );
+
+        manager.stop_tester_present(type_).await.unwrap();
+    }
+
+    /// `shutdown()` drains the tester-present map, so an `on_enabled` that
+    /// runs afterwards finds nothing suspended and spawns nothing.
+    #[tokio::test]
+    async fn on_enabled_after_shutdown_does_not_resume() {
+        let access = FakeCommunicationAccess::new(true, true);
+        let manager = make_manager_with_ecu_and_access(make_gateway(), Arc::clone(&access) as _);
+        let type_ = TesterPresentType::Ecu("TestECU".to_owned());
+
+        manager.start_tester_present(type_).await.unwrap();
+        disable_communication(&manager, &access).await;
+
+        cda_interfaces::Shutdown::shutdown(&manager).await;
+        access.begin_enabling();
+        access.finish_enabling();
+        manager.on_enabled().await;
+
+        assert!(
+            manager.tester_present_tasks.read().await.is_empty(),
+            "on_enabled after shutdown must not spawn tester present"
+        );
+    }
+
+    /// Like [`make_gateway`], but counts every request it receives.
+    fn make_counting_gateway(sends: Arc<std::sync::atomic::AtomicUsize>) -> TestGateway {
+        let inner = make_gateway();
+        TestGateway {
+            send_fn: Arc::new(move |response_tx, request| {
+                sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (inner.send_fn)(response_tx, request)
+            }),
+        }
+    }
+
+    async fn set_tracked_state(manager: &UdsManager<TestGateway, TestEcuDb>, sid: u8, value: &str) {
+        manager
+            .uds_ecu_db("TestECU")
+            .unwrap()
+            .read()
+            .await
+            .set_service_state(sid, value.to_owned())
+            .await;
+    }
+
+    async fn tracked_session(manager: &UdsManager<TestGateway, TestEcuDb>) -> String {
+        manager
+            .uds_ecu_db("TestECU")
+            .unwrap()
+            .read()
+            .await
+            .session()
+            .await
+            .unwrap()
+    }
+
+    fn is_deferred(tasks: &HashMap<String, ResetTask>) -> bool {
+        matches!(tasks.get("TestECU"), Some(ResetTask::Deferred))
+    }
+
+    /// A lock that expires while communication is disabled must still reset
+    /// the ECU session. Nothing is sent and no activation is requested while
+    /// disabled; the reset is sent once communication is enabled again.
+    #[tokio::test]
+    async fn session_reset_while_disabled_is_sent_once_enabled() {
+        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let access = FakeCommunicationAccess::new(true, true);
+        let manager = make_manager_with_ecu_and_access(
+            make_counting_gateway(Arc::clone(&sends)),
+            Arc::clone(&access) as _,
+        );
+        set_tracked_state(&manager, service_ids::SESSION_CONTROL, "extended").await;
+        disable_communication(&manager, &access).await;
+
+        let outcome = manager
+            .reset_ecu_session("TestECU", &(Box::new(()) as DynamicPlugin))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, ResetOutcome::Deferred);
+        assert_eq!(sends.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(
             access.activate_call_count(),
             0,
-            "the restart must not request a second activation"
+            "a deferred reset must not switch communication on"
         );
+        assert!(is_deferred(&*manager.session_reset_tasks.read().await));
 
-        access.finish_enabling();
-        await_tester_present_active(
-            &manager,
-            &type_,
-            "snapshot restart should start after communication is enabled",
-        )
-        .await;
+        enable_communication(&manager, &access).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while tracked_session(&manager).await != "default" {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the deferred session reset must run once communication is enabled");
 
-        manager.stop_tester_present(type_).await.unwrap();
+        assert_eq!(sends.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(manager.session_reset_tasks.read().await.is_empty());
     }
 
-    /// An activation can end after `initialize` ran but before it publishes
-    /// `Enabled`, when a later lifecycle hook or whole-vehicle detection fails
-    /// and the worker deinitializes every hook that already ran. That cancels
-    /// the pending restart, but the snapshot it was waiting to restore must
-    /// survive for the next activation.
+    /// The timed reset scheduled from a session's `mode_expiration` may fire
+    /// while communication is disabled. It must be deferred without sending
+    /// anything or requesting activation, and sent once communication is
+    /// enabled again.
     #[tokio::test]
-    async fn snapshot_survives_an_activation_that_never_reaches_enabled() {
+    async fn timed_session_reset_firing_while_disabled_is_sent_once_enabled() {
+        tokio::time::pause();
+        let expiration = Duration::from_millis(50);
+        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let access = FakeCommunicationAccess::new(true, true);
+        let manager = make_manager_with_ecu_and_access(
+            make_counting_gateway(Arc::clone(&sends)),
+            Arc::clone(&access) as _,
+        );
+        set_tracked_state(&manager, service_ids::SESSION_CONTROL, "default").await;
+
+        manager
+            .set_ecu_session(
+                "TestECU",
+                "extended",
+                &(Box::new(()) as DynamicPlugin),
+                Some(expiration),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tracked_session(&manager).await, "extended");
+        let sends_after_set = sends.load(std::sync::atomic::Ordering::SeqCst);
+
+        disable_communication(&manager, &access).await;
+        tokio::time::advance(expiration).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !is_deferred(&*manager.session_reset_tasks.read().await) {
+                cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the timed session reset must be deferred while disabled");
+
+        assert_eq!(
+            sends.load(std::sync::atomic::Ordering::SeqCst),
+            sends_after_set
+        );
+        assert_eq!(
+            access.activate_call_count(),
+            0,
+            "a deferred reset must not switch communication on"
+        );
+        assert_eq!(tracked_session(&manager).await, "extended");
+
+        enable_communication(&manager, &access).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while tracked_session(&manager).await != "default" {
+                cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the deferred session reset must run once communication is enabled");
+
+        assert_eq!(
+            sends.load(std::sync::atomic::Ordering::SeqCst),
+            sends_after_set + 1
+        );
+        assert!(manager.session_reset_tasks.read().await.is_empty());
+    }
+
+    /// The security-access reset is deferred the same way while
+    /// communication is disabled.
+    #[tokio::test]
+    async fn security_access_reset_while_disabled_is_deferred() {
+        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let access = FakeCommunicationAccess::new(true, true);
+        let manager = make_manager_with_ecu_and_access(
+            make_counting_gateway(Arc::clone(&sends)),
+            Arc::clone(&access) as _,
+        );
+        set_tracked_state(&manager, service_ids::SECURITY_ACCESS, "level_01").await;
+        disable_communication(&manager, &access).await;
+
+        let outcome = manager
+            .reset_ecu_security_access("TestECU", &(Box::new(()) as DynamicPlugin))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, ResetOutcome::Deferred);
+        assert_eq!(sends.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(access.activate_call_count(), 0);
+        assert!(is_deferred(&*manager.security_reset_tasks.read().await));
+    }
+
+    /// A session set after communication is enabled again, but before
+    /// `on_enabled` ran, makes the deferred reset obsolete: it must not
+    /// overwrite the new session.
+    #[tokio::test]
+    async fn session_set_after_enable_discards_deferred_reset() {
         let access = FakeCommunicationAccess::new(true, true);
         let manager = make_manager_with_ecu_and_access(make_gateway(), Arc::clone(&access) as _);
-        let type_ = TesterPresentType::Ecu("TestECU".to_owned());
+        set_tracked_state(&manager, service_ids::SESSION_CONTROL, "extended").await;
+        disable_communication(&manager, &access).await;
+        manager
+            .reset_ecu_session("TestECU", &(Box::new(()) as DynamicPlugin))
+            .await
+            .unwrap();
 
-        manager.start_tester_present(type_.clone()).await.unwrap();
-        manager.snapshot_and_abort_tester_present().await;
-
-        // First activation: `initialize` defers the restart, then the
-        // activation fails and every hook that already ran is deinitialized.
         access.begin_enabling();
-        manager.restart_tester_present_snapshot().await;
-        access.abort_enabling();
-        manager.snapshot_and_abort_tester_present().await;
-
-        // Second activation, this one reaches `Enabled`.
-        access.begin_enabling();
-        manager.restart_tester_present_snapshot().await;
+        manager.initialize().await.unwrap();
         access.finish_enabling();
+        manager
+            .set_ecu_session(
+                "TestECU",
+                "programming",
+                &(Box::new(()) as DynamicPlugin),
+                None,
+            )
+            .await
+            .unwrap();
+        manager.on_enabled().await;
 
-        await_tester_present_active(
-            &manager,
-            &type_,
-            "tester present must be restored by the next successful activation",
-        )
-        .await;
+        assert!(manager.session_reset_tasks.read().await.is_empty());
+        assert_eq!(tracked_session(&manager).await, "programming");
+    }
 
-        manager.stop_tester_present(type_).await.unwrap();
+    /// `shutdown()` drops deferred resets along with every other pending
+    /// reset, so a later `on_enabled` sends nothing.
+    #[tokio::test]
+    async fn shutdown_drops_deferred_resets() {
+        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let access = FakeCommunicationAccess::new(true, true);
+        let manager = make_manager_with_ecu_and_access(
+            make_counting_gateway(Arc::clone(&sends)),
+            Arc::clone(&access) as _,
+        );
+        set_tracked_state(&manager, service_ids::SESSION_CONTROL, "extended").await;
+        disable_communication(&manager, &access).await;
+        manager
+            .reset_ecu_session("TestECU", &(Box::new(()) as DynamicPlugin))
+            .await
+            .unwrap();
+
+        cda_interfaces::Shutdown::shutdown(&manager).await;
+        access.begin_enabling();
+        access.finish_enabling();
+        manager.on_enabled().await;
+
+        assert!(manager.session_reset_tasks.read().await.is_empty());
+        assert_eq!(sends.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// `stop_tester_present(Functional(group))` must remove every entry of
+    /// that type regardless of current group membership, so an ECU that left
+    /// the group between start and stop does not leak a running task.
+    #[tokio::test]
+    async fn functional_stop_removes_all_keys_of_type() {
+        let access = FakeCommunicationAccess::new(true, true);
+        let manager = make_manager_with_ecu_and_access(make_gateway(), Arc::clone(&access) as _);
+        let group_type = TesterPresentType::Functional("group".to_owned());
+
+        // Seed entries directly: the manager's `TestEcuDb` does not implement
+        // functional-group membership, so this bypasses
+        // `ecus_for_functional_group` to isolate `stop_tester_present`'s
+        // removal behavior from group resolution.
+        {
+            let mut tasks = manager.tester_present_tasks.write().await;
+            tasks.insert(
+                TesterPresentTaskId {
+                    type_: group_type.clone(),
+                    ecu: "member-still-in-group".to_owned(),
+                },
+                TesterPresentTask::Suspended,
+            );
+            tasks.insert(
+                TesterPresentTaskId {
+                    type_: group_type.clone(),
+                    ecu: "member-that-left-the-group".to_owned(),
+                },
+                TesterPresentTask::Suspended,
+            );
+        }
+
+        manager
+            .stop_tester_present(group_type.clone())
+            .await
+            .unwrap();
+
+        let tasks = manager.tester_present_tasks.read().await;
+        assert!(
+            !tasks.keys().any(|id| id.type_ == group_type),
+            "stop must remove every entry of the type, including members no longer in the group"
+        );
+    }
+
+    /// Acquiring a functional lock replaces the physical tester present of a
+    /// covered ECU: both entries can be suspended independently, and stopping
+    /// the functional entry must not disturb the ECU's own entry.
+    #[tokio::test]
+    async fn ecu_tp_survives_functional_stop_while_suspended() {
+        let access = FakeCommunicationAccess::new(true, true);
+        let manager = make_manager_with_ecu_and_access(make_gateway(), Arc::clone(&access) as _);
+        let ecu_type = TesterPresentType::Ecu("TestECU".to_owned());
+        let group_type = TesterPresentType::Functional("group".to_owned());
+
+        {
+            let mut tasks = manager.tester_present_tasks.write().await;
+            tasks.insert(
+                TesterPresentTaskId {
+                    type_: ecu_type.clone(),
+                    ecu: "TestECU".to_owned(),
+                },
+                TesterPresentTask::Suspended,
+            );
+            tasks.insert(
+                TesterPresentTaskId {
+                    type_: group_type.clone(),
+                    ecu: "TestECU".to_owned(),
+                },
+                TesterPresentTask::Suspended,
+            );
+        }
+
+        manager
+            .stop_tester_present(group_type.clone())
+            .await
+            .unwrap();
+
+        let tasks = manager.tester_present_tasks.read().await;
+        assert!(
+            tasks.contains_key(&TesterPresentTaskId {
+                type_: ecu_type,
+                ecu: "TestECU".to_owned(),
+            }),
+            "the ECU's own tester-present entry must survive the functional stop"
+        );
+        assert!(!tasks.keys().any(|id| id.type_ == group_type));
     }
 }

@@ -29,6 +29,27 @@ pub(crate) enum ResetType {
     SecurityAccess,
 }
 
+/// State of a session or security-access reset entry, keyed by ECU.
+pub(crate) enum ResetTask {
+    /// A task that resets the ECU once its delay has passed: a timed reset
+    /// after a session or security-access change with an expiration, or a
+    /// deferred reset handed over from `on_enabled`.
+    Scheduled(JoinHandle<()>),
+    /// The reset was due while communication was not enabled. Nothing was
+    /// sent; `on_enabled` turns this into a [`Self::Scheduled`] task.
+    Deferred,
+}
+
+impl ResetTask {
+    /// Returns the handle if this entry is [`Self::Scheduled`].
+    pub(crate) fn into_scheduled(self) -> Option<JoinHandle<()>> {
+        match self {
+            Self::Scheduled(handle) => Some(handle),
+            Self::Deferred => None,
+        }
+    }
+}
+
 pub(crate) struct UdsParameters {
     pub(crate) timeout_default: Duration,
     pub(crate) rc_21_retry_policy: RetryPolicy,

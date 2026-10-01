@@ -82,6 +82,18 @@ pub trait UdsTransport: Send + Sync + 'static {
     ) -> Result<Vec<u8>, DiagServiceError>;
 }
 
+/// Outcome of resetting an ECU's session or security access to its default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResetOutcome {
+    /// The ECU is at its default: it already was, or the reset was sent and
+    /// answered positively.
+    Completed,
+    /// Diagnostic communication is not enabled, so nothing was sent. The reset
+    /// is sent once communication is enabled again, unless the session or
+    /// security access is set again before that.
+    Deferred,
+}
+
 /// UDS session management interface.
 #[async_trait]
 pub trait UdsSession: UdsTransport {
@@ -104,6 +116,10 @@ pub trait UdsSession: UdsTransport {
     ) -> Result<Self::Response, DiagServiceError>;
 
     /// Reset the session of the given ECU to default.
+    ///
+    /// While diagnostic communication is not enabled, nothing is sent and no
+    /// activation is requested; the reset is deferred until communication is
+    /// enabled again (see [`ResetOutcome::Deferred`]).
     /// # Errors
     /// * `DiagServiceError::NotFound` if the ECU does not
     ///     exist or the state chart/default session cannot be found.
@@ -116,7 +132,7 @@ pub trait UdsSession: UdsTransport {
         &self,
         ecu_name: &str,
         security_plugin: &DynamicPlugin,
-    ) -> Result<(), DiagServiceError>;
+    ) -> Result<ResetOutcome, DiagServiceError>;
 }
 
 /// UDS security access interface.
@@ -144,6 +160,10 @@ pub trait UdsSecurity: UdsTransport {
     ) -> Result<(SecurityAccess, Self::Response), DiagServiceError>;
 
     /// Reset the security access of the given ECU to default.
+    ///
+    /// While diagnostic communication is not enabled, nothing is sent and no
+    /// activation is requested; the reset is deferred until communication is
+    /// enabled again (see [`ResetOutcome::Deferred`]).
     /// # Errors
     /// * `DiagServiceError::NotFound` if the ECU does not exist or
     ///     the state chart/default session cannot be found.
@@ -156,7 +176,7 @@ pub trait UdsSecurity: UdsTransport {
         &self,
         ecu_name: &str,
         security_plugin: &DynamicPlugin,
-    ) -> Result<(), DiagServiceError>;
+    ) -> Result<ResetOutcome, DiagServiceError>;
 
     /// Get the name of the parameter used to send the key for the given ECU and security level.
     /// # Errors
@@ -663,7 +683,7 @@ pub mod mock {
 
     use async_trait::async_trait;
 
-    use super::FlashTransferStartParams;
+    use super::{FlashTransferStartParams, ResetOutcome};
     use crate::{
         Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuState, HashMap, SecurityAccess,
         TesterPresentType, UdsDataTransfer, UdsDtc, UdsEcu, UdsFunctionalGroup, UdsQuery,
@@ -743,7 +763,7 @@ pub mod mock {
                 &self,
                 ecu_name: &str,
                 security_plugin: &DynamicPlugin,
-            ) ->  Result<(), DiagServiceError>;
+            ) ->  Result<ResetOutcome, DiagServiceError>;
         }
 
         #[async_trait]
@@ -752,7 +772,7 @@ pub mod mock {
                 &self,
                 ecu_name: &str,
                 security_plugin: &DynamicPlugin,
-            ) ->  Result<(), DiagServiceError>;
+            ) ->  Result<ResetOutcome, DiagServiceError>;
             #[mockall::concretize]
             async fn set_ecu_security_access(
                 &self,

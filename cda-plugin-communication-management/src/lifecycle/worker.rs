@@ -58,7 +58,8 @@ pub(crate) type ActivationReply =
 /// A plugin-authorized lifecycle operation submitted to the worker.
 pub(crate) enum LifecycleCommand {
     /// Runs the physical activation sequence: activate transport, run
-    /// initializers in registration order.
+    /// initializers in registration order, then publish the result and, on
+    /// success, call every hook's `on_enabled()` before replying.
     Activate {
         operation: CommunicationOperation,
         /// Optional detector to run after initialization.
@@ -119,6 +120,18 @@ pub(crate) fn new_resources(transport_control: Arc<dyn TransportControl>) -> Wor
 async fn deinitialize_all(initializers: &[Arc<dyn CommunicationLifecycle>]) {
     for initializer in initializers.iter().rev() {
         initializer.deinitialize().await;
+    }
+}
+
+/// Calls `on_enabled()` on every registered hook, in registration order.
+///
+/// Only called once the lifecycle state has actually been published as
+/// `Enabled` (see [`LifecycleWorker::handle_command`] and
+/// [`LifecycleWorker::execute_release`]), so every hook's `on_enabled`
+/// observes a settled `Enabled` state.
+async fn on_enabled_all(initializers: &[Arc<dyn CommunicationLifecycle>]) {
+    for initializer in initializers {
+        initializer.on_enabled().await;
     }
 }
 
@@ -320,6 +333,10 @@ impl LifecycleWorker {
                 reply,
             } => {
                 let result = run_activation(&self.resources, operation, detector).await;
+                let result = self.finish_enabling(result, operation);
+                if matches!(result, Ok(CommunicationState::Enabled)) {
+                    on_enabled_all(&self.resources.initializers).await;
+                }
                 let _ = reply.send(result);
             }
             LifecycleCommand::Redetect { detector, reply } => {
@@ -476,6 +493,9 @@ impl LifecycleWorker {
         let result =
             run_activation(&self.resources, CommunicationOperation::Resume, detector).await;
         let result = self.finish_enabling(result, CommunicationOperation::Resume);
+        if matches!(result, Ok(CommunicationState::Enabled)) {
+            on_enabled_all(&self.resources.initializers).await;
+        }
         // A resume that fails leaves the transport in an unknown state; the next
         // operation must not simply retry over it.
         if let Err(failure) = &result {

@@ -618,12 +618,16 @@ impl<S: EcuGateway, T: EcuManager> CommunicationLifecycle for UdsManager<S, T> {
             });
             *self.variant_detection_listener.lock().await = Some((cancel, listener));
         }
-        self.restart_tester_present_snapshot().await;
         Ok(())
     }
 
+    async fn on_enabled(&self) {
+        self.resume_tester_present().await;
+        self.resume_deferred_resets().await;
+    }
+
     async fn deinitialize(&self) {
-        self.snapshot_and_abort_tester_present().await;
+        self.suspend_tester_present().await;
         self.stop_variant_detection_listener(ReceiverRetention::Keep)
             .await;
     }

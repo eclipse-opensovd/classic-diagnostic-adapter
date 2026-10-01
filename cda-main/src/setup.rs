@@ -128,6 +128,10 @@ impl<SP: SecurityPlugin> CommunicationLifecycle for UdsCommunicationHooks<SP> {
         self.uds_manager.read().await.initialize().await
     }
 
+    async fn on_enabled(&self) {
+        self.uds_manager.read().await.on_enabled().await;
+    }
+
     async fn deinitialize(&self) {
         self.uds_manager.read().await.deinitialize().await;
     }

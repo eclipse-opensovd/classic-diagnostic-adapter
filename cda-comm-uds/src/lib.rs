@@ -15,8 +15,8 @@ use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, FunctionalDescriptionConfig,
-    HashMap, HashMapExtensions, SchemaDescription, SchemaProvider, TesterPresentType, UdsEcu,
-    UdsEcuDb, UdsTransport, VariantDetectionReceiver,
+    HashMap, HashMapExtensions, SchemaDescription, SchemaProvider, UdsEcu, UdsEcuDb, UdsTransport,
+    VariantDetectionReceiver,
     communication_control::{ActivationCause, CommunicationAccess, CommunicationGuard},
     datatypes::FaultConfig,
     diagservices::UdsPayloadData,
@@ -45,7 +45,9 @@ mod variant;
 mod test_helpers;
 
 pub use state_coordinator::EcuStateCoordinator;
-use types::{EcuDataTransfer, EcuIdentifier, TesterPresentTaskId};
+use types::{EcuDataTransfer, EcuIdentifier, ResetTask, TesterPresentTaskId};
+
+use crate::tester_present::TesterPresentTask;
 
 // todo: what timeout should we use to wait till the ecu is 'free'?
 const PERMIT_AQUISITION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -103,9 +105,14 @@ pub struct UdsManager<S: EcuGateway, T: UdsEcuDb> {
     gateway: S,
     data_transfers: Arc<Mutex<HashMap<EcuIdentifier, EcuDataTransfer>>>,
     ecu_semaphores: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
-    tester_present_tasks: Arc<RwLock<HashMap<TesterPresentTaskId, JoinHandle<()>>>>,
-    session_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, JoinHandle<()>>>>,
-    security_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, JoinHandle<()>>>>,
+    /// Single source of truth for tester-present state: one entry per
+    /// `(type, ecu)`, either actively running or suspended while
+    /// communication is disabled. See [`TesterPresentTask`].
+    tester_present_tasks: Arc<RwLock<HashMap<TesterPresentTaskId, TesterPresentTask>>>,
+    /// Pending session resets, one per ECU. See [`ResetTask`].
+    session_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, ResetTask>>>,
+    /// Pending security-access resets, one per ECU. See [`ResetTask`].
+    security_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, ResetTask>>>,
     state_coordinator: EcuStateCoordinator,
     functional_description_database: String,
     fault_config: FaultConfig,
@@ -117,13 +124,6 @@ pub struct UdsManager<S: EcuGateway, T: UdsEcuDb> {
     /// work runs before an authorized activation.
     variant_detection_receiver: Arc<Mutex<Option<VariantDetectionReceiver>>>,
     variant_detection_listener: VariantDetectionListener,
-    /// Tester-present types that were running at the last `deinitialize()` call,
-    /// to be restarted in the next `initialize()` call when communication is
-    /// re-enabled.
-    tester_present_snapshot: Arc<Mutex<Vec<TesterPresentType>>>,
-    /// Deferred snapshot restart, which waits for the lifecycle to publish
-    /// `Enabled` after `initialize()` returns.
-    tester_present_restart_task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
@@ -214,8 +214,6 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             communication_retry_after,
             variant_detection_receiver: Arc::new(Mutex::new(Some(variant_detection_receiver))),
             variant_detection_listener: Arc::new(Mutex::new(None)),
-            tester_present_snapshot: Arc::new(Mutex::new(Vec::new())),
-            tester_present_restart_task: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -380,8 +378,6 @@ impl<S: Clone + EcuGateway, T: UdsEcuDb> Clone for UdsManager<S, T> {
             communication_retry_after: self.communication_retry_after,
             variant_detection_receiver: Arc::clone(&self.variant_detection_receiver),
             variant_detection_listener: Arc::clone(&self.variant_detection_listener),
-            tester_present_snapshot: Arc::clone(&self.tester_present_snapshot),
-            tester_present_restart_task: Arc::clone(&self.tester_present_restart_task),
         }
     }
 }
@@ -391,16 +387,23 @@ impl<S: EcuGateway, T: EcuManager> cda_interfaces::Shutdown for UdsManager<S, T>
     async fn shutdown(&self) {
         self.stop_variant_detection_listener(ReceiverRetention::Discard)
             .await;
-        self.abort_pending_snapshot_restart().await;
         let mut tester_present_tasks = self.tester_present_tasks.write().await;
         let mut session_reset_tasks = self.session_reset_tasks.write().await;
         let mut security_reset_tasks = self.security_reset_tasks.write().await;
         let mut data_transfers = self.data_transfers.lock().await;
         tester_present_tasks
             .drain()
-            .map(|(_, task)| task)
-            .chain(session_reset_tasks.drain().map(|(_, h)| h))
-            .chain(security_reset_tasks.drain().map(|(_, h)| h))
+            .filter_map(|(_, task)| task.into_running())
+            .chain(
+                session_reset_tasks
+                    .drain()
+                    .filter_map(|(_, task)| task.into_scheduled()),
+            )
+            .chain(
+                security_reset_tasks
+                    .drain()
+                    .filter_map(|(_, task)| task.into_scheduled()),
+            )
             .chain(data_transfers.drain().map(|(_, t)| t.task))
             .for_each(|h| h.abort());
     }
