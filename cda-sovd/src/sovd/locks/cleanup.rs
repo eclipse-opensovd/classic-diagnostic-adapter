@@ -14,7 +14,7 @@
 use std::{pin::Pin, sync::Arc, time::SystemTime};
 
 use cda_interfaces::{
-    DynamicPlugin, HashMap, UdsEcu,
+    DynamicPlugin, HashMap, ResetOutcome, UdsEcu,
     lock_priority_api::{LockId, LockLifecycleEvent},
 };
 use futures::FutureExt;
@@ -181,20 +181,32 @@ pub(super) async fn reset_ecu_session_and_security<T: UdsEcu>(
     context: &str,
     security_plugin: &DynamicPlugin,
 ) {
-    if let Err(e) = uds.reset_ecu_session(ecu_name, security_plugin).await {
-        tracing::error!("Failed to reset ECU session for ECU {ecu_name} during {context}: {e}");
-    } else {
-        tracing::info!("ECU session reset for ECU {ecu_name} during {context}");
+    match uds.reset_ecu_session(ecu_name, security_plugin).await {
+        Ok(ResetOutcome::Completed) => {
+            tracing::info!("ECU session reset for ECU {ecu_name} during {context}");
+        }
+        Ok(ResetOutcome::Deferred) => tracing::info!(
+            "ECU session reset for ECU {ecu_name} during {context} deferred until communication \
+             is enabled"
+        ),
+        Err(e) => {
+            tracing::error!("Failed to reset ECU session for ECU {ecu_name} during {context}: {e}");
+        }
     }
 
-    if let Err(e) = uds
+    match uds
         .reset_ecu_security_access(ecu_name, security_plugin)
         .await
     {
-        tracing::error!(
+        Ok(ResetOutcome::Completed) => {
+            tracing::info!("ECU security access reset for ECU {ecu_name} during {context}");
+        }
+        Ok(ResetOutcome::Deferred) => tracing::info!(
+            "ECU security access reset for ECU {ecu_name} during {context} deferred until \
+             communication is enabled"
+        ),
+        Err(e) => tracing::error!(
             "Failed to reset ECU security access for ECU {ecu_name} during {context}: {e}"
-        );
-    } else {
-        tracing::info!("ECU security access reset for ECU {ecu_name} during {context}");
+        ),
     }
 }

@@ -20,6 +20,8 @@
     )
 )]
 
+use cda_interfaces::ResetOutcome;
+
 use super::*;
 
 #[tokio::test]
@@ -123,13 +125,13 @@ fn expect_ecu_lock_cleanup_multiple(uds_ecu: &mut MockUdsEcu, ecus: &Vec<String>
             .expect_reset_ecu_session()
             .with(eq(ecu.clone()), always())
             .times(1)
-            .returning(|_, _| Ok(()));
+            .returning(|_, _| Ok(ResetOutcome::Completed));
 
         uds_ecu
             .expect_reset_ecu_security_access()
             .with(eq(ecu.clone()), always())
             .times(1)
-            .returning(|_, _| Ok(()));
+            .returning(|_, _| Ok(ResetOutcome::Completed));
     }
 }
 
@@ -179,7 +181,7 @@ pub(super) fn setup_ecu_lock_test() -> (
                 .times(1)
                 .returning(move |_, _| {
                     session_resets.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
+                    Ok(ResetOutcome::Completed)
                 });
             cleanup
                 .expect_reset_ecu_security_access()
@@ -187,7 +189,7 @@ pub(super) fn setup_ecu_lock_test() -> (
                 .times(1)
                 .returning(move |_, _| {
                     security_resets.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
+                    Ok(ResetOutcome::Completed)
                 });
             cleanup
         });

@@ -400,11 +400,13 @@ impl CommunicationHandle {
         state.variant_detection = detection_mode(detector.as_ref());
 
         let handle = self.clone();
+        let attempt = rx.clone();
         cda_interfaces::spawn_named!(
             &format!("communication-enabling-{operation:?}"),
             async move {
-                let result = handle.run_enabling_operation(operation, detector).await;
-                let result = handle.finish_enabling(result, operation);
+                let result = handle
+                    .run_enabling_operation(operation, detector, &attempt)
+                    .await;
                 let _ = tx.send(Some(result));
             }
         );
@@ -461,17 +463,31 @@ impl CommunicationHandle {
 
     /// Runs the physical operation on the worker, isolating the caller from a
     /// send/reply failure (worker shutdown mid-flight).
+    ///
+    /// The worker publishes the final state itself before replying (and, on a
+    /// successful activation, calls every hook's `on_enabled()`), so its reply
+    /// is returned unchanged. When the worker cannot be reached (a send
+    /// failure, or a reply channel dropped without an answer), the attempt is
+    /// failed via [`fail_closed_enabling_attempt`](Self::fail_closed_enabling_attempt),
+    /// which only publishes `Error` while `attempt` still owns the state.
     async fn run_enabling_operation(
         &self,
         operation: CommunicationOperation,
         detector: Option<Arc<dyn CommunicationVariantDetection>>,
+        attempt: &EnablingResultReceiver,
     ) -> Result<CommunicationState, CommunicationOperationFailure> {
-        self.submit_and_await(operation, |reply| LifecycleCommand::Activate {
-            operation,
-            detector,
-            reply,
-        })
-        .await
+        let Ok(rx) = self
+            .submit(operation, |reply| LifecycleCommand::Activate {
+                operation,
+                detector,
+                reply,
+            })
+            .await
+        else {
+            return Err(self.fail_closed_enabling_attempt(operation, attempt));
+        };
+        rx.await
+            .unwrap_or_else(|_| Err(self.fail_closed_enabling_attempt(operation, attempt)))
     }
 
     /// Runs variant detection on the worker (detector only, no transport
@@ -484,20 +500,6 @@ impl CommunicationHandle {
             LifecycleCommand::Redetect { detector, reply }
         })
         .await
-    }
-
-    /// Publishes the final state for a completed enabling operation and clears
-    /// the enabling-result slot.
-    ///
-    /// Runs detached from the caller and can race the worker's shutdown
-    /// sequence. See
-    /// [`publish_enabling_result`](super::state::CommunicationStateData::publish_enabling_result).
-    fn finish_enabling(
-        &self,
-        result: Result<CommunicationState, CommunicationOperationFailure>,
-        operation: CommunicationOperation,
-    ) -> Result<CommunicationState, CommunicationOperationFailure> {
-        self.state.lock().publish_enabling_result(result, operation)
     }
 
     /// Clears the detection slot and returns the result unchanged, without
@@ -522,17 +524,19 @@ impl CommunicationHandle {
         result
     }
 
-    /// Fails the current enabling attempt with `WorkerUnavailable` when the
-    /// watch channel closes before a result was published.
+    /// Fails the current enabling attempt when the worker could not be reached,
+    /// or the watch channel closed before a result was published.
     ///
     /// State is changed only when the current slot belongs to the same channel,
-    /// so a stale finalizer cannot overwrite a newer attempt.
+    /// so neither a stale finalizer nor this fallback can overwrite a newer
+    /// attempt, a result the worker already published, or shutdown's terminal
+    /// state (shutdown clears the slot).
     fn fail_closed_enabling_attempt(
         &self,
         operation: CommunicationOperation,
         failed: &EnablingResultReceiver,
     ) -> CommunicationOperationFailure {
-        let failure = CommunicationOperationFailure::WorkerUnavailable { operation };
+        let failure = self.construct_worker_failure(operation);
         let mut state = self.state.lock();
         // Detection changes nothing physical and publishes no lifecycle state,
         // not even a failed one.
@@ -961,7 +965,7 @@ mod tests {
         }
     }
 
-    /// A detached `finish_enabling` write must not overwrite the worker's
+    /// A detached fallback write must not overwrite the worker's
     /// shutdown-sequence write, which would leave `state == Enabled` on a
     /// torn-down transport.
     #[tokio::test]
@@ -1312,6 +1316,7 @@ mod tests {
         async fn initialize(&self) -> Result<(), CommControlError> {
             Ok(())
         }
+        async fn on_enabled(&self) {}
     }
 
     #[tokio::test]
@@ -1577,6 +1582,7 @@ mod tests {
                 Ok(())
             }
         }
+        async fn on_enabled(&self) {}
         async fn deinitialize(&self) {
             self.deinit_calls.fetch_add(1, Ordering::Relaxed);
         }
@@ -2258,5 +2264,450 @@ mod tests {
             Ok(CommunicationState::Enabled)
         );
         assert_eq!(handle.variant_detection(), VariantDetectionMode::Never);
+    }
+
+    /// Lifecycle events recorded by test hooks.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum LifecycleEvent {
+        Initialized,
+        Enabled,
+        Deinitialized,
+    }
+
+    /// Records lifecycle call order into a shared, cloneable log.
+    #[derive(Clone, Default)]
+    struct RecordingHook {
+        events: Arc<std::sync::Mutex<Vec<LifecycleEvent>>>,
+    }
+
+    #[async_trait]
+    impl CommunicationLifecycle for RecordingHook {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+        async fn initialize(&self) -> Result<(), CommControlError> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(LifecycleEvent::Initialized);
+            Ok(())
+        }
+        async fn on_enabled(&self) {
+            self.events.lock().unwrap().push(LifecycleEvent::Enabled);
+        }
+        async fn deinitialize(&self) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(LifecycleEvent::Deinitialized);
+        }
+    }
+
+    /// `on_enabled` must observe the state already published as `Enabled`, and
+    /// must be able to acquire a guard: both are false while still `Enabling`.
+    #[tokio::test]
+    async fn on_enabled_runs_after_enabled_is_published() {
+        struct ObservingHook {
+            handle: CommunicationHandle,
+            observed_state: Arc<std::sync::Mutex<Option<CommunicationState>>>,
+            observed_acquire_ok: Arc<AtomicBool>,
+        }
+        #[async_trait]
+        impl CommunicationLifecycle for ObservingHook {
+            fn name(&self) -> &'static str {
+                "observing"
+            }
+            async fn initialize(&self) -> Result<(), CommControlError> {
+                Ok(())
+            }
+            async fn on_enabled(&self) {
+                *self.observed_state.lock().unwrap() = Some(self.handle.state());
+                self.observed_acquire_ok
+                    .store(self.handle.acquire().is_ok(), Ordering::Relaxed);
+            }
+        }
+
+        let (handle, _control) = handle();
+        let observed_state = Arc::new(std::sync::Mutex::new(None));
+        let observed_acquire_ok = Arc::new(AtomicBool::new(false));
+        handle
+            .register_lifecycle_hook(Arc::new(ObservingHook {
+                handle: handle.clone(),
+                observed_state: Arc::clone(&observed_state),
+                observed_acquire_ok: Arc::clone(&observed_acquire_ok),
+            }) as Arc<dyn CommunicationLifecycle>)
+            .await
+            .expect("registration must succeed");
+
+        assert_eq!(
+            handle.enable_and_detect().await,
+            Ok(CommunicationState::Enabled)
+        );
+
+        assert_eq!(
+            *observed_state.lock().unwrap(),
+            Some(CommunicationState::Enabled),
+            "on_enabled must observe the state already published as Enabled"
+        );
+        assert!(
+            observed_acquire_ok.load(Ordering::Relaxed),
+            "on_enabled must be able to acquire a guard once Enabled is published"
+        );
+    }
+
+    /// By the time an activation call returns, every registered hook's
+    /// `on_enabled` has already run.
+    #[tokio::test]
+    async fn on_enabled_runs_before_activation_caller_returns() {
+        let (handle, _control) = handle();
+        let hook = Arc::new(RecordingHook::default());
+        handle
+            .register_lifecycle_hook(Arc::clone(&hook) as Arc<dyn CommunicationLifecycle>)
+            .await
+            .expect("registration must succeed");
+
+        assert_eq!(
+            handle.enable_and_detect().await,
+            Ok(CommunicationState::Enabled)
+        );
+
+        assert_eq!(
+            *hook.events.lock().unwrap(),
+            vec![LifecycleEvent::Initialized, LifecycleEvent::Enabled]
+        );
+    }
+
+    /// A hook that blocks inside `on_enabled` until released.
+    #[derive(Default)]
+    struct BlockingOnEnabledHook {
+        events: Arc<std::sync::Mutex<Vec<LifecycleEvent>>>,
+        entered_on_enabled: Notify,
+        proceed_on_enabled: Notify,
+    }
+
+    #[async_trait]
+    impl CommunicationLifecycle for BlockingOnEnabledHook {
+        fn name(&self) -> &'static str {
+            "blocking-on-enabled"
+        }
+        async fn initialize(&self) -> Result<(), CommControlError> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(LifecycleEvent::Initialized);
+            Ok(())
+        }
+        async fn on_enabled(&self) {
+            self.entered_on_enabled.notify_one();
+            self.proceed_on_enabled.notified().await;
+            self.events.lock().unwrap().push(LifecycleEvent::Enabled);
+        }
+        async fn deinitialize(&self) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(LifecycleEvent::Deinitialized);
+        }
+    }
+
+    /// A disable requested while `on_enabled` is still running must not
+    /// deinitialize hooks until `on_enabled` finishes. `Enabled` is already
+    /// published by the time `on_enabled` starts, so a disable can be claimed
+    /// concurrently; the worker handles one lifecycle command at a time, so the
+    /// claimed `Disable` cannot reach `execute_disable` before `on_enabled`
+    /// returns.
+    #[tokio::test]
+    async fn disable_requested_during_on_enabled_deinitializes_afterwards() {
+        let (handle, _control) = handle();
+        let hook = Arc::new(BlockingOnEnabledHook::default());
+        handle
+            .register_lifecycle_hook(Arc::clone(&hook) as Arc<dyn CommunicationLifecycle>)
+            .await
+            .expect("registration must succeed");
+
+        let activation = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.enable_and_detect().await }
+        });
+        hook.entered_on_enabled.notified().await;
+
+        let disable = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.disable(DisableReason::RuntimeUpdate).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while handle.state() != CommunicationState::Disabling {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("disable must claim Disabling while on_enabled is still running");
+
+        hook.proceed_on_enabled.notify_one();
+
+        assert_eq!(activation.await.unwrap(), Ok(CommunicationState::Enabled));
+        let lease = disable
+            .await
+            .unwrap()
+            .expect("disable must succeed once on_enabled finishes");
+
+        assert_eq!(
+            *hook.events.lock().unwrap(),
+            vec![
+                LifecycleEvent::Initialized,
+                LifecycleEvent::Enabled,
+                LifecycleEvent::Deinitialized,
+            ],
+            "deinitialize must never run before on_enabled finishes"
+        );
+        drop(lease);
+    }
+
+    /// `on_enabled` must not run when a later initializer fails: the
+    /// activation never reached `Enabled`.
+    #[tokio::test]
+    async fn on_enabled_not_called_when_initializer_fails() {
+        let (handle, _control) = handle();
+        let failing = Arc::new(DeinitTrackingInitializer {
+            fail: AtomicBool::new(true),
+            ..Default::default()
+        });
+        let hook = Arc::new(RecordingHook::default());
+        handle
+            .register_lifecycle_hook(Arc::clone(&failing) as Arc<dyn CommunicationLifecycle>)
+            .await
+            .expect("registration must succeed");
+        handle
+            .register_lifecycle_hook(Arc::clone(&hook) as Arc<dyn CommunicationLifecycle>)
+            .await
+            .expect("registration must succeed");
+
+        assert!(matches!(
+            handle.enable_and_detect().await,
+            Err(CommunicationOperationFailure::InitializerFailure { .. })
+        ));
+
+        assert!(
+            hook.events.lock().unwrap().is_empty(),
+            "on_enabled must not run when an earlier initializer failed"
+        );
+    }
+
+    /// `on_enabled` must not run when detection fails: the activation never
+    /// reached `Enabled`.
+    #[tokio::test]
+    async fn on_enabled_not_called_when_detection_fails() {
+        let (handle, _control) = handle();
+        let hook = Arc::new(RecordingHook::default());
+        handle
+            .register_lifecycle_hook(Arc::clone(&hook) as Arc<dyn CommunicationLifecycle>)
+            .await
+            .expect("registration must succeed");
+        let detector = FailingDetector::new(true);
+        handle
+            .register_variant_detection(
+                Arc::clone(&detector) as Arc<dyn CommunicationVariantDetection>
+            )
+            .await
+            .expect("registration must succeed");
+
+        assert!(matches!(
+            handle.enable_and_detect().await,
+            Err(CommunicationOperationFailure::DetectionFailure { .. })
+        ));
+
+        assert_eq!(
+            *hook.events.lock().unwrap(),
+            vec![LifecycleEvent::Initialized, LifecycleEvent::Deinitialized],
+            "a failed detection unwinds the hook that already initialized, but must not call \
+             on_enabled on it"
+        );
+    }
+
+    /// A redetect never deinitializes hooks, so it must not call `on_enabled`
+    /// either: the state was `Enabled` throughout and the hook was never
+    /// deinitialized.
+    #[tokio::test]
+    async fn on_enabled_not_called_on_redetect() {
+        let (handle, _control) = handle();
+        let hook = Arc::new(RecordingHook::default());
+        handle
+            .register_lifecycle_hook(Arc::clone(&hook) as Arc<dyn CommunicationLifecycle>)
+            .await
+            .expect("registration must succeed");
+        let detector = with_detector(&handle).await;
+
+        assert_eq!(
+            handle.enable_and_detect().await,
+            Ok(CommunicationState::Enabled)
+        );
+        assert_eq!(
+            *hook.events.lock().unwrap(),
+            vec![LifecycleEvent::Initialized, LifecycleEvent::Enabled]
+        );
+        assert_eq!(detector.calls.load(Ordering::Relaxed), 1);
+
+        assert_eq!(handle.redetect().await, Ok(CommunicationState::Enabled));
+        assert_eq!(detector.calls.load(Ordering::Relaxed), 2);
+
+        assert_eq!(
+            *hook.events.lock().unwrap(),
+            vec![LifecycleEvent::Initialized, LifecycleEvent::Enabled],
+            "redetect must not call on_enabled again"
+        );
+    }
+
+    /// Releasing an exclusive disable lease that resumes communication calls
+    /// `on_enabled` too, just like a fresh activation.
+    #[tokio::test]
+    async fn on_enabled_called_on_lease_release_resume() {
+        let (handle, _control) = handle();
+        let hook = Arc::new(RecordingHook::default());
+        handle
+            .register_lifecycle_hook(Arc::clone(&hook) as Arc<dyn CommunicationLifecycle>)
+            .await
+            .expect("registration must succeed");
+
+        assert_eq!(
+            handle.enable_and_detect().await,
+            Ok(CommunicationState::Enabled)
+        );
+        assert_eq!(
+            *hook.events.lock().unwrap(),
+            vec![LifecycleEvent::Initialized, LifecycleEvent::Enabled]
+        );
+
+        let lease = handle.disable(DisableReason::RuntimeUpdate).await.unwrap();
+        assert_eq!(
+            *hook.events.lock().unwrap(),
+            vec![
+                LifecycleEvent::Initialized,
+                LifecycleEvent::Enabled,
+                LifecycleEvent::Deinitialized,
+            ]
+        );
+
+        assert_eq!(lease.release().await, Ok(CommunicationState::Enabled));
+
+        assert_eq!(
+            *hook.events.lock().unwrap(),
+            vec![
+                LifecycleEvent::Initialized,
+                LifecycleEvent::Enabled,
+                LifecycleEvent::Deinitialized,
+                LifecycleEvent::Initialized,
+                LifecycleEvent::Enabled,
+            ],
+            "releasing a lease that resumes communication must call on_enabled again"
+        );
+    }
+
+    /// Shutdown racing an in-flight activation must win the publish, and
+    /// `on_enabled` must then not run. Companion to
+    /// `shutdown_racing_in_flight_activation_finishes_disabled_not_enabled`,
+    /// which asserts the resulting state.
+    #[tokio::test]
+    async fn on_enabled_not_called_when_shutdown_wins_publish() {
+        let control = Arc::new(BlockingEnableControl::default());
+        let handle = communication_handle_new(Arc::clone(&control) as Arc<dyn TransportControl>);
+        let hook = Arc::new(RecordingHook::default());
+        handle
+            .register_lifecycle_hook(Arc::clone(&hook) as Arc<dyn CommunicationLifecycle>)
+            .await
+            .expect("registration must succeed");
+
+        let activation = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.enable_and_detect().await }
+        });
+        control.entered.notified().await;
+
+        let shutdown = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.shutdown().await }
+        });
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        control.proceed.notify_one();
+
+        assert!(matches!(
+            activation.await.unwrap(),
+            Err(CommunicationOperationFailure::ShuttingDown { .. })
+        ));
+        shutdown.await.unwrap();
+
+        assert!(
+            !hook
+                .events
+                .lock()
+                .unwrap()
+                .contains(&LifecycleEvent::Enabled),
+            "on_enabled must not run when shutdown won the publish for this activation"
+        );
+    }
+
+    /// When the worker cannot be reached at all, the controller still
+    /// publishes the failure itself, through `fail_closed_enabling_attempt`, for
+    /// a send failure or a dropped reply.
+    #[tokio::test]
+    async fn worker_unreachable_still_publishes_error() {
+        let (handle, _control) = handle();
+        let task = handle
+            .worker_task
+            .lock()
+            .await
+            .take()
+            .expect("test handle must own a worker task");
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+
+        assert_eq!(
+            handle.enable_and_detect().await,
+            Err(CommunicationOperationFailure::WorkerUnavailable {
+                operation: CommunicationOperation::EnableAndDetect,
+            })
+        );
+        assert!(matches!(handle.state(), CommunicationState::Error(_)));
+    }
+
+    /// The worker publishes `Enabled` before it calls `on_enabled()`. If it
+    /// then dies before replying (here: a hook panics), the caller sees the
+    /// dropped reply, but the fallback must not overwrite the state the worker
+    /// already published.
+    #[tokio::test]
+    async fn fallback_does_not_overwrite_a_result_the_worker_published() {
+        struct PanicOnEnabled;
+
+        #[async_trait]
+        impl CommunicationLifecycle for PanicOnEnabled {
+            fn name(&self) -> &'static str {
+                "panic-on-enabled"
+            }
+            async fn initialize(&self) -> Result<(), CommControlError> {
+                Ok(())
+            }
+            async fn on_enabled(&self) {
+                panic!("hook panicked in on_enabled");
+            }
+        }
+
+        let (handle, _control) = handle();
+        handle
+            .register_lifecycle_hook(Arc::new(PanicOnEnabled) as Arc<dyn CommunicationLifecycle>)
+            .await
+            .expect("registration must succeed");
+
+        assert_eq!(
+            handle.enable_and_detect().await,
+            Err(CommunicationOperationFailure::WorkerUnavailable {
+                operation: CommunicationOperation::EnableAndDetect,
+            })
+        );
+        assert_eq!(
+            handle.state(),
+            CommunicationState::Enabled,
+            "the fallback must not overwrite the result the worker published"
+        );
     }
 }

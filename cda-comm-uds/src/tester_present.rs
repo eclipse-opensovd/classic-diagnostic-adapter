@@ -11,14 +11,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::time::Duration;
-
 use async_trait::async_trait;
 use cda_interfaces::{
-    Connectivity, DiagServiceError, EcuGateway, EcuManager, HashMap,
+    Connectivity, DiagServiceError, EcuGateway, EcuManager, HashMap, HashSet,
     SUPPRESS_POSITIVE_RESPONSE_BIT, ServicePayload, TesterPresentControlMessage, TesterPresentMode,
-    TesterPresentType, UdsEcuDb, UdsFunctionalGroup, UdsTesterPresent, VariantDetection,
-    communication_control::CommunicationError, dlt_ctx, service_ids,
+    TesterPresentType, UdsEcuDb, UdsFunctionalGroup, UdsTesterPresent, VariantDetection, dlt_ctx,
+    service_ids, util::tokio_ext,
 };
 use tokio::{
     task::JoinHandle,
@@ -27,8 +25,33 @@ use tokio::{
 
 use crate::{UdsManager, transport::CommunicationReadiness, types::TesterPresentTaskId};
 
+/// State of a tester-present map entry (keyed by `(type, ecu)` via
+/// [`TesterPresentTaskId`]).
+///
+/// An entry exists for as long as some lock still wants tester present for that `(type, ecu)`,
+/// regardless whether communication is currently enabled. Only
+/// [`UdsTesterPresent::stop_tester_present`] removes an entry; suspending and
+/// resuming only ever change its state.
+pub(crate) enum TesterPresentTask {
+    /// The task is actively sending tester present.
+    Running(JoinHandle<()>),
+    /// Communication is disabled; the task is not running, but the entry is
+    /// kept so it can be resumed once communication is enabled again.
+    Suspended,
+}
+
+impl TesterPresentTask {
+    /// Returns the handle if this entry is [`Self::Running`].
+    pub(crate) fn into_running(self) -> Option<JoinHandle<()>> {
+        match self {
+            Self::Running(handle) => Some(handle),
+            Self::Suspended => None,
+        }
+    }
+}
+
 fn all_active(
-    tester_presents: &HashMap<TesterPresentTaskId, JoinHandle<()>>,
+    tester_presents: &HashMap<TesterPresentTaskId, TesterPresentTask>,
     type_: &TesterPresentType,
     ecu_names: &[String],
 ) -> bool {
@@ -41,15 +64,20 @@ fn all_active(
         })
 }
 
-/// How often a deferred snapshot restart re-checks whether the activation it
-/// belongs to has published `Enabled`.
-///
-/// [`CommunicationAccess`](cda_interfaces::communication_control::CommunicationAccess)
-/// exposes no state-change subscription, so this has to poll. `Enabling` covers
-/// whole-vehicle variant detection and can therefore last seconds, which is
-/// what this interval is sized against: the added restart latency is far below
-/// any tester-present interval.
-const SNAPSHOT_RESTART_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Distinguishes the two ways [`UdsManager::activate_tester_present`] is
+/// reached.
+enum ActivateMode {
+    /// A fresh [`UdsTesterPresent::start_tester_present`] call. ECUs are
+    /// resolved from the current functional-group membership; missing or
+    /// `Suspended` entries are spawned, `Running` entries are left alone.
+    Start,
+    /// The resume run from [`CommunicationLifecycle::on_enabled`]
+    /// (`cda_interfaces::communication_control::CommunicationLifecycle`), once
+    /// communication is enabled again. Only entries that are still `Suspended`
+    /// for `type_` are spawned; nothing is inserted that was not already in
+    /// the map.
+    Resume,
+}
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     fn spawn_tester_present_task(
@@ -117,45 +145,81 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         )
     }
 
-    async fn start_tester_present_tasks(
-        &self,
-        type_: TesterPresentType,
-    ) -> Result<(), DiagServiceError> {
-        let ecu_names = match &type_ {
+    /// Resolves the ECUs that a tester-present type currently addresses.
+    async fn ecus_for_tester_present_type(&self, type_: &TesterPresentType) -> Vec<String> {
+        match type_ {
             TesterPresentType::Ecu(ecu_name) => vec![ecu_name.clone()],
             TesterPresentType::Functional(functional_group) => {
                 self.ecus_for_functional_group(functional_group, true).await
             }
+        }
+    }
+
+    /// Resolves and spawns or resumes tasks for `type_`, used by both
+    /// [`UdsTesterPresent::start_tester_present`] and the resume run from
+    /// `on_enabled` after communication is re-enabled. The two modes only
+    /// differ in which ECUs are considered and in how a zero tester-present
+    /// interval is handled; the resolution, spawning and map update are
+    /// shared.
+    async fn activate_tester_present(
+        &self,
+        type_: TesterPresentType,
+        mode: ActivateMode,
+    ) -> Result<(), DiagServiceError> {
+        let ecu_names = match mode {
+            ActivateMode::Start => self.ecus_for_tester_present_type(&type_).await,
+            ActivateMode::Resume => {
+                let tester_presents = self.tester_present_tasks.read().await;
+                tester_presents
+                    .iter()
+                    .filter(|(id, task)| {
+                        id.type_ == type_ && matches!(task, TesterPresentTask::Suspended)
+                    })
+                    .map(|(id, _)| id.ecu.clone())
+                    .collect()
+            }
         };
 
-        let mut starts = Vec::with_capacity(ecu_names.len());
+        let mut resolved = Vec::with_capacity(ecu_names.len());
         for ecu in ecu_names {
             let interval = self.uds_ecu_db(&ecu)?.read().await.tester_present_time();
             if interval.is_zero() {
+                // Can only happen in 'start' as a 'resume' should never see the 'zero'
+                // interval, as it was rejected in 'start'
                 return Err(DiagServiceError::InvalidConfiguration(format!(
                     "Tester present interval for ECU {ecu} must be greater than zero"
                 )));
             }
-            starts.push((ecu, interval));
+            resolved.push((ecu, interval));
         }
 
         let mut tester_presents = self.tester_present_tasks.write().await;
-        for (ecu, interval) in starts {
+        for (ecu, interval) in resolved {
             let key = TesterPresentTaskId {
                 type_: type_.clone(),
                 ecu: ecu.clone(),
             };
-
-            tester_presents.entry(key).or_insert_with(|| {
-                let control_msg = TesterPresentControlMessage {
-                    mode: TesterPresentMode::Start,
-                    type_: type_.clone(),
-                    ecu,
-                    interval: Some(interval),
-                };
-
-                self.spawn_tester_present_task(control_msg, interval)
-            });
+            match (tester_presents.get(&key), interval) {
+                // Already sending: a start is idempotent, and a concurrent
+                // start already resumed it.
+                (Some(TesterPresentTask::Running(_)), _) => {}
+                // Removed by `stop_tester_present` since the candidates were
+                // read, e.g. a lock released while communication was disabled
+                // or enabling: the release wins over the resume.
+                (None, _) if matches!(mode, ActivateMode::Resume) => {}
+                // A start of a missing or suspended entry, or a resume of a
+                // suspended one.
+                (_, interval) => {
+                    let control_msg = TesterPresentControlMessage {
+                        mode: TesterPresentMode::Start,
+                        type_: type_.clone(),
+                        ecu,
+                        interval: Some(interval),
+                    };
+                    let handle = self.spawn_tester_present_task(control_msg, interval);
+                    tester_presents.insert(key, TesterPresentTask::Running(handle));
+                }
+            }
         }
 
         Ok(())
@@ -234,30 +298,23 @@ impl<S: EcuGateway, T: EcuManager> UdsTesterPresent for UdsManager<S, T> {
     )]
     async fn start_tester_present(&self, type_: TesterPresentType) -> Result<(), DiagServiceError> {
         let _guard = self.require_communication_ready()?;
-        self.start_tester_present_tasks(type_).await
+        self.activate_tester_present(type_, ActivateMode::Start)
+            .await
     }
 
     #[tracing::instrument(skip_all,
         fields(dlt_context = dlt_ctx!("UDS"))
     )]
     async fn stop_tester_present(&self, type_: TesterPresentType) -> Result<(), DiagServiceError> {
-        let ecu_names = match &type_ {
-            TesterPresentType::Ecu(ecu_name) => vec![ecu_name.clone()],
-            TesterPresentType::Functional(functional_group) => {
-                self.ecus_for_functional_group(functional_group, true).await
-            }
-        };
-        let keys = ecu_names
-            .iter()
-            .map(|ecu| TesterPresentTaskId {
-                type_: type_.clone(),
-                ecu: ecu.clone(),
-            })
-            .collect::<Vec<_>>();
         let mut tester_presents = self.tester_present_tasks.write().await;
+        let keys: Vec<TesterPresentTaskId> = tester_presents
+            .keys()
+            .filter(|id| id.type_ == type_)
+            .cloned()
+            .collect();
         for key in keys {
-            if let Some(tester_present) = tester_presents.remove(&key) {
-                tester_present.abort();
+            if let Some(TesterPresentTask::Running(handle)) = tester_presents.remove(&key) {
+                tokio_ext::abort_and_join(handle, "tester present").await;
             }
         }
         Ok(())
@@ -282,108 +339,88 @@ impl<S: EcuGateway, T: EcuManager> UdsTesterPresent for UdsManager<S, T> {
 }
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
-    /// Aborts a deferred snapshot restart that has not run yet.
+    /// Suspends all running tester-present tasks: aborts their handles and
+    /// turns their map entries into [`TesterPresentTask::Suspended`].
     ///
-    /// The snapshot itself is deliberately left untouched: a restart that was
-    /// still waiting has restored nothing, so its types must stay available for
-    /// the next activation.
-    pub(crate) async fn abort_pending_snapshot_restart(&self) {
-        let pending = self.tester_present_restart_task.lock().await.take();
-        if let Some(task) = pending {
-            task.abort();
-            let _ = task.await;
-        }
-    }
-
-    /// Aborts all running tester-present tasks and saves their types so the
-    /// lifecycle initialization can restart them after communication is re-enabled.
-    ///
-    /// Running tasks are keyed per ECU, so a functional group shows up once per
-    /// member. Types are de-duplicated on insert, leaving one `Functional` entry
-    /// per group, because [`UdsTesterPresent::start_tester_present`]
-    /// re-enumerates the whole group from it.
-    ///
-    /// The new types are merged into the existing snapshot rather than
-    /// replacing it. A restart still waiting for its activation to reach
-    /// `Enabled` has started no tasks, so the types it was going to restore
-    /// exist only in the snapshot.
-    pub(crate) async fn snapshot_and_abort_tester_present(&self) {
-        self.abort_pending_snapshot_restart().await;
-
+    /// Entries are never removed here; only [`UdsTesterPresent::stop_tester_present`]
+    /// removes an entry. This is what makes a lock released while
+    /// communication is disabled take effect immediately instead of being
+    /// silently restored on the next resume.
+    pub(crate) async fn suspend_tester_present(&self) {
         let mut tasks = self.tester_present_tasks.write().await;
-        let running: Vec<TesterPresentType> = tasks.keys().map(|id| id.type_.clone()).collect();
-        let handles: Vec<_> = tasks.drain().map(|(_, task)| task).collect();
-        drop(tasks);
-        for handle in handles {
-            handle.abort();
-            let _ = handle.await;
-        }
-
-        let mut snapshot = self.tester_present_snapshot.lock().await;
-        for type_ in running {
-            if !snapshot.contains(&type_) {
-                snapshot.push(type_);
+        let ids: Vec<TesterPresentTaskId> = tasks.keys().cloned().collect();
+        let mut handles = Vec::new();
+        for id in ids {
+            if let Some(TesterPresentTask::Running(handle)) =
+                tasks.insert(id, TesterPresentTask::Suspended)
+            {
+                handles.push(handle);
             }
         }
-        if !snapshot.is_empty() {
+        drop(tasks);
+
+        if !handles.is_empty() {
             tracing::debug!(
-                count = snapshot.len(),
-                "Communication disabling; aborting tester-present tasks and saving snapshot"
+                count = handles.len(),
+                "Communication disabling; suspending tester-present tasks"
             );
         }
+        for handle in handles {
+            tokio_ext::abort_and_join(handle, "tester present").await;
+        }
     }
 
-    /// Restarts the tester-present tasks captured by
-    /// [`UdsManager::snapshot_and_abort_tester_present`], once the activation
-    /// that triggered this initialization has reached `Enabled`.
+    /// Resumes the tester-present entries suspended by
+    /// [`UdsManager::suspend_tester_present`].
     ///
-    /// The restart waits for the in-flight activation to publish `Enabled`
-    /// rather than requesting another activation. It keeps the snapshot when
-    /// that activation ends in any other state, so a later activation can retry
-    /// the restart. After restoration, the active tasks become the record of
-    /// tester-present state and the snapshot is cleared.
-    pub(crate) async fn restart_tester_present_snapshot(&self) {
-        let snapshot = self.tester_present_snapshot.lock().await.clone();
-        if snapshot.is_empty() {
-            return;
-        }
-
-        self.abort_pending_snapshot_restart().await;
-
-        let uds = self.clone();
-        let task = cda_interfaces::spawn_named!("tester-present-snapshot-restart", async move {
-            let guard = loop {
-                match uds.communication_access.acquire() {
-                    Ok(guard) => break guard,
-                    Err(CommunicationError::Enabling) => {
-                        cda_interfaces::util::tokio_ext::sleep_for(SNAPSHOT_RESTART_POLL_INTERVAL)
-                            .await;
-                    }
-                    Err(e) => {
-                        tracing::debug!(
-                            error = %e,
-                            "Communication did not reach enabled; keeping tester-present snapshot \
-                             for the next activation"
-                        );
-                        return;
-                    }
-                }
-            };
-
-            for type_ in snapshot {
-                if let Err(e) = uds.start_tester_present_tasks(type_.clone()).await {
-                    tracing::warn!(
-                        ?type_,
-                        error = %e,
-                        "Failed to restart tester present after communication re-enable"
-                    );
-                }
+    /// Called from [`CommunicationLifecycle::on_enabled`]
+    /// (`cda_interfaces::communication_control::CommunicationLifecycle`), which
+    /// the framework guarantees only runs once the lifecycle state has
+    /// actually been published as `Enabled`, so [`acquire`] below is expected
+    /// to succeed. It can still fail, e.g. if a disable raced in and claimed
+    /// the state before this runs; in that case the suspended entries are left
+    /// untouched for the next activation to resume.
+    ///
+    /// [`UdsManager::tester_present_tasks`] is read under lock after the guard
+    /// has been acquired, so a [`UdsTesterPresent::stop_tester_present`] call
+    /// that happened in between is reflected here.
+    ///
+    /// [`acquire`]: cda_interfaces::communication_control::CommunicationAccess::acquire
+    pub(crate) async fn resume_tester_present(&self) {
+        let guard = match self.communication_access.acquire() {
+            Ok(guard) => guard,
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "Communication not acquirable on_enabled; keeping suspended tester-present \
+                     entries for the next activation"
+                );
+                return;
             }
-            drop(guard);
+        };
 
-            uds.tester_present_snapshot.lock().await.clear();
-        });
-        *self.tester_present_restart_task.lock().await = Some(task);
+        let pending_types: HashSet<TesterPresentType> = self
+            .tester_present_tasks
+            .read()
+            .await
+            .iter()
+            .filter(|(_, task)| matches!(task, TesterPresentTask::Suspended))
+            .map(|(id, _)| id.type_.clone())
+            .collect();
+
+        for type_ in pending_types {
+            if let Err(e) = self
+                .activate_tester_present(type_.clone(), ActivateMode::Resume)
+                .await
+            {
+                tracing::warn!(
+                    ?type_,
+                    error = %e,
+                    "Failed to resume tester present after communication re-enable"
+                );
+            }
+        }
+        drop(guard);
     }
 }
 
@@ -403,8 +440,8 @@ mod tests {
     use super::*;
     use crate::{test_helpers::TestEcuDb, types::TesterPresentTaskId};
 
-    fn task() -> tokio::task::JoinHandle<()> {
-        tokio::spawn(std::future::pending())
+    fn running() -> TesterPresentTask {
+        TesterPresentTask::Running(tokio::spawn(std::future::pending()))
     }
 
     #[tokio::test]
@@ -414,17 +451,25 @@ mod tests {
             type_: type_.clone(),
             ecu: "ecu".to_owned(),
         };
-        let mut tasks: HashMap<TesterPresentTaskId, tokio::task::JoinHandle<()>> = HashMap::new();
-        tasks.insert(key.clone(), task());
-        let original_id = tasks.get(&key).expect("task exists").id();
+        let mut tasks: HashMap<TesterPresentTaskId, TesterPresentTask> = HashMap::new();
+        tasks.insert(key.clone(), running());
+        let original_id = match tasks.get(&key).expect("task exists") {
+            TesterPresentTask::Running(handle) => handle.id(),
+            TesterPresentTask::Suspended => panic!("expected a running task"),
+        };
 
         if !tasks.contains_key(&key) {
-            tasks.insert(key.clone(), task());
+            tasks.insert(key.clone(), running());
         }
 
         let existing = tasks.remove(&key).expect("task remains");
-        assert_eq!(existing.id(), original_id);
-        existing.abort();
+        match existing {
+            TesterPresentTask::Running(handle) => {
+                assert_eq!(handle.id(), original_id);
+                handle.abort();
+            }
+            TesterPresentTask::Suspended => panic!("expected a running task"),
+        }
     }
 
     #[tokio::test]
@@ -439,18 +484,22 @@ mod tests {
             ecu,
         };
         let mut tasks = HashMap::new();
-        tasks.insert(ecu_key.clone(), task());
-        tasks.insert(functional_key.clone(), task());
+        tasks.insert(ecu_key.clone(), running());
+        tasks.insert(functional_key.clone(), running());
 
-        let ecu_task = tasks.remove(&ecu_key).expect("ECU task exists");
-        ecu_task.abort();
+        if let Some(TesterPresentTask::Running(handle)) = tasks.remove(&ecu_key) {
+            handle.abort();
+        } else {
+            panic!("ECU task exists");
+        }
 
         assert!(!tasks.contains_key(&ecu_key));
         assert!(tasks.contains_key(&functional_key));
-        tasks
-            .remove(&functional_key)
-            .expect("functional task exists")
-            .abort();
+        if let Some(TesterPresentTask::Running(handle)) = tasks.remove(&functional_key) {
+            handle.abort();
+        } else {
+            panic!("functional task exists");
+        }
     }
 
     #[tokio::test]
@@ -466,18 +515,37 @@ mod tests {
             ecu: "ecu-2".to_owned(),
         };
         let mut tasks = HashMap::new();
-        tasks.insert(first_key.clone(), task());
+        tasks.insert(first_key.clone(), running());
 
         assert!(!all_active(&tasks, &type_, &ecu_names));
 
-        tasks.insert(second_key.clone(), task());
+        tasks.insert(second_key.clone(), running());
         assert!(all_active(&tasks, &type_, &ecu_names));
 
-        tasks.remove(&first_key).expect("first task exists").abort();
-        tasks
-            .remove(&second_key)
-            .expect("second task exists")
-            .abort();
+        if let Some(TesterPresentTask::Running(handle)) = tasks.remove(&first_key) {
+            handle.abort();
+        } else {
+            panic!("first task exists");
+        }
+        if let Some(TesterPresentTask::Running(handle)) = tasks.remove(&second_key) {
+            handle.abort();
+        } else {
+            panic!("second task exists");
+        }
+    }
+
+    #[tokio::test]
+    async fn suspended_entry_counts_as_active() {
+        let type_ = TesterPresentType::Ecu("ecu".to_owned());
+        let key = TesterPresentTaskId {
+            type_: type_.clone(),
+            ecu: "ecu".to_owned(),
+        };
+        let mut tasks: HashMap<TesterPresentTaskId, TesterPresentTask> = HashMap::new();
+        tasks.insert(key.clone(), TesterPresentTask::Suspended);
+
+        assert!(all_active(&tasks, &type_, &["ecu".to_owned()]));
+        assert!(tasks.contains_key(&key));
     }
 
     #[tokio::test]
@@ -486,7 +554,7 @@ mod tests {
             type_: TesterPresentType::Ecu("ecu".to_owned()),
             ecu: "ecu".to_owned(),
         };
-        let mut tasks: HashMap<TesterPresentTaskId, tokio::task::JoinHandle<()>> = HashMap::new();
+        let mut tasks: HashMap<TesterPresentTaskId, TesterPresentTask> = HashMap::new();
 
         assert!(tasks.remove(&key).is_none());
         assert!(tasks.is_empty());

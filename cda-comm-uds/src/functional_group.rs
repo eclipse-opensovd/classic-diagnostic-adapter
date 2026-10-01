@@ -463,10 +463,8 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
                     .await
                     .set_service_state(sid, service_name.to_owned())
                     .await;
-                if let Some(ref expiration) = mode_expiration {
-                    self.start_reset_task(ecu, Some(*expiration), ResetType::Session)
-                        .await;
-                }
+                self.start_reset_task(ecu, mode_expiration, ResetType::Session)
+                    .await;
             }
         }
 
@@ -487,8 +485,7 @@ mod tests {
     use cda_interfaces::{
         DiagCommType, DiagServiceError, EcuAddresses, EcuRuntimeState, FunctionalTransport,
         HashMap, HashMapExtensions, NetworkTopology, PhysicalTransport, ServicePayload,
-        TransmissionParameters, TransportResponse, VariantDetectionSender,
-        communication_control::CommunicationAccess, datatypes::FaultConfig,
+        TransmissionParameters, TransportResponse, VariantDetectionSender, datatypes::FaultConfig,
     };
     use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
     use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
@@ -579,13 +576,10 @@ mod tests {
             ),
             functional_description_database: "functional".to_owned(),
             fault_config: FaultConfig::default(),
-            communication_access: enabled_communication_access_for_test()
-                as Arc<dyn CommunicationAccess>,
+            communication_access: enabled_communication_access_for_test(),
             communication_retry_after: Duration::from_secs(1),
             variant_detection_receiver: Arc::new(Mutex::new(None)),
             variant_detection_listener: Arc::new(Mutex::new(None)),
-            tester_present_snapshot: Arc::new(Mutex::new(Vec::new())),
-            tester_present_restart_task: Arc::new(Mutex::new(None)),
         }
     }
 

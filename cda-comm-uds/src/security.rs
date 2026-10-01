@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, SecurityAccess, UdsSecurity,
-    UdsTransport,
+    DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, ResetOutcome, SecurityAccess,
+    UdsSecurity, UdsTransport,
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
 };
 
@@ -28,11 +28,9 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
         &self,
         ecu_name: &str,
         security_plugin: &DynamicPlugin,
-    ) -> Result<(), DiagServiceError> {
+    ) -> Result<ResetOutcome, DiagServiceError> {
         // Cancel any existing security access reset task to prevent double resetting
-        if let Some(old_task) = self.security_reset_tasks.write().await.remove(ecu_name) {
-            old_task.abort();
-        }
+        self.cancel_reset(ecu_name, ResetType::SecurityAccess).await;
 
         let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
         let default_security_access = ecu_diag_service.read().await.default_security_access()?;
@@ -40,8 +38,15 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
 
         if current_security_access == default_security_access {
             tracing::debug!("Already at default security access, nothing to do");
-            return Ok(());
+            return Ok(ResetOutcome::Completed);
         }
+
+        // Checked directly rather than through the send path, which would
+        // request an activation: a reset must not switch communication on.
+        let Ok(_guard) = self.communication_access.acquire() else {
+            self.defer_reset(ecu_name, ResetType::SecurityAccess).await;
+            return Ok(ResetOutcome::Deferred);
+        };
 
         let (_, response) = self
             .set_ecu_security_access(
@@ -61,7 +66,7 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
                     security_access = %default_security_access,
                     "ECU security access reset to default"
                 );
-                Ok(())
+                Ok(ResetOutcome::Completed)
             }
             DiagServiceResponseType::Negative => Err(DiagServiceError::UnexpectedResponse(Some(
                 "Security access reset negative response".to_owned(),

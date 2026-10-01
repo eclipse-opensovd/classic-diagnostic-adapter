@@ -68,6 +68,18 @@ pub mod tokio_ext {
             .expect("sleep_for: duration must not overflow tokio::time::Instant");
         tokio::time::sleep_until(deadline).await;
     }
+
+    /// Aborts `task` and waits until it has finished. Cancellation is the
+    /// expected outcome; any other end, i.e. a panic, is logged as a warning
+    /// naming the task by `name`.
+    pub async fn abort_and_join<T>(task: tokio::task::JoinHandle<T>, name: &str) {
+        task.abort();
+        if let Err(error) = task.await
+            && !error.is_cancelled()
+        {
+            tracing::warn!(%error, task = name, "Aborted task ended abnormally");
+        }
+    }
 }
 
 pub mod dlt_ext {
@@ -545,6 +557,18 @@ pub fn byte_field_matches_hex_pattern(received: &str, expected: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A task that never finishes is cancelled, and one that already
+    /// panicked is reported instead of propagating the panic.
+    #[tokio::test]
+    async fn abort_and_join_waits_for_cancelled_and_panicked_tasks() {
+        let pending = tokio::spawn(std::future::pending::<()>());
+        tokio_ext::abort_and_join(pending, "pending").await;
+
+        let panicked = tokio::spawn(async { panic!("task panicked") });
+        tokio::task::yield_now().await;
+        tokio_ext::abort_and_join(panicked, "panicked").await;
+    }
 
     #[test]
     fn uds_response_matching_accepts_only_echoes_of_the_request() {
