@@ -998,7 +998,11 @@ pub(crate) mod service {
                     );
                     res
                 })
-                .response_with::<202, Json<AsyncPostResponse>, _>(|res| {
+                .response_with::<
+                    202,
+                    Json<AsyncPostResponse<serde_json::Map<String, serde_json::Value>>>,
+                    _,
+                >(|res| {
                     res.description(
                         "Execution started asynchronously. Use the returned id for GET/DELETE on \
                          /executions/{id}.",
@@ -1205,13 +1209,7 @@ pub(crate) mod service {
                 diag_service,
             } = args;
             if is_async {
-                handle_async_post::<T>(
-                    response,
-                    map_to_json,
-                    include_schema,
-                    &base_path,
-                    reservation,
-                )
+                handle_async_post::<T>(response, include_schema, &base_path, reservation)
             } else {
                 drop(reservation);
                 handle_sync_post::<T>(
@@ -1372,16 +1370,15 @@ pub(crate) mod service {
 
         /// Handles the async (Stop/RequestResults) POST path: finalises the
         /// previously reserved execution with the Start-response parameters,
-        /// then returns 202 Accepted with only `id` and `status` per spec Table 184.
+        /// then returns them with the execution id and status.
         fn handle_async_post<T: UdsEcu>(
             response: Option<T::Response>,
-            map_to_json: bool,
             include_schema: bool,
             base_path: &str,
             reservation: ExecutionReservation<ServiceExecution>,
         ) -> Response {
             let parameters = match response {
-                Some(r) if map_to_json && !r.is_empty() => match r.into_json() {
+                Some(r) if !r.is_empty() => match r.into_json() {
                     Ok(DiagServiceJsonResponse {
                         data: serde_json::Value::Object(m),
                         ..
@@ -1390,11 +1387,14 @@ pub(crate) mod service {
                 },
                 _ => serde_json::Map::new(),
             };
+            let stored_parameters = parameters.clone();
             let exec_id = reservation.commit_async(|exec| {
-                exec.parameters = parameters;
+                exec.parameters = stored_parameters;
             });
             let schema = if include_schema {
-                Some(create_schema!(AsyncPostResponse))
+                Some(create_schema!(
+                    AsyncPostResponse<serde_json::Map<String, serde_json::Value>>
+                ))
             } else {
                 None
             };
@@ -1404,6 +1404,7 @@ pub(crate) mod service {
                 Json(AsyncPostResponse {
                     id: exec_id.to_string(),
                     status: Some(ExecutionStatus::Running),
+                    parameters,
                     schema,
                 }),
             )
@@ -4053,10 +4054,12 @@ mod tests {
                         has_request_results: true,
                     })
                 });
-            mock_uds
-                .expect_send()
-                .times(1)
-                .returning(|_, _, _, _, _| Ok(make_empty_positive_response()));
+            mock_uds.expect_send().times(1).returning(|_, _, _, _, _| {
+                Ok(make_json_response(serde_json::json!({
+                    "routineInfo": 1,
+                    "result": 0
+                })))
+            });
 
             let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
                 ecu_name.clone(),
@@ -4085,6 +4088,16 @@ mod tests {
             .await;
 
             assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(result.get("id").is_some(), "202 body must have id");
+            assert_eq!(result.get("status"), Some(&serde_json::json!("running")));
+            assert_eq!(
+                result.get("parameters"),
+                Some(&serde_json::json!({"routineInfo": 1, "result": 0}))
+            );
             assert_eq!(lock_read(&service_executions_ref).len(), 1);
         }
 
@@ -4130,7 +4143,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_post_operation_async_into_json_error_surfaces_in_errors_not_500() {
+        async fn test_post_operation_async_into_json_error_returns_empty_parameters() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
             let mock_file_manager = MockFileManager::new();
@@ -4184,7 +4197,7 @@ mod tests {
             )
             .await;
 
-            // Must be 202, not 500 - spec Table 184 body has only id + status
+            // Decoding failures do not prevent the asynchronous execution from starting.
             assert_eq!(response.status(), StatusCode::ACCEPTED);
             // Execution must still be tracked
             assert_eq!(lock_read(&service_executions_ref).len(), 1);
@@ -4195,6 +4208,7 @@ mod tests {
             let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert!(result.get("id").is_some(), "202 body must have id");
             assert!(result.get("status").is_some(), "202 body must have status");
+            assert_eq!(result.get("parameters"), Some(&serde_json::json!({})));
             assert!(
                 result.get("errors").is_none(),
                 "202 body must not contain errors per spec Table 184"
@@ -4202,7 +4216,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_post_operation_async_non_object_json_surfaces_in_errors_not_500() {
+        async fn test_post_operation_async_non_object_json_returns_empty_parameters() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
             let mock_file_manager = MockFileManager::new();
@@ -4257,7 +4271,7 @@ mod tests {
             )
             .await;
 
-            // Must be 202, not 500 - spec Table 184 body has only id + status
+            // Non-object response data does not prevent the asynchronous execution from starting.
             assert_eq!(response.status(), StatusCode::ACCEPTED);
             assert_eq!(lock_read(&service_executions_ref).len(), 1);
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -4266,6 +4280,7 @@ mod tests {
             let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert!(result.get("id").is_some(), "202 body must have id");
             assert!(result.get("status").is_some(), "202 body must have status");
+            assert_eq!(result.get("parameters"), Some(&serde_json::json!({})));
             assert!(
                 result.get("errors").is_none(),
                 "202 body must not contain errors per spec Table 184"

@@ -278,13 +278,16 @@ pub(crate) mod diag_service {
         include_schema: bool,
         reservation: ExecutionReservation<FgServiceExecution>,
     ) -> Response {
+        let stored_parameters = response_data.clone();
         let exec_id = reservation.commit_async(|exec| {
-            exec.parameters = response_data;
+            exec.parameters = stored_parameters;
         });
 
         let exec_url = format!("http://{host}{uri}/executions/{exec_id}");
         let schema = if include_schema {
-            Some(create_schema!(AsyncPostResponse))
+            Some(create_schema!(
+                AsyncPostResponse<HashMap<String, serde_json::Map<String, serde_json::Value>>>
+            ))
         } else {
             None
         };
@@ -294,6 +297,7 @@ pub(crate) mod diag_service {
             Json(AsyncPostResponse {
                 id: exec_id.to_string(),
                 status: Some(ExecutionStatus::Running),
+                parameters: response_data,
                 schema,
             }),
         )
@@ -565,7 +569,15 @@ pub(crate) mod diag_service {
                 },
             )
         })
-        .response_with::<202, Json<AsyncPostResponse>, _>(|res| {
+        .response_with::<
+            202,
+            Json<
+                AsyncPostResponse<
+                    HashMap<String, serde_json::Map<String, serde_json::Value>>,
+                >,
+            >,
+            _,
+        >(|res| {
             res.description(
                 "Asynchronous execution started. Use DELETE \
                  /operations/{operation}/executions/{id} to stop.",
@@ -1090,6 +1102,19 @@ pub(crate) mod diag_service {
             mock
         }
 
+        fn make_json_response(data: serde_json::Value) -> MockDiagServiceResponse {
+            let mut mock = MockDiagServiceResponse::new();
+            mock.expect_response_type()
+                .returning(|| cda_interfaces::diagservices::DiagServiceResponseType::Positive);
+            mock.expect_into_json().return_once(move || {
+                Ok(DiagServiceJsonResponse {
+                    data,
+                    errors: vec![],
+                })
+            });
+            mock
+        }
+
         fn make_query(
             include_schema: bool,
             suppress_service: bool,
@@ -1191,7 +1216,13 @@ pub(crate) mod diag_service {
                 .times(1)
                 .returning(|_, _, _, _, _| {
                     let mut results = cda_interfaces::HashMap::default();
-                    results.insert("ECU1".to_string(), Ok(make_empty_json_response()));
+                    results.insert(
+                        "ECU1".to_string(),
+                        Ok(make_json_response(serde_json::json!({
+                            "routineInfo": 1,
+                            "result": 0
+                        }))),
+                    );
                     results
                 });
 
@@ -1233,6 +1264,12 @@ pub(crate) mod diag_service {
             let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert!(result.get("id").is_some(), "202 body must have id");
             assert_eq!(result.get("status"), Some(&serde_json::json!("running")));
+            assert_eq!(
+                result.get("parameters"),
+                Some(&serde_json::json!({
+                    "ECU1": {"routineInfo": 1, "result": 0}
+                }))
+            );
             assert_eq!(
                 lock_read(&fg_executions_ref)
                     .get("brakeselftest")
