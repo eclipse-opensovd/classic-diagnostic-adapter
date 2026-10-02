@@ -408,7 +408,7 @@ fn handle_ecu_response<R: DiagServiceResponse>(
                                 message: format!("Failed to convert response to JSON: {e}"),
                                 error_code:
                                     sovd_interfaces::error::ErrorCode::InvalidResponseContent,
-                                vendor_code: Some(VendorErrorCode::ErrorInterpretingMessage),
+                                vendor_code: None,
                                 parameters: None,
                                 // todo: x-ecu-name: Some(ecu_name)
                                 error_source: Some("ecu".to_owned()),

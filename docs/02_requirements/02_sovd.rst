@@ -332,8 +332,7 @@ Operations
               "path": "/parameters",
               "error": {
                 "message": "Failed to parse Start response",
-                "error_code": "invalid-response-content",
-                "vendor_code": "error-interpreting-message"
+                "error_code": "invalid-response-content"
               }
             }
           ]

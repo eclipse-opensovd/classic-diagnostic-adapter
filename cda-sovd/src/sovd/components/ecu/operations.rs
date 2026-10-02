@@ -1287,7 +1287,7 @@ pub(crate) mod service {
                 error: sovd_interfaces::error::ApiErrorResponse {
                     message: detail,
                     error_code: sovd_interfaces::error::ErrorCode::InvalidResponseContent,
-                    vendor_code: Some(VendorErrorCode::ErrorInterpretingMessage),
+                    vendor_code: None,
                     parameters: None,
                     error_source: None,
                     schema: None,
