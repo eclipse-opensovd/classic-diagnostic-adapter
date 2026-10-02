@@ -302,17 +302,16 @@ pub async fn add_openapi_routes(dynamic_router: &DynamicRouter) {
 
 fn rewrite_request_uri<B>(mut req: Request<B>) -> Request<B> {
     let uri = req.uri();
-    // Decode URI here, so we can use query params later without
-    // needing to decode them later on.
-    let decoded = percent_encoding::percent_decode_str(
-        uri.path_and_query()
-            .map(http::uri::PathAndQuery::as_str)
-            .unwrap_or_default(),
-    )
-    .decode_utf8()
-    .unwrap_or_else(|_| uri.to_string().into());
+    let decoded_path = percent_encoding::percent_decode_str(uri.path())
+        .decode_utf8()
+        .unwrap_or_else(|_| uri.path().into());
+    let normalized_path = decoded_path.to_lowercase();
+    let normalized_path_and_query = uri.query().map_or_else(
+        || normalized_path.clone(),
+        |query| format!("{normalized_path}?{query}"),
+    );
 
-    let new_uri = match decoded.to_lowercase().parse() {
+    let new_uri = match normalized_path_and_query.parse() {
         Ok(uri) => uri,
         Err(e) => {
             tracing::warn!(error = %e, "Failed to parse URI, using original");
@@ -386,6 +385,60 @@ pub(crate) mod test_utils {
             .await
             .unwrap();
         serde_json::from_slice::<T>(body.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod uri_rewrite_tests {
+    use axum::{body::Body, extract::Query};
+    use sovd_interfaces::components::ecu::operations::{OperationDeleteQuery, OperationQuery};
+    use tower::ServiceExt;
+
+    use super::*;
+
+    async fn rewrite_uri(uri: &str) -> http::Uri {
+        let service = tower::service_fn(|request: Request<Body>| async move {
+            Ok::<_, std::convert::Infallible>(request.uri().clone())
+        });
+        let service = tower::util::MapRequestLayer::new(rewrite_request_uri).layer(service);
+        let request = Request::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .expect("failed to build request");
+
+        service
+            .oneshot(request)
+            .await
+            .expect("URI rewrite service failed")
+    }
+
+    #[tokio::test]
+    async fn rewrite_request_uri_normalizes_only_path() {
+        let uri =
+            rewrite_uri("/Vehicle/%45CU?x-sovd2uds-suppressService=true&caseSensitive=AbC%26X%3DY")
+                .await;
+
+        assert_eq!(uri.path(), "/vehicle/ecu");
+        assert_eq!(
+            uri.query(),
+            Some("x-sovd2uds-suppressService=true&caseSensitive=AbC%26X%3DY")
+        );
+    }
+
+    #[tokio::test]
+    async fn rewrite_request_uri_preserves_operation_queries() {
+        let uri = rewrite_uri(concat!(
+            "/Vehicle/v15/components/ECU/operations/Routine/executions/id",
+            "?x-sovd2uds-suppressService=true"
+        ))
+        .await;
+        let Query(query) = Query::<OperationQuery>::try_from_uri(&uri)
+            .expect("failed to deserialize operation query");
+        let Query(delete_query) = Query::<OperationDeleteQuery>::try_from_uri(&uri)
+            .expect("failed to deserialize operation delete query");
+
+        assert!(query.suppress_service);
+        assert!(delete_query.suppress_service);
     }
 }
 
