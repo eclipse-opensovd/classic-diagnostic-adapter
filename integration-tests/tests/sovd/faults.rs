@@ -432,6 +432,7 @@ async fn test_get_faults_with_different_dtc_masks() {
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
     let ecu_name = "flxc1000";
     let fault_memory = "Standard";
+    let development_fault_memory = "Development";
 
     // Clear any existing DTCs from the simulator
     ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
@@ -523,14 +524,38 @@ async fn test_get_faults_with_different_dtc_masks() {
         dtcs_in_sim.dtcs.len()
     );
 
-    // Test GET /faults - should return all 6 faults
+    // add development dtcs
+    ecusim::add_dtc(
+        &runtime.ecu_sim,
+        ecu_name,
+        development_fault_memory,
+        &DtcMinimal {
+            id: "01E245".into(),
+            status_mask: "29".into(),
+            emissions_related: false,
+        },
+    )
+    .await
+    .expect("Failed to add development DTC 0x01E245");
+
+    let dev_dtcs_in_sim = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, development_fault_memory)
+        .await
+        .expect("Failed to get development DTCs in Simulator");
+    assert_eq!(
+        dev_dtcs_in_sim.dtcs.len(),
+        1,
+        "Expected 1 development DTC in simulator, got {}",
+        dev_dtcs_in_sim.dtcs.len()
+    );
+
+    // Test GET /faults - should return all 7 faults (6 from standard memory, 1 from development memory)
     let faults = get_faults(&runtime.config, &auth, ecu_endpoint)
         .await
         .expect("Failed to get faults via SOVD");
     assert_eq!(
         faults.len(),
-        6,
-        "Expected 6 faults via SOVD, got {}",
+        7,
+        "Expected 7 faults via SOVD, got {}",
         faults.len()
     );
 
@@ -765,6 +790,10 @@ async fn test_get_faults_with_different_dtc_masks() {
     ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
         .await
         .expect("Failed to clear DTCs in simulator");
+
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, development_fault_memory)
+        .await
+        .expect("Failed to clear Development DTCs in simulator");
 
     // Verify no faults remain
     let failed_faults_after_clear = get_faults(&runtime.config, &auth, ecu_endpoint)
@@ -1377,6 +1406,227 @@ async fn test_dtc_deletion_user_memory() {
         "Expected 0 Standard DTCs after default scope clear, got {}",
         standard_dtcs_after_default_scope_clear.dtcs.len()
     );
+
+    // Clean up - delete the ECU lock
+    locks::lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+}
+
+/// Test that reading DTCs by fault ID with a Development Fault Memory scope works correctly.
+///
+/// This test verifies:
+/// 1. Reading a single DTC of Development Fault Memory requests only relevant subfunctions
+///    0x19 0x17 followed by 0x19 0x18 and 0x19 0x19 and returns the correct DTC information.
+/// 2. `FaultMem` read by status mask is not requested when reading by fault ID
+///    with a `DevelopmentFaultMemory` scope.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "test scenario is easier to understand kept together"
+)]
+async fn test_dtc_read_by_fault_id_development_fault_memory() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let ecu_name = "flxc1000";
+    let fault_memory = "Standard";
+    let development_fault_memory = "Development";
+
+    // create and acquire lock
+    let expiration_timeout = Duration::from_secs(30);
+    let ecu_lock = locks::create_lock(
+        expiration_timeout,
+        locks::ECU_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let lock_id =
+        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+
+    // clear any existing dtcs from both standard and development memories
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+        .await
+        .expect("failed to clear standard dtcs in simulator");
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, development_fault_memory)
+        .await
+        .expect("failed to clear development dtcs in simulator");
+
+    // add development dtcs
+    ecusim::add_dtc(
+        &runtime.ecu_sim,
+        ecu_name,
+        development_fault_memory,
+        &DtcMinimal {
+            id: "01E245".into(),
+            status_mask: "29".into(),
+            emissions_related: false,
+        },
+    )
+    .await
+    .expect("failed to add development dtc 0x01E245");
+
+    let dev_dtcs = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, development_fault_memory)
+        .await
+        .expect("failed to get development dtcs");
+    assert_eq!(
+        dev_dtcs.dtcs.len(),
+        1,
+        "expected 1 development dtc, got {}",
+        dev_dtcs.dtcs.len()
+    );
+
+    // Start recording in ecu-sim to capture the requests made during the test
+    ecusim::start_recording(&runtime.ecu_sim, ecu_name)
+        .await
+        .expect("failed to start recording in ecu-sim");
+
+    // Request Read of Development DTC by fault ID
+    let fault = get_fault(&runtime.config, &auth, ecu_endpoint, "01E245")
+        .await
+        .expect("Failed to get fault 0x01E245");
+
+    assert_eq!(fault.code, "01E245");
+
+    // Stop recording in ecu-sim to capture the requests made during the test
+    let requests = ecusim::stop_and_clear_recording(&runtime.ecu_sim, ecu_name)
+        .await
+        .expect("failed to stop recording in ecu-sim");
+
+    // Check the requests made to ECU SIM to ensure the correct subfunctions were called (0x17, 0x18, 0x19)
+    assert!(
+        ["1917", "1918", "1919"]
+            .iter()
+            .all(|sf| requests.iter().any(|request| request.contains(sf))),
+        "Expected subfunctions 0x17, 0x18 and 0x19 to be called"
+    );
+
+    assert!(
+        !requests.iter().any(|request| request.contains("1902")),
+        "Did not expect subfunction 0x02 to be called"
+    );
+
+    //clear all dtcs from development memory to clean up
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, development_fault_memory)
+        .await
+        .expect("Failed to clear Development DTCs in simulator");
+
+    // clean up - delete the ecu lock
+    locks::lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+}
+
+/// Test that reading DTCs by fault ID with a Fault Memory scope works correctly.
+///
+/// This test verifies:
+/// 1. Reading a single DTC of Fault Memory requests only relevant subfunctions 0x19 0x02
+///    followed by 0x19 0x04 and 0x19 0x06 and returns the correct DTC information.
+/// 2. `DevelopmentFaultMemory` read by status mask is not requested when reading by fault ID
+///    with a `FaultMem` scope.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Test scenario is easier to understand kept together"
+)]
+async fn test_dtc_read_by_fault_id_fault_memory() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let ecu_name = "flxc1000";
+    let fault_memory = "Standard";
+    let development_fault_memory = "Development";
+
+    // Create and acquire lock
+    let expiration_timeout = Duration::from_secs(30);
+    let ecu_lock = locks::create_lock(
+        expiration_timeout,
+        locks::ECU_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let lock_id =
+        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+
+    // Clear any existing DTCs from both Standard and Development memories
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+        .await
+        .expect("Failed to clear Standard DTCs in simulator");
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, development_fault_memory)
+        .await
+        .expect("Failed to clear Development DTCs in simulator");
+
+    // Add Standard DTCs
+    ecusim::add_dtc(
+        &runtime.ecu_sim,
+        ecu_name,
+        fault_memory,
+        &DtcMinimal {
+            id: "01E240".into(),
+            status_mask: "29".into(),
+            emissions_related: false,
+        },
+    )
+    .await
+    .expect("Failed to add Standard DTC 0x01E240");
+
+    let std_dtcs = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+        .await
+        .expect("Failed to get Standard DTCs");
+    assert!(
+        !std_dtcs.dtcs.is_empty(),
+        "Expected at least 1 Standard DTC, got 0"
+    );
+
+    // Start recording in ecu-sim to capture the requests made during the test
+    ecusim::start_recording(&runtime.ecu_sim, ecu_name)
+        .await
+        .expect("Failed to start recording in ecu-sim");
+
+    // Request Read of Standard DTC by fault ID without specifying a scope (should default to Fault Memory)
+    let fault = get_fault(&runtime.config, &auth, ecu_endpoint, "01E240")
+        .await
+        .expect("Failed to get fault 0x01E240");
+    assert_eq!(fault.code, "01E240");
+
+    // Stop recording in ecu-sim to capture the requests made during the test
+    let requests = ecusim::stop_and_clear_recording(&runtime.ecu_sim, ecu_name)
+        .await
+        .expect("Failed to stop recording in ecu-sim");
+
+    // Check the requests made to ecu-sim to ensure the correct subfunctions (0x02, 0x04, 0x06)
+    assert!(
+        ["1902", "1904", "1906"]
+            .iter()
+            .all(|sf| requests.iter().any(|request| request.contains(sf))),
+        "Expected subfunctions 0x02, 0x04 and 0x06 to be called"
+    );
+
+    assert!(
+        !requests.iter().any(|request| request.contains("1917")),
+        "Did not expect subfunction 0x17 to be called"
+    );
+
+    // Clear all DTCs from Standard memory to clean up
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+        .await
+        .expect("Failed to clear Standard DTCs in simulator");
 
     // Clean up - delete the ECU lock
     locks::lock_operation(
