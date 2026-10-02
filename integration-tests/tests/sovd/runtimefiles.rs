@@ -1510,14 +1510,6 @@ async fn wait_for_execution_completion(
     auth: &http::HeaderMap,
     execution_id: &str,
 ) -> Result<(), TestingError> {
-    #[cfg_attr(
-        nightly,
-        allow(
-            unknown_lints,
-            clippy::duration_suboptimal_units,
-            reason = "from_mins is not available in Rust 1.88, our MSRV"
-        )
-    )]
     const TIMEOUT: Duration = Duration::from_secs(60);
 
     let deadline = Instant::now()
