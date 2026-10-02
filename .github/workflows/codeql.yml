@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: CodeQL
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: rust
+            build-mode: none
+            source-patterns: "*.rs"
+          - language: actions
+            build-mode: none
+            source-patterns: |-
+              .github/workflows/*.yml
+              .github/workflows/*.yaml
+              .github/reusable_workflows/**/*.yml
+              .github/reusable_workflows/**/*.yaml
+              **/action.yml
+              **/action.yaml
+          - language: python
+            build-mode: none
+            source-patterns: "*.py"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+      - name: Detect source files
+        id: sources
+        env:
+          SOURCE_PATTERNS: ${{ matrix.source-patterns }}
+        run: |
+          mapfile -t patterns <<< "${SOURCE_PATTERNS}"
+          sources="$(git ls-files -- "${patterns[@]}")"
+          if [[ -n "${sources}" ]]; then
+            echo "found=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "found=false" >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Warn when no source files are found
+        if: steps.sources.outputs.found == 'false'
+        env:
+          LANGUAGE: ${{ matrix.language }}
+        run: echo "::warning title=CodeQL skipped::No source files found for configured language '${LANGUAGE}'."
+      - name: Initialize CodeQL
+        if: steps.sources.outputs.found == 'true'
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+      - name: Perform CodeQL analysis
+        if: steps.sources.outputs.found == 'true'
+        uses: github/codeql-action/analyze@v4
