@@ -20,6 +20,8 @@ def generate_comparam_refs(
     gateway_address: int,
     functional_address: int,
     database: Database,
+    tester_present_message: str | None = None,
+    tester_present_req_resp: str | None = None,
 ) -> list[ComparamInstance]:
     refs = []
 
@@ -78,6 +80,29 @@ def generate_comparam_refs(
         protocol_snref="UDS_Ethernet_DoIP_DOBT",
     )
     refs.append(cp_resp_dobt)
+
+    # Tester-present com-params are only emitted for ECUs that opt in, so other
+    # ECUs exercise the CDA's config-default fallback path. They are emitted for
+    # both protocols, like the DoIP addresses above, because the CDA looks
+    # com-params up by its configured protocol (UDS_Ethernet_DoIP_DOBT by default).
+    uds = database.comparam_subsets.get("ISO_14229_5")
+    for protocol_snref in ("UDS_Ethernet_DoIP", "UDS_Ethernet_DoIP_DOBT"):
+        if tester_present_message is not None:
+            refs.append(
+                ComparamInstance(
+                    value=tester_present_message,
+                    spec_ref=ref(uds.comparams["CP_TesterPresentMessage"]),
+                    protocol_snref=protocol_snref,
+                )
+            )
+        if tester_present_req_resp is not None:
+            refs.append(
+                ComparamInstance(
+                    value=tester_present_req_resp,
+                    spec_ref=ref(uds.comparams["CP_TesterPresentReqResp"]),
+                    protocol_snref=protocol_snref,
+                )
+            )
 
     return refs
 
