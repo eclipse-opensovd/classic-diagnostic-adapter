@@ -313,8 +313,34 @@ Operations
           }
         }
 
+    A positive ``Start`` response creates the execution even when individual response fields cannot
+    be decoded. Successfully decoded fields shall be returned in ``parameters`` and decoding errors
+    shall be returned as ``DataError`` entries in ``errors``. Each error path shall identify the
+    affected ``parameters`` field. If the complete response cannot be decoded, ``parameters`` shall
+    be empty and the error path shall point to ``/parameters``.
 
-    Should the call to the ``Start`` subfunction return an error (e.g. NRC), no ``id`` for polling is created.
+    Example with a response decoding error:
+
+    .. code:: javascript
+
+        {
+          "id": "<id of created execution>",
+          "status": "running",
+          "parameters": {},
+          "errors": [
+            {
+              "path": "/parameters",
+              "error": {
+                "message": "Failed to parse Start response",
+                "error_code": "invalid-response-content"
+              }
+            }
+          ]
+        }
+
+
+    Should the call to the ``Start`` subfunction fail before a positive response is received, for
+    example due to an NRC or a communication error, no ``id`` for polling is created.
 
     There are however use-cases, in which you may want to call ``RequestResults`` or ``Stop`` independently, or there could
     only be partial definitions (e.g. only Stop). For this use case the extension :ref:`requirements_sovd_api_operation_order` is required.

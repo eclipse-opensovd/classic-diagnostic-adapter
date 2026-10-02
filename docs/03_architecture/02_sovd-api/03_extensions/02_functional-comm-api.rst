@@ -79,6 +79,10 @@ API
     :status: draft
 
     Same principle as with data, except that the top-level element name is ``parameters``.
+    Asynchronous ``Start`` responses return HTTP status ``202 ACCEPTED`` with ECU-keyed
+    ``parameters`` and any per-ECU conversion failures in ``errors``. Error paths point to
+    ``/parameters/{ecu-name}/{field}``, or ``/parameters/{ecu-name}`` if the complete response from
+    an ECU cannot be decoded.
 
     .. note::
        The content-type ``application/octet-stream`` is only supported for requests.

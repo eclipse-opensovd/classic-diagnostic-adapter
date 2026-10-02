@@ -390,12 +390,13 @@ fn handle_ecu_response<R: DiagServiceResponse>(
                 // Extract data from the response into JSON format
                 match response.into_json() {
                     Ok(json_response) => {
+                        let parse_error_ref = format!("{data_tag}/{ecu_name}");
                         if let serde_json::Value::Object(data_map) = json_response.data {
                             response_data.insert(ecu_name, data_map);
                         }
                         if !json_response.errors.is_empty() {
                             let mut parse_errors =
-                                field_parse_errors_to_json(json_response.errors, data_tag);
+                                field_parse_errors_to_json(json_response.errors, &parse_error_ref);
                             errors.append(&mut parse_errors);
                         }
                     }
@@ -405,8 +406,9 @@ fn handle_ecu_response<R: DiagServiceResponse>(
                             path: format!("/{data_tag}/{ecu_name}"),
                             error: sovd_interfaces::error::ApiErrorResponse {
                                 message: format!("Failed to convert response to JSON: {e}"),
-                                error_code: sovd_interfaces::error::ErrorCode::VendorSpecific,
-                                vendor_code: Some(VendorErrorCode::ErrorInterpretingMessage),
+                                error_code:
+                                    sovd_interfaces::error::ErrorCode::InvalidResponseContent,
+                                vendor_code: None,
                                 parameters: None,
                                 // todo: x-ecu-name: Some(ecu_name)
                                 error_source: Some("ecu".to_owned()),
