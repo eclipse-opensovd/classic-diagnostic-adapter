@@ -273,6 +273,7 @@ pub(crate) mod diag_service {
     /// parameters and builds the `202 Accepted` response.
     fn build_async_response(
         response_data: HashMap<String, serde_json::Map<String, serde_json::Value>>,
+        errors: Vec<sovd_interfaces::error::DataError<VendorErrorCode>>,
         host: &str,
         uri: &Uri,
         include_schema: bool,
@@ -286,7 +287,10 @@ pub(crate) mod diag_service {
         let exec_url = format!("http://{host}{uri}/executions/{exec_id}");
         let schema = if include_schema {
             Some(create_schema!(
-                AsyncPostResponse<HashMap<String, serde_json::Map<String, serde_json::Value>>>
+                AsyncPostResponse<
+                    HashMap<String, serde_json::Map<String, serde_json::Value>>,
+                    VendorErrorCode,
+                >
             ))
         } else {
             None
@@ -298,6 +302,7 @@ pub(crate) mod diag_service {
                 id: exec_id.to_string(),
                 status: Some(ExecutionStatus::Running),
                 parameters: response_data,
+                errors,
                 schema,
             }),
         )
@@ -535,7 +540,14 @@ pub(crate) mod diag_service {
         } = handle_ecu_responses(results);
 
         if is_async {
-            build_async_response(response_data, &host, &uri, include_schema, reservation)
+            build_async_response(
+                response_data,
+                errors,
+                &host,
+                &uri,
+                include_schema,
+                reservation,
+            )
         } else {
             drop(reservation);
             build_operation_response(response_data, errors, include_schema)
@@ -569,15 +581,12 @@ pub(crate) mod diag_service {
                 },
             )
         })
-        .response_with::<
-            202,
-            Json<
-                AsyncPostResponse<
-                    HashMap<String, serde_json::Map<String, serde_json::Value>>,
-                >,
+        .response_with::<202, Json<
+            AsyncPostResponse<
+                HashMap<String, serde_json::Map<String, serde_json::Value>>,
+                VendorErrorCode,
             >,
-            _,
-        >(|res| {
+        >, _>(|res| {
             res.description(
                 "Asynchronous execution started. Use DELETE \
                  /operations/{operation}/executions/{id} to stop.",
@@ -1536,6 +1545,87 @@ pub(crate) mod diag_service {
                     .get("parameters")
                     .and_then(serde_json::Value::as_object)
                     .is_none_or(serde_json::Map::is_empty)
+            );
+        }
+
+        #[tokio::test]
+        async fn test_fg_post_async_conversion_error_surfaces_in_errors() {
+            let mut mock_uds = MockUdsEcu::new();
+            mock_uds
+                .expect_get_functional_group_routine_subfunctions()
+                .times(1)
+                .returning(|_, _, _| {
+                    Ok(RoutineSubfunctions {
+                        has_stop: true,
+                        has_request_results: false,
+                    })
+                });
+            mock_uds
+                .expect_send_functional_group()
+                .times(1)
+                .returning(|_, _, _, _, _| {
+                    let mut response = MockDiagServiceResponse::new();
+                    response.expect_response_type().returning(|| {
+                        cda_interfaces::diagservices::DiagServiceResponseType::Positive
+                    });
+                    response.expect_into_json().return_once(|| {
+                        Err(DiagServiceError::BadPayload(
+                            "simulated parse failure".to_string(),
+                        ))
+                    });
+                    let mut results = cda_interfaces::HashMap::default();
+                    results.insert("ECU1".to_string(), Ok(response));
+                    results
+                });
+
+            let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
+            insert_test_fg_lock(&state.locks, "AllECUs").await;
+            let response = post::<MockUdsEcu>(
+                make_post_headers(),
+                UseApi(
+                    Secured(Box::new(TestSecurityPlugin)),
+                    std::marker::PhantomData,
+                ),
+                UseApi(
+                    axum_extra::extract::Host("localhost".to_string()),
+                    std::marker::PhantomData,
+                ),
+                axum::extract::OriginalUri(
+                    "/functions/functionalgroups/AllECUs/operations/BrakeSelfTest"
+                        .parse()
+                        .unwrap(),
+                ),
+                axum::extract::Path(crate::sovd::components::ecu::DiagServicePathParam {
+                    service: "BrakeSelfTest".to_string(),
+                }),
+                WithRejection(
+                    axum::extract::Query(make_query(false, false)),
+                    std::marker::PhantomData,
+                ),
+                State(state),
+                Bytes::from_static(b"{\"parameters\":{}}"),
+            )
+            .await;
+
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(result.get("parameters"), Some(&serde_json::json!({})));
+            let errors = result
+                .get("errors")
+                .and_then(serde_json::Value::as_array)
+                .expect("202 body must contain errors");
+            assert_eq!(errors.len(), 1);
+            let error = errors.first().expect("error entry must exist");
+            assert_eq!(
+                error.get("path"),
+                Some(&serde_json::json!("/parameters/ECU1"))
+            );
+            assert_eq!(
+                error.get("error").and_then(|error| error.get("error_code")),
+                Some(&serde_json::json!("invalid-response-content"))
             );
         }
 

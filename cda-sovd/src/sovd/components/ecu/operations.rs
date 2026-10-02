@@ -1000,7 +1000,12 @@ pub(crate) mod service {
                 })
                 .response_with::<
                     202,
-                    Json<AsyncPostResponse<serde_json::Map<String, serde_json::Value>>>,
+                    Json<
+                        AsyncPostResponse<
+                            serde_json::Map<String, serde_json::Value>,
+                            VendorErrorCode,
+                        >,
+                    >,
                     _,
                 >(|res| {
                     res.description(
@@ -1278,7 +1283,7 @@ pub(crate) mod service {
             detail: String,
         ) -> sovd_interfaces::error::DataError<VendorErrorCode> {
             sovd_interfaces::error::DataError {
-                path: String::new(),
+                path: "/parameters".to_owned(),
                 error: sovd_interfaces::error::ApiErrorResponse {
                     message: detail,
                     error_code: sovd_interfaces::error::ErrorCode::InvalidResponseContent,
@@ -1377,15 +1382,9 @@ pub(crate) mod service {
             base_path: &str,
             reservation: ExecutionReservation<ServiceExecution>,
         ) -> Response {
-            let parameters = match response {
-                Some(r) if !r.is_empty() => match r.into_json() {
-                    Ok(DiagServiceJsonResponse {
-                        data: serde_json::Value::Object(m),
-                        ..
-                    }) => m,
-                    _ => serde_json::Map::new(),
-                },
-                _ => serde_json::Map::new(),
+            let (parameters, errors) = match response {
+                Some(r) if !r.is_empty() => parse_json_response_params(r, "Start"),
+                _ => (serde_json::Map::new(), vec![]),
             };
             let stored_parameters = parameters.clone();
             let exec_id = reservation.commit_async(|exec| {
@@ -1393,7 +1392,7 @@ pub(crate) mod service {
             });
             let schema = if include_schema {
                 Some(create_schema!(
-                    AsyncPostResponse<serde_json::Map<String, serde_json::Value>>
+                    AsyncPostResponse<serde_json::Map<String, serde_json::Value>, VendorErrorCode>
                 ))
             } else {
                 None
@@ -1405,6 +1404,7 @@ pub(crate) mod service {
                     id: exec_id.to_string(),
                     status: Some(ExecutionStatus::Running),
                     parameters,
+                    errors,
                     schema,
                 }),
             )
@@ -4201,7 +4201,6 @@ mod tests {
             assert_eq!(response.status(), StatusCode::ACCEPTED);
             // Execution must still be tracked
             assert_eq!(lock_read(&service_executions_ref).len(), 1);
-            // Body must contain id and status, no errors field
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .unwrap();
@@ -4209,9 +4208,21 @@ mod tests {
             assert!(result.get("id").is_some(), "202 body must have id");
             assert!(result.get("status").is_some(), "202 body must have status");
             assert_eq!(result.get("parameters"), Some(&serde_json::json!({})));
-            assert!(
-                result.get("errors").is_none(),
-                "202 body must not contain errors per spec Table 184"
+            let errors = result
+                .get("errors")
+                .and_then(serde_json::Value::as_array)
+                .expect("202 body must contain errors");
+            assert_eq!(errors.len(), 1);
+            assert_eq!(
+                errors.first().and_then(|error| error.get("path")),
+                Some(&serde_json::json!("/parameters"))
+            );
+            assert_eq!(
+                errors
+                    .first()
+                    .and_then(|error| error.get("error"))
+                    .and_then(|error| error.get("error_code")),
+                Some(&serde_json::json!("invalid-response-content"))
             );
         }
 
@@ -4281,9 +4292,12 @@ mod tests {
             assert!(result.get("id").is_some(), "202 body must have id");
             assert!(result.get("status").is_some(), "202 body must have status");
             assert_eq!(result.get("parameters"), Some(&serde_json::json!({})));
-            assert!(
-                result.get("errors").is_none(),
-                "202 body must not contain errors per spec Table 184"
+            assert_eq!(
+                result
+                    .get("errors")
+                    .and_then(serde_json::Value::as_array)
+                    .map(Vec::len),
+                Some(1)
             );
         }
 

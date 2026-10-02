@@ -220,7 +220,7 @@ pub enum ExecutionStatus {
 
 /// Response body for a successful async `POST /operations/{service}/executions`.
 #[derive(Serialize, schemars::JsonSchema)]
-pub struct AsyncPostResponse<T> {
+pub struct AsyncPostResponse<T, E> {
     /// Unique id for this execution, used in subsequent GET / DELETE calls.
     pub id: String,
     /// Status of the executed operation immediately after a POST.
@@ -228,6 +228,9 @@ pub struct AsyncPostResponse<T> {
     pub status: Option<ExecutionStatus>,
     /// Response parameters returned by the Start subfunction.
     pub parameters: T,
+    /// Errors encountered while processing the Start response.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<crate::error::DataError<E>>,
     #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<schemars::Schema>,

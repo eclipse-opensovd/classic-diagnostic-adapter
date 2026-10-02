@@ -36,11 +36,17 @@ ECU -> COMM : positive response\n(71 01 {routine ID} {result})
 deactivate ECU
 COMM -> DIAG : raw UDS response
 deactivate COMM
-DIAG -> CDA : decoded result
+DIAG -> CDA : response with decoded fields\nand conversion errors
 deactivate DIAG
 
 CDA -> CDA : generate execution {id}\ntrack execution state
-CDA -> Client : HTTP 202 Accepted\n{ "id": "{id}", "status": "running",\n  "data": { ... } }
+alt Start response fully decoded
+    CDA -> Client : HTTP 202 Accepted\n{ "id": "{id}", "status": "running",\n  "parameters": { ... } }
+else Start response partially decoded
+    CDA -> Client : HTTP 202 Accepted\n{ "id": "{id}", "status": "running",\n  "parameters": { ... }, "errors": [ ... ] }
+else Complete Start response conversion error
+    CDA -> Client : HTTP 202 Accepted\n{ "id": "{id}", "status": "running",\n  "parameters": {}, "errors": [ ... ] }
+end
 deactivate CDA
 
 == Poll Results ==
@@ -62,7 +68,7 @@ deactivate COMM
 DIAG -> CDA : decoded result
 deactivate DIAG
 
-CDA -> Client : HTTP 200 OK\n{ "id": "{id}", "status": "completed",\n  "data": { ... } }
+CDA -> Client : HTTP 200 OK\n{ "status": "completed",\n  "parameters": { ... } }
 deactivate CDA
 
 == Stop Routine (optional) ==
