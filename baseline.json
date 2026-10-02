@@ -6177,15 +6177,6 @@
       "crate": "cda-plugin-communication-management"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
-      "function": "rewrite_request_uri",
-      "line": 303,
-      "cyclomatic": 3.0,
-      "coverage": 81.25,
-      "crap": 3.059326171875,
-      "crate": "cda-sovd"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-database/src/datatypes/diag_coded_type.rs",
       "function": "DiagCodedType::decode_with_runtime_byte_length",
       "line": 207,
@@ -6211,6 +6202,15 @@
       "coverage": 82.35294117647058,
       "crap": 3.0494606146957053,
       "crate": "cda-interfaces"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
+      "function": "rewrite_request_uri",
+      "line": 303,
+      "cyclomatic": 3.0,
+      "coverage": 82.35294117647058,
+      "crap": 3.0494606146957053,
+      "crate": "cda-sovd"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
@@ -13163,7 +13163,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "create_trace_layer",
-      "line": 326,
+      "line": 325,
       "cyclomatic": 1.0,
       "coverage": 97.14285714285714,
       "crap": 1.0000233236151603,
@@ -20102,7 +20102,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "webserver_bind_tests::get_over_unix_socket",
-      "line": 406,
+      "line": 459,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20111,7 +20111,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "webserver_bind_tests::shutdown_channel",
-      "line": 421,
+      "line": 474,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20120,7 +20120,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "webserver_bind_tests::temp_socket_config",
-      "line": 436,
+      "line": 489,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20129,7 +20129,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "webserver_bind_tests::assert_reachable_then_shutdown",
-      "line": 448,
+      "line": 501,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20138,7 +20138,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "webserver_bind_tests::launch_webserver_binds_unix_socket",
-      "line": 468,
+      "line": 521,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20147,7 +20147,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "webserver_bind_tests::launch_webserver_binds_tcp",
-      "line": 481,
+      "line": 534,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20156,7 +20156,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "webserver_bind_tests::launch_webserver_removes_stale_unix_socket_file",
-      "line": 515,
+      "line": 568,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20165,7 +20165,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "webserver_bind_tests::launch_webserver_fails_if_stale_socket_cannot_be_removed",
-      "line": 532,
+      "line": 585,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
