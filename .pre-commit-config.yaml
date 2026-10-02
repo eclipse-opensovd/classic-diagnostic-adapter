@@ -18,10 +18,10 @@ repos:
   - repo: local
     hooks:
       - id: make-lint-all-features
-        name: make lint with --all-features
+        name: make lint-nightly-all-features
         stages: [manual]
         groups: [CI]
-        entry: make lint-all-features
+        entry: make lint-nightly-all-features
         language: system
         pass_filenames: false
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -85,8 +85,8 @@ repos:
         always_run: true
         args: []
       - id: cargo-clippy
-        name: make lint
-        entry: make lint
+        name: make lint-nightly
+        entry: make lint-nightly
         language: system
         pass_filenames: false
         always_run: true
