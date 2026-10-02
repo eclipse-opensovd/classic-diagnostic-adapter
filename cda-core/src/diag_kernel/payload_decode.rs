@@ -1105,10 +1105,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         let num_items_diag_type: datatypes::DiagCodedType = num_items_dop.diag_coded_type()?;
 
+        // ISO 22901-1 7.3.5.4: without BYTE-POSITION the field starts at the byte edge
+        // following the previously extracted parameter. DETERMINE-NUMBER-OF-ITEMS and
+        // OFFSET are relative to this position (7.3.6.10.4).
         let param_abs_byte_pos = if param_ctx.parameter.has_byte_position() {
             param_ctx.abs_byte_pos()
         } else {
-            param_ctx.base_offset
+            uds_payload.last_read_byte_pos()
         };
         let (num_items_data, _count_field_bit_len) = num_items_diag_type.decode(
             uds_payload
@@ -1121,18 +1124,28 @@ impl<S: SecurityPlugin> EcuManager<S> {
             determine_num_items.bit_position() as usize,
         )?;
 
-        let num_items_diag_val = operations::uds_data_to_serializable(
-            datatypes::DataType::UInt32, // Using hard coded UInt32 as per ISO 22901-1:2008
-            None,                        // Also according per spec, no compu method defined.
-            false,
-            &num_items_data,
-        )?;
+        // ISO 22901-1 requires the count DOP to use A_UINT32 as base type. A compu method,
+        // if present, is applied so decoding is the inverse of the encoder which converts
+        // the physical item count into its coded value.
+        let num_items_compu: Option<datatypes::CompuMethod> =
+            num_items_dop.compu_method().map(Into::into);
+        let num_items_diag_val = if num_items_data.is_empty() {
+            DiagDataValue::UInt32(0)
+        } else {
+            operations::uds_data_to_serializable(
+                datatypes::DataType::UInt32,
+                num_items_compu.as_ref(),
+                false,
+                &num_items_data,
+            )?
+        };
 
         let repeated_dop = datatypes::DopField(dynamic_length_field_dop.field().ok_or(
             DiagServiceError::InvalidDatabase("DynamicLengthField field is None".to_owned()),
         )?);
         let num_items: u32 = num_items_diag_val.try_into()?;
-        let num_items_byte_pos = determine_num_items.byte_position() as usize;
+        let num_items_byte_pos =
+            param_abs_byte_pos.saturating_add(determine_num_items.byte_position() as usize);
         uds_payload.set_last_read_byte_pos(num_items_byte_pos.saturating_add(num_items_data.len()));
 
         let mut repeated_data = Vec::new();
