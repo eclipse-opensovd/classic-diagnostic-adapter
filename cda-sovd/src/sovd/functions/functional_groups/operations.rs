@@ -208,12 +208,13 @@ pub(crate) mod diag_service {
         http::{HeaderMap, StatusCode, Uri, header},
         response::{IntoResponse, Response},
     };
-    use axum_extra::extract::{Host, WithRejection};
+    use axum_extra::extract::WithRejection;
     use cda_interfaces::{
         DiagComm, DiagCommType, DynamicPlugin, HashMap, UdsEcu, diagservices::DiagServiceResponse,
         subfunction_ids, util::std_ext::lock_write,
     };
     use cda_plugin_security::Secured;
+    use opensovd_axum_extra::ExtractHost;
     use sovd_interfaces::components::ecu::operations::{AsyncPostResponse, ExecutionStatus};
     use uuid::Uuid;
 
@@ -393,7 +394,7 @@ pub(crate) mod diag_service {
     pub(crate) async fn post<T: UdsEcu + Clone>(
         headers: HeaderMap,
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-        UseApi(Host(host), _): UseApi<Host, String>,
+        UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
         OriginalUri(uri): OriginalUri,
         Path(DiagServicePathParam { service: operation }): Path<DiagServicePathParam>,
         WithRejection(Query(query), _): WithRejection<
@@ -1149,7 +1150,7 @@ pub(crate) mod diag_service {
                     std::marker::PhantomData,
                 ),
                 UseApi(
-                    axum_extra::extract::Host("localhost".to_string()),
+                    opensovd_axum_extra::ExtractHost("localhost".to_string()),
                     std::marker::PhantomData,
                 ),
                 axum::extract::OriginalUri(
@@ -1206,7 +1207,7 @@ pub(crate) mod diag_service {
                     std::marker::PhantomData,
                 ),
                 UseApi(
-                    axum_extra::extract::Host("localhost".to_string()),
+                    opensovd_axum_extra::ExtractHost("localhost".to_string()),
                     std::marker::PhantomData,
                 ),
                 axum::extract::OriginalUri(
@@ -1262,7 +1263,7 @@ pub(crate) mod diag_service {
                     std::marker::PhantomData,
                 ),
                 UseApi(
-                    axum_extra::extract::Host("localhost".to_string()),
+                    opensovd_axum_extra::ExtractHost("localhost".to_string()),
                     std::marker::PhantomData,
                 ),
                 axum::extract::OriginalUri(
@@ -1317,7 +1318,7 @@ pub(crate) mod diag_service {
                     std::marker::PhantomData,
                 ),
                 UseApi(
-                    axum_extra::extract::Host("localhost".to_string()),
+                    opensovd_axum_extra::ExtractHost("localhost".to_string()),
                     std::marker::PhantomData,
                 ),
                 axum::extract::OriginalUri(
@@ -1385,7 +1386,7 @@ pub(crate) mod diag_service {
                     std::marker::PhantomData,
                 ),
                 UseApi(
-                    axum_extra::extract::Host("localhost".to_string()),
+                    opensovd_axum_extra::ExtractHost("localhost".to_string()),
                     std::marker::PhantomData,
                 ),
                 axum::extract::OriginalUri(
@@ -1462,7 +1463,7 @@ pub(crate) mod diag_service {
                     std::marker::PhantomData,
                 ),
                 UseApi(
-                    axum_extra::extract::Host("localhost".to_string()),
+                    opensovd_axum_extra::ExtractHost("localhost".to_string()),
                     std::marker::PhantomData,
                 ),
                 axum::extract::OriginalUri(
@@ -1772,7 +1773,7 @@ pub(crate) mod diag_service {
                     std::marker::PhantomData,
                 ),
                 UseApi(
-                    axum_extra::extract::Host("localhost".to_string()),
+                    opensovd_axum_extra::ExtractHost("localhost".to_string()),
                     std::marker::PhantomData,
                 ),
                 axum::extract::OriginalUri(
@@ -1820,7 +1821,7 @@ pub(crate) mod diag_service {
                     std::marker::PhantomData,
                 ),
                 UseApi(
-                    axum_extra::extract::Host("localhost".to_string()),
+                    opensovd_axum_extra::ExtractHost("localhost".to_string()),
                     std::marker::PhantomData,
                 ),
                 axum::extract::OriginalUri(
@@ -1890,7 +1891,7 @@ pub(crate) mod diag_service {
                     std::marker::PhantomData,
                 ),
                 UseApi(
-                    axum_extra::extract::Host("localhost".to_string()),
+                    opensovd_axum_extra::ExtractHost("localhost".to_string()),
                     std::marker::PhantomData,
                 ),
                 axum::extract::OriginalUri(
