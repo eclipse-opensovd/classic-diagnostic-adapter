@@ -234,6 +234,7 @@ def add_dtc_read_by_mask_service(
         subfunction: The subfunction value (e.g, 0x02)
         description: Description of the service
         dtc_record_dop: OdxLinkRef for the DTC structure,
+        user_memory: Whether the memory selection is included
     """
     request = Request(
         odx_id=derived_id(dlr, f"RQ.RQ_{name}"),
@@ -308,6 +309,18 @@ def add_dtc_read_by_mask_service(
 
 
 def create_dtc_snapshot_types(dlr: DiagLayerRaw) -> tuple[DataObjectProperty, EndOfPduField]:
+    """
+    Create the DTC Extended Data types (DOP and EndOfPduField) for the diagnostic layer.
+
+    Args:
+        dlr: The diagnostic layer
+
+    Returns:
+        tuple: A tuple containing:
+            - DataObjectProperty: The DTC request snapshot data record number DOP.
+            - EndOfPduField: The end of the DTC snapshot data PDU.
+    """
+
     dtc_snapshot_record_dop = texttable_int_str_dop(
         dlr,
         "DtcSnapshotRecordDop",
@@ -319,6 +332,9 @@ def create_dtc_snapshot_types(dlr: DiagLayerRaw) -> tuple[DataObjectProperty, En
     )
     dlr.diag_data_dictionary_spec.data_object_props.append(dtc_snapshot_record_dop)
 
+    # TEXTTABLE uint8 DOP for the snapshot record number field in the response
+    # Maps all possible uint8 values (0-255) to their decimal string representation
+    # Currently CDA expects a String type for this field
     dtc_snapshot_record_number_dop = texttable_int_str_dop(
         dlr,
         "DTCSnapshotRecordNumberDop",
@@ -326,10 +342,16 @@ def create_dtc_snapshot_types(dlr: DiagLayerRaw) -> tuple[DataObjectProperty, En
     )
     dlr.diag_data_dictionary_spec.data_object_props.append(dtc_snapshot_record_number_dop)
 
+    # uint8 DOP for the number-of-identifiers field in the snapshot record
     dtc_snapshot_number_of_identifiers_dop = find_dop_by_shortname(dlr, "IDENTICAL_UINT_8")
+
+    # uint16 DOP for the 2-byte DID within a snapshot record
     dtc_snapshot_did_dop = find_dop_by_shortname(dlr, "IDENTICAL_UINT_16")
+
+    # uint32 DOP for the data bytes associated with the DID as example
     dtc_snapshot_did_data_dop = find_dop_by_shortname(dlr, "IDENTICAL_UINT_32")
 
+    # Structure DOP for a single Snapshot entry (DID + Data)
     dtc_snapshot_record_did_entry_structure = Structure(
         odx_id=derived_id(dlr, "STRUCT.DTCSnapshotRecordDidEntry"),
         short_name="DTCSnapshotRecordDidEntry",
@@ -352,6 +374,7 @@ def create_dtc_snapshot_types(dlr: DiagLayerRaw) -> tuple[DataObjectProperty, En
     )
     dlr.diag_data_dictionary_spec.structures.append(dtc_snapshot_record_did_entry_structure)
 
+    # Dynamic Field for actual data (Number of DIDs + Variable number of DIDs with their data)
     dtc_snapshot_record_entries = DynamicLengthField(
         odx_id=derived_id(dlr, "DYN_FIELD.DTCSnapshotRecordEntries"),
         short_name="DTCSnapshotRecordEntries",
@@ -518,6 +541,18 @@ def add_dtc_read_snapshots_by_dtc_number_service(
 
 
 def create_dtc_ext_data_types(dlr: DiagLayerRaw) -> tuple[DataObjectProperty, EndOfPduField]:
+    """
+    Create the DTC Extended Data types (DOP and EndOfPduField) for the diagnostic layer.
+
+    Args:
+        dlr: The diagnostic layer
+
+    Returns:
+        tuple: A tuple containing:
+            - DataObjectProperty: The DTC request extended data record number DOP.
+            - EndOfPduField: The end of the DTC extended data PDU.
+    """
+
     dtc_req_ext_data_record_number_dop = texttable_int_str_dop(
         dlr,
         "DtcReqExtDataRecordNrDop",
@@ -530,6 +565,9 @@ def create_dtc_ext_data_types(dlr: DiagLayerRaw) -> tuple[DataObjectProperty, En
     )
     dlr.diag_data_dictionary_spec.data_object_props.append(dtc_req_ext_data_record_number_dop)
 
+    # TEXTTABLE uint8 DOP for the Extended data record number field in the response
+    # Maps all possible uint8 values (0-255) to their decimal string representation
+    # Currently CDA expects a String type for this field
     dtc_ext_data_record_number_dop = texttable_int_str_dop(
         dlr,
         "DTCExtDataRecordNumberDop",
@@ -560,6 +598,8 @@ def create_dtc_ext_data_types(dlr: DiagLayerRaw) -> tuple[DataObjectProperty, En
     )
     dlr.diag_data_dictionary_spec.structures.append(dtc_ext_data_default_case_structure)
 
+    # Multiplexer wrapping the data bytes.
+    # Only the default case structure is defined to act as test example
     dtc_ext_data_mux = Multiplexer(
         odx_id=derived_id(dlr, "MUX.DTCExtDataRecordMux"),
         short_name="DTCExtDataRecordMux",
@@ -838,7 +878,7 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
     dlr.diag_data_dictionary_spec.end_of_pdu_fields.append(dtc_end_of_pdu)
 
     # User-memory DTC pool for the 0x17 user-memory read service.
-    user_mem_fault_memory_dtc_dop = DtcDop(
+    user_fault_memory_dtc_dop = DtcDop(
         odx_id=derived_id(dlr, "DOP.UserMemoryRecordDataType"),
         short_name="UserMemoryRecordDataType",
         compu_method=CompuMethod(
@@ -862,7 +902,7 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
             )
         ],
     )
-    dlr.diag_data_dictionary_spec.dtc_dops.append(user_mem_fault_memory_dtc_dop)
+    dlr.diag_data_dictionary_spec.dtc_dops.append(user_fault_memory_dtc_dop)
 
     user_mem_fault_memory_dtc_record_structure = Structure(
         odx_id=derived_id(dlr, "STRUCT.UserMemoryDTCRecord"),
@@ -873,7 +913,7 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
                     short_name="UserMemoryDTCRecord",
                     semantic="DATA",
                     byte_position=0,
-                    dop_ref=ref(user_mem_fault_memory_dtc_dop.odx_id),
+                    dop_ref=ref(user_fault_memory_dtc_dop.odx_id),
                 ),
                 *dtc_status_parameters(dlr, 3),
             ],
