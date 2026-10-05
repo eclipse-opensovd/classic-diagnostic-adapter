@@ -1423,27 +1423,27 @@ async fn test_dtc_deletion_user_memory() {
     .await;
 }
 
-/// Returns the ReadDTCInformation (0x19) sub-functions of the recorded requests, in order.
+/// Returns the `ReadDTCInformation` (0x19) sub-functions of the recorded requests, in order.
 ///
 /// The recorder stores each request as hex without separators, starting at the SID
 /// (`WebserverRoutes.kt:117`), so the sub-function is characters 2..4.
-/// Other services (e.g. TesterPresent) are ignored.
+/// Other services (e.g. `TesterPresent`) are ignored.
 fn read_dtc_info_subfunctions(requests: &[String]) -> Vec<String> {
     requests
         .iter()
         .map(|r| r.to_ascii_uppercase())
-        .filter(|r| r.starts_with("19") && r.len() >= 4)
-        .map(|r| r[2..4].to_owned())
+        .filter(|r| r.starts_with("19"))
+        .filter_map(|r| r.get(2..4).map(str::to_owned))
         .collect()
 }
 
-/// Test that reading DTCs by fault ID with a Development Fault Memory scope works correctly.
+/// Test that reading DTCs by fault ID with a `UserFaultMemory` scope works correctly.
 ///
 /// This test verifies:
-/// 1. Reading a single DTC of UserMemory Fault Memory requests only relevant subfunctions
+/// 1. Reading a single DTC of `UserFaultMemory` requests only relevant subfunctions
 ///    0x19 0x17 followed by 0x19 0x18 and 0x19 0x19 and returns the correct DTC information.
 /// 2. `FaultMem` read by status mask is not requested when reading by fault ID
-///    with a `UserMemoryFaultMemory` scope.
+///    with a `UserFaultMemory` scope.
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
