@@ -555,6 +555,7 @@ name = "cda-comm-uds"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "cda-build",
  "cda-interfaces",
  "cda-plugin-communication-management",
@@ -572,6 +573,7 @@ name = "cda-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "cda-build",
  "cda-database",
  "cda-interfaces",
@@ -580,7 +582,6 @@ dependencies = [
  "linkme",
  "num-traits",
  "override-macros",
- "parking_lot",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -700,8 +701,6 @@ dependencies = [
  "cda-database",
  "cda-interfaces",
  "cda-plugin-communication-management",
- "cda-plugin-security",
- "cda-sovd",
  "cda-storage",
  "schemars 1.2.2",
  "serde",
@@ -908,21 +907,6 @@ name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
-
-[[package]]
-name = "conquer-once"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d008a441c0f269f36ca13712528069a86a3e60dffee1d98b976eb3b0b2160b4"
-dependencies = [
- "conquer-util",
-]
-
-[[package]]
-name = "conquer-util"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e763eef8846b13b380f37dfecda401770b0ca4e56e95170237bd7c25c7db3582"
 
 [[package]]
 name = "console-api"
@@ -2226,20 +2210,12 @@ dependencies = [
  "axum",
  "cargo_metadata",
  "cda-build",
- "cda-comm-doip",
- "cda-comm-uds",
- "cda-core",
- "cda-database",
  "cda-health",
  "cda-interfaces",
- "cda-plugin-communication-management",
- "cda-plugin-lock-priority",
- "cda-plugin-security",
  "cda-sovd",
  "cda-tracing",
  "chrono",
  "const_format",
- "figment",
  "futures",
  "http",
  "libc",
@@ -2249,15 +2225,13 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
- "serde_qs",
  "sovd-interfaces",
+ "strum",
  "tempfile",
  "testcontainers",
  "thiserror 2.0.21",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
  "url",
  "urlencoding",
 ]
@@ -4134,16 +4108,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
-name = "signal-hook"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2a0c28ca5908dbdbcd52e6fdaa00358ab88637f8ab33e1f188dd510eb44b53d"
-dependencies = [
- "libc",
- "signal-hook-registry",
-]
-
-[[package]]
 name = "signal-hook-registry"
 version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4413,7 +4377,6 @@ dependencies = [
  "async-trait",
  "bollard",
  "bytes",
- "conquer-once",
  "docker_credential",
  "either",
  "etcetera",
@@ -4428,7 +4391,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
- "signal-hook",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",

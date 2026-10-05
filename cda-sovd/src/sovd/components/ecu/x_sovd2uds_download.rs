@@ -13,7 +13,7 @@
 
 use aide::UseApi;
 use axum::{
-    extract::{OriginalUri, Query, State},
+    extract::{OriginalUri, Query},
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
@@ -22,7 +22,6 @@ use cda_interfaces::{
     diagservices::{
         DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType, UdsPayloadData,
     },
-    file_manager::FileManager,
 };
 use cda_plugin_security::{Secured, SecurityPlugin};
 use opensovd_axum_extra::ExtractHost;
@@ -88,11 +87,11 @@ async fn sovd_to_func_class_service_exec<T: UdsEcu + Clone>(
     Ok(mapped_data)
 }
 
-pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+pub(crate) async fn get<T: UdsEcu + Clone>(
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-    State(crate::sovd::WebserverEcuState {
+    crate::sovd::EcuContext(crate::sovd::WebserverEcuState {
         ecu_name, locks, ..
-    }): State<crate::sovd::WebserverEcuState<T, U>>,
+    }): crate::sovd::EcuContext<T>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::IncludeSchemaQuery>,
         ApiError,
@@ -119,14 +118,13 @@ pub(crate) mod request_download {
     use aide::{UseApi, transform::TransformOperation};
     use axum::{
         Json,
-        extract::{Query, State},
+        extract::Query,
         http::StatusCode,
         response::{IntoResponse as _, Response},
     };
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{
-        SchemaProvider, UdsEcu, diagservices::DiagServiceJsonResponse, file_manager::FileManager,
-        service_ids,
+        SchemaProvider, UdsEcu, diagservices::DiagServiceJsonResponse, service_ids,
     };
     use cda_plugin_security::Secured;
     use sovd_interfaces::components::ecu::x::sovd2uds;
@@ -134,7 +132,7 @@ pub(crate) mod request_download {
     use crate::{
         openapi,
         sovd::{
-            WebserverEcuState, create_response_schema,
+            EcuContext, WebserverEcuState, create_response_schema,
             error::{ApiError, ErrorWrapper, VendorErrorCode},
             field_parse_errors_to_json,
             locks::require_ecu_access,
@@ -144,18 +142,18 @@ pub(crate) mod request_download {
         },
     };
 
-    pub(crate) async fn put<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+    pub(crate) async fn put<T: UdsEcu + SchemaProvider + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<
             Query<sovd_interfaces::IncludeSchemaQuery>,
             ApiError,
         >,
-        State(WebserverEcuState {
+        EcuContext(WebserverEcuState {
             ecu_name,
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): EcuContext<T>,
         body: Json<sovd2uds::download::request_download::put::Request>,
     ) -> Response {
         let include_schema = query.include_schema;
@@ -274,13 +272,11 @@ pub(crate) mod flash_transfer {
     use aide::{UseApi, transform::TransformOperation};
     use axum::{
         Json,
-        extract::{Path, Query, State},
+        extract::{Path, Query},
         response::{IntoResponse, Response},
     };
     use axum_extra::extract::WithRejection;
-    use cda_interfaces::{
-        DynamicPlugin, FlashTransferStartParams, UdsEcu, file_manager::FileManager,
-    };
+    use cda_interfaces::{DynamicPlugin, FlashTransferStartParams, UdsEcu};
     use cda_plugin_security::Secured;
     use http::StatusCode;
     use sovd_interfaces::components::ecu::x::sovd2uds;
@@ -289,26 +285,26 @@ pub(crate) mod flash_transfer {
     use crate::{
         openapi,
         sovd::{
-            IntoSovd, WebserverEcuState, create_schema,
+            EcuContext, IntoSovd, WebserverEcuState, create_schema,
             error::{ApiError, ErrorWrapper},
             locks::require_ecu_access,
             x_sovd2uds_download::FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS,
         },
     };
 
-    pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn post<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<
             Query<sovd_interfaces::IncludeSchemaQuery>,
             ApiError,
         >,
-        State(WebserverEcuState {
+        EcuContext(WebserverEcuState {
             ecu_name,
             uds,
             locks,
             flash_data,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): EcuContext<T>,
         body: Json<sovd2uds::download::flash_transfer::post::Request>,
     ) -> Response {
         let include_schema = query.include_schema;
@@ -404,18 +400,18 @@ pub(crate) mod flash_transfer {
             .with(openapi::error_not_found)
     }
 
-    pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn get<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<
             Query<sovd_interfaces::IncludeSchemaQuery>,
             ApiError,
         >,
-        State(WebserverEcuState {
+        EcuContext(WebserverEcuState {
             ecu_name,
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): EcuContext<T>,
     ) -> Response {
         let include_schema = query.include_schema;
         require_ecu_access!(write, security_plugin, &ecu_name, &locks, include_schema);
@@ -467,24 +463,24 @@ pub(crate) mod flash_transfer {
 
     pub(crate) mod id {
         use super::{
-            ApiError, ErrorWrapper, FileManager, IntoResponse, IntoSovd, Json, Path, Query,
-            Response, Secured, State, StatusCode, TransformOperation, UdsEcu, UseApi,
-            WebserverEcuState, WithRejection, create_schema, openapi, sovd2uds,
+            ApiError, EcuContext, ErrorWrapper, IntoResponse, IntoSovd, Json, Path, Query,
+            Response, Secured, StatusCode, TransformOperation, UdsEcu, UseApi, WebserverEcuState,
+            WithRejection, create_schema, openapi, sovd2uds,
         };
         use crate::sovd::{components::IdPathParam, locks::require_ecu_access};
-        pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+        pub(crate) async fn get<T: UdsEcu + Clone>(
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(id): Path<IdPathParam>,
             WithRejection(Query(query), _): WithRejection<
                 Query<sovd_interfaces::IncludeSchemaQuery>,
                 ApiError,
             >,
-            State(WebserverEcuState {
+            EcuContext(WebserverEcuState {
                 ecu_name,
                 uds,
                 locks,
                 ..
-            }): State<WebserverEcuState<T, U>>,
+            }): EcuContext<T>,
         ) -> Response {
             let include_schema = query.include_schema;
             require_ecu_access!(write, security_plugin, &ecu_name, &locks, include_schema);
@@ -527,15 +523,15 @@ pub(crate) mod flash_transfer {
                 .with(openapi::error_not_found)
         }
 
-        pub(crate) async fn delete<T: UdsEcu + Clone, U: FileManager>(
+        pub(crate) async fn delete<T: UdsEcu + Clone>(
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(id): Path<IdPathParam>,
-            State(WebserverEcuState {
+            EcuContext(WebserverEcuState {
                 ecu_name,
                 uds,
                 locks,
                 ..
-            }): State<WebserverEcuState<T, U>>,
+            }): EcuContext<T>,
         ) -> Response {
             require_ecu_access!(write, security_plugin, &ecu_name, &locks, false);
             match uds.ecu_flash_transfer_exit(&ecu_name, &id).await {
@@ -614,20 +610,15 @@ pub(crate) mod flash_transfer {
 
 pub(crate) mod transferexit {
     use aide::{UseApi, transform::TransformOperation};
-    use axum::{
-        extract::State,
-        response::{IntoResponse, Response},
-    };
-    use cda_interfaces::{
-        HashMap, HashMapExtensions, UdsEcu, file_manager::FileManager, service_ids,
-    };
+    use axum::response::{IntoResponse, Response};
+    use cda_interfaces::{HashMap, HashMapExtensions, UdsEcu, service_ids};
     use cda_plugin_security::Secured;
     use http::StatusCode;
 
     use crate::{
         openapi,
         sovd::{
-            WebserverEcuState,
+            EcuContext, WebserverEcuState,
             locks::require_ecu_access,
             x_sovd2uds_download::{
                 FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS, sovd_to_func_class_service_exec,
@@ -635,14 +626,14 @@ pub(crate) mod transferexit {
         },
     };
 
-    pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn put<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-        State(WebserverEcuState {
+        EcuContext(WebserverEcuState {
             ecu_name,
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): EcuContext<T>,
     ) -> Response {
         require_ecu_access!(write, security_plugin, &ecu_name, &locks, false);
         match sovd_to_func_class_service_exec::<T>(

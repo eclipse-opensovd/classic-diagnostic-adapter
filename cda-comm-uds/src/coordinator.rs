@@ -118,7 +118,7 @@ impl EcuCoordinatorHandle {
             .cloned()
     }
 
-    /// Claims the variant-detection slot of this handle (the group
+    /// Claims the variant-detection lock of this handle (the group
     /// representative's, for duplicate groups): detection writes the state of
     /// every group member, so two members must never detect concurrently - a
     /// reconnect burst would otherwise race concurrent detections
@@ -270,6 +270,10 @@ impl Message<EcuDisconnected> for EcuCoordinator {
 /// Replies with `true` when an actual `Offline` -> `Online` transition happened, so the
 /// caller can push a variant re-detection; the pre-send guard alone would leave the ECU
 /// `NotTested` until the next UDS request arrives.
+///
+/// The cleared state is also published to the variant-state watch channel, so
+/// the two stores in [`EcuRuntimeState`] stay consistent - see
+/// [`MarkAsDuplicate`] for why that matters.
 pub struct EcuConnected;
 
 impl Message<EcuConnected> for EcuCoordinator {
@@ -280,26 +284,39 @@ impl Message<EcuConnected> for EcuCoordinator {
         _msg: EcuConnected,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let mut ecu_state = std_ext::lock_write(&self.state.ecu_state);
+        let transitioned = {
+            let mut ecu_state = std_ext::lock_write(&self.state.ecu_state);
 
-        if ecu_state.connectivity == Connectivity::Offline {
-            tracing::info!(
-                ecu = %self.ecu_name,
-                dlt_context = dlt_ctx!("UDS"),
-                "ECU connected. Setting connectivity to Online"
-            );
-            ecu_state.connectivity = Connectivity::Online;
-            ecu_state.variant_state = VariantState::NotTested;
-            ecu_state.variant_index = None;
-            true
-        } else {
-            tracing::debug!(
-                ecu = %self.ecu_name,
-                current = ?ecu_state.connectivity,
-                "ECU connected received but already Online..skipping"
-            );
-            false
+            if ecu_state.connectivity == Connectivity::Offline {
+                tracing::info!(
+                    ecu = %self.ecu_name,
+                    dlt_context = dlt_ctx!("UDS"),
+                    "ECU connected. Setting connectivity to Online"
+                );
+                ecu_state.connectivity = Connectivity::Online;
+                ecu_state.variant_state = VariantState::NotTested;
+                ecu_state.variant_index = None;
+                true
+            } else {
+                tracing::debug!(
+                    ecu = %self.ecu_name,
+                    current = ?ecu_state.connectivity,
+                    "ECU connected received but already Online..skipping"
+                );
+                false
+            }
+        };
+
+        // Publish outside the write lock, only for a real transition.
+        // `uds_ecu_handle_variant_detection_concluded` takes its verdict from
+        // the watch channel, so leaving the pre-reconnect `Detected` there
+        // would let a request through against a variant this reconnect just
+        // invalidated.
+        if transitioned {
+            self.state.publish_variant_state(VariantState::NotTested);
         }
+
+        transitioned
     }
 }
 
@@ -345,6 +362,12 @@ impl Message<RestoreDisconnectHandling> for EcuCoordinator {
 }
 
 /// Mark ECU as having duplicate logical addresses.
+///
+/// Writes both halves of [`EcuRuntimeState`]'s variant state: the `EcuState`
+/// snapshot and the watch channel. They are independent stores, and
+/// `uds_ecu_handle_variant_detection_concluded` reads the snapshot for its
+/// early-out but the channel for its verdict, so a writer that updates only
+/// one can make that gate report a conclusion the ECU never reached.
 pub struct MarkAsDuplicate;
 
 impl Message<MarkAsDuplicate> for EcuCoordinator {
@@ -359,13 +382,21 @@ impl Message<MarkAsDuplicate> for EcuCoordinator {
             ecu = %self.ecu_name,
             "Marking ECU as duplicate"
         );
-        let mut ecu_state = std_ext::lock_write(&self.state.ecu_state);
-        ecu_state.variant_state = VariantState::Duplicate;
-        ecu_state.variant_index = None;
+        {
+            let mut ecu_state = std_ext::lock_write(&self.state.ecu_state);
+            ecu_state.variant_state = VariantState::Duplicate;
+            ecu_state.variant_index = None;
+        }
+        // Keep the watch channel in step with `ecu_state`; published outside
+        // the write lock.
+        self.state.publish_variant_state(VariantState::Duplicate);
     }
 }
 
 /// Mark ECU as having no variant detected (detection failed, no fallback).
+///
+/// Writes both the `EcuState` snapshot and the watch channel; see
+/// [`MarkAsDuplicate`].
 pub struct MarkAsNoVariantDetected;
 
 impl Message<MarkAsNoVariantDetected> for EcuCoordinator {
@@ -380,9 +411,14 @@ impl Message<MarkAsNoVariantDetected> for EcuCoordinator {
             ecu = %self.ecu_name,
             "Marking ECU as no-variant-detected"
         );
-        let mut ecu_state = std_ext::lock_write(&self.state.ecu_state);
-        ecu_state.variant_state = VariantState::NotDetected;
-        ecu_state.variant_index = None;
+        {
+            let mut ecu_state = std_ext::lock_write(&self.state.ecu_state);
+            ecu_state.variant_state = VariantState::NotDetected;
+            ecu_state.variant_index = None;
+        }
+        // Keep the watch channel in step with `ecu_state`; published outside
+        // the write lock.
+        self.state.publish_variant_state(VariantState::NotDetected);
     }
 }
 
@@ -565,6 +601,11 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert_eq!(handle.ecu_status().variant_state, VariantState::Duplicate);
+        assert_eq!(
+            *handle.state.variant_state_rx().borrow(),
+            VariantState::Duplicate,
+            "watch channel must track the EcuState snapshot"
+        );
     }
 
     #[tokio::test]
@@ -611,6 +652,79 @@ mod tests {
         assert_eq!(status.variant_index, None);
     }
 
+    /// Regression: `EcuConnected` used to clear `EcuState::variant_state` to
+    /// `NotTested` without publishing, leaving the pre-reconnect `Detected` in
+    /// the watch channel. `uds_ecu_handle_variant_detection_concluded` takes
+    /// its verdict from that channel, so it reported "detection concluded" for
+    /// an ECU that had just been invalidated, and the send went out against the
+    /// stale variant's service definitions.
+    #[tokio::test]
+    async fn ecu_connected_publishes_the_cleared_variant_state() {
+        let handle = spawn_test_coordinator("TestECU");
+        let detected = VariantState::Detected {
+            name: "Application".to_owned(),
+            is_base_variant: false,
+            is_fallback: false,
+        };
+        // A concluded detection leaves both stores in agreement, the way the
+        // cda-core writers do; then the ECU drops.
+        {
+            let mut ecu_state = handle.state.ecu_state.write().unwrap();
+            ecu_state.connectivity = Connectivity::Offline;
+            ecu_state.variant_state = detected.clone();
+            ecu_state.variant_index = Some(2);
+        }
+        handle.state.publish_variant_state(detected);
+        let rx = handle.state.variant_state_rx();
+
+        handle
+            .actor_ref
+            .tell(EcuConnected)
+            .await
+            .expect("Actor should be alive");
+        tokio::task::yield_now().await;
+
+        assert_eq!(handle.ecu_status().variant_state, VariantState::NotTested);
+        assert_eq!(
+            *rx.borrow(),
+            VariantState::NotTested,
+            "a reconnect must invalidate the variant in both stores"
+        );
+    }
+
+    /// The no-op branch changes nothing, so it must not wake watchers either.
+    #[tokio::test]
+    async fn ecu_connected_noop_does_not_publish() {
+        let handle = spawn_test_coordinator("TestECU");
+        let detected = VariantState::Detected {
+            name: "Application".to_owned(),
+            is_base_variant: false,
+            is_fallback: false,
+        };
+        {
+            let mut ecu_state = handle.state.ecu_state.write().unwrap();
+            ecu_state.connectivity = Connectivity::Online;
+            ecu_state.variant_state = detected.clone();
+        }
+        handle.state.publish_variant_state(detected.clone());
+        // `subscribe` marks the current value as seen, so `has_changed` below
+        // reports only what this message published.
+        let rx = handle.state.variant_state_rx();
+
+        handle
+            .actor_ref
+            .tell(EcuConnected)
+            .await
+            .expect("Actor should be alive");
+        tokio::task::yield_now().await;
+
+        assert!(
+            !rx.has_changed().expect("sender is alive"),
+            "an already-Online ECU must not publish a variant-state change"
+        );
+        assert_eq!(*rx.borrow(), detected);
+    }
+
     #[tokio::test]
     async fn ecu_connected_is_noop_when_already_online() {
         let handle = spawn_test_coordinator("TestECU");
@@ -637,16 +751,23 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert_eq!(handle.ecu_status().variant_state, VariantState::NotDetected);
+        assert_eq!(
+            *handle.state.variant_state_rx().borrow(),
+            VariantState::NotDetected,
+            "watch channel must track the EcuState snapshot"
+        );
     }
 
     // begin_detection: serialization + trigger coalescing
 
     #[tokio::test]
-    async fn begin_detection_grants_the_slot_when_uncontended() {
+    async fn begin_detection_grants_the_guard_when_uncontended() {
         let handle = spawn_test_coordinator("TestECU");
         let guard = handle.begin_detection().await;
-        assert!(guard.is_some(), "sole entrant must get the slot");
+        assert!(guard.is_some(), "sole entrant must get the guard");
         // Releasing and re-entering works (generation moved on, no stale skip).
+        // The lock is not reentrant: calling again while this guard is alive
+        // would block until it is dropped - here, forever.
         drop(guard);
         assert!(handle.begin_detection().await.is_some());
     }
@@ -655,7 +776,7 @@ mod tests {
     async fn begin_detection_coalesces_a_burst_to_the_newest_trigger() {
         let handle = spawn_test_coordinator("TestECU");
 
-        // Entrant 1 runs and holds the slot.
+        // Entrant 1 runs and holds the lock.
         let in_flight = handle.begin_detection().await.expect("first entrant");
 
         // Entrants 2 and 3 queue up behind it, in order (each is polled
@@ -669,6 +790,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         // The in-flight run finishes; the queued triggers resolve.
+        // Awaiting the waiters below before dropping the guard would hang.
         drop(in_flight);
         let second = waiter2.await.expect("waiter 2 must not panic");
         let third = waiter3.await.expect("waiter 3 must not panic");

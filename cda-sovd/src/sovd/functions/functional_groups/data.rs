@@ -14,7 +14,7 @@
 use aide::{UseApi, transform::TransformOperation};
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::Query,
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
@@ -22,7 +22,7 @@ use cda_interfaces::{DynamicPlugin, UdsEcu};
 use cda_plugin_security::Secured;
 use http::StatusCode;
 
-use super::WebserverFgState;
+use super::{FgContext, WebserverFgState};
 use crate::sovd::{
     IntoSovd, create_schema,
     error::{ApiError, ErrorWrapper},
@@ -35,12 +35,12 @@ pub(crate) async fn get<T: UdsEcu + Clone>(
         Query<sovd_interfaces::functions::functional_groups::data::get::Query>,
         ApiError,
     >,
-    State(WebserverFgState {
+    FgContext(WebserverFgState {
         uds,
         locks,
         functional_group_name,
         ..
-    }): State<WebserverFgState<T>>,
+    }): FgContext<T>,
 ) -> Response {
     if let Err(response) = validate_fg_read(
         &security_plugin.as_auth_plugin().claims(),
@@ -104,7 +104,7 @@ pub(crate) mod diag_service {
     use axum::{
         Json,
         body::Bytes,
-        extract::{Path, Query, State},
+        extract::{Path, Query},
         http::{HeaderMap, StatusCode},
         response::{IntoResponse, Response},
     };
@@ -117,7 +117,9 @@ pub(crate) mod diag_service {
         sovd::{
             components::{ecu::DiagServicePathParam, get_content_type_and_accept},
             error::{ApiError, ErrorWrapper, VendorErrorCode},
-            functions::functional_groups::{WebserverFgState, handle_ecu_response, map_to_json},
+            functions::functional_groups::{
+                FgContext, WebserverFgState, handle_ecu_response, map_to_json,
+            },
             get_payload_data,
             locks::{validate_fg_read, validate_fg_write},
         },
@@ -138,12 +140,12 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::functions::functional_groups::data::service::Query>,
             ApiError,
         >,
-        State(WebserverFgState {
+        FgContext(WebserverFgState {
             uds,
             locks,
             functional_group_name,
             ..
-        }): State<WebserverFgState<T>>,
+        }): FgContext<T>,
     ) -> Response {
         let include_schema = query.include_schema;
         if diag_service.contains('/') {
@@ -210,12 +212,12 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::functions::functional_groups::data::service::Query>,
             ApiError,
         >,
-        State(WebserverFgState {
+        FgContext(WebserverFgState {
             uds,
             locks,
             functional_group_name,
             ..
-        }): State<WebserverFgState<T>>,
+        }): FgContext<T>,
         body: Bytes,
     ) -> Response {
         let include_schema = query.include_schema;
@@ -395,7 +397,7 @@ mod tests {
     use aide::UseApi;
     use axum::{
         body::Bytes,
-        extract::{Path, Query, State},
+        extract::{Path, Query},
         http::{HeaderMap, StatusCode, header},
     };
     use axum_extra::extract::WithRejection;
@@ -413,7 +415,8 @@ mod tests {
     use super::diag_service;
     use crate::sovd::{
         components::ecu::DiagServicePathParam,
-        functions::functional_groups::tests::create_test_fg_state, locks::insert_test_fg_lock,
+        functions::functional_groups::{FgContext, tests::create_test_fg_state},
+        locks::insert_test_fg_lock,
     };
 
     fn foreign_security_plugin() -> Box<dyn SecurityPlugin> {
@@ -476,7 +479,7 @@ mod tests {
                 service: "VehicleSpeed".to_owned(),
             }),
             query(),
-            State(state),
+            FgContext(state),
         )
         .await;
 
@@ -499,7 +502,7 @@ mod tests {
                 service: "VehicleSpeed".to_owned(),
             }),
             query(),
-            State(state),
+            FgContext(state),
             Bytes::from_static(b"{\"data\":{\"value\":1}}"),
         )
         .await;
@@ -535,7 +538,7 @@ mod tests {
                 service: "VehicleSpeed".to_owned(),
             }),
             query(),
-            State(state),
+            FgContext(state),
         )
         .await;
 
@@ -570,7 +573,7 @@ mod tests {
                 service: "VehicleSpeed".to_owned(),
             }),
             query(),
-            State(state),
+            FgContext(state),
             Bytes::from_static(b"{\"data\":{\"value\":1}}"),
         )
         .await;

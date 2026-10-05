@@ -30,8 +30,9 @@ pub mod sovd2uds {
 
     pub mod operations {
         pub mod runtimefilesupdate {
+            use cda_interfaces::runtime_update_api::ExecutionFailureClass;
             pub use cda_interfaces::runtime_update_api::{
-                ExecutionMode, ExecutionStatus, UpdateExecution,
+                ExecutionFailure, ExecutionMode, ExecutionStatus, UpdateExecution,
             };
 
             /// The operation-specific parameters for a diagnostic database update execution.
@@ -99,7 +100,13 @@ pub mod sovd2uds {
                     let (status, reason) = match exec.status {
                         ExecutionStatus::Running => (ExecutionStatusKind::Running, None),
                         ExecutionStatus::Completed => (ExecutionStatusKind::Completed, None),
-                        ExecutionStatus::Failed(msg) => (ExecutionStatusKind::Failed, Some(msg)),
+                        ExecutionStatus::Failed(failure) => {
+                            let reason = match failure.class() {
+                                ExecutionFailureClass::Fatal => format!("fatal: {failure}"),
+                                ExecutionFailureClass::Ordinary => failure.to_string(),
+                            };
+                            (ExecutionStatusKind::Failed, Some(reason))
+                        }
                     };
                     Self {
                         status,
@@ -114,23 +121,93 @@ pub mod sovd2uds {
 
             #[cfg(test)]
             mod tests {
+                use std::sync::Arc;
+
+                use cda_interfaces::runtime_update_api::{
+                    RecoveryError, ReloadError, RuntimeUpdateError,
+                };
+
                 use super::*;
 
                 #[test]
-                fn failed_execution_places_mode_and_reason_in_parameters() {
-                    let response = ExecutionResponse::from(UpdateExecution {
+                fn execution_status_kind_uses_only_standard_sovd_values() {
+                    assert_eq!(
+                        serde_json::to_value(ExecutionStatusKind::Running).unwrap(),
+                        serde_json::json!("running")
+                    );
+                    assert_eq!(
+                        serde_json::to_value(ExecutionStatusKind::Completed).unwrap(),
+                        serde_json::json!("completed")
+                    );
+                    assert_eq!(
+                        serde_json::to_value(ExecutionStatusKind::Failed).unwrap(),
+                        serde_json::json!("failed")
+                    );
+
+                    let schema =
+                        serde_json::to_value(schemars::schema_for!(ExecutionStatusKind)).unwrap();
+                    assert_eq!(
+                        schema.get("enum"),
+                        Some(&serde_json::json!(["running", "completed", "failed"]))
+                    );
+                    for unsupported in [
+                        "recovery-failed",
+                        "recoveryfailed",
+                        "RecoveryFailed",
+                        "additional",
+                    ] {
+                        assert!(
+                            serde_json::from_value::<ExecutionStatusKind>(serde_json::json!(
+                                unsupported
+                            ))
+                            .is_err(),
+                            "unexpectedly accepted non-SOVD execution status {unsupported}"
+                        );
+                    }
+                }
+
+                fn failed_response(failure: ExecutionFailure) -> serde_json::Value {
+                    serde_json::to_value(ExecutionResponse::from(UpdateExecution {
                         id: "execution-id".to_string(),
                         mode: ExecutionMode::Apply,
-                        status: ExecutionStatus::Failed("verification failed".to_string()),
-                    });
+                        status: ExecutionStatus::Failed(failure),
+                    }))
+                    .unwrap()
+                }
 
+                #[test]
+                fn failure_serializes_reason() {
                     assert_eq!(
-                        serde_json::to_value(response).unwrap(),
+                        failed_response(ExecutionFailure::RuntimeUnchanged(Arc::new(
+                            RuntimeUpdateError::ValidationFailed("verification failed".to_owned())
+                        ))),
                         serde_json::json!({
                             "status": "failed",
                             "parameters": {
                                 "mode": "apply",
-                                "reason": "verification failed"
+                                "reason": "Validation failed: verification failed"
+                            }
+                        })
+                    );
+                }
+
+                #[test]
+                fn recovery_failure_serializes_reason() {
+                    assert_eq!(
+                        failed_response(ExecutionFailure::RecoveryFailed {
+                            original: ReloadError::General("candidate rejected".to_owned()),
+                            recovery: RecoveryError::PersistentRestore(ReloadError::General(
+                                "backup unreadable".to_owned()
+                            )),
+                        }),
+                        serde_json::json!({
+                            "status": "failed",
+                            "parameters": {
+                                "mode": "apply",
+                                "reason": "fatal: Runtime update failed and the previous database \
+                                    could not be restored: Reload error: candidate rejected; \
+                                    Restoring the previous databases failed: Reload error: backup \
+                                    unreadable"
                             }
                         })
                     );

@@ -20,6 +20,8 @@ use cda_interfaces::{
 };
 use cda_tracing::TracingSetupError;
 
+use crate::mdd::DatabaseLoadError;
+
 #[derive(thiserror::Error)]
 pub enum AppError {
     #[error("Initialization failed `{0}`")]
@@ -159,6 +161,23 @@ impl From<ConfigSanityError> for AppError {
 impl From<RuntimeUpdateError> for AppError {
     fn from(value: RuntimeUpdateError) -> Self {
         AppError::InitializationFailed(value.to_string())
+    }
+}
+
+impl From<DatabaseLoadError> for AppError {
+    fn from(error: DatabaseLoadError) -> Self {
+        match error {
+            DatabaseLoadError::Data(message) => Self::DataError(message),
+            DatabaseLoadError::Configuration { message, source } => {
+                Self::ConfigurationError { message, source }
+            }
+            // No `AppError` variant describes this case: it is meaningful only
+            // to the database loading path, whose callers that report an
+            // `AppError` treat any load failure as unusable data.
+            error @ DatabaseLoadError::NoDatabasesLoaded { .. } => {
+                Self::DataError(error.to_string())
+            }
+        }
     }
 }
 

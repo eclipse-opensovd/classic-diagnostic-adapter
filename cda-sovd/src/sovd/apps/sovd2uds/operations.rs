@@ -21,7 +21,7 @@ pub(crate) mod runtimefilesupdate {
     };
     use cda_interfaces::{
         http_protection::registry::{HttpMethod, HttpRouteMatcher},
-        runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin},
+        runtime_update_api::{LockStateProvider, RuntimeUpdateExecutor},
     };
     use cda_plugin_security::Secured;
     use opensovd_axum_extra::ExtractHost;
@@ -38,7 +38,7 @@ pub(crate) mod runtimefilesupdate {
     const EXECUTIONS_ID_ROUTE: &str =
         "/vehicle/v15/apps/sovd2uds/operations/runtimefilesupdate/executions/{id}";
 
-    pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+    pub(crate) async fn get<P: RuntimeUpdateExecutor, L: LockStateProvider>(
         State(route_state): State<RuntimeUpdateRouteState<P, L>>,
     ) -> impl IntoResponse {
         let items = route_state
@@ -51,7 +51,7 @@ pub(crate) mod runtimefilesupdate {
         (StatusCode::OK, Json(ExecutionListResponse { items })).into_response()
     }
 
-    pub(crate) async fn post<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+    pub(crate) async fn post<P: RuntimeUpdateExecutor, L: LockStateProvider>(
         State(route_state): State<RuntimeUpdateRouteState<P, L>>,
         UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
         Secured(sec_plugin): Secured,
@@ -94,14 +94,14 @@ pub(crate) mod runtimefilesupdate {
             response::IntoResponse,
         };
         use axum_extra::extract::WithRejection;
-        use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
+        use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeUpdateExecutor};
         use sovd_interfaces::apps::sovd2uds::operations::runtimefilesupdate::ExecutionResponse;
 
         use crate::sovd::{
             apps::sovd2uds::bulk_data::runtimefiles::RuntimeUpdateRouteState, error::ApiError,
         };
 
-        pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+        pub(crate) async fn get<P: RuntimeUpdateExecutor, L: LockStateProvider>(
             State(route_state): State<RuntimeUpdateRouteState<P, L>>,
             Path(id): Path<String>,
             WithRejection(Query(query), _): WithRejection<
@@ -124,7 +124,7 @@ pub(crate) mod runtimefilesupdate {
 
     pub fn routes<
         S: cda_plugin_security::SecurityPluginLoader,
-        P: RuntimeFilesUpdatePlugin,
+        P: RuntimeUpdateExecutor,
         L: LockStateProvider,
     >(
         state: RuntimeUpdateRouteState<P, L>,

@@ -158,6 +158,12 @@ mod lock_core {
 
 use lock_core::{LockCore, TransitionReservation};
 
+/// Lock transitions held back from a successful
+/// [`Locks::reserve_runtime_update`] until it is dropped.
+pub(crate) struct RuntimeUpdateReservation {
+    _transitions: TransitionReservation,
+}
+
 pub struct Locks {
     core: LockCore,
     priority_policy: Arc<dyn LockPriorityPolicy>,
@@ -263,24 +269,43 @@ impl Locks {
     /// # Errors
     /// Returns an error if any ECU or functional-group lock is currently held.
     pub async fn prepare_runtime_update(&self) -> Result<(), LockUpdateError> {
+        self.reserve_runtime_update().await.map(drop)
+    }
+
+    /// Prepares lock state for a runtime configuration update and holds every
+    /// lock transition back until the returned reservation is dropped.
+    ///
+    /// The check alone only holds for the instant it runs: a lock taken
+    /// between it and the update it admits would be validated as absent and
+    /// then outlive the databases it was taken against.
+    ///
+    /// # Errors
+    /// Returns an error if any ECU or functional-group lock is currently held.
+    pub(crate) async fn reserve_runtime_update(
+        &self,
+    ) -> Result<RuntimeUpdateReservation, LockUpdateError> {
         let reservation = self.core.reserve_transition().await;
-        let mut store = reservation.write_store().await;
-        if store
-            .state
-            .active()
-            .any(|lock| matches!(lock.scope, ScopeKey::FunctionalGroup(_)))
         {
-            return Err(LockUpdateError::FunctionalGroupLocksHeld);
+            let mut store = reservation.write_store().await;
+            if store
+                .state
+                .active()
+                .any(|lock| matches!(lock.scope, ScopeKey::FunctionalGroup(_)))
+            {
+                return Err(LockUpdateError::FunctionalGroupLocksHeld);
+            }
+            if store
+                .state
+                .active()
+                .any(|lock| matches!(lock.scope, ScopeKey::Ecu(_)))
+            {
+                return Err(LockUpdateError::EcuLocksHeld);
+            }
+            store.generation = store.generation.saturating_add(1);
         }
-        if store
-            .state
-            .active()
-            .any(|lock| matches!(lock.scope, ScopeKey::Ecu(_)))
-        {
-            return Err(LockUpdateError::EcuLocksHeld);
-        }
-        store.generation = store.generation.saturating_add(1);
-        Ok(())
+        Ok(RuntimeUpdateReservation {
+            _transitions: reservation,
+        })
     }
 
     pub(crate) async fn vehicle_lock_owner_sub(&self) -> Option<String> {
