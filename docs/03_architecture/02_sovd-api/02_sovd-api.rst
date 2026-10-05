@@ -654,7 +654,14 @@ Operations
     asynchronous properties required by the standard for calling the RequestResults subfunction with
     ``GET /operations/{routine-name}/executions/{id}``.
 
-    The POST request returns HTTP status ``202 ACCEPTED`` with an execution identifier.
+    The POST request returns HTTP status ``202 ACCEPTED`` with an execution identifier, status, and
+    the decoded ``Start`` response in ``parameters``. If response fields cannot be decoded, the
+    response also contains ``DataError`` entries in ``errors``. A complete conversion failure returns
+    empty ``parameters`` with an error path of ``/parameters``. Because the ECU returned a positive
+    ``Start`` response, these conversion errors do not prevent creation of the execution identifier.
+
+    An NRC, communication error, or other failure before a positive ``Start`` response is received
+    returns an error response and does not create an execution identifier.
 
     Additionally, by calling ``DELETE /operations/{routine-name}/executions/{id}``, it's possible to
     call the Stop subfunction of the routine.
@@ -697,7 +704,9 @@ Operations
     When executing an asynchronous function, there's no good way to return the response of the
     routine with the GET to the id-endpoint, since that endpoint should only return the status of
     the RequestResults call. Therefore, the response of the routine is returned directly when
-    executing the routine with POST in addition to the id.
+    executing the routine with POST in addition to the id. Partial or failed conversion of a
+    positive response is reported in the same POST body so clients can distinguish missing output
+    from an operation that returned no output.
 
     .. note::
        This is a deviation from the standard, but is required to allow clients to handle

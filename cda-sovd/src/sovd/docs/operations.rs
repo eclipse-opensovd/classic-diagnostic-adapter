@@ -81,23 +81,14 @@ fn build_post_operation(meta: &OperationDocsMeta) -> Operation {
     post_op.request_body = Some(json_request_body(post_request_schema));
 
     if meta.is_async {
+        let async_response_schema = build_async_response_schema(meta);
         post_op.responses = Some(responses(vec![
             (
                 202,
                 json_response(
                     "Execution started asynchronously. Poll the returned execution resource for \
                      status.",
-                    schemars::json_schema!({
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string", "description": "Execution identifier" },
-                            "status": {
-                                "type": "string",
-                                "enum": ["running", "completed", "failed", "stopped"]
-                            }
-                        },
-                        "required": ["id"]
-                    }),
+                    async_response_schema,
                 ),
             ),
             (
@@ -364,4 +355,103 @@ fn build_sync_response_schema(meta: &OperationDocsMeta) -> Schema {
     });
     embed_response_params(&mut schema, meta);
     schema
+}
+
+/// Build the response schema for an asynchronous operation (202 from POST).
+fn build_async_response_schema(meta: &OperationDocsMeta) -> Schema {
+    let mut schema = schemars::json_schema!({
+        "type": "object",
+        "properties": {
+            "id": { "type": "string", "description": "Execution identifier" },
+            "status": {
+                "type": "string",
+                "enum": ["running", "completed", "failed", "stopped"]
+            },
+            "parameters": { "type": "object" },
+            "errors": {
+                "type": "array",
+                "items": schemars::schema_for!(
+                    sovd_interfaces::error::DataError<crate::sovd::error::VendorErrorCode>
+                )
+            }
+        },
+        "required": ["id", "parameters"]
+    });
+    if let Some(response_schema) = &meta.response_params_schema
+        && let Some(properties) = schema
+            .get_mut("properties")
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        let mut partial_response_schema = response_schema.clone();
+        make_schema_fields_optional(&mut partial_response_schema);
+        properties.insert(
+            "parameters".to_owned(),
+            serde_json::Value::from(partial_response_schema),
+        );
+    }
+    schema
+}
+
+/// Allow async responses to omit fields which could not be decoded and report them in `errors`.
+fn make_schema_fields_optional(schema: &mut Schema) {
+    if let Some(object) = schema.as_object_mut() {
+        object.remove("required");
+        object.values_mut().for_each(|value| {
+            if let Ok(mut nested_schema) = Schema::try_from(value.clone()) {
+                make_schema_fields_optional(&mut nested_schema);
+                *value = serde_json::Value::from(nested_schema);
+            } else if let Some(array) = value.as_array_mut() {
+                for item in array {
+                    if let Ok(mut nested_schema) = Schema::try_from(item.clone()) {
+                        make_schema_fields_optional(&mut nested_schema);
+                        *item = serde_json::Value::from(nested_schema);
+                    }
+                }
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn async_post_schema_includes_parameters_and_errors() {
+        let meta = OperationDocsMeta {
+            name: "Test operation".to_owned(),
+            is_async: true,
+            request_params_schema: None,
+            response_params_schema: Some(schemars::json_schema!({
+                "type": "object",
+                "properties": {
+                    "result": { "type": "string" }
+                }
+            })),
+        };
+
+        let schema = build_async_response_schema(&meta);
+        let properties = schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("async response schema must define properties");
+
+        assert!(properties.contains_key("id"));
+        assert!(properties.contains_key("status"));
+        assert!(properties.contains_key("errors"));
+        assert_eq!(
+            properties
+                .get("parameters")
+                .and_then(|parameters| parameters.get("properties"))
+                .and_then(|properties| properties.get("result"))
+                .and_then(|result| result.get("type")),
+            Some(&serde_json::json!("string"))
+        );
+        assert!(
+            properties
+                .get("parameters")
+                .and_then(|parameters| parameters.get("required"))
+                .is_none()
+        );
+    }
 }

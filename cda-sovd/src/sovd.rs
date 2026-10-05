@@ -1319,8 +1319,8 @@ impl From<FieldParseErrorWrapper> for DataError<VendorErrorCode> {
             path: value.path,
             error: sovd_interfaces::error::ApiErrorResponse {
                 message: "Failed to parse parameter".to_owned(),
-                error_code: sovd_interfaces::error::ErrorCode::VendorSpecific,
-                vendor_code: Some(VendorErrorCode::ErrorInterpretingMessage),
+                error_code: sovd_interfaces::error::ErrorCode::InvalidResponseContent,
+                vendor_code: None,
                 parameters: Some(
                     [
                         ("details", value.error.details),
