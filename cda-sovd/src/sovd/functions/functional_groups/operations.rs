@@ -1588,7 +1588,7 @@ pub(crate) mod diag_service {
                     std::marker::PhantomData,
                 ),
                 UseApi(
-                    axum_extra::extract::Host("localhost".to_string()),
+                    opensovd_axum_extra::ExtractHost("localhost".to_string()),
                     std::marker::PhantomData,
                 ),
                 axum::extract::OriginalUri(
