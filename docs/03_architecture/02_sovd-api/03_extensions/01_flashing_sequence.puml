@@ -114,6 +114,7 @@ end
 loop Transfer all segments
     group RequestDownload
         Client -> CDA: PUT /x-sovd2uds-download/requestdownload
+        note right of Client: optional "flashClass" selects the\nfunctional class for SIDs 34, 36, 37
         activate CDA
         CDA -> ECU : RequestDownload (34 ...)
         activate ECU
@@ -144,6 +145,10 @@ loop Transfer all segments
             CDA -> Client: HTTP 200 (OK with transfer status)
             deactivate CDA
         end
+        Client -> CDA: DELETE /x-sovd2uds-download/flashtransfer/{id}
+        activate CDA
+        CDA -> Client: HTTP 204 (No Content)
+        deactivate CDA
     end
 
     group TransferExit
@@ -153,7 +158,7 @@ loop Transfer all segments
         activate ECU
         ECU -> CDA : ACK
         deactivate ECU
-        CDA -> Client: HTTP 200 (OK)
+        CDA -> Client: HTTP 204 (No Content)
         deactivate CDA
     end
 end

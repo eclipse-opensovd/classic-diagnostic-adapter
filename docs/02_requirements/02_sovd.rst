@@ -161,7 +161,8 @@ Paths
          - | /x-sovd2uds-download/requestdownload
            | /x-sovd2uds-download/flashtransfer
            | /x-sovd2uds-download/transferexit
-         - ``flashtransfer`` handles the whole transfer, not for individual calls
+         - ``flashtransfer`` handles the whole transfer, not for individual calls.
+           Services are selected by functional class, see :need:`req~sovd-api-flashing-functional-class`
        * - 3E
          - --
          - handled internally by CDA
@@ -1099,7 +1100,7 @@ Flash API
 
 .. req:: Flash API
     :id: req~sovd-api-flashing
-    :links: arch~sovd-api-flash-file-management, arch~sovd-api-flash-data-transfer
+    :links: arch~sovd-api-flash-file-management, arch~sovd-api-flash-data-transfer, arch~sovd-api-flash-functional-class
     :status: draft
 
     A Flash-API is required to support flashing of ECUs, utilizing SIDs 34\ :sub:`16`, 36\ :sub:`16` & 37\ :sub:`16`. It needs to enable efficient transfer of the data, without sending the individual data transfers via REST.
@@ -1112,6 +1113,7 @@ Flash API
 
 .. req:: Flash API - Data Source Restriction
     :id: req~sovd-api-flashing-security
+    :links: arch~sovd-api-flash-folder-configuration
     :status: draft
 
     The source of the data to be sent for flashing, must be restrictable to a path and its subdirectories via configuration.
@@ -1119,6 +1121,23 @@ Flash API
     **Rationale**
 
     Without restrictions to the path, an attacker could exfiltrate arbitrary accessible data.
+
+.. req:: Flash API - Functional Class Selection
+    :id: req~sovd-api-flashing-functional-class
+    :links: arch~sovd-api-flash-functional-class, arch~sovd-api-flash-functional-class-configuration
+    :status: draft
+
+    The Flash API must allow the client to optionally select the ODX functional class that is used to resolve the
+    services for SIDs 34\ :sub:`16`, 36\ :sub:`16` & 37\ :sub:`16`, individually for each request.
+
+    If the client does not select a functional class, a configurable default functional class must be used. The
+    default value of this configuration is ``flash_download_upload``.
+
+    **Rationale**
+
+    Diagnostic descriptions can contain several services with the same SID and the same name for the flash
+    transfer, which differ only in their functional class (e.g. for different memory areas or flash procedures).
+    Without a selection, the client cannot choose which of these services is used.
 
 Communication Parameters API
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
