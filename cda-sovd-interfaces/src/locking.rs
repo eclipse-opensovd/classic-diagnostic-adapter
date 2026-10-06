@@ -66,11 +66,7 @@ pub struct Request {
     pub lock_expiration: u64,
     #[serde(default)]
     pub break_lock: bool,
-    #[serde(
-        default,
-        rename = "x-sovd2uds-isexclusive",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, rename = "x-sovd2uds-isexclusive")]
     pub x_sovd2uds_isexclusive: Option<bool>,
     #[serde(flatten)]
     pub metadata: Map<String, Value>,

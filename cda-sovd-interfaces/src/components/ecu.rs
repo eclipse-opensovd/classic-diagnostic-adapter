@@ -66,12 +66,7 @@ pub struct ComponentDataInfo {
     pub name: String,
 }
 
-/// A special data (SD) or a special data group (SDG).
-///
-/// Serialized untagged. Both variants have optional fields only, so an
-/// untagged derive would read every SDG as an SD; deserialization tells them
-/// apart by the fields only an SDG has, `caption` and `sdgs`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 #[derive(schemars::JsonSchema)]
 pub enum SdSdg {
@@ -104,41 +99,6 @@ pub enum SdSdg {
         #[schemars(with = "Vec<serde_json::Map<String, serde_json::Value>>")]
         sdgs: Vec<SdSdg>,
     },
-}
-
-impl<'de> Deserialize<'de> for SdSdg {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        /// The fields of both variants.
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Fields {
-            value: Option<String>,
-            si: Option<String>,
-            ti: Option<String>,
-            caption: Option<String>,
-            sdgs: Option<Vec<SdSdg>>,
-        }
-
-        let fields = Fields::deserialize(deserializer)?;
-        if fields.caption.is_some() || fields.sdgs.is_some() {
-            if fields.value.is_some() || fields.ti.is_some() {
-                return Err(serde::de::Error::custom(
-                    "an SDG has neither `value` nor `ti`",
-                ));
-            }
-            Ok(Self::Sdg {
-                caption: fields.caption,
-                si: fields.si,
-                sdgs: fields.sdgs.unwrap_or_default(),
-            })
-        } else {
-            Ok(Self::Sd {
-                value: fields.value,
-                si: fields.si,
-                ti: fields.ti,
-            })
-        }
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -706,43 +666,4 @@ mod tests {
         assert!(query_with_schema.include_schema);
     }
 
-    #[test]
-    fn sd_sdg_round_trips() {
-        use super::SdSdg;
-
-        let json = serde_json::json!([{
-            "caption": "default_sdg",
-            "si": "default",
-            "sdgs": [
-                { "value": "1", "si": "bool", "ti": "true" },
-                { "si": "empty" },
-                { "caption": "nested" }
-            ]
-        }]);
-        let parsed: Vec<SdSdg> = serde_json::from_value(json.clone()).unwrap();
-
-        let [SdSdg::Sdg { caption, si, sdgs }] = parsed.as_slice() else {
-            panic!("expected one SDG, got {parsed:?}");
-        };
-        assert_eq!(caption.as_deref(), Some("default_sdg"));
-        assert_eq!(si.as_deref(), Some("default"));
-        assert!(matches!(
-            sdgs.as_slice(),
-            [
-                SdSdg::Sd { value: Some(_), .. },
-                SdSdg::Sd { value: None, .. },
-                SdSdg::Sdg {
-                    caption: Some(_),
-                    ..
-                },
-            ]
-        ));
-        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
-
-        assert!(
-            serde_json::from_value::<SdSdg>(serde_json::json!({ "caption": "c", "ti": "t" }))
-                .is_err()
-        );
-        assert!(serde_json::from_value::<SdSdg>(serde_json::json!({ "unknown": 1 })).is_err());
-    }
 }
