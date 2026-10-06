@@ -295,7 +295,7 @@ impl<'de> Deserialize<'de> for ExecutionMode {
 }
 
 /// Query parameters for runtime file list endpoints.
-#[derive(Debug, Default, Deserialize, schemars::JsonSchema, serde::Serialize)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct RuntimeFilesQuery {
     #[serde(rename = "include-schema", default)]
     pub include_schema: bool,

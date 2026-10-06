@@ -29,13 +29,13 @@ pub mod security_and_session {
     pub mod put {
         use serde::{Deserialize, Serialize};
 
-        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
         pub struct SovdSeed {
             #[serde(rename = "Request_Seed")]
             pub request_seed: String,
         }
 
-        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
         pub struct RequestSeedResponse {
             pub id: String,
             pub seed: SovdSeed,

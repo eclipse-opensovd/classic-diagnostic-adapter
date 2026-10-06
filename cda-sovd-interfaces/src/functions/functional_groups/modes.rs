@@ -22,15 +22,12 @@ pub mod get {
 }
 
 /// Returns data keyed by ECU name at the top level
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-// Without the explicit bound, `#[serde(default)]` makes serde require
-// `Default` for the type parameters when deserializing.
-#[serde(bound(deserialize = "T: serde::Deserialize<'de>, R: serde::Deserialize<'de>"))]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DataResponse<T, R> {
     /// Data results per ECU - key is ECU name, value is the data result
     pub modes: HashMap<String, R>,
     /// Errors that occurred during the operation
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<DataError<T>>,
     #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -98,13 +95,10 @@ pub mod session {
         pub type ResponseElement = crate::common::modes::put::Response<String>;
 
         #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
-        // Without the explicit bound, `#[serde(default)]` makes serde require
-        // `Default` for the type parameters when deserializing.
-        #[serde(bound(deserialize = "T: serde::Deserialize<'de>"))]
         pub struct Response<T> {
             pub modes: HashMap<String, ResponseElement>,
             /// Errors that occurred during the operation
-            #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            #[serde(skip_serializing_if = "Vec::is_empty")]
             pub errors: Vec<ApiErrorResponse<T>>,
             #[schemars(skip)]
             #[serde(skip_serializing_if = "Option::is_none")]
