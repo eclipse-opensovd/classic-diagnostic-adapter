@@ -18,6 +18,9 @@ on:
     types: [submitted, dismissed]
   pull_request_review_comment:
     types: [created, deleted]
+  workflow_run:
+    workflows: ["Rust CI"]
+    types: [completed]
 
 permissions:
   pull-requests: write
@@ -32,7 +35,8 @@ jobs:
         with:
           script: |
             const prNumber = context.payload.pull_request?.number
-              || context.payload.review?.pull_request?.number;
+              || context.payload.review?.pull_request?.number
+              || context.payload.workflow_run?.pull_requests?.[0]?.number;
 
             if (!prNumber) {
               core.info('No PR number found, skipping.');
@@ -71,6 +75,16 @@ jobs:
                   core.warning(`Failed to remove label "${label}": ${e.message}`);
                 }
               }
+            }
+
+            if (context.eventName === 'workflow_run') {
+              if (context.payload.workflow_run.conclusion === 'failure') {
+                core.info('Rust CI failed; removing the needs review label.');
+                await removeLabel(NEEDS_REVIEW);
+              } else {
+                core.info('Rust CI did not fail.');
+              }
+              return;
             }
 
             const { data: reviews } = await github.rest.pulls.listReviews({
