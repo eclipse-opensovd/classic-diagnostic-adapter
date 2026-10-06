@@ -1203,7 +1203,7 @@ fn filter_failed_faults(faults: Vec<Fault>) -> Vec<Fault> {
 /// This test verifies:
 /// 1. Deleting a single DTC with a scope is rejected (`BadRequest`).
 /// 2. Clearing all faults with a scope calls the configured service (31 01 42 00)
-///    and clears only the UserMem faults in the ECU sim.
+///    and clears only the `UserMem` faults in the ECU sim.
 /// 3. Standard fault memory faults are not affected by the scoped clear.
 #[tokio::test]
 #[allow(

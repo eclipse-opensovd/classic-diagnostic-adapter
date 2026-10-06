@@ -469,9 +469,6 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             ])?
             .into_iter()
             .filter(|(_, lookup)| lookup.dtcs.iter().any(|dtc| dtc.code == dtc_code))
-            // Prefer fault memory if the same code is defined in both memories.
-            .min_by_key(|(service_type, _)| *service_type as u8)
-            .into_iter()
             .collect();
         if scoped_services.is_empty() {
             return Err(DiagServiceError::InvalidRequest(format!(
