@@ -13,23 +13,25 @@
 use std::time::Duration;
 
 use cda_sovd::VendorErrorCode;
-use http::StatusCode;
-use sovd_interfaces::{
-    common::modes::{DTC_SETTING_ID, SESSION_ID},
-    components::ecu::{
-        faults::{
-            Fault,
-            id::get::{ExtendedDataRecords, ExtendedFault, ExtendedSnapshots},
-        },
-        modes::{dtcsetting, security_and_session},
+use http::{Method, StatusCode};
+use sovd_interfaces::components::ecu::{
+    faults::{
+        Fault,
+        id::get::{ExtendedDataRecords, ExtendedFault, ExtendedSnapshots},
     },
+    modes::dtcsetting,
 };
 
 use crate::{
-    client::{self, components::Component},
-    sovd::{self, ECU_FLXC1000, set_dtc_setting},
+    sovd::{
+        self, ECU_FLXC1000, delete_faults,
+        ecu::{get_dtc_setting, switch_session},
+        get_extended_fault, get_fault, get_faults, set_dtc_setting,
+    },
     util::{
         ecusim::{self, DtcExtended, DtcMinimal, ExtDataRecord, SnapshotData, SnapshotRecord},
+        http::{extract_field_from_json, response_to_json, send_authenticated_cda_request},
+        locks,
         test_env::TestEnv,
     },
 };
@@ -38,42 +40,40 @@ use crate::{
 #[allow(clippy::too_many_lines, reason = "Keep test together")]
 async fn test_dtc_setting() {
     let test_env = TestEnv::builder().await.unwrap();
-    let component = test_env.client().component(ECU_FLXC1000);
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
 
     // Without lock, the CDA should reject the request
     let dtcs_on = "on";
-    assert_dtc_setting_rejected_without_lock(&component, dtcs_on).await;
+    set_dtc_setting(dtcs_on, &test_env, ecu_endpoint, StatusCode::CONFLICT)
+        .await
+        .unwrap();
 
     // Create and acquire lock
     let expiration_timeout = Duration::from_secs(60);
-    let ecu_lock = component
-        .locks()
-        .create(expiration_timeout)
-        .await
-        .expect("Failed to create lock")
-        .expect_status(StatusCode::CREATED)
-        .into_body();
+    let ecu_lock = locks::create_lock(
+        expiration_timeout,
+        locks::COMPONENTS_FLXC1000_LOCKS,
+        StatusCode::CREATED,
+        &test_env,
+    )
+    .await;
+    let lock_id =
+        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
 
     // Test DTC Setting On - without setting session first, this should be not possible
     // as the service has a state precondition for Session == "Extended"
-    let _ = set_dtc_setting(&component, dtcs_on).await;
+    let _ = set_dtc_setting(dtcs_on, &test_env, ecu_endpoint, StatusCode::BAD_REQUEST).await;
 
-    component
-        .mode(SESSION_ID)
-        .put::<security_and_session::put::Response<String>>(
-            &security_and_session::put::SessionRequest {
-                value: "extended".to_owned(),
-                mode_expiration: None,
-            },
-        )
+    switch_session("extended", &test_env, ecu_endpoint, StatusCode::OK)
         .await
-        .unwrap()
-        .expect_status(StatusCode::OK);
+        .unwrap();
 
     // Sending an invalid value should return BAD_REQUEST with possible values
     sovd::validate_invalid_parameter_error(
-        &component.mode(DTC_SETTING_ID),
-        &dtcsetting::put::Request {
+        &test_env,
+        ecu_endpoint,
+        "dtcsetting",
+        dtcsetting::put::Request {
             value: "invalid-value".to_owned(),
             parameters: None,
         },
@@ -84,13 +84,13 @@ async fn test_dtc_setting() {
 
     // Test DTC Setting On, after switching to extended session, should work now.
     // Test remaining services without switching sessions.
-    let result = set_dtc_setting(&component, dtcs_on)
+    let result = set_dtc_setting(dtcs_on, &test_env, ecu_endpoint, StatusCode::OK)
         .await
         .unwrap()
-        .expect_status(StatusCode::OK);
+        .unwrap();
     assert_eq!(result.value.to_ascii_lowercase(), dtcs_on);
 
-    let current_setting = get_dtc_setting(&component).await.unwrap();
+    let current_setting = get_dtc_setting(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(
         current_setting.value.as_ref().map(|s| s.to_lowercase()),
         Some(dtcs_on.to_owned())
@@ -108,13 +108,13 @@ async fn test_dtc_setting() {
 
     // Test DTC Setting Off
     let dtcs_off = "off";
-    let result = set_dtc_setting(&component, dtcs_off)
+    let result = set_dtc_setting(dtcs_off, &test_env, ecu_endpoint, StatusCode::OK)
         .await
         .unwrap()
-        .expect_status(StatusCode::OK);
+        .unwrap();
     assert_eq!(result.value.to_ascii_lowercase(), dtcs_off);
 
-    let current_setting = get_dtc_setting(&component).await.unwrap();
+    let current_setting = get_dtc_setting(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(
         current_setting.value.as_ref().map(|s| s.to_lowercase()),
         Some(dtcs_off.to_owned())
@@ -132,13 +132,13 @@ async fn test_dtc_setting() {
 
     // Test DTC Setting TimeTravelDTCsOn (custom vendor-specific)
     let dtcs_time_travel = "timetraveldtcson";
-    let result = set_dtc_setting(&component, dtcs_time_travel)
+    let result = set_dtc_setting(dtcs_time_travel, &test_env, ecu_endpoint, StatusCode::OK)
         .await
         .unwrap()
-        .expect_status(StatusCode::OK);
+        .unwrap();
     assert_eq!(result.value.to_ascii_lowercase(), dtcs_time_travel);
 
-    let current_setting = get_dtc_setting(&component).await.unwrap();
+    let current_setting = get_dtc_setting(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(
         current_setting.value.as_ref().map(|s| s.to_lowercase()),
         Some(dtcs_time_travel.to_owned())
@@ -155,14 +155,19 @@ async fn test_dtc_setting() {
     );
 
     // Delete the ECU lock
-    ecu_lock
-        .release()
-        .await
-        .expect("lock operation failed")
-        .expect_status(StatusCode::NO_CONTENT);
+    locks::lock_operation(
+        locks::COMPONENTS_FLXC1000_LOCKS,
+        Some(&lock_id),
+        &test_env,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
 
     // After deleting lock, we should not be able to set DTC setting
-    assert_dtc_setting_rejected_without_lock(&component, dtcs_on).await;
+    set_dtc_setting(dtcs_on, &test_env, ecu_endpoint, StatusCode::CONFLICT)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -172,19 +177,21 @@ async fn test_dtc_setting() {
 )]
 async fn test_dtc_deletion() {
     let test_env = TestEnv::builder().await.unwrap();
-    let component = test_env.client().component(ECU_FLXC1000);
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
     let ecu_name = ECU_FLXC1000;
     let fault_memory = "Standard";
 
     // Create and acquire lock
     let expiration_timeout = Duration::from_secs(30);
-    let ecu_lock = component
-        .locks()
-        .create(expiration_timeout)
-        .await
-        .expect("Failed to create lock")
-        .expect_status(StatusCode::CREATED)
-        .into_body();
+    let ecu_lock = locks::create_lock(
+        expiration_timeout,
+        locks::COMPONENTS_FLXC1000_LOCKS,
+        StatusCode::CREATED,
+        &test_env,
+    )
+    .await;
+    let lock_id =
+        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
 
     // Add test DTCs to the simulator
     // DTC 1: 0x1E240 with status mask 0x29
@@ -229,11 +236,9 @@ async fn test_dtc_deletion() {
 
     // Get DTCs via SOVD API
     // expect 1 failed dtc
-    let faults = component
-        .faults()
-        .list()
+    let faults = get_faults(&test_env, ecu_endpoint)
         .await
-        .map(|faults| filter_failed_faults(faults.expect_status(StatusCode::OK).into_body().items))
+        .map(filter_failed_faults)
         .expect("Failed to get faults via SOVD");
     assert_eq!(
         faults.len(),
@@ -243,13 +248,15 @@ async fn test_dtc_deletion() {
     );
 
     // Test deletion of a single DTC
-    component
-        .faults()
-        .fault("01E240")
-        .delete(None)
-        .await
-        .expect("Failed to delete fault 0x01E240")
-        .expect_status(StatusCode::NO_CONTENT);
+    delete_faults(
+        &test_env,
+        ecu_endpoint,
+        Some("01E240"),
+        None,
+        StatusCode::NO_CONTENT,
+    )
+    .await
+    .expect("Failed to delete fault 0x01E240");
 
     // Verify the DTC was deleted via ecu simulator
     let dtcs_in_sim_after_delete = ecusim::get_dtcs(&test_env.ecu_sim, ecu_name, fault_memory)
@@ -281,12 +288,8 @@ async fn test_dtc_deletion() {
     assert!(second_dtc_still_exists, "DTC 0x039447 should still exist");
 
     // Verify that the DTCs are not set to failed in the SOVD API
-    let fault_1 = component
-        .faults()
-        .fault("01E240")
-        .get()
+    let fault_1 = get_fault(&test_env, ecu_endpoint, "01E240")
         .await
-        .map(|fault| fault.expect_status(StatusCode::OK).into_body().item)
         .expect("Failed to get SOVD status for fault 0x01E240");
 
     let fault_1_failed = fault_1.status.and_then(|status| status.test_failed);
@@ -298,12 +301,9 @@ async fn test_dtc_deletion() {
     );
 
     // Test deletion of all DTCs
-    component
-        .faults()
-        .delete_all(None)
+    delete_faults(&test_env, ecu_endpoint, None, None, StatusCode::NO_CONTENT)
         .await
-        .expect("Failed to delete all faults")
-        .expect_status(StatusCode::NO_CONTENT);
+        .expect("Failed to delete all faults");
 
     // Verify all DTCs were deleted via SOVD API
     let dtcs_after_delete_all = ecusim::get_dtcs(&test_env.ecu_sim, ecu_name, fault_memory)
@@ -317,11 +317,14 @@ async fn test_dtc_deletion() {
     );
 
     // Test deletion without lock (should fail)
-    ecu_lock
-        .release()
-        .await
-        .expect("lock operation failed")
-        .expect_status(StatusCode::NO_CONTENT);
+    locks::lock_operation(
+        locks::COMPONENTS_FLXC1000_LOCKS,
+        Some(&lock_id),
+        &test_env,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
 
     // Add a DTC for testing deletion without lock
     ecusim::add_dtc(
@@ -338,13 +341,15 @@ async fn test_dtc_deletion() {
     .expect("Failed to add DTC for lock test");
 
     // Attempt to delete without lock - should fail
-    let err = component
-        .faults()
-        .fault("999999")
-        .delete(None)
-        .await
-        .expect_err("Request should be forbidden");
-    assert_eq!(err.status(), Some(StatusCode::CONFLICT), "{err}");
+    delete_faults(
+        &test_env,
+        ecu_endpoint,
+        Some("999999"),
+        None,
+        StatusCode::CONFLICT,
+    )
+    .await
+    .expect("Request should be forbidden");
 
     // Verify the DTC was NOT deleted
     let dtcs_after_forbidden = ecusim::get_dtcs(&test_env.ecu_sim, ecu_name, fault_memory)
@@ -362,7 +367,7 @@ async fn test_dtc_deletion() {
 #[allow(clippy::too_many_lines, reason = "Keep test together")]
 async fn test_get_faults_with_different_dtc_masks() {
     let test_env = TestEnv::builder().await.unwrap();
-    let component = test_env.client().component(ECU_FLXC1000);
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
     let ecu_name = ECU_FLXC1000;
     let fault_memory = "Standard";
 
@@ -452,14 +457,9 @@ async fn test_get_faults_with_different_dtc_masks() {
     );
 
     // Test GET /faults - should return all 6 faults
-    let faults = component
-        .faults()
-        .list()
+    let faults = get_faults(&test_env, ecu_endpoint)
         .await
-        .expect("Failed to get faults via SOVD")
-        .expect_status(StatusCode::OK)
-        .into_body()
-        .items;
+        .expect("Failed to get faults via SOVD");
     assert_eq!(
         faults.len(),
         6,
@@ -468,12 +468,8 @@ async fn test_get_faults_with_different_dtc_masks() {
     );
 
     // Verify DTC1 (0x01E240) - status mask 0x29
-    let fault1 = component
-        .faults()
-        .fault("01E240")
-        .get()
+    let fault1 = get_fault(&test_env, ecu_endpoint, "01E240")
         .await
-        .map(|fault| fault.expect_status(StatusCode::OK).into_body().item)
         .expect("Failed to get fault 0x01E240");
     assert_eq!(fault1.code, "01E240");
     let status1 = fault1.status.expect("Status should be present for DTC1");
@@ -504,12 +500,8 @@ async fn test_get_faults_with_different_dtc_masks() {
     );
 
     // Verify DTC2 (0x039447) - status mask 0x0C
-    let fault2 = component
-        .faults()
-        .fault("039447")
-        .get()
+    let fault2 = get_fault(&test_env, ecu_endpoint, "039447")
         .await
-        .map(|fault| fault.expect_status(StatusCode::OK).into_body().item)
         .expect("Failed to get fault 0x039447");
     assert_eq!(fault2.code, "039447");
     let status2 = fault2.status.expect("Status should be present for DTC2");
@@ -540,12 +532,8 @@ async fn test_get_faults_with_different_dtc_masks() {
     );
 
     // Verify DTC3 (0x01E241) - status mask 0xFF (all flags set)
-    let fault3 = component
-        .faults()
-        .fault("01E241")
-        .get()
+    let fault3 = get_fault(&test_env, ecu_endpoint, "01E241")
         .await
-        .map(|fault| fault.expect_status(StatusCode::OK).into_body().item)
         .expect("Failed to get fault 0x01E241");
     assert_eq!(fault3.code, "01E241");
     let status3 = fault3.status.expect("Status should be present for DTC3");
@@ -596,12 +584,8 @@ async fn test_get_faults_with_different_dtc_masks() {
     );
 
     // Verify DTC4 (0x01E242) - status mask 0x00 (no flags set)
-    let fault4 = component
-        .faults()
-        .fault("01E242")
-        .get()
+    let fault4 = get_fault(&test_env, ecu_endpoint, "01E242")
         .await
-        .map(|fault| fault.expect_status(StatusCode::OK).into_body().item)
         .expect("Failed to get fault 0x01E242");
     assert_eq!(fault4.code, "01E242");
     let status4 = fault4.status.expect("Status should be present for DTC4");
@@ -652,12 +636,8 @@ async fn test_get_faults_with_different_dtc_masks() {
     );
 
     // Verify DTC5 (0x01E243) - status mask 0x03
-    let fault5 = component
-        .faults()
-        .fault("01E243")
-        .get()
+    let fault5 = get_fault(&test_env, ecu_endpoint, "01E243")
         .await
-        .map(|fault| fault.expect_status(StatusCode::OK).into_body().item)
         .expect("Failed to get fault 0x01E243");
     assert_eq!(fault5.code, "01E243");
     let status5 = fault5.status.expect("Status should be present for DTC5");
@@ -688,12 +668,8 @@ async fn test_get_faults_with_different_dtc_masks() {
     );
 
     // Verify DTC6 (0x01E244) - status mask 0x80
-    let fault6 = component
-        .faults()
-        .fault("01E244")
-        .get()
+    let fault6 = get_fault(&test_env, ecu_endpoint, "01E244")
         .await
-        .map(|fault| fault.expect_status(StatusCode::OK).into_body().item)
         .expect("Failed to get fault 0x01E244");
     assert_eq!(fault6.code, "01E244");
     let status6 = fault6.status.expect("Status should be present for DTC6");
@@ -722,7 +698,7 @@ async fn test_get_faults_with_different_dtc_masks() {
 #[tokio::test]
 async fn test_get_fault_with_extended_dtc() {
     let test_env = TestEnv::builder().await.unwrap();
-    let component = test_env.client().component(ECU_FLXC1000);
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
     let ecu_name = ECU_FLXC1000;
     let fault_memory = "Standard";
 
@@ -785,14 +761,9 @@ async fn test_get_fault_with_extended_dtc() {
     );
 
     // Verify DTC1 (0x01E240)
-    let fault = component
-        .faults()
-        .fault("01E240")
-        .get()
+    let fault = get_extended_fault(&test_env, ecu_endpoint, "01E240")
         .await
-        .expect("Failed to get fault 0x01E240")
-        .expect_status(StatusCode::OK)
-        .into_body();
+        .expect("Failed to get fault 0x01E240");
     assert_eq!(fault.item.code, "01E240");
 
     assert_fault_data(&ext_dtc, fault);
@@ -1015,19 +986,24 @@ fn assert_dtc_extended_data(
 #[tokio::test]
 async fn test_get_nonexistent_fault() {
     let test_env = TestEnv::builder().await.unwrap();
-    let component = test_env.client().component(ECU_FLXC1000);
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
 
     // Try to get a fault that doesn't exist - should return 400
-    let err = component
-        .faults()
-        .fault("FFFFFF")
-        .get()
-        .await
-        .expect_err("the CDA returned a non-existent fault");
-    assert_eq!(
-        err.status(),
-        Some(StatusCode::BAD_REQUEST),
-        "Should return a BAD_REQUEST response for non-existent fault, but got {err}"
+    let path = format!("{ecu_endpoint}/faults/FFFFFF");
+    let response = send_authenticated_cda_request(
+        &test_env,
+        &path,
+        StatusCode::BAD_REQUEST,
+        Method::GET,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(
+        response.is_ok(),
+        "Should return a BAD_REQUEST response for non-existent fault, but got {:?}",
+        response.err(),
     );
 }
 
@@ -1036,14 +1012,12 @@ async fn test_get_nonexistent_fault() {
 #[tokio::test]
 async fn test_get_faults_empty() {
     let test_env = TestEnv::builder().await.unwrap();
-    let component = test_env.client().component(ECU_FLXC1000);
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
 
     // Get faults - should return no faults with test_failed==true
-    let faults = component
-        .faults()
-        .list()
+    let faults = get_faults(&test_env, ecu_endpoint)
         .await
-        .map(|faults| filter_failed_faults(faults.expect_status(StatusCode::OK).into_body().items))
+        .map(filter_failed_faults)
         .expect("Failed to get faults");
     assert_eq!(
         faults.len(),
@@ -1051,25 +1025,6 @@ async fn test_get_faults_empty() {
         "Expected 0 failed faults when fault memory is empty, got {}",
         faults.len()
     );
-}
-
-/// Checks that the CDA rejects setting the DTC setting to `value` without a
-/// lock with `409 Conflict`.
-async fn assert_dtc_setting_rejected_without_lock(component: &Component<'_>, value: &str) {
-    let err = set_dtc_setting(component, value)
-        .await
-        .expect_err("the CDA set the DTC setting without a lock");
-    assert_eq!(err.status(), Some(StatusCode::CONFLICT), "{err}");
-}
-
-/// Reads the DTC setting of `component`, which the CDA must answer with `200 OK`.
-async fn get_dtc_setting(component: &Component<'_>) -> client::Result<dtcsetting::get::Response> {
-    Ok(component
-        .mode(DTC_SETTING_ID)
-        .get::<dtcsetting::get::Response>()
-        .await?
-        .expect_status(StatusCode::OK)
-        .into_body())
 }
 
 fn filter_failed_faults(faults: Vec<Fault>) -> Vec<Fault> {
@@ -1093,21 +1048,23 @@ fn filter_failed_faults(faults: Vec<Fault>) -> Vec<Fault> {
 )]
 async fn test_dtc_deletion_user_memory() {
     let test_env = TestEnv::builder().await.unwrap();
-    let component = test_env.client().component(ECU_FLXC1000);
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
     let ecu_name = ECU_FLXC1000;
     let fault_memory = "Standard";
     let dev_memory = "Development";
-    let scope = test_env.config.faults.user_memory_scope.as_str();
+    let scope = &test_env.config.faults.user_memory_scope;
 
     // Create and acquire lock
     let expiration_timeout = Duration::from_secs(30);
-    let ecu_lock = component
-        .locks()
-        .create(expiration_timeout)
-        .await
-        .expect("Failed to create lock")
-        .expect_status(StatusCode::CREATED)
-        .into_body();
+    let ecu_lock = locks::create_lock(
+        expiration_timeout,
+        locks::COMPONENTS_FLXC1000_LOCKS,
+        StatusCode::CREATED,
+        &test_env,
+    )
+    .await;
+    let lock_id =
+        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
 
     // Add Standard DTCs
     ecusim::add_dtc(
@@ -1185,21 +1142,26 @@ async fn test_dtc_deletion_user_memory() {
     );
 
     // Deleting all faults with an invalid scope should be rejected (BadRequest)
-    let err = component
-        .faults()
-        .delete_all(Some("InvalidScope"))
-        .await
-        .expect_err("Expected delete with invalid scope to be rejected");
-    assert_eq!(err.status(), Some(StatusCode::BAD_REQUEST), "{err}");
+    delete_faults(
+        &test_env,
+        ecu_endpoint,
+        None,
+        Some("InvalidScope"),
+        StatusCode::BAD_REQUEST,
+    )
+    .await
+    .expect("Expected delete with invalid scope to be rejected");
 
     // Deleting a single DTC with a scope should be rejected (BadRequest)
-    let err = component
-        .faults()
-        .fault("0AA000")
-        .delete(Some(scope))
-        .await
-        .expect_err("Expected single DTC deletion with scope to be rejected");
-    assert_eq!(err.status(), Some(StatusCode::BAD_REQUEST), "{err}");
+    delete_faults(
+        &test_env,
+        ecu_endpoint,
+        Some("0AA000"),
+        Some(scope),
+        StatusCode::BAD_REQUEST,
+    )
+    .await
+    .expect("Expected single DTC deletion with scope to be rejected");
 
     // Verify nothing was deleted after the rejected request
     let dev_dtcs_after_reject = ecusim::get_dtcs(&test_env.ecu_sim, ecu_name, dev_memory)
@@ -1213,12 +1175,15 @@ async fn test_dtc_deletion_user_memory() {
     );
 
     // Clearing all faults with scope should clear Development faults only
-    component
-        .faults()
-        .delete_all(Some(scope))
-        .await
-        .expect("Failed to delete all faults with scope")
-        .expect_status(StatusCode::NO_CONTENT);
+    delete_faults(
+        &test_env,
+        ecu_endpoint,
+        None,
+        Some(scope),
+        StatusCode::NO_CONTENT,
+    )
+    .await
+    .expect("Failed to delete all faults with scope");
 
     // Verify Development faults were cleared
     let dev_dtcs_after_clear = ecusim::get_dtcs(&test_env.ecu_sim, ecu_name, dev_memory)
@@ -1256,13 +1221,16 @@ async fn test_dtc_deletion_user_memory() {
     assert!(has_039447, "Standard DTC 0x039447 should still exist");
 
     // Now clear the standard fault memory by using the default scope
-    let default_scope = test_env.config.faults.default_scope.as_str();
-    component
-        .faults()
-        .delete_all(Some(default_scope))
-        .await
-        .expect("Failed to delete all faults with default scope")
-        .expect_status(StatusCode::NO_CONTENT);
+    let default_scope = &test_env.config.faults.default_scope;
+    delete_faults(
+        &test_env,
+        ecu_endpoint,
+        None,
+        Some(default_scope),
+        StatusCode::NO_CONTENT,
+    )
+    .await
+    .expect("Failed to delete all faults with default scope");
 
     // Verify standard DTCs were cleared
     let standard_dtcs_after_default_scope_clear =
@@ -1277,9 +1245,12 @@ async fn test_dtc_deletion_user_memory() {
     );
 
     // Clean up - delete the ECU lock
-    ecu_lock
-        .release()
-        .await
-        .expect("lock operation failed")
-        .expect_status(StatusCode::NO_CONTENT);
+    locks::lock_operation(
+        locks::COMPONENTS_FLXC1000_LOCKS,
+        Some(&lock_id),
+        &test_env,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
 }

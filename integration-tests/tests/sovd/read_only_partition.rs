@@ -10,12 +10,11 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use cda_sovd::VendorErrorCode;
 use http::StatusCode;
 
 use crate::{
     sovd::{
-        ECU_FLXC1000,
+        COMPONENTS_FLXC1000_BASE, get_ecu_component,
         runtimefiles::{setup_with_lock, upload_mdd},
     },
     util::{TestingError, test_env::TestEnv},
@@ -28,12 +27,13 @@ async fn cda_should_work_on_a_read_only_partition() -> Result<(), TestingError> 
     let test_env = TestEnv::builder().with_read_only_rootfs().await?;
 
     // Served from the databases loaded out of the read-only directory.
-    test_env
-        .client()
-        .component(ECU_FLXC1000)
-        .get()
-        .await?
-        .expect_status(StatusCode::OK);
+    get_ecu_component(
+        &test_env.config,
+        COMPONENTS_FLXC1000_BASE,
+        StatusCode::OK,
+        None,
+    )
+    .await?;
 
     Ok(())
 }
@@ -42,29 +42,33 @@ async fn cda_should_work_on_a_read_only_partition() -> Result<(), TestingError> 
 async fn database_update_on_read_only_partition_returns_read_only_error() -> Result<(), TestingError>
 {
     let test_env = TestEnv::builder().with_read_only_rootfs().await?;
-    setup_with_lock(test_env.client()).await;
+    setup_with_lock(&test_env).await;
 
-    let err = upload_mdd(test_env.client())
+    let response = upload_mdd(&test_env).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = response
+        .text()
         .await
-        .expect_err("uploading to a read-only storage must fail");
-    assert_eq!(err.status(), Some(StatusCode::INTERNAL_SERVER_ERROR));
-    let error = err.api_error::<VendorErrorCode>().ok_or_else(|| {
-        TestingError::InvalidData(format!("Expected a JSON storage error response: {err}"))
+        .map_err(|e| TestingError::InvalidData(format!("Could not read storage error: {e}")))?;
+    let error: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        TestingError::InvalidData(format!("Expected a JSON storage error response: {e}"))
     })?;
     assert!(
         error
-            .message
-            .starts_with("Storage error: Storage is read-only:"),
-        "Expected a read-only storage error, got {error:?}"
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|message| message.starts_with("Storage error: Storage is read-only:")),
+        "Expected a read-only storage error, got {error}"
     );
 
     // The failed write must not bring down the CDA or prevent further reads.
-    test_env
-        .client()
-        .component(ECU_FLXC1000)
-        .get()
-        .await?
-        .expect_status(StatusCode::OK);
+    get_ecu_component(
+        &test_env.config,
+        COMPONENTS_FLXC1000_BASE,
+        StatusCode::OK,
+        None,
+    )
+    .await?;
 
     Ok(())
 }
