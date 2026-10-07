@@ -571,6 +571,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     uds_payload,
                     &diag_type,
                     None,
+                    None,
                 )?;
 
                 let value = match value {
@@ -644,6 +645,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 let diag_type = normal_dop.diag_coded_type()?;
                 let compu_method: Option<datatypes::CompuMethod> =
                     normal_dop.compu_method().map(Into::into);
+                let physical_type = physical_base_type(&normal_dop);
 
                 data.insert(
                     param_name.to_owned(),
@@ -654,6 +656,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                         uds_payload,
                         &diag_type,
                         compu_method,
+                        physical_type,
                     )?,
                 );
                 Ok(())
@@ -1027,6 +1030,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let diag_coded_type = normal_dop.diag_coded_type()?;
         let compu_method: Option<datatypes::CompuMethod> =
             normal_dop.compu_method().map(Into::into);
+        let physical_type = physical_base_type(normal_dop);
         let data_type = diag_coded_type.base_datatype();
 
         if byte_count == 0 {
@@ -1041,6 +1045,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     bit_len: 0,
                     data_type,
                     compu_method,
+                    physical_type,
                 }),
             );
             return Ok(());
@@ -1064,6 +1069,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 bit_len,
                 data_type,
                 compu_method,
+                physical_type,
             }),
         );
         Ok(())
@@ -1571,6 +1577,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 uds_payload,
                 &diag_coded_type,
                 Some(compu_method),
+                physical_base_type(normal_dop),
             )?,
         );
         Ok(())
@@ -1629,6 +1636,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                         data_type: switch_key_diag_type.base_datatype(),
                         bit_len,
                         compu_method: None,
+                        physical_type: None,
                     }),
                 );
 
@@ -1737,6 +1745,7 @@ fn map_param_reserved_from_uds(
             bit_len,
             data_type,
             compu_method: None,
+            physical_type: None,
         }),
     );
     Ok(())
@@ -1766,6 +1775,7 @@ fn map_param_coded_const_from_uds(
         param_ctx.parameter.bit_position() as usize,
         uds_payload,
         &diag_type,
+        None,
         None,
     )?;
 
@@ -1954,6 +1964,13 @@ fn create_diag_service_response(
             response_type: DiagServiceResponseType::Positive,
         },
     }
+}
+
+/// Base type of a DOP's PHYSICAL-TYPE: the type of its computed physical value.
+fn physical_base_type(normal_dop: &datatypes::NormalDop) -> Option<datatypes::DataType> {
+    normal_dop
+        .physical_type()
+        .map(|physical| datatypes::PhysicalType::from(physical).base_type)
 }
 
 #[cfg(test)]

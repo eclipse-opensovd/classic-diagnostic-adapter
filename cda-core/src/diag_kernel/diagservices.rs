@@ -55,10 +55,21 @@ pub enum DiagDataTypeContainer {
 
 #[derive(Clone, Debug)]
 pub struct DiagDataTypeContainerRaw {
+    /// Raw coded bytes of the parameter as extracted from the UDS payload.
     pub data: Vec<u8>,
+    /// Length of the coded value in bits, as decoded by the DIAG-CODED-TYPE.
     pub bit_len: usize,
+    /// Base data type of the DIAG-CODED-TYPE, i.e. the type of the raw
+    /// (internal) value in `data`.
     pub data_type: DataType,
+    /// COMPU-METHOD used to convert the coded (internal) value into its
+    /// physical value, if the DOP defines one.
     pub compu_method: Option<datatypes::CompuMethod>,
+    /// Base type of the DOP's PHYSICAL-TYPE, if known. A computed physical
+    /// value (e.g. LINEAR) is represented in this type, not in `data_type`.
+    /// `None` if the parameter has no DOP PHYSICAL-TYPE (e.g. RESERVED or a
+    /// mux selector); the physical value is then represented in `data_type`.
+    pub physical_type: Option<DataType>,
 }
 
 pub type MappedDiagServiceResponsePayload = HashMap<String, DiagDataTypeContainer>;
@@ -276,14 +287,13 @@ impl DiagServiceResponseStruct {
         ) -> Result<(), DiagServiceError> {
             for (k, v) in hash_map {
                 let val = match v {
-                    DiagDataTypeContainer::RawContainer(raw) => {
-                        operations::uds_data_to_serializable(
-                            raw.data_type,
-                            raw.compu_method.as_ref(),
-                            false,
-                            &raw.data,
-                        )?
-                    }
+                    DiagDataTypeContainer::RawContainer(raw) => operations::uds_data_to_physical(
+                        raw.data_type,
+                        raw.physical_type,
+                        raw.compu_method.as_ref(),
+                        false,
+                        &raw.data,
+                    )?,
                     DiagDataTypeContainer::Struct(s) => {
                         let mut nested_mapped = HashMap::new();
                         match create_struct(
@@ -356,8 +366,9 @@ impl DiagServiceResponseStruct {
         }
 
         match data {
-            DiagDataTypeContainer::RawContainer(raw) => Ok(operations::uds_data_to_serializable(
+            DiagDataTypeContainer::RawContainer(raw) => Ok(operations::uds_data_to_physical(
                 raw.data_type,
+                raw.physical_type,
                 raw.compu_method.as_ref(),
                 false,
                 &raw.data,
