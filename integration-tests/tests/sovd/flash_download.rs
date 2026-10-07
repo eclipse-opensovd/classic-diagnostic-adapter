@@ -1278,3 +1278,148 @@ async fn test_flash_download_functional_class_selection() {
         .await
         .unwrap();
 }
+
+/// Verify that attempting a flash transfer with no body is rejected with a bad request error
+/// and a JSON error message.
+#[tokio::test]
+async fn test_flash_transfer_with_no_body_rejected_with_json_error_message() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+
+    // Verify that a flash transfer request with no body is rejected with a JSON HTTP 400 response.
+    let flashtransfer_response = send_cda_request(
+        &runtime.config,
+        &format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer"),
+        StatusCode::BAD_REQUEST,
+        Method::POST,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+    // Validate the response is a JSON object, which is expected for a JSON error message.
+    let json_response = response_to_json(&flashtransfer_response).unwrap();
+    // Validate the json response string in the body is a JSON object, which is expected for a JSON error message.
+    assert!(
+        json_response.is_object(),
+        "Expected the rejection response to contain a valid JSON object"
+    );
+    // Verify the contents of the JSON error response.
+    let json_response = response_to_json(&flashtransfer_response).unwrap();
+    assert!(
+        json_response
+            .get("message")
+            .unwrap()
+            .as_str()
+            .is_some_and(|message| message.contains("Failed to parse the request body as JSON")),
+        "Expected the rejection response to contain message indicating json parsing error for \
+         missing request body"
+    );
+    for (field, expected) in [
+        ("error_code", "vendor-specific"),
+        ("vendor_code", "bad-request"),
+    ] {
+        assert_eq!(
+            json_response.get(field).and_then(|v| v.as_str()),
+            Some(expected),
+            "Expected the rejection response to contain {field} as {expected}"
+        );
+    }
+}
+
+/// Verify that attempting a flash transfer with invalid values in the body is rejected with a bad request error
+/// and a JSON error message.
+#[tokio::test]
+async fn test_flash_transfer_with_invalid_body_rejected_with_json_error_message() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+
+    // Attempt flash transfer with BlockSize < 0 (negative) - should be rejected with a JSON HTTP 400 response.
+    let zero_length_body = serde_json::json!({
+        "blocksequencecounter": 1,
+        "blocksize": -1,
+        "offset": 0,
+        "length": 16140,
+        "id": "test_id"
+    });
+
+    let flashtransfer_response = send_cda_request(
+        &runtime.config,
+        &format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer"),
+        StatusCode::BAD_REQUEST,
+        Method::POST,
+        Some(&zero_length_body.to_string()),
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+    // Verify the contents of the JSON error response.
+    let json_response = response_to_json(&flashtransfer_response).unwrap();
+    assert!(
+        json_response
+            .get("message")
+            .unwrap()
+            .as_str()
+            .is_some_and(|message| message
+                .contains("Failed to deserialize the JSON body into the target type")),
+        "Expected the rejection response to contain message indicating json parsing error for \
+         negative blocksize"
+    );
+    for (field, expected) in [
+        ("error_code", "vendor-specific"),
+        ("vendor_code", "bad-request"),
+    ] {
+        assert_eq!(
+            json_response.get(field).and_then(|v| v.as_str()),
+            Some(expected),
+            "Expected the rejection response to contain {field} as {expected}"
+        );
+    }
+}
+
+/// Verify that attempting a request download with no body is rejected with a bad request error
+/// and a JSON error message.
+#[tokio::test]
+async fn test_request_download_with_no_body_rejected_with_json_error_message() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+
+    let request_download_response = send_cda_request(
+        &runtime.config,
+        &format!("{ecu_endpoint}/x-sovd2uds-download/requestdownload"),
+        StatusCode::BAD_REQUEST,
+        Method::PUT,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Verify the contents of the JSON error response.
+    let json_response = response_to_json(&request_download_response).unwrap();
+    assert!(
+        json_response
+            .get("message")
+            .unwrap()
+            .as_str()
+            .is_some_and(|message| message.contains("Failed to parse the request body as JSON")),
+        "Expected the rejection response to contain message indicating json parsing error for \
+         missing request body"
+    );
+    for (field, expected) in [
+        ("error_code", "vendor-specific"),
+        ("vendor_code", "bad-request"),
+    ] {
+        assert_eq!(
+            json_response.get(field).and_then(|v| v.as_str()),
+            Some(expected),
+            "Expected the rejection response to contain {field} as {expected}"
+        );
+    }
+}
