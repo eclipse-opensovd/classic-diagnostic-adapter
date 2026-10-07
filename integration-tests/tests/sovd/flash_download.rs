@@ -889,3 +889,425 @@ async fn get_sim_data_transfers(
         crate::util::http::send_request(StatusCode::OK, Method::GET, None, None, url).await?;
     response_to_t(&response)
 }
+
+/// Verify that attempting a flash transfer with no body is rejected with a bad request error
+/// and a JSON error message.
+/// Uses `SecurityAccess` `LEVEL_05` (minimum level accepted by the ECU simulator for flash operations).
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Test scenario is easier to understand kept together"
+)]
+async fn test_flash_transfer_with_no_body_rejected_with_json_error_message() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+
+    // Create and acquire ECU lock
+    let expiration_timeout = Duration::from_secs(120);
+    let ecu_lock = create_lock(
+        expiration_timeout,
+        locks::ECU_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let lock_id =
+        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+
+    lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::OK,
+        Method::GET,
+    )
+    .await;
+
+    // Switch ECU sim to BOOT variant
+    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "BOOT")
+        .await
+        .unwrap();
+
+    // Force variant detection
+    send_cda_request(
+        &runtime.config,
+        ecu_endpoint,
+        StatusCode::CREATED,
+        Method::PUT,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Switch to programming session
+    switch_session(
+        "programming",
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // SecurityAccess Level 5
+    let seed_response: RequestSeedResponse = put_mode(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        "security",
+        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
+            value: "Level_5_RequestSeed".to_owned(),
+            mode_expiration: None,
+            key: None,
+            parameters: None,
+        },
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // Verify that the seed payload is the deterministic sequence 0x00..0x07
+    assert_eq!(
+        seed_response.seed.request_seed, "0x00 0x01 0x02 0x03 0x04 0x05 0x06 0x07",
+        "Expected deterministic seed payload from ECU sim"
+    );
+
+    let key = compute_security_key(&seed_response.seed.request_seed);
+
+    let key_result: sovd_interfaces::components::ecu::modes::security_and_session::put::Response<
+        String,
+    > = put_mode(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        "security",
+        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
+            value: "Level_5".to_owned(),
+            mode_expiration: None,
+            key: Some(
+                sovd_interfaces::components::ecu::modes::security_and_session::put::ModeKey {
+                    send_key: key,
+                },
+            ),
+            parameters: None,
+        },
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(key_result.value, "Level_5");
+
+    // Verify the ECU sim is in the expected state
+    let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("Failed to get ECU sim state");
+    assert!(
+        matches!(
+            ecu_state.security_access,
+            Some(ecusim::SecurityAccess::Level05)
+        ),
+        "ECU sim should be at SecurityAccess Level 05, got {:?}",
+        ecu_state.security_access
+    );
+
+    // RequestDownload (required before flash transfer)
+    let request_download_body = serde_json::json!({
+        "requestdownload": {
+            "DataFormatIdentifier": 0,
+            "AddressAndLengthFormatIdentifier": 0x44,
+            "MemoryAddress": "0x00 0x00 0x00 0x00",
+            "MemorySize": "0x00 0x00 0x01 0x00"
+        }
+    });
+    send_cda_request(
+        &runtime.config,
+        &format!("{ecu_endpoint}/x-sovd2uds-download/requestdownload"),
+        StatusCode::OK,
+        Method::PUT,
+        Some(&request_download_body.to_string()),
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Verify that a flash transfer request with no body is rejected with a JSON HTTP 400 response.
+    let flashtransfer_response = send_cda_request(
+        &runtime.config,
+        &format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer"),
+        StatusCode::BAD_REQUEST,
+        Method::POST,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        response_to_json(&flashtransfer_response).is_ok_and(|json| json.is_object()),
+        "Expected the rejection response to contain a valid JSON object"
+    );
+
+    // Cleanup
+    lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
+        .await
+        .unwrap();
+}
+
+/// Verify that attempting a flash transfer with invalid values in the body is rejected with a bad request error
+/// and a JSON error message.
+/// Uses `SecurityAccess` `LEVEL_05` (minimum level accepted by the ECU simulator for flash operations).
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Test scenario is easier to understand kept together"
+)]
+async fn test_flash_transfer_with_invalid_body_rejected_with_json_error_message() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+
+    // Create and acquire ECU lock
+    let expiration_timeout = Duration::from_secs(120);
+    let ecu_lock = create_lock(
+        expiration_timeout,
+        locks::ECU_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let lock_id =
+        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+
+    lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::OK,
+        Method::GET,
+    )
+    .await;
+
+    // Switch ECU sim to BOOT variant
+    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "BOOT")
+        .await
+        .unwrap();
+
+    // Force variant detection
+    send_cda_request(
+        &runtime.config,
+        ecu_endpoint,
+        StatusCode::CREATED,
+        Method::PUT,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Switch to programming session
+    switch_session(
+        "programming",
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // SecurityAccess Level 5
+    let _seed_response: RequestSeedResponse = put_mode(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        "security",
+        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
+            value: "Level_5_RequestSeed".to_owned(),
+            mode_expiration: None,
+            key: None,
+            parameters: None,
+        },
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // SecurityAccess Level 5
+    let seed_response: RequestSeedResponse = put_mode(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        "security",
+        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
+            value: "Level_5_RequestSeed".to_owned(),
+            mode_expiration: None,
+            key: None,
+            parameters: None,
+        },
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // Verify that the seed payload is the deterministic sequence 0x00..0x07
+    assert_eq!(
+        seed_response.seed.request_seed, "0x00 0x01 0x02 0x03 0x04 0x05 0x06 0x07",
+        "Expected deterministic seed payload from ECU sim"
+    );
+
+    let key = compute_security_key(&seed_response.seed.request_seed);
+
+    let key_result: sovd_interfaces::components::ecu::modes::security_and_session::put::Response<
+        String,
+    > = put_mode(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        "security",
+        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
+            value: "Level_5".to_owned(),
+            mode_expiration: None,
+            key: Some(
+                sovd_interfaces::components::ecu::modes::security_and_session::put::ModeKey {
+                    send_key: key,
+                },
+            ),
+            parameters: None,
+        },
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(key_result.value, "Level_5");
+
+    // Verify the ECU sim is in the expected state
+    let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("Failed to get ECU sim state");
+    assert!(
+        matches!(
+            ecu_state.security_access,
+            Some(ecusim::SecurityAccess::Level05)
+        ),
+        "ECU sim should be at SecurityAccess Level 05, got {:?}",
+        ecu_state.security_access
+    );
+
+    // RequestDownload (required before flash transfer)
+    let request_download_body = serde_json::json!({
+        "requestdownload": {
+            "DataFormatIdentifier": 0,
+            "AddressAndLengthFormatIdentifier": 0x44,
+            "MemoryAddress": "0x00 0x00 0x00 0x00",
+            "MemorySize": "0x00 0x00 0x01 0x00"
+        }
+    });
+    send_cda_request(
+        &runtime.config,
+        &format!("{ecu_endpoint}/x-sovd2uds-download/requestdownload"),
+        StatusCode::OK,
+        Method::PUT,
+        Some(&request_download_body.to_string()),
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // List flash files to get a valid file ID
+    let flash_files_response = send_cda_request(
+        &runtime.config,
+        "apps/sovd2uds/bulk-data/flashfiles",
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+    let flash_files_json = response_to_json(&flash_files_response).unwrap();
+    let files = flash_files_json
+        .get("items")
+        .and_then(|v| v.as_array())
+        .expect("Expected 'items' array in flash files response");
+    let flash_file = files
+        .iter()
+        .find(|f| {
+            f.get("x-sovd2uds-OrigPath")
+                .and_then(|v| v.as_str())
+                .is_some_and(|p| p.contains("test_flash"))
+        })
+        .expect("Expected to find test_flash.bin in flash files list");
+    let file_id = flash_file
+        .get("id")
+        .and_then(|v| v.as_str())
+        .expect("Expected 'id' in flash file");
+
+    // Attempt flash transfer with BlockSize < 0 (negative) - should be rejected with a JSON HTTP 400 response.
+    let zero_length_body = serde_json::json!({
+        "blocksequencecounter": 1,
+        "blocksize": -1,
+        "offset": 0,
+        "length": 16140,
+        "id": file_id
+    });
+
+    let flashtransfer_response = send_cda_request(
+        &runtime.config,
+        &format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer"),
+        StatusCode::BAD_REQUEST,
+        Method::POST,
+        Some(&zero_length_body.to_string()),
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        response_to_json(&flashtransfer_response).is_ok_and(|json| json.is_object()),
+        "Expected the rejection response to contain a valid JSON object"
+    );
+
+    // Cleanup
+    lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
+        .await
+        .unwrap();
+}
