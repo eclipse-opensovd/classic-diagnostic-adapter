@@ -156,7 +156,10 @@ pub(crate) mod request_download {
             locks,
             ..
         }): State<WebserverEcuState<T, U>>,
-        body: Json<sovd2uds::download::request_download::put::Request>,
+        WithRejection(Json(body), _): WithRejection<
+            Json<sovd2uds::download::request_download::put::Request>,
+            ApiError,
+        >,
     ) -> Response {
         let include_schema = query.include_schema;
         require_ecu_access!(write, security_plugin, &ecu_name, &locks, include_schema);
@@ -309,7 +312,10 @@ pub(crate) mod flash_transfer {
             flash_data,
             ..
         }): State<WebserverEcuState<T, U>>,
-        body: Json<sovd2uds::download::flash_transfer::post::Request>,
+        WithRejection(Json(body), _): WithRejection<
+            Json<sovd2uds::download::flash_transfer::post::Request>,
+            ApiError,
+        >,
     ) -> Response {
         let include_schema = query.include_schema;
         require_ecu_access!(write, security_plugin, &ecu_name, &locks, include_schema);
