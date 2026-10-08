@@ -1634,7 +1634,8 @@ async fn test_dtc_read_by_fault_id_fault_memory() {
     assert_eq!(
         read_dtc_info_subfunctions(&requests),
         ["02", "04", "06"],
-        "unexpected ReadDTCInformation requests for UserMem DTC 01E240, all requests: {requests:?}"
+        "unexpected ReadDTCInformation requests for Standard DTC 01E240, all requests: \
+         {requests:?}"
     );
 
     // Clear all DTCs from Standard memory to clean up
