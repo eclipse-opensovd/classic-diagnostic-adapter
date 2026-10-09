@@ -1332,6 +1332,8 @@ Version Endpoint
             ]
         }
 
+    The endpoint is also available with the manufacturer prefix as ``/vehicle/version-info``.
+
     **Version segments**
 
     All SOVD routes are mounted under ``/vehicle/v15``. The ``[sovd_api] version_aliases`` setting (default

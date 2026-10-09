@@ -22,6 +22,7 @@ pub mod docs;
 pub mod error;
 pub mod functions;
 pub mod locking;
+pub mod version_info;
 
 fn default_true() -> bool {
     true

@@ -30,6 +30,7 @@ pub use dynamic_router::{RouteGroupNotFound, RouteHandle};
 pub use http::Method;
 use opensovd_axum_extra::ExtractHost;
 use sovd::apps::sovd2uds::bulk_data::runtimefiles::RuntimeUpdateRouteState;
+pub use sovd_interfaces::version_info::{BuildVendorInfo, VendorInfo};
 use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::UnixListener;
@@ -40,6 +41,7 @@ use tower_http::{normalize_path::NormalizePathLayer, trace::TraceLayer};
 pub use crate::sovd::{
     SovdLockStateProvider, error::VendorErrorCode, locks::Locks,
     request_guard::install_http_restriction_guard, static_data::add_static_data_endpoint,
+    version_info::add_version_info_endpoint,
 };
 pub mod api_config;
 pub mod dynamic_router;

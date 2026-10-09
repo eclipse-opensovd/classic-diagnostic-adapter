@@ -557,7 +557,7 @@ async fn init_webserver(
         webserver_state.shutdown_signal.clone(),
     );
 
-    register_version_endpoints(&webserver_state.dynamic_router).await;
+    register_version_endpoints(&webserver_state.dynamic_router, &config.sovd_api).await;
     cda_sovd::add_openapi_routes(&webserver_state.dynamic_router).await;
 
     if let Some(hook) = pre_load {
@@ -567,8 +567,22 @@ async fn init_webserver(
     Ok(webserver_state)
 }
 
-async fn register_version_endpoints(dynamic_router: &cda_sovd::dynamic_router::DynamicRouter) {
+async fn register_version_endpoints(
+    dynamic_router: &cda_sovd::dynamic_router::DynamicRouter,
+    api_config: &cda_sovd::api_config::SovdApiConfig,
+) {
     // [[ dimpl~sovd-api-version-endpoint, Register Version Endpoint ]]
+    cda_sovd::add_version_info_endpoint(
+        dynamic_router,
+        api_config,
+        Some(cda_sovd::BuildVendorInfo {
+            name: "Eclipse OpenSOVD Classic Diagnostic Adapter".to_owned(),
+            version: cda_version().to_owned(),
+            commit: env!("GIT_COMMIT_HASH").to_owned(),
+            build_date: env!("BUILD_DATE").to_owned(),
+        }),
+    )
+    .await;
     let serde_json::Value::Object(version_info) = serde_json::json!({
         "id": "version",
         "data": {
