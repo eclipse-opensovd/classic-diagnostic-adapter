@@ -185,10 +185,6 @@ pub(crate) fn create_ecu_manager_with_mixed_functional_group()
 ///   that repeats a structure based on `num_items`
 ///   - Each repeated structure contains `item_param` (u16)
 /// - **DOPs**: `NormalDOP` for `num_items`, `DynamicLengthField` DOP for response
-#[expect(
-    clippy::too_many_lines,
-    reason = "Test data creation should be kept together for readability"
-)]
 pub(crate) fn create_ecu_manager_with_dynamic_length_field_service() -> (
     crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
     cda_interfaces::DiagComm,
@@ -1202,10 +1198,6 @@ pub(crate) fn create_ecu_manager_dlf_sibling_no_byte_pos() -> (
 ///     - Contains variant detection service
 ///     - State charts: Session (`DefaultSession`), Security (Locked)
 /// - **ECU name**: "`VariantDetectionEcu`"
-#[expect(
-    clippy::too_many_lines,
-    reason = "Test data creation must be kept together for readability"
-)] // must be kept together
 pub(crate) fn create_ecu_manager_variant_detection(
     fallback_to_base: bool,
 ) -> crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData> {
@@ -1372,10 +1364,6 @@ pub(crate) fn create_ecu_manager_variant_detection(
 ///   byte 0: SID (CODED-CONST)
 ///   byte 1-2: DID (PHYS-CONST, Normal DOP, u16)
 ///   byte 3: `data_param` (VALUE, u8)
-#[expect(
-    clippy::too_many_lines,
-    reason = "Test data creation should be kept together for readability"
-)]
 pub(crate) fn create_ecu_manager_with_phys_const_normal_dop_service() -> (
     crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
     cda_interfaces::DiagComm,
@@ -1480,10 +1468,6 @@ pub(crate) fn create_ecu_manager_with_phys_const_normal_dop_service() -> (
 ///   byte 3+: DREC (PHYS-CONST, Structure DOP with sub-params)
 ///     sub-param1: u16 at byte 0
 ///     sub-param2: u8 at byte 2
-#[expect(
-    clippy::too_many_lines,
-    reason = "Test data creation should be kept together for readability"
-)]
 pub(crate) fn create_ecu_manager_with_phys_const_structure_dop_service() -> (
     crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
     cda_interfaces::DiagComm,

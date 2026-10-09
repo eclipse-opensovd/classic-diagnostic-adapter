@@ -21,17 +21,13 @@ use serde::de::DeserializeOwned;
 use crate::util::TestingError;
 
 #[derive(Debug)]
+#[allow(
+    dead_code,
+    reason = "Fields captured for debugging, not all tests use them"
+)]
 pub(crate) struct Response {
-    #[expect(
-        dead_code,
-        reason = "Status captured for debugging. Not all tests assert on it"
-    )]
     status: StatusCode,
     body: Option<String>,
-    #[expect(
-        dead_code,
-        reason = "Headers captured for debugging. Not all tests assert on them"
-    )]
     header_map: HeaderMap,
 }
 

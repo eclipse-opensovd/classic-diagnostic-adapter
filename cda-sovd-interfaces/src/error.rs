@@ -16,10 +16,6 @@ use serde::{Deserialize, Serialize};
 
 #[derive(schemars::JsonSchema, PartialEq, Eq, Clone, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "kebab-case")]
-#[expect(
-    dead_code,
-    reason = "Pre-filled with all SOVD error codes; not all variants used yet"
-)]
 pub enum ErrorCode {
     /// Details are specified in the `vendor_code`
     VendorSpecific,

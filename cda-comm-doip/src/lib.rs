@@ -884,10 +884,6 @@ impl<T: EcuAddresses + DoipComParams> TransportProbe for DoipDiagGateway<T> {
 }
 /// Waits for the `DoIP` diagnostic-message acknowledgement from the gateway,
 /// with a deadline of `timeout`.
-#[expect(
-    clippy::needless_continue,
-    reason = "Explicit continue improves readability of wait logic"
-)]
 async fn wait_for_ack_or_response_until_timeout(
     receiver: &mut broadcast::Receiver<Result<DiagnosticResponse, EcuError>>,
     ecu_name: &str,

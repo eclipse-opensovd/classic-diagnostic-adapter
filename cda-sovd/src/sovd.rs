@@ -1218,7 +1218,7 @@ pub(crate) use create_response_schema;
 #[macro_export]
 macro_rules! create_schema {
     ($type_:ty) => {{
-        #[expect(
+        #[allow(
             unused_imports,
             reason = "Import may already be in scope at the macro call site"
         )]

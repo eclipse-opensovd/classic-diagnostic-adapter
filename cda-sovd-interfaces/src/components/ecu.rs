@@ -331,11 +331,6 @@ pub mod x {
                     #[derive(Serialize, Debug, Clone, PartialEq)]
                     #[serde(rename_all = "lowercase")]
                     #[derive(schemars::JsonSchema)]
-                    #[expect(
-                        dead_code,
-                        reason = "Not all variants are used yet. Kept to match CDA internal types \
-                                  and future SOVD server use"
-                    )]
                     pub enum DataTransferStatus {
                         Running,
                         Aborted,

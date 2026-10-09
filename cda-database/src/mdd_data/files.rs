@@ -44,12 +44,6 @@ impl FileManager {
     #[must_use]
     pub fn new(mdd_path: String, files: Vec<Chunk>) -> Self {
         let mdd_name = mdd_path.split('/').next_back().unwrap_or("mdd").to_string();
-        #[expect(
-            unknown_lints,
-            clippy::duration_suboptimal_units,
-            reason = "Literal duration value is intentional. Duration_suboptimal_units not \
-                      available in all toolchain versions"
-        )]
         let cache_lifetime = Duration::from_secs(60 * 5);
 
         let files = Arc::new(RwLock::new(

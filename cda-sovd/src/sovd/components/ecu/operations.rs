@@ -1862,12 +1862,6 @@ pub(crate) mod service {
                 .with(openapi::error_bad_gateway)
             }
 
-            #[expect(
-                clippy::too_many_lines,
-                reason = "Keeping validation, execution guarding, UDS Stop, and guard cleanup \
-                          together makes cleanup on every response path visible. Splitting the \
-                          flow would obscure that state invariant"
-            )]
             pub(crate) async fn delete<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
                 UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
                 Path(ServiceAndIdPathParam { service, id }): Path<ServiceAndIdPathParam>,
