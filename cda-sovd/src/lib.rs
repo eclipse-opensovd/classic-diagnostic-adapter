@@ -30,6 +30,7 @@ pub use dynamic_router::{RouteGroupNotFound, RouteHandle};
 pub use http::Method;
 use opensovd_axum_extra::ExtractHost;
 use sovd::apps::sovd2uds::bulk_data::runtimefiles::RuntimeUpdateRouteState;
+pub use sovd_interfaces::version_info::{BuildVendorInfo, VendorInfo};
 use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::UnixListener;
@@ -40,7 +41,9 @@ use tower_http::{normalize_path::NormalizePathLayer, trace::TraceLayer};
 pub use crate::sovd::{
     SovdLockStateProvider, error::VendorErrorCode, locks::Locks,
     request_guard::install_http_restriction_guard, static_data::add_static_data_endpoint,
+    version_info::add_version_info_endpoint,
 };
+pub mod api_config;
 pub mod dynamic_router;
 mod openapi;
 pub(crate) mod sovd;
@@ -91,6 +94,28 @@ pub async fn launch_webserver<F>(
 where
     F: Future<Output = ()> + Clone + Send + 'static,
 {
+    launch_webserver_with_api_config(
+        config,
+        &api_config::SovdApiConfig::default(),
+        shutdown_signal,
+    )
+    .await
+}
+
+/// Like [`launch_webserver`], serving the SOVD routes on the version segments of
+/// `api_config` in addition to the canonical `v15` segment.
+///
+/// # Errors
+/// Will return `Err` in case that the webserver couldn't be launched.
+#[tracing::instrument(skip(config, shutdown_signal))]
+pub async fn launch_webserver_with_api_config<F>(
+    config: WebServerConfig,
+    api_config: &api_config::SovdApiConfig,
+    shutdown_signal: F,
+) -> Result<(DynamicRouter, tokio::task::JoinHandle<()>), DoipGatewaySetupError>
+where
+    F: Future<Output = ()> + Clone + Send + 'static,
+{
     let dynamic_router = DynamicRouter::new();
     let dynamic_router_for_service = dynamic_router.clone();
     let service = tower::service_fn(move |request: Request<axum::body::Body>| {
@@ -101,7 +126,13 @@ where
         }
     });
 
-    let middleware = tower::util::MapRequestLayer::new(rewrite_request_uri);
+    let version_aliases: Arc<[String]> = api_config
+        .version_aliases
+        .iter()
+        .map(|alias| alias.to_lowercase())
+        .collect();
+    let middleware =
+        tower::util::MapRequestLayer::new(move |req| rewrite_request_uri(req, &version_aliases));
     let trim_trailing_slash_middleware = NormalizePathLayer::trim_trailing_slash();
     let service_with_middleware = middleware.layer(trim_trailing_slash_middleware.layer(service));
 
@@ -300,12 +331,14 @@ pub async fn add_openapi_routes(dynamic_router: &DynamicRouter) {
         .await;
 }
 
-fn rewrite_request_uri<B>(mut req: Request<B>) -> Request<B> {
+fn rewrite_request_uri<B>(mut req: Request<B>, version_aliases: &[String]) -> Request<B> {
     let uri = req.uri();
     let decoded_path = percent_encoding::percent_decode_str(uri.path())
         .decode_utf8()
         .unwrap_or_else(|_| uri.path().into());
-    let normalized_path = decoded_path.to_lowercase();
+    let lowercase_path = decoded_path.to_lowercase();
+    let normalized_path = api_config::rewrite_version_alias(&lowercase_path, version_aliases)
+        .unwrap_or(lowercase_path);
     let normalized_path_and_query = uri.query().map_or_else(
         || normalized_path.clone(),
         |query| format!("{normalized_path}?{query}"),
@@ -429,7 +462,10 @@ mod uri_rewrite_tests {
         let service = tower::service_fn(|request: Request<Body>| async move {
             Ok::<_, std::convert::Infallible>(request.uri().clone())
         });
-        let service = tower::util::MapRequestLayer::new(rewrite_request_uri).layer(service);
+        let service = tower::util::MapRequestLayer::new(|request| {
+            rewrite_request_uri(request, &["v1".to_owned()])
+        })
+        .layer(service);
         let request = Request::builder()
             .uri(uri)
             .body(Body::empty())
@@ -468,6 +504,14 @@ mod uri_rewrite_tests {
 
         assert!(query.suppress_service);
         assert!(delete_query.suppress_service);
+    }
+
+    #[tokio::test]
+    async fn rewrite_request_uri_maps_version_alias_to_canonical_segment() {
+        let uri = rewrite_uri("/Vehicle/V1/components/ECU?include-schema=true").await;
+
+        assert_eq!(uri.path(), "/vehicle/v15/components/ecu");
+        assert_eq!(uri.query(), Some("include-schema=true"));
     }
 }
 
