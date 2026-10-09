@@ -91,10 +91,7 @@ async fn test_dtc_setting() {
     assert_eq!(result.value.to_ascii_lowercase(), dtcs_on);
 
     let current_setting = get_dtc_setting(&test_env, ecu_endpoint).await.unwrap();
-    assert_eq!(
-        current_setting.value.as_ref().map(|s| s.to_lowercase()),
-        Some(dtcs_on.to_owned())
-    );
+    assert_eq!(current_setting.value.to_lowercase(), dtcs_on);
 
     // Validate that ECU sim received and stored the DTC setting
     let ecu_state = ecusim::get_ecu_state(&test_env.ecu_sim, ECU_FLXC1000)
@@ -115,10 +112,7 @@ async fn test_dtc_setting() {
     assert_eq!(result.value.to_ascii_lowercase(), dtcs_off);
 
     let current_setting = get_dtc_setting(&test_env, ecu_endpoint).await.unwrap();
-    assert_eq!(
-        current_setting.value.as_ref().map(|s| s.to_lowercase()),
-        Some(dtcs_off.to_owned())
-    );
+    assert_eq!(current_setting.value.to_lowercase(), dtcs_off);
 
     // Validate that ECU sim received and stored the DTC setting
     let ecu_state = ecusim::get_ecu_state(&test_env.ecu_sim, ECU_FLXC1000)
@@ -139,10 +133,7 @@ async fn test_dtc_setting() {
     assert_eq!(result.value.to_ascii_lowercase(), dtcs_time_travel);
 
     let current_setting = get_dtc_setting(&test_env, ecu_endpoint).await.unwrap();
-    assert_eq!(
-        current_setting.value.as_ref().map(|s| s.to_lowercase()),
-        Some(dtcs_time_travel.to_owned())
-    );
+    assert_eq!(current_setting.value.to_lowercase(), dtcs_time_travel);
 
     // Validate that ECU sim received and stored the DTC setting
     let ecu_state = ecusim::get_ecu_state(&test_env.ecu_sim, ECU_FLXC1000)
