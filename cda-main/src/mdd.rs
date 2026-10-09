@@ -525,15 +525,18 @@ fn load_single_mdd<S: SecurityPlugin>(
                 reason: "Failed to convert path to string".to_string(),
             })?;
 
-    // Ensure the MDD file contains uncompressed data (rewrite on first
-    // use), so that subsequent loads skip LZMA decompression.
+    // Attempt to rewrite the MDD file with uncompressed data so that
+    // subsequent loads skip LZMA decompression. If this fails (e.g. on a
+    // read-only filesystem), log a warning and continue - the database
+    // loader will decompress in memory instead.
     if config.flat_buf.mdd_decompress
         && let Err(e) = update_mdd_uncompressed(&mdd_path)
     {
-        return Err(MddLoadingError::DecompressFailed {
-            path: mdd_path,
-            reason: e.to_string(),
-        });
+        tracing::warn!(
+            mdd_path = %mdd_path,
+            error = %e,
+            "Failed to write decompressed MDD to disk, continuing with in-memory decompression"
+        );
     }
 
     let (ecu_name, proto_data) = cda_database::load_proto_data(&mdd_path, PROTO_LOAD_CONFIG)
