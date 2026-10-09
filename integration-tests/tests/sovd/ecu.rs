@@ -309,10 +309,7 @@ async fn test_ecu_session_switching() {
         .unwrap();
     assert_eq!(switch_session_result.value.to_lowercase(), "extended");
     let session_result = session(&test_env, ecu_endpoint).await.unwrap();
-    assert_eq!(
-        session_result.value.map(|s| s.to_lowercase()),
-        Some("extended".to_owned())
-    );
+    assert_eq!(session_result.value.to_lowercase(), "extended");
     assert_eq!(session_result.name, Some("Diagnostic session".to_owned()));
 
     // After switching to extended session, fetch again using configuraion GET and verify.
@@ -342,8 +339,8 @@ async fn test_ecu_session_switching() {
 
     let session_result_after_reset = session(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(
-        session_result_after_reset.value.map(|s| s.to_lowercase()),
-        Some("default".to_owned()),
+        session_result_after_reset.value.to_lowercase(),
+        "default",
         "Session should be back to default after hard reset"
     );
 
@@ -402,7 +399,7 @@ async fn test_ecu_session_switching() {
     .await
     .unwrap();
     let security_result = security(&test_env, ecu_endpoint).await.unwrap();
-    assert_eq!(security_result.value, Some("Level_5".to_owned()));
+    assert_eq!(security_result.value, "Level_5");
     assert_eq!(security_result.name, Some("Security access".to_owned()));
 
     // Delete the ECU lock
@@ -911,10 +908,7 @@ async fn test_communication_control() {
     assert_eq!(result.value, "EnableRxAndEnableTx");
 
     let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
-    assert_eq!(
-        current_state.value.as_ref().map(|s| s.to_lowercase()),
-        Some(enable_rx_and_enable_tx.to_owned())
-    );
+    assert_eq!(current_state.value.to_lowercase(), enable_rx_and_enable_tx);
 
     let enable_rx_and_disable_tx = "enablerxanddisabletx";
     let result = set_comm_control(
@@ -930,10 +924,7 @@ async fn test_communication_control() {
     assert_eq!(result.value, "EnableRxAndDisableTx");
 
     let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
-    assert_eq!(
-        current_state.value.as_ref().map(|s| s.to_lowercase()),
-        Some(enable_rx_and_disable_tx.to_owned())
-    );
+    assert_eq!(current_state.value.to_lowercase(), enable_rx_and_disable_tx);
 
     let disable_rx_and_enable_tx = "disablerxandenabletx";
     let result = set_comm_control(
@@ -949,10 +940,7 @@ async fn test_communication_control() {
     assert_eq!(result.value, "DisableRxAndEnableTx");
 
     let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
-    assert_eq!(
-        current_state.value.as_ref().map(|s| s.to_lowercase()),
-        Some(disable_rx_and_enable_tx.to_owned())
-    );
+    assert_eq!(current_state.value.to_lowercase(), disable_rx_and_enable_tx);
 
     let disable_rx_and_disable_tx = "disablerxanddisabletx";
     let result = set_comm_control(
@@ -969,8 +957,8 @@ async fn test_communication_control() {
 
     let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(
-        current_state.value.as_ref().map(|s| s.to_lowercase()),
-        Some(disable_rx_and_disable_tx.to_owned())
+        current_state.value.to_lowercase(),
+        disable_rx_and_disable_tx
     );
 
     let enable_rx_and_disable_tx_with_enhanced =
@@ -992,8 +980,8 @@ async fn test_communication_control() {
 
     let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(
-        current_state.value.as_ref().map(|s| s.to_lowercase()),
-        Some(enable_rx_and_disable_tx_with_enhanced.to_owned())
+        current_state.value.to_lowercase(),
+        enable_rx_and_disable_tx_with_enhanced
     );
 
     let enable_rx_and_tx_with_enhanced = "enablerxandtxwithenhancedaddressinformation";
@@ -1011,8 +999,8 @@ async fn test_communication_control() {
 
     let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(
-        current_state.value.as_ref().map(|s| s.to_lowercase()),
-        Some(enable_rx_and_tx_with_enhanced.to_owned())
+        current_state.value.to_lowercase(),
+        enable_rx_and_tx_with_enhanced
     );
 
     // VendorSpecific (custom TemporalSync 0x88)
@@ -1037,10 +1025,7 @@ async fn test_communication_control() {
     assert_eq!(result.value, "TemporalSync");
 
     let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
-    assert_eq!(
-        current_state.value.as_ref().map(|s| s.to_lowercase()),
-        Some(temporal_sync.to_owned())
-    );
+    assert_eq!(current_state.value.to_lowercase(), temporal_sync);
 
     // Validate that ECU sim received and stored the temporalEraId
     let ecu_state = ecusim::get_ecu_state(&test_env.ecu_sim, ECU_FLXC1000)
@@ -1182,10 +1167,7 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
 
     // Also verify through CDA API
     let session_result_after = session(&test_env, ecu_endpoint).await.unwrap();
-    assert_eq!(
-        session_result_after.value.map(|s| s.to_lowercase()),
-        Some("default".to_owned())
-    );
+    assert_eq!(session_result_after.value.to_lowercase(), "default");
 
     // Delete the lock
     lock_operation(
