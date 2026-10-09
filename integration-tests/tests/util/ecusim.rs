@@ -87,7 +87,7 @@ pub(crate) enum DtcSettingType {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(
+#[expect(
     dead_code,
     reason = "Struct fields deserialized from ECU simulator JSON. Not all fields consumed by tests"
 )]
@@ -100,7 +100,7 @@ pub(crate) struct DataBlockDto {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(
+#[expect(
     dead_code,
     reason = "Struct fields deserialized from ECU simulator JSON. Not all fields consumed by tests"
 )]
@@ -122,7 +122,7 @@ pub(crate) struct EcuState {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(
+#[expect(
     dead_code,
     reason = "Struct fields deserialized from ECU simulator JSON. Not all fields consumed by tests"
 )]
@@ -134,7 +134,7 @@ pub(crate) struct DtcMinimal {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(
+#[expect(
     dead_code,
     reason = "Struct fields deserialized from ECU simulator JSON. Not all fields consumed by tests"
 )]
@@ -145,7 +145,7 @@ pub(crate) struct ExtDataRecord {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(
+#[expect(
     dead_code,
     reason = "Struct fields deserialized from ECU simulator JSON. Not all fields consumed by tests"
 )]
@@ -156,7 +156,7 @@ pub(crate) struct SnapshotData {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(
+#[expect(
     dead_code,
     reason = "Struct fields deserialized from ECU simulator JSON. Not all fields consumed by tests"
 )]
@@ -167,7 +167,7 @@ pub(crate) struct SnapshotRecord {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(
+#[expect(
     dead_code,
     reason = "Struct fields deserialized from ECU simulator JSON. Not all fields consumed by tests"
 )]
@@ -181,7 +181,7 @@ pub(crate) struct DtcExtended {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", transparent)]
-#[allow(
+#[expect(
     dead_code,
     reason = "Struct fields deserialized from ECU simulator JSON. Not all fields consumed by tests"
 )]

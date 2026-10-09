@@ -560,7 +560,7 @@ async fn create_tls_stream(
 
 // Allow building CDA without TLS support
 #[cfg(all(not(feature = "openssl"), not(feature = "mbedtls")))]
-#[allow(
+#[expect(
     clippy::unused_async,
     reason = "async matches the signature of the TLS-enabled variant"
 )]
@@ -573,7 +573,7 @@ async fn create_tls_stream(
     ))
 }
 
-#[allow(
+#[expect(
     clippy::used_underscore_binding,
     reason = "Variables are unused in the function but required as named tracing fields"
 )]

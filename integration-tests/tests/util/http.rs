@@ -22,13 +22,13 @@ use crate::util::TestingError;
 
 #[derive(Debug)]
 pub(crate) struct Response {
-    #[allow(
+    #[expect(
         dead_code,
         reason = "Status captured for debugging. Not all tests assert on it"
     )]
     status: StatusCode,
     body: Option<String>,
-    #[allow(
+    #[expect(
         dead_code,
         reason = "Headers captured for debugging. Not all tests assert on them"
     )]

@@ -232,7 +232,7 @@ async fn handle_connection_error(
     }
 }
 
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "Contains receiver loop that should remain in scope"
 )]

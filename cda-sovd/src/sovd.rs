@@ -820,7 +820,7 @@ async fn components_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + '
     router.with_state(state)
 }
 
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "Route creation kept together for structural clarity"
 )]
@@ -1218,7 +1218,7 @@ pub(crate) use create_response_schema;
 #[macro_export]
 macro_rules! create_schema {
     ($type_:ty) => {{
-        #[allow(
+        #[expect(
             unused_imports,
             reason = "Import may already be in scope at the macro call site"
         )]

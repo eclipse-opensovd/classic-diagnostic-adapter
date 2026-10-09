@@ -112,7 +112,7 @@ pub mod comparams {
             use super::{Capability, ComParamValue, Deserialize, HashMap, Serialize, Status};
             // todo: which ones are optional or not
             #[derive(Deserialize)]
-            #[allow(
+            #[expect(
                 dead_code,
                 reason = "Request fields not all consumed yet. Struct kept for future use"
             )]

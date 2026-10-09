@@ -35,7 +35,7 @@ struct PendingEcuInfo {
 
 impl<S: EcuGateway, T: UdsEcuDb + PayloadDecoder> UdsManager<S, T> {
     /// Send a functional request to a single gateway and collect responses from all expected ECUs
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "Combining parameters into a struct is not preferred here, to keep call \
                   semantics consistent across all send functions"

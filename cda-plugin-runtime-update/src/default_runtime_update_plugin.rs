@@ -78,7 +78,7 @@ impl<
     ///   communication state, subject to `init_mode`
     /// * `update_retry_after` - Retry-After duration while an update owns protection
     /// * `post_update_mode` - Communication state to restore after an update
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "Constructor requires many dependencies for plugin initialization, adding a \
                   struct of this is pointless, as it is only used once."

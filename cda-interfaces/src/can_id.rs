@@ -68,7 +68,7 @@ impl TryFrom<u32> for CanId {
 
     fn try_from(id: u32) -> Result<Self, Self::Error> {
         if id <= 0x7FF {
-            #[allow(
+            #[expect(
                 clippy::cast_possible_truncation,
                 reason = "the range check makes the cast lossless"
             )]

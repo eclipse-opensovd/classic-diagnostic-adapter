@@ -190,7 +190,7 @@ impl RawCodedConstParam {
 impl DiagService<'_> {
     #[must_use]
     pub fn request_id(&self) -> Option<u8> {
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             reason = "SID is 1 byte per ISO 14229-1. Truncation is correct by spec"
         )]

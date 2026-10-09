@@ -331,7 +331,7 @@ pub mod x {
                     #[derive(Serialize, Debug, Clone, PartialEq)]
                     #[serde(rename_all = "lowercase")]
                     #[derive(schemars::JsonSchema)]
-                    #[allow(
+                    #[expect(
                         dead_code,
                         reason = "Not all variants are used yet. Kept to match CDA internal types \
                                   and future SOVD server use"
@@ -449,7 +449,7 @@ pub mod x {
             pub schema: Option<schemars::Schema>,
         }
 
-        #[allow(
+        #[expect(
             clippy::ref_option,
             reason = "Option<&LongName> not compatible with serde Serialize derive"
         )]

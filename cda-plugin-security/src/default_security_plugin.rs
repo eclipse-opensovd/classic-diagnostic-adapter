@@ -67,7 +67,7 @@ use crate::{
     SecurityPlugin, SecurityPluginInitializer, SecurityPluginLoader,
 };
 
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "Return type must match the feature-enabled auth variant signature"
 )]
@@ -344,7 +344,7 @@ pub struct AuthPayload {
     /// Client identifier for authentication
     client_id: String,
     /// Client secret for authentication
-    #[allow(
+    #[expect(
         unused,
         reason = "client_secret is only used when the auth feature is enabled"
     )]

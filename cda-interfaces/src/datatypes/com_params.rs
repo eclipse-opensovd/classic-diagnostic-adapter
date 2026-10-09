@@ -658,7 +658,7 @@ impl DeserializableCompParam for u16 {
     }
 }
 
-#[allow(
+#[expect(
     clippy::implicit_hasher,
     reason = "type alias does not allow specifying hasher, we set the hasher globally."
 )]
@@ -727,11 +727,11 @@ impl DeserializableCompParam for Duration {
             .unwrap_or(0.000_001);
         // base unit would be seconds, but internally use microseconds for better precision
         let result = std::panic::catch_unwind(|| {
-            #[allow(
+            #[expect(
                 clippy::cast_possible_truncation,
                 reason = "Value range validated above"
             )]
-            #[allow(
+            #[expect(
                 clippy::cast_sign_loss,
                 reason = "Value is checked to be positive above"
             )]

@@ -175,7 +175,7 @@ fn remove_stale_unix_socket(socket_path: &str) -> Result<(), DoipGatewaySetupErr
 ///
 /// # Errors
 /// Returns `Err` if routes cannot be added to the dynamic router.
-#[allow(
+#[expect(
     clippy::implicit_hasher,
     reason = "Type alias doesn't allow specifying hasher"
 )]
@@ -203,7 +203,7 @@ where
     Ok(handle)
 }
 
-#[allow(
+#[expect(
     clippy::implicit_hasher,
     reason = "Type alias doesn't allow specifying hasher"
 )]

@@ -195,7 +195,7 @@ fn out_dir() -> Result<String, std::io::Error> {
     Ok(out_dir)
 }
 
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "Return type must be Result to satisfy feature-gated code paths"
 )]

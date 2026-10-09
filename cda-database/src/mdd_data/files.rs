@@ -44,7 +44,7 @@ impl FileManager {
     #[must_use]
     pub fn new(mdd_path: String, files: Vec<Chunk>) -> Self {
         let mdd_name = mdd_path.split('/').next_back().unwrap_or("mdd").to_string();
-        #[allow(
+        #[expect(
             unknown_lints,
             clippy::duration_suboptimal_units,
             reason = "Literal duration value is intentional. Duration_suboptimal_units not \

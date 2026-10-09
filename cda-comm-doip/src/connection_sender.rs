@@ -448,7 +448,7 @@ mod tests {
         let mut harness = GatewaySenderTestHarness::new(Duration::ZERO);
 
         // Advance a very long time - alive check should never fire.
-        #[allow(
+        #[expect(
             unknown_lints,
             clippy::duration_suboptimal_units,
             reason = "Literal duration value chosen for test clarity; suboptimal units lint not \

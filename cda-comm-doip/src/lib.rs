@@ -884,7 +884,7 @@ impl<T: EcuAddresses + DoipComParams> TransportProbe for DoipDiagGateway<T> {
 }
 /// Waits for the `DoIP` diagnostic-message acknowledgement from the gateway,
 /// with a deadline of `timeout`.
-#[allow(
+#[expect(
     clippy::needless_continue,
     reason = "Explicit continue improves readability of wait logic"
 )]
@@ -1115,7 +1115,7 @@ fn diagnostic_response_to_transport(
     }
 }
 
-#[allow(
+#[expect(
     clippy::needless_continue,
     reason = "Explicit continue improves readability of complex loop logic"
 )]

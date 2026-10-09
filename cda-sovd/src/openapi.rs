@@ -132,7 +132,7 @@ pub(crate) mod aide_helper {
 
             impl $struct_name {
             $(
-                #[allow(dead_code)]
+                #[expect(dead_code)]
                 pub(crate) fn $value_name(&self) -> &$type {
                     &self.$value_name
                 }

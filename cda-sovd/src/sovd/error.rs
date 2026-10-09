@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use serde_qs::axum::QsQueryRejection;
 use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
 
-#[allow(
+#[expect(
     dead_code,
     reason = "Not all ApiError variants are used in all configurations"
 )]

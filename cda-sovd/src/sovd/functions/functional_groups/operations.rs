@@ -390,11 +390,11 @@ pub(crate) mod diag_service {
         }
     }
 
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "Axum extractors cannot be combined without a new custom extractor"
     )]
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "Keeping execution reservation, UDS Start, and reservation rollback together \
                   makes cleanup on every failure path visible. Splitting the transaction would \
@@ -601,7 +601,7 @@ pub(crate) mod diag_service {
         .with(openapi::error_bad_gateway)
     }
 
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "Keeping execution guarding, UDS Stop, and execution-state cleanup together \
                   makes cleanup on every response path visible. Splitting the flow would obscure \
