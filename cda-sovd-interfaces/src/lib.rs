@@ -67,7 +67,8 @@ pub struct ResourceResponse {
 #[derive(Serialize, Debug, schemars::JsonSchema)]
 pub struct ObjectDataItem<T> {
     pub id: String,
-    pub data: serde_json::Map<String, serde_json::Value>,
+    /// Spec Table 85: `AnyValue`, so scalars and arrays are valid as well as objects.
+    pub data: serde_json::Value,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<DataError<T>>,
     #[schemars(skip)]
