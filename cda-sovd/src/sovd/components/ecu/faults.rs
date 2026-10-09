@@ -210,7 +210,7 @@ pub(crate) mod id {
     use super::*;
     use crate::sovd::{
         IntoSovdWithSchema, components::IdPathParam, error::VendorErrorCode,
-        remove_descriptions_recursive,
+        field_parse_errors_to_json, remove_descriptions_recursive,
     };
 
     impl IntoSovd for datatypes::DtcSnapshot {
@@ -223,69 +223,73 @@ pub(crate) mod id {
         }
     }
 
-    impl IntoSovd for datatypes::ExtendedDataRecords {
-        type SovdType = ExtendedDataRecords<VendorErrorCode>;
+    const EXTENDED_DATA_ERROR_PATH: &str = "environment_data/extended_data_records/data";
+    const SNAPSHOT_ERROR_PATH: &str = "environment_data/snapshots/data";
 
-        fn into_sovd(self) -> Self::SovdType {
-            Self::SovdType {
-                data: self.data,
-                errors: self.errors.map(|v| {
-                    v.into_iter()
-                        .map(crate::sovd::IntoSovd::into_sovd)
-                        .collect()
-                }),
-            }
-        }
-    }
-
-    impl IntoSovd for datatypes::ExtendedSnapshots {
-        type SovdType = ExtendedSnapshots<VendorErrorCode>;
-
-        fn into_sovd(self) -> Self::SovdType {
-            Self::SovdType {
-                data: self
+    /// Splits the environment data from its parse errors, so the errors can be
+    /// reported in the top-level `errors` list of the fault response.
+    fn environment_data_into_sovd(
+        extended_data_records: Option<datatypes::ExtendedDataRecords>,
+        snapshots: Option<datatypes::ExtendedSnapshots>,
+    ) -> (Option<EnvironmentData>, Vec<DataError<VendorErrorCode>>) {
+        let mut errors = Vec::new();
+        let extended_data_records = extended_data_records.map(|records| {
+            errors.extend(field_parse_errors_to_json(
+                records.errors.unwrap_or_default(),
+                EXTENDED_DATA_ERROR_PATH,
+            ));
+            ExtendedDataRecords { data: records.data }
+        });
+        let snapshots = snapshots.map(|snapshots| {
+            errors.extend(field_parse_errors_to_json(
+                snapshots.errors.unwrap_or_default(),
+                SNAPSHOT_ERROR_PATH,
+            ));
+            ExtendedSnapshots {
+                data: snapshots
                     .data
                     .map(|d| d.into_iter().map(|(k, v)| (k, v.into_sovd())).collect()),
-                errors: self.errors.map(|v| {
-                    v.into_iter()
-                        .map(crate::sovd::IntoSovd::into_sovd)
-                        .collect()
-                }),
             }
-        }
+        });
+        let environment_data =
+            (extended_data_records.is_some() || snapshots.is_some()).then_some(EnvironmentData {
+                extended_data_records,
+                snapshots,
+            });
+        (environment_data, errors)
     }
 
     impl IntoSovdWithSchema for datatypes::DtcExtendedInfo {
         type SovdType = ExtendedFault<VendorErrorCode>;
 
         fn into_sovd_with_schema(self, include_schema: bool) -> Result<Self::SovdType, ApiError> {
+            let datatypes::DtcExtendedInfo {
+                record_and_status,
+                extended_data_records,
+                extended_data_records_schema,
+                snapshots,
+                snapshots_schema,
+            } = self;
+            let item = record_and_status.into_sovd();
+            let (environment_data, errors) =
+                environment_data_into_sovd(extended_data_records, snapshots);
             let t = Self::SovdType {
+                item,
+                environment_data,
+                errors,
                 // Build the schema manually because the DTC content is dynamic and
                 // purely defined by the database.
                 // Deriving the types from schemars would not work here.
-                item: self.record_and_status.into_sovd(),
-                environment_data: if self.snapshots.is_some()
-                    || self.extended_data_records.is_some()
-                {
-                    Some(EnvironmentData {
-                        snapshots: self.snapshots.map(crate::sovd::IntoSovd::into_sovd),
-                        extended_data_records: self
-                            .extended_data_records
-                            .map(crate::sovd::IntoSovd::into_sovd),
-                    })
-                } else {
-                    None
-                },
                 schema: if include_schema {
                     let fault_schema = create_schema!(Fault).to_value();
 
-                    let snapshot_schema = self.snapshots_schema.ok_or_else(|| {
+                    let snapshot_schema = snapshots_schema.ok_or_else(|| {
                         ApiError::InternalServerError(Some(
                             "Failed to extract snapshot schema".to_string(),
                         ))
                     })?;
 
-                    let extended_schema = self.extended_data_records_schema.ok_or_else(|| {
+                    let extended_schema = extended_data_records_schema.ok_or_else(|| {
                         ApiError::InternalServerError(Some(
                             "Failed to extract extended schema".to_string(),
                         ))
@@ -298,15 +302,15 @@ pub(crate) mod id {
                             serde_json::json!({
                                 "snapshots": {
                                     "data": snapshot_schema,
-                                    "errors": create_schema!(
-                                        Option<Vec<DataError<VendorErrorCode>>>).to_value()
                                 },
                                 "extended_data_records": {
                                     "data": extended_schema,
-                                    "errors": create_schema!(
-                                        Option<Vec<DataError<VendorErrorCode>>>).to_value()
                                 }
                             }),
+                        ),
+                        (
+                            "errors",
+                            create_schema!(Vec<DataError<VendorErrorCode>>).to_value(),
                         ),
                     ];
 
