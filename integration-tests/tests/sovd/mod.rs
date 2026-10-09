@@ -42,6 +42,7 @@ mod operations;
 mod read_only_partition;
 mod runtimefiles;
 mod tester_present;
+mod topology_persistence;
 mod version_endpoint;
 
 pub(crate) const ECU_FLXC1000_ENDPOINT: &str = "components/flxc1000";
