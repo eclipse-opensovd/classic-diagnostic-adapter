@@ -151,7 +151,7 @@ Paths
          -
        * - 29
          - /modes/authentication
-         -
+         - see :need:`req~sovd-api-authentication-modes`
        * - 31
          - /operations/{routine-identifier}
          -
@@ -169,7 +169,8 @@ Paths
          - /modes/dtcsetting
          -
 
-    NOTE: The mapping in ISO standard is inconsistent w.r.t. ``/modes/security`` and ``/modes/authentication``
+    NOTE: The mapping in ISO standard is inconsistent w.r.t. ``/modes/security`` and ``/modes/authentication``.
+    The CDA maps SID 27\ :sub:`16` and 29\ :sub:`16` to separate modes, see :doc:`/04_adr/07_uds_authentication_mode`.
 
     **Query Parameters**
 
@@ -1149,6 +1150,52 @@ MDD Embedded files
     **Rationale**
 
     Some data required for communication with ECUs might be embedded in the mdd file. To allow clients to retrieve this data, it must be made available through the API.
+
+Authentication (UDS 29\ :sub:`16`)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. req:: Authentication Mode
+    :id: req~sovd-api-authentication-modes
+    :links: arch~sovd-api-authentication-modes
+    :status: draft
+
+    .. note::
+       Not yet implemented.
+
+    The CDA must provide the UDS service Authentication (SID 29\ :sub:`16`, ISO 14229-1 clause
+    10.6) for components via ``/modes/authentication``, separately from ``/modes/security``
+    (SID 27\ :sub:`16`).
+
+    The following must apply:
+
+    * Each ``PUT`` request results in exactly one UDS Authentication request. Multi-step
+      procedures (authentication with PKI certificate exchange, challenge-response
+      authentication) are orchestrated by the client (client-driven option of ISO 17978-3
+      §8.3.3).
+    * The CDA does not hold, generate or validate private keys, certificates, challenges or
+      proofs of ownership. They are passed through as request and response parameters.
+    * All sub-functions of ISO 14229-1 Table 74 must be supported, if the corresponding
+      service is described in the diagnostic database.
+    * A ``PUT`` request is a write operation and is subject to the lock rules, see
+      :need:`req~sovd-api-lock-ecu-enforcement` and :need:`req~sovd-api-lock-requirement-policy`.
+    * The CDA must track the last authentication state confirmed by the ECU per ECU, and
+      report it via ``GET /modes/authentication``. If the ECU cannot be reached, ``offline``
+      must be reported instead.
+    * A ``PUT`` request may contain an optional ``mode_expiration`` in seconds. When it elapses,
+      the CDA must send deAuthenticate. A ``mode_expiration`` together with deAuthenticate must
+      be rejected.
+    * If the ECU is in an authenticated state, the CDA must send deAuthenticate when the lock
+      that was used for authentication is released or expires, and during ECU cleanup.
+    * Negative responses of the ECU (including NRC 34\ :sub:`16` and
+      50\ :sub:`16` -- 5D\ :sub:`16`) must be reported to the client, including the NRC.
+    * The endpoint is not provided for functional groups.
+
+    **Rationale**
+
+    The authenticated state of an ECU is independent of the diagnostic session and the
+    security access level (ISO 14229-1 clause 10.6.4), so it needs its own mode. Keeping the
+    credentials in the client avoids secret handling in the CDA. Deauthenticating on lock
+    release prevents a following client from inheriting the authenticated state.
 
 Security
 ^^^^^^^^

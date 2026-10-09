@@ -850,18 +850,185 @@ Authentication -- SID 29\ :sub:`16`
 
 .. arch:: Authentication Endpoints
     :id: arch~sovd-api-authentication-modes
+    :links: req~sovd-api-authentication-modes
     :status: draft
 
     .. note::
-       This is technically a deviation from Table 343 in the ISO API. The table in the ISO is misleading, since 8.3.2 and 8.3.3 describe them separately.
+       Not yet implemented.
 
-    The endpoints are available under ``/modes/authentication``. A ``PUT`` call needs to provide a request body containing
-    ``value`` with the desired subfunction (names are determined by the UDS standard), and a ``parameters`` field containing all request parameters.
+    .. note::
+       This is technically a deviation from Table 343 in the ISO API. The table in the ISO is misleading, since 8.3.2
+       and 8.3.3 describe them separately. See :doc:`/04_adr/07_uds_authentication_mode`.
 
-    Diagnostic data descriptions have to specify the used services including the subfunction individually, so the
-    request parameters can be converted into UDS payloads.
+    The endpoints are available under ``/components/{ecu-name}/modes/authentication``. They are not provided
+    for functional groups, since authentication procedures are ECU specific. ``GET /modes`` lists the mode
+    ``authentication`` if the diagnostic database of the ECU contains at least one SID 29\ :sub:`16` service.
+
+    The CDA follows the client-driven approach of ISO 17978-3 §8.3.3: every ``PUT`` is translated into exactly
+    one UDS Authentication request. The client orchestrates multi-step procedures and provides all certificates,
+    challenges and proofs of ownership. The CDA does not store or validate any credentials.
+
+    **GET**
+
+    Returns the authentication state of the ECU as tracked by the CDA:
+
+    .. code-block:: json
+
+       {
+         "id": "authentication",
+         "value": "authenticated",
+         "x-sovd2uds-last-subfunction": "verifyProofOfOwnershipBidirectional",
+         "x-sovd2uds-expires-at": "2026-10-09T12:00:00Z"
+       }
+
+    ``value`` is one of:
+
+    * ``authenticated`` -- the ECU confirmed the authentication.
+    * ``deAuthenticated`` -- the ECU is not authenticated.
+    * ``offline`` -- the ECU cannot be reached.
+
+    ``x-sovd2uds-last-subfunction`` is the last sub-function that resulted in a positive response and is omitted
+    if there was none. ``x-sovd2uds-expires-at`` (ISO 8601 string) is the point in time at which the
+    ``mode_expiration`` elapses and is only present while an expiration is running.
+
+    **PUT**
+
+    The request body contains ``value`` with the sub-function name, an optional ``mode_expiration`` and
+    ``parameters`` with the request parameters:
+
+    .. code-block:: json
+
+       {
+         "value": "verifyProofOfOwnershipBidirectional",
+         "mode_expiration": 3600,
+         "parameters": {
+           "<request parameter short name>": "<value>"
+         }
+       }
+
+    The response body contains ``id``, ``value`` and the decoded response parameters in ``parameters``:
+
+    .. code-block:: json
+
+       {
+         "id": "authentication",
+         "value": "verifyProofOfOwnershipBidirectional",
+         "parameters": {
+           "<response parameter short name>": "<value>"
+         }
+       }
+
+    .. list-table:: Sub-function names (ISO 14229-1 Table 74)
+       :header-rows: 1
+
+       * - ``value``
+         - Sub-function
+         - Procedure
+       * - ``deAuthenticate``
+         - 00\ :sub:`16`
+         - common
+       * - ``verifyCertificateUnidirectional``
+         - 01\ :sub:`16`
+         - PKI certificate exchange
+       * - ``verifyCertificateBidirectional``
+         - 02\ :sub:`16`
+         - PKI certificate exchange
+       * - ``proofOfOwnership``
+         - 03\ :sub:`16`
+         - PKI certificate exchange
+       * - ``transmitCertificate``
+         - 04\ :sub:`16`
+         - PKI certificate exchange
+       * - ``requestChallengeForAuthentication``
+         - 05\ :sub:`16`
+         - challenge-response
+       * - ``verifyProofOfOwnershipUnidirectional``
+         - 06\ :sub:`16`
+         - challenge-response
+       * - ``verifyProofOfOwnershipBidirectional``
+         - 07\ :sub:`16`
+         - challenge-response
+       * - ``authenticationConfiguration``
+         - 08\ :sub:`16`
+         - common
+
+    Names are matched case-insensitively. Unknown names are rejected with HTTP 400.
+
+    **Service resolution**
+
+    The CDA maps the ``value`` to its sub-function byte and selects the SID 29\ :sub:`16` service of the ECU
+    variant whose request contains this sub-function as coded constant. The short name of the service is not
+    evaluated, so no naming convention is required in the diagnostic description. If no matching service
+    exists, the request is rejected with HTTP 404.
+
+    Diagnostic descriptions have to specify each used sub-function as an individual service, so the request
+    parameters can be converted into UDS payloads.
+
+    **Parameters**
+
+    * Keys in ``parameters`` are the short names of the request parameters in the diagnostic description.
+    * Byte fields (certificates, challenges, proofs of ownership, session keys) use the same representation
+      as other raw byte parameters of the SOVD API.
+    * Length fields are calculated by the CDA where the diagnostic description defines them as length keys.
+    * The suppressPosRspMsgIndicationBit is never set, since the CDA needs the response to track the state.
+
+    **Mode expiration**
+
+    The field ``mode_expiration`` is optional. If set, it determines the time in seconds that the authentication
+    should be active, as for the session mode (:need:`arch~sovd-api-session-management`):
+
+    * The expiration starts when the request switches the tracked state to ``authenticated``. For requests that
+      do not switch the state to ``authenticated``, the field has no effect.
+    * Requests with ``value`` ``deAuthenticate`` and a ``mode_expiration`` are rejected with HTTP 400.
+    * When the expiration elapses, the CDA sends ``deAuthenticate`` and sets the tracked state to
+      ``deAuthenticated``. A negative or missing response is logged as warning, and the state is reset anyway.
+    * A running expiration is cancelled by ``deAuthenticate``, lock release or expiry, ECU cleanup, and loss of
+      the connection to the ECU.
+    * A following successful authentication without ``mode_expiration`` cancels a running expiration, with
+      ``mode_expiration`` it restarts it.
+
+    **State tracking**
+
+    The CDA tracks the authentication state per ECU:
+
+    * It is set to ``authenticated`` after a positive response whose ``authenticationReturnParameter``
+      signals that authentication was completed (e.g. ``proofOfOwnership``,
+      ``verifyProofOfOwnershipUnidirectional``, ``verifyProofOfOwnershipBidirectional``, or
+      ``verifyCertificate*`` when no proof of ownership is needed).
+    * It is set to ``deAuthenticated`` after a positive response to ``deAuthenticate``, an ECU reset, a loss of
+      the connection to the ECU, or a negative response to an authentication step.
+
+    While the ECU cannot be reached, ``GET`` reports ``offline``.
+
+    The ECU internal authentication timeout is restarted by every request on the same diagnostic channel,
+    including tester present (ISO 14229-1 clause 10.6.4). The CDA does not track this ECU internal timeout,
+    it is independent of ``mode_expiration``. The tracked state is informational. The ECU remains the authority.
+
+    **Locks and cleanup**
+
+    ``PUT`` is a write operation and requires the lock of the ECU, see :need:`arch~sovd-api-lock-api`.
+    If the tracked state is ``authenticated``, the CDA sends ``deAuthenticate`` before the session and security
+    access are reset when:
+
+    * the lock is released or expires (:need:`arch~sovd-api-lock-expiration`),
+    * the ECU is cleaned up.
+
+    A failed ``deAuthenticate`` is logged and does not prevent the remaining cleanup.
+
+    **Error handling**
+
+    * A negative response of the ECU is returned as HTTP 502 with the NRC in the error parameters, like other
+      services. This includes NRC 34\ :sub:`16` (authenticationRequired) and the authentication specific
+      NRCs 50\ :sub:`16` -- 5D\ :sub:`16`.
+    * NRC 78\ :sub:`16` (responsePending) is handled as described in :need:`arch~uds-nrc-handling`,
+      which covers long running certificate verification.
+    * Lock violations are rejected according to the lock rules (HTTP 409 / 423).
 
     .. uml:: images/authentication.puml
+
+    .. uml:: images/authentication_challenge_response.puml
+
+    .. uml:: images/authentication_cleanup.puml
 
 
 Communication Control -- SID 28\ :sub:`16`

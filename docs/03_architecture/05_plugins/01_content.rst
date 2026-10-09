@@ -14,6 +14,11 @@ Overview
 
 The plugin system in the Classic Diagnostic Adapter (CDA) provides extensibility for vendor-specific functionality that cannot be standardized across all implementations. Plugins enable customization of security mechanisms, authentication flows, and other domain-specific requirements while maintaining the core diagnostic functionality.
 
+.. note::
+   "Authentication" in the context of plugins refers to authenticating SOVD clients on the HTTP level.
+   The UDS service Authentication (SID 29\ :sub:`16`) is handled by the CDA core, see
+   :need:`arch~sovd-api-authentication-modes`.
+
 The plugin architecture is designed around trait-based interfaces that allow runtime polymorphism and flexible configuration. This approach ensures that the CDA can adapt to different deployment environments and vendor requirements without requiring modifications to the core codebase.
 
 Security Plugin Architecture
