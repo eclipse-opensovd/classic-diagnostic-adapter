@@ -180,16 +180,18 @@ pub mod common {
             use crate::Items;
 
             /// Used in the GET `/components/ecu/{ecu_id|functional_group}/modes/{mode_id}` endpoint
+            ///
+            /// Spec Table 234: `name` and `translation_id` are optional, `value` is mandatory.
             #[derive(Serialize, Deserialize, schemars::JsonSchema)]
             pub struct Mode<T> {
                 /// The name of the mode, optional in accordance with sovd standard
+                #[serde(default, skip_serializing_if = "Option::is_none")]
                 pub name: Option<String>,
                 /// The translation ID for the name
-                #[serde(skip_serializing_if = "Option::is_none")]
+                #[serde(default, skip_serializing_if = "Option::is_none")]
                 pub translation_id: Option<String>,
                 /// The value of the mode.
-                #[serde(skip_serializing_if = "Option::is_none")]
-                pub value: Option<T>,
+                pub value: T,
                 /// The schema of the mode resource.
                 #[schemars(skip)]
                 #[serde(skip_serializing_if = "Option::is_none")]
