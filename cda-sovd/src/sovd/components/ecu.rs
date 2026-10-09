@@ -46,6 +46,7 @@ pub(crate) mod faults;
 pub(crate) mod genericservice;
 pub(crate) mod modes;
 pub(crate) mod operations;
+pub(crate) mod status;
 pub(crate) mod x_single_ecu_jobs;
 pub(crate) mod x_sovd2uds_bulk_data;
 pub(crate) mod x_sovd2uds_download;

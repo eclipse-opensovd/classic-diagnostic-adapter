@@ -162,6 +162,12 @@ Entities
       previous session). It is formatted as RFC 3339 in UTC with second precision and omitted if the ECU was never contacted.
     - URI references to the standardized resource collection endpoints: data, operations, configurations, faults, modes, locks, bulk-data, and extension endpoints
 
+    **GET /components/{ecu-name}/status**
+
+    Returns the entity status (ISO 17978-3 §7.19.2): ``status`` is ``ready`` while the ECU is reachable and
+    ``notReady`` otherwise, ``restart`` references the restart resource if the ECU supports ECUReset, and
+    ``x-sovd2uds-state`` carries the connectivity state below.
+
     The connectivity state of an ECU reflects its current diagnostic reachability and variant detection status:
 
     .. list-table:: ECU connectivity states
@@ -603,6 +609,7 @@ Operations
 
 .. arch:: Synchronous and Asynchronous Operations
     :id: arch~sovd-api-operations-handling
+    :links: dimpl~sovd-api-ecu-restart
     :status: draft
 
     Operations in the CDA are Routines (31\ :sub:`16`), Reset (11\ :sub:`16`), and an extension to configure
@@ -610,8 +617,15 @@ Operations
 
     **Reset -- SID 11**\ :sub:`16`
 
-    For compatibility with SOVD version 1.0 and earlier, the operations ``/operations/ecureset`` and
-    ``/operations/reset`` to reset an ECU must be supported.
+    An ECU is reset through ``PUT /status/restart`` (ISO 17978-3 §7.19.4, §8.7). The request body
+    ``{"parameters": {"ResetType": "<reset service>"}}`` selects one of the reset services of the ECU. The
+    CDA answers ``202 Accepted`` with a ``Location`` header pointing at ``/status``, ``400`` for an unknown
+    reset type, and ``409`` with the error code ``preconditions-not-fulfilled`` when the ECU refuses the reset
+    with a negative response.
+
+    For compatibility with SOVD version 1.0 and earlier, the deprecated operations ``/operations/ecureset``
+    and ``/operations/reset`` to reset an ECU must be supported. They share the reset service resolution with
+    ``/status/restart``.
 
     **Routines -- SID 31**\ :sub:`16`
 
