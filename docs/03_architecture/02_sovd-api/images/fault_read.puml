@@ -20,7 +20,7 @@ participant ECU
 
 == List All Faults ==
 
-Client -> CDA : GET /components/{ecu}/faults\n?status[confirmedDtc]=true
+Client -> CDA : GET /components/{ecu}/faults\n?status[confirmedDTC]=true
 activate CDA
 
 CDA -> DIAG : read DTCs (status mask)

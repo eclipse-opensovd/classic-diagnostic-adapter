@@ -598,15 +598,18 @@ pub mod faults {
         pub status: Option<FaultStatus>,
     }
 
+    /// DTC status bits, keyed as in ISO 14229-1 Annex D.2.3 (ISO 17978-3 Table 61 Note).
     #[derive(Serialize, Deserialize, Debug, schemars::JsonSchema)]
+    #[serde(rename_all = "camelCase")]
     pub struct FaultStatus {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub test_failed: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub test_failed_this_operation_cycle: Option<bool>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        // `rename_all` would give `pendingDtc`; ISO 14229-1 spells the bit `pendingDTC`.
+        #[serde(rename = "pendingDTC", skip_serializing_if = "Option::is_none")]
         pub pending_dtc: Option<bool>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "confirmedDTC", skip_serializing_if = "Option::is_none")]
         pub confirmed_dtc: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub test_not_completed_since_last_clear: Option<bool>,
@@ -630,9 +633,9 @@ pub mod faults {
             /// Filters the elements based on a status, if the value ia a full match.
             /// To allow multiple values the parameter is repeated. (0..*), they are 'OR' combined.
             /// Currently supported  (case-insensitive) keys are:
-            /// * confirmedDtc
+            /// * confirmedDTC
             /// * mask
-            /// * pendingDtc
+            /// * pendingDTC
             /// * testFailed
             /// * testFailedSinceLastClear
             /// * testFailedThisOperationCycle
@@ -645,7 +648,7 @@ pub mod faults {
             ///
             /// Example:
             ///
-            /// `?status[confirmedDtc]=true&status[warningIndicatorRequested]=1`
+            /// `?status[confirmedDTC]=true&status[warningIndicatorRequested]=1`
             pub status: Option<HashMap<String, serde_json::Value>>,
             /// Filters the elements based on their severity
             pub severity: Option<u32>,

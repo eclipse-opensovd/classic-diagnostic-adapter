@@ -964,10 +964,10 @@ Faults -- SID 14\ :sub:`16` & 19\ :sub:`16`
     It can be used multiple times to combine different status flags. The values correspond to the DTC status bits
     defined in ISO 14229-1.
 
-    Available keys:
+    Available keys (matched case-insensitively), as spelled in ISO 14229-1 Annex D.2.3:
 
-    - confirmedDtc
-    - pendingDtc
+    - confirmedDTC
+    - pendingDTC
     - testFailed
     - testFailedSinceLastClear
     - testFailedThisOperationCycle
@@ -976,6 +976,9 @@ Faults -- SID 14\ :sub:`16` & 19\ :sub:`16`
     - warningIndicatorRequested
 
     All values are either boolean values (true/false), or a bit value (0/1).
+
+    The ``status`` object of a returned fault uses the same keys (ISO 17978-3 Table 61 Note), plus ``mask``
+    with the complete status byte as hex string.
 
     Additionally, a special key called ``mask`` is available, which takes a hexadecimal mask as a value
     to allow filtering by the complete status byte. Using other keys together with ``mask`` is not supported.
