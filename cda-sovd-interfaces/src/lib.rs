@@ -31,12 +31,15 @@ pub trait Payload {
     fn get_data_map(&self) -> HashMap<String, serde_json::Value>;
 }
 
+/// A sub-resource entry of a collection.
+/// Spec Table 43: `id` and `name` are mandatory, `translation_id` is optional.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct Resource {
     pub href: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
+    pub id: String,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translation_id: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Debug, schemars::JsonSchema)]
