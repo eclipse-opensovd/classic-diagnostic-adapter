@@ -1,0 +1,47 @@
+' SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+'
+' See the NOTICE file(s) distributed with this work for additional
+' information regarding copyright ownership.
+'
+' This program and the accompanying materials are made available under the
+' terms of the Apache License Version 2.0 which is available at
+' https://www.apache.org/licenses/LICENSE-2.0
+'
+' SPDX-License-Identifier: Apache-2.0
+
+
+@startuml
+title Authentication -- SID 29 -- client-driven challenge-response (bidirectional)
+
+participant Client
+participant CDA
+participant ECU
+
+Client -> CDA : PUT /components/{ecu}/locks
+CDA -> Client : lock acquired
+
+Client -> CDA : PUT /modes/authentication\n{ "value": "requestChallengeForAuthentication", "parameters": { ... } }
+CDA -> ECU : 29 05 {communicationConfiguration} {algorithmIndicator}
+ECU -> CDA : 69 05 {returnParameter} {algorithmIndicator} {challengeServer} ...
+CDA -> Client : HTTP 200 { "parameters": { "challengeServer": ..., ... } }
+
+Client -> Client : sign challengeServer,\ncreate challengeClient\n(keys stay in the client)
+
+Client -> CDA : PUT /modes/authentication\n{ "value": "verifyProofOfOwnershipBidirectional", "mode_expiration": 3600,\n"parameters": { proofOfOwnershipClient, challengeClient, ... } }
+CDA -> ECU : 29 07 {algorithmIndicator} {proofOfOwnershipClient} {challengeClient} ...
+ECU -> CDA : 69 07 {returnParameter} {proofOfOwnershipServer} ...
+CDA -> CDA : tracked state = authenticated
+note right of CDA : start mode_expiration timer (3600 s)
+CDA -> Client : HTTP 200 { "parameters": { "proofOfOwnershipServer": ..., ... } }
+
+Client -> Client : verify proofOfOwnershipServer
+
+== authenticated diagnostic requests ==
+
+Client -> CDA : PUT /modes/authentication\n{ "value": "deAuthenticate" }
+CDA -> ECU : 29 00
+ECU -> CDA : 69 00 {returnParameter}
+CDA -> CDA : tracked state = deAuthenticated,\ncancel mode_expiration timer
+CDA -> Client : HTTP 200
+
+@enduml
