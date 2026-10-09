@@ -76,6 +76,9 @@ impl StrictConfig {
 pub struct Configuration {
     /// SOVD HTTP server bind settings.
     pub server: ServerTransport,
+    /// SOVD API surface settings (served version segments).
+    #[serde(default)]
+    pub sovd_api: cda_sovd::api_config::SovdApiConfig,
     /// `DoIP` (Diagnostics over IP) transport layer settings.
     pub doip: DoipConfig,
     /// Optional CAN bus transport configuration.
@@ -280,6 +283,7 @@ impl Default for Configuration {
             database: DatabaseConfig::default(),
             flash_files_path: ".".to_owned(),
             server: ServerTransport::default(),
+            sovd_api: cda_sovd::api_config::SovdApiConfig::default(),
             #[cfg(feature = "health")]
             health: cda_health::config::HealthConfig::default(),
             doip: DoipConfig {
@@ -436,6 +440,7 @@ impl ConfigSanity for Configuration {
         self.validate_can_mappings()?;
         self.validate_transport_overrides()?;
         self.locks.validate_sanity()?;
+        self.sovd_api.validate_sanity()?;
         // Add more checks for Configuration fields here if needed
         Ok(())
     }

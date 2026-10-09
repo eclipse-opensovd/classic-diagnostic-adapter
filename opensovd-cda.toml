@@ -894,6 +894,13 @@
 # port = 20002
 # transport = "tcp"
 
+# SOVD API surface settings (served version segments).
+[sovd_api]
+# Version segments served in addition to `v15`, e.g. `["v1"]` makes
+# `/vehicle/v1/components` an alias of `/vehicle/v15/components`.
+# Each segment must have the form `v<number>`.
+# version_aliases = ["v1"]
+
 # Strict-mode validation flags.
 [strict]
 # Exit with an error if any key under `[ecu.<name>]` does not match a

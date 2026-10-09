@@ -285,6 +285,7 @@ fn base_test_config(
             port: cda_port,
             unix_socket: None,
         },
+        sovd_api: cda_sovd::api_config::SovdApiConfig::default(),
         doip: opensovd_cda_lib::config::configfile::DoipConfig {
             tester_address: host,
             enabled: false,

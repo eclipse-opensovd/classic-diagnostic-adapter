@@ -1332,6 +1332,13 @@ Version Endpoint
             ]
         }
 
+    **Version segments**
+
+    All SOVD routes are mounted under ``/vehicle/v15``. The ``[sovd_api] version_aliases`` setting (default
+    ``["v1"]``) names further version segments; a request on ``/vehicle/<alias>/...`` is served by the same
+    route as ``/vehicle/v15/...``. ``sovd_info`` contains one entry per served segment, ``v15`` first, each
+    with ``version`` ``1.1.0``.
+
     **Optional Vendor-Specific Endpoints: /data/version, /apps/sovd2uds/data/version**
 
     When enabled, these endpoints are registered as static data endpoints returning:

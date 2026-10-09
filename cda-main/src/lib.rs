@@ -503,9 +503,12 @@ async fn init_webserver(
     let clonable_shutdown_signal = shutdown_signal
         .unwrap_or_else(|| cda_interfaces::shutdown_signal(crate::shutdown_signal()));
 
-    let (dynamic_router, webserver_task) =
-        cda_sovd::launch_webserver(webserver_config.clone(), clonable_shutdown_signal.clone())
-            .await?;
+    let (dynamic_router, webserver_task) = cda_sovd::launch_webserver_with_api_config(
+        webserver_config.clone(),
+        &config.sovd_api,
+        clonable_shutdown_signal.clone(),
+    )
+    .await?;
 
     let mut webserver_state = ApplicationState {
         _tracing_guards: tracing_guards,
