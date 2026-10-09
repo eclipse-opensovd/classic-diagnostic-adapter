@@ -25,7 +25,9 @@ use cda_interfaces::{
     communication_control::{
         GatewayLifecycle, TransportControl, TransportState, error::CommControlError,
     },
-    dlt_ctx, pending_nrc_from_raw, uds_response_from_raw,
+    dlt_ctx, pending_nrc_from_raw,
+    topology::{DiscoveryPlan, KnownGateway, TopologyRuntime},
+    uds_response_from_raw,
     util::{self, tokio_ext},
 };
 use doip_definitions::{
@@ -49,6 +51,7 @@ mod connection_receiver;
 mod connection_sender;
 mod connections;
 mod ecu_connection;
+mod reconnect;
 pub mod socket;
 mod vir_vam;
 
@@ -125,22 +128,70 @@ pub(crate) struct DoipGatewayState<T: EcuAddresses + DoipComParams> {
     /// created at construction time, only when an authorized activation runs.
     pub(crate) socket: Arc<Mutex<Option<DoIPUdpSocket>>>,
     pub(crate) netmask: u32,
+    /// Discovery plan and connected gateways, shared with topology persistence.
+    pub(crate) topology: Arc<TopologyRuntime>,
+    /// Gateways that connect on their first use after a lazy start.
+    pub(crate) lazy: Arc<LazyGateways>,
+}
+
+/// Gateways not connected yet after a lazy start (`OnDemand` with a persisted
+/// topology): each connects on its first use.
+#[derive(Default)]
+pub(crate) struct LazyGateways {
+    /// Pending gateways by logical address. `None`: no usable persisted address,
+    /// searched by a broadcast on first use.
+    pending: Mutex<HashMap<u16, Option<DiscoveredGateway>>>,
+    /// Serializes the connect of one gateway between concurrent requests.
+    locks: Mutex<HashMap<u16, Arc<Mutex<()>>>>,
+    /// Set by a lazy start, cleared on stop.
+    context: Mutex<Option<LazyContext>>,
+}
+
+#[derive(Clone)]
+struct LazyContext {
+    transport_config: DoipTransportConfig,
+    connection_tasks: Arc<ConnectionTasks>,
+    cancel: CancellationToken,
+}
+
+impl LazyGateways {
+    /// Whether `logical_address` is a gateway waiting for its first use.
+    pub(crate) async fn is_pending(&self, logical_address: u16) -> bool {
+        self.pending.lock().await.contains_key(&logical_address)
+    }
+
+    /// Updates the address of a pending gateway from an announcement. Returns
+    /// `true` if the gateway is pending, so it must not be connected now.
+    pub(crate) async fn update_pending(&self, gateway: &DiscoveredGateway) -> bool {
+        match self.pending.lock().await.get_mut(&gateway.logical_address) {
+            Some(entry) => {
+                *entry = Some(gateway.clone());
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// Owns all connection tasks for one enabled lifecycle so they stop together.
-pub(crate) struct ConnectionTasks(Mutex<Vec<JoinHandle<()>>>);
+/// `None` once shut down: a task pushed afterwards is aborted right away.
+pub(crate) struct ConnectionTasks(Mutex<Option<Vec<JoinHandle<()>>>>);
 
 impl ConnectionTasks {
     fn new() -> Self {
-        Self(Mutex::new(Vec::new()))
+        Self(Mutex::new(Some(Vec::new())))
     }
 
     pub(crate) async fn push(&self, task: JoinHandle<()>) {
-        self.0.lock().await.push(task);
+        match self.0.lock().await.as_mut() {
+            Some(tasks) => tasks.push(task),
+            // E.g. a connect on first use racing with the transport stop.
+            None => task.abort(),
+        }
     }
 
     async fn shutdown(&self) {
-        let mut tasks = std::mem::take(&mut *self.0.lock().await);
+        let mut tasks = self.0.lock().await.take().unwrap_or_default();
         for task in &tasks {
             task.abort();
         }
@@ -167,7 +218,7 @@ impl Drop for ConnectionTasks {
     fn drop(&mut self) {
         // Best effort cleanup, we cannot await the tasks in
         // here. A user should call 'shutdown' instead of relying on this.
-        for task in self.0.get_mut().drain(..) {
+        for task in self.0.get_mut().take().unwrap_or_default() {
             tracing::warn!("DoIP connection tasks dropped without `shutdown`, aborting tasks");
             task.abort();
         }
@@ -182,6 +233,8 @@ impl<T: EcuAddresses + DoipComParams> Clone for DoipGatewayState<T> {
             ecus: Arc::clone(&self.ecus),
             socket: Arc::clone(&self.socket),
             netmask: self.netmask,
+            topology: Arc::clone(&self.topology),
+            lazy: Arc::clone(&self.lazy),
         }
     }
 }
@@ -242,12 +295,23 @@ impl DoipGatewayOperation {
 ///
 /// Contains the IP address, ECU name, and logical address obtained from a
 /// `VehicleIdentificationResponse` or `EntityStatusResponse` message.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct DiscoveredGateway {
     pub(crate) ip: String,
     pub(crate) ecu_name: String,
     pub(crate) logical_address: u16,
     pub(crate) doip_protocol_version: ProtocolVersion,
+}
+
+impl From<&DiscoveredGateway> for KnownGateway {
+    fn from(gateway: &DiscoveredGateway) -> Self {
+        Self {
+            name: gateway.ecu_name.clone(),
+            logical_address: gateway.logical_address,
+            network_address: Some(gateway.ip.clone()),
+            doip_protocol_version: Some(u8::from(gateway.doip_protocol_version)),
+        }
+    }
 }
 
 /// Transport-level settings shared across all `DoIP` gateway connections.
@@ -358,12 +422,23 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                 ecus,
                 socket: Arc::new(Mutex::new(None)),
                 netmask: create_netmask(&doip_config.tester_address, &doip_config.tester_subnet)?,
+                topology: TopologyRuntime::new(DiscoveryPlan::Broadcast),
+                lazy: Arc::new(LazyGateways::default()),
             },
             config: doip_config.clone(),
             variant_detection,
             connectivity_handler,
             lifecycle: Arc::new(GatewayLifecycle::new(TransportState::Disabled)),
         })
+    }
+
+    /// Shares `topology` with this gateway: its plan selects the discovery on the
+    /// next start, and connected gateways and the end of the initial discovery are
+    /// reported to it.
+    #[must_use]
+    pub fn with_topology_runtime(mut self, topology: Arc<TopologyRuntime>) -> Self {
+        self.state.topology = topology;
+        self
     }
 
     async fn start(
@@ -397,22 +472,341 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         operation.cancel = Some(cancel.clone());
         operation.connection_tasks = Some(Arc::clone(&connection_tasks));
 
-        // TODO(persistence-init-mode): Implement as described in req~dt-ecu-list-persistence
+        let discovery_generation = self.state.topology.begin_discovery();
+        // Consumed on every start, so a stale request cannot make a later start lazy.
+        let lazy_start = self.state.topology.take_lazy_start();
+
+        // Bound in every mode: the VAM listener started below receives on it.
         let socket = socket_guard.insert(create_udp_vir_socket(
             &config.tester_address,
             config.gateway_port,
         )?);
-        let gateways = vir_vam::get_vehicle_identification::<T, _>(
-            socket,
+        match self.state.topology.plan() {
+            DiscoveryPlan::Broadcast => {
+                let gateways = vir_vam::get_vehicle_identification::<T, _>(
+                    socket,
+                    mask,
+                    config.gateway_port,
+                    &self.state.ecus,
+                    shutdown.clone(),
+                )
+                .await
+                .map_err(|error| DoipGatewaySetupError::ResourceError(error.to_string()))?;
+                drop(socket_guard);
+
+                let initial_connections = self
+                    .spawn_initial_connections(gateways, &transport_config, &connection_tasks)
+                    .await;
+                let topology = Arc::clone(&self.state.topology);
+                spawn_connection_task(&connection_tasks, "doip-initial-discovery", async move {
+                    for (_, connection) in initial_connections {
+                        // An error means the task was aborted, which also ends it.
+                        let _ = connection.await;
+                    }
+                    topology.finish_discovery(discovery_generation, true);
+                })
+                .await;
+            }
+            DiscoveryPlan::Reconnect { known, search } => {
+                drop(socket_guard);
+                let db_gateways = self.db_gateways().await;
+                let plan = reconnect::plan_reconnect(&known, &search, &db_gateways, mask);
+                if lazy_start {
+                    self.start_lazy(plan, &transport_config, &connection_tasks, &cancel)
+                        .await;
+                    self.state
+                        .topology
+                        .finish_discovery(discovery_generation, false);
+                    return self
+                        .finish_start(
+                            operation,
+                            transport_config,
+                            mask,
+                            &connection_tasks,
+                            shutdown,
+                        )
+                        .await;
+                }
+                tracing::info!(
+                    unicast = plan.unicast.len(),
+                    broadcast = plan.broadcast_for.len(),
+                    "Reconnecting to persisted gateways without a full broadcast discovery"
+                );
+                let initial_connections = self
+                    .spawn_initial_connections(plan.unicast, &transport_config, &connection_tasks)
+                    .await;
+                let this = self.clone();
+                let tasks = Arc::clone(&connection_tasks);
+                let shutdown = shutdown.clone();
+                let fallback_transport = transport_config.clone();
+                spawn_connection_task(&connection_tasks, "doip-initial-reconnect", async move {
+                    this.finish_reconnect(
+                        discovery_generation,
+                        initial_connections,
+                        plan.broadcast_for,
+                        fallback_transport,
+                        &tasks,
+                        shutdown,
+                    )
+                    .await;
+                })
+                .await;
+            }
+        }
+
+        self.finish_start(
+            operation,
+            transport_config,
             mask,
-            config.gateway_port,
-            &self.state.ecus,
-            shutdown.clone(),
+            &connection_tasks,
+            shutdown,
         )
         .await
-        .map_err(|error| DoipGatewaySetupError::ResourceError(error.to_string()))?;
-        drop(socket_guard);
+    }
 
+    /// Starts the spontaneous VAM listener, unless `vam_handling_mode` disables it.
+    async fn finish_start<F>(
+        &self,
+        operation: &mut DoipGatewayOperation,
+        transport_config: DoipTransportConfig,
+        mask: u32,
+        connection_tasks: &Arc<ConnectionTasks>,
+        shutdown: futures::future::Shared<F>,
+    ) -> Result<(), DoipGatewaySetupError>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        if self.state.topology.listens_for_vams() {
+            let listener = vir_vam::listen_for_vams(
+                transport_config,
+                mask,
+                self.state.clone(),
+                Arc::clone(connection_tasks),
+                self.variant_detection.clone(),
+                Arc::clone(&self.connectivity_handler),
+                shutdown,
+            )
+            .await;
+            operation.vam_listener = Some(listener);
+        } else {
+            tracing::info!("Spontaneous VAM listener not started (vam_handling_mode)");
+        }
+        Ok(())
+    }
+
+    /// Registers the persisted gateways as pending instead of connecting them.
+    async fn start_lazy(
+        &self,
+        plan: reconnect::ReconnectPlan,
+        transport_config: &DoipTransportConfig,
+        connection_tasks: &Arc<ConnectionTasks>,
+        cancel: &CancellationToken,
+    ) {
+        let mut pending: HashMap<u16, Option<DiscoveredGateway>> = HashMap::new();
+        for gateway in plan.unicast {
+            pending.insert(gateway.logical_address, Some(gateway));
+        }
+        for logical_address in plan.broadcast_for {
+            pending.entry(logical_address).or_insert(None);
+        }
+        tracing::info!(
+            gateways = pending.len(),
+            "Lazy start: each persisted gateway connects on its first request"
+        );
+        *self.state.lazy.pending.lock().await = pending;
+        *self.state.lazy.context.lock().await = Some(LazyContext {
+            transport_config: transport_config.clone(),
+            connection_tasks: Arc::clone(connection_tasks),
+            cancel: cancel.clone(),
+        });
+    }
+
+    /// Connects a pending gateway on its first use. Concurrent callers for the
+    /// same gateway wait for one connect. Returns `true` if it is connected.
+    /// [[ dimpl~doip-lazy-gateway-connect, Connect a persisted gateway on its first request, dimpl ]]
+    async fn connect_pending(&self, logical_address: u16) -> bool {
+        let lock = Arc::clone(
+            self.state
+                .lazy
+                .locks
+                .lock()
+                .await
+                .entry(logical_address)
+                .or_default(),
+        );
+        let _connecting = lock.lock().await;
+        if self
+            .state
+            .logical_address_to_connection
+            .read()
+            .await
+            .contains_key(&logical_address)
+        {
+            return true;
+        }
+        // Stays pending while connecting, so an announcement of this gateway does
+        // not open a second connection (see `LazyGateways::update_pending`).
+        let Some(entry) = self
+            .state
+            .lazy
+            .pending
+            .lock()
+            .await
+            .get(&logical_address)
+            .cloned()
+        else {
+            return false;
+        };
+        let Some(context) = self.state.lazy.context.lock().await.clone() else {
+            return false;
+        };
+        if context.cancel.is_cancelled() {
+            return false;
+        }
+        tracing::info!(
+            logical_address = %format!("{logical_address:#06x}"),
+            "Connecting persisted gateway on first request"
+        );
+
+        let mut connected = false;
+        if let Some(gateway) = entry {
+            for (_, connection) in self
+                .spawn_initial_connections(
+                    vec![gateway],
+                    &context.transport_config,
+                    &context.connection_tasks,
+                )
+                .await
+            {
+                connected = connection.await.unwrap_or(false);
+            }
+        }
+        if !connected {
+            let mut wanted = cda_interfaces::HashSet::default();
+            wanted.insert(logical_address);
+            let shutdown = context.cancel.child_token().cancelled_owned().shared();
+            let found = reconnect::fallback_identification(
+                &self.config.tester_address,
+                self.config.gateway_port,
+                self.state.netmask,
+                &self.state.ecus,
+                &wanted,
+                shutdown,
+            )
+            .await
+            .unwrap_or_default();
+            for (_, connection) in self
+                .spawn_initial_connections(
+                    found,
+                    &context.transport_config,
+                    &context.connection_tasks,
+                )
+                .await
+            {
+                connected = connection.await.unwrap_or(false);
+            }
+        }
+        self.state
+            .lazy
+            .pending
+            .lock()
+            .await
+            .remove(&logical_address);
+        if !connected && !context.cancel.is_cancelled() {
+            let (_, gateway_ecu_name_map) = self.gateway_ecu_maps().await;
+            if let Some(ecu_names) = gateway_ecu_name_map.get(&logical_address) {
+                self.connectivity_handler
+                    .on_gateway_disconnected(ecu_names)
+                    .await;
+            }
+        }
+        connected && !context.cancel.is_cancelled()
+    }
+
+    /// Names of the database ECUs that are their own gateway, keyed by logical
+    /// address (several for duplicate ECUs).
+    async fn db_gateways(&self) -> HashMap<u16, Vec<String>> {
+        let mut gateways: HashMap<u16, Vec<String>> = HashMap::new();
+        for (name, ecu) in self.state.ecus.iter() {
+            let ecu = ecu.read().await;
+            if ecu.logical_address() == ecu.logical_gateway_address() {
+                gateways
+                    .entry(ecu.logical_address())
+                    .or_default()
+                    .push(name.clone());
+            }
+        }
+        gateways
+    }
+
+    /// Completes a reconnect to persisted gateways: gateways that could not be
+    /// reached at their persisted address (and gateways that must be searched) are
+    /// searched by a broadcast; the ECUs of gateways still not found are reported
+    /// disconnected. Then the discovery is marked complete.
+    /// [[ dimpl~doip-persisted-reconnect, Reconnect to persisted gateways with broadcast fallback, dimpl ]]
+    async fn finish_reconnect<F>(
+        &self,
+        generation: u64,
+        initial_connections: Vec<(u16, tokio::sync::oneshot::Receiver<bool>)>,
+        mut missing: cda_interfaces::HashSet<u16>,
+        transport_config: DoipTransportConfig,
+        connection_tasks: &Arc<ConnectionTasks>,
+        shutdown: futures::future::Shared<F>,
+    ) where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        for (logical_address, connection) in initial_connections {
+            if !connection.await.unwrap_or(false) {
+                missing.insert(logical_address);
+            }
+        }
+        if !missing.is_empty() {
+            tracing::info!(
+                gateways = ?missing,
+                "Searching gateways not reachable at their persisted address by broadcast"
+            );
+            let found = reconnect::fallback_identification(
+                &self.config.tester_address,
+                self.config.gateway_port,
+                self.state.netmask,
+                &self.state.ecus,
+                &missing,
+                shutdown,
+            )
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "Fallback vehicle identification failed");
+                Vec::new()
+            });
+            let fallback_connections = self
+                .spawn_initial_connections(found, &transport_config, connection_tasks)
+                .await;
+            for (logical_address, connection) in fallback_connections {
+                if connection.await.unwrap_or(false) {
+                    missing.remove(&logical_address);
+                }
+            }
+            if !missing.is_empty() {
+                let (_, gateway_ecu_name_map) = self.gateway_ecu_maps().await;
+                for logical_address in &missing {
+                    tracing::warn!(
+                        logical_address = %format!("{logical_address:#06x}"),
+                        "Gateway not found, marking its ECUs as not reachable"
+                    );
+                    if let Some(ecu_names) = gateway_ecu_name_map.get(logical_address) {
+                        self.connectivity_handler
+                            .on_gateway_disconnected(ecu_names)
+                            .await;
+                    }
+                }
+            }
+        }
+        self.state.topology.finish_discovery(generation, false);
+    }
+
+    /// Maps each gateway logical address to the logical addresses and names of
+    /// the ECUs reached through it.
+    async fn gateway_ecu_maps(&self) -> (HashMap<u16, Vec<u16>>, HashMap<u16, Vec<String>>) {
         let mut gateway_ecu_map: HashMap<u16, Vec<u16>> = HashMap::new();
         let mut gateway_ecu_name_map: HashMap<u16, Vec<String>> = HashMap::new();
         for (ecu_name, ecu_lock) in self.state.ecus.iter() {
@@ -426,8 +820,26 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                 .or_default()
                 .push(ecu_name.clone());
         }
+        (gateway_ecu_map, gateway_ecu_name_map)
+    }
+
+    /// Spawns one connection task per gateway. Each task records the connected
+    /// gateway, requests variant detection for its ECUs and then completes the
+    /// returned receiver, so the caller can tell when the initial discovery is done.
+    async fn spawn_initial_connections(
+        &self,
+        gateways: Vec<DiscoveredGateway>,
+        transport_config: &DoipTransportConfig,
+        connection_tasks: &Arc<ConnectionTasks>,
+    ) -> Vec<(u16, tokio::sync::oneshot::Receiver<bool>)> {
+        let (gateway_ecu_map, gateway_ecu_name_map) = self.gateway_ecu_maps().await;
+        let mut initial_connections = Vec::new();
         for gateway in gateways {
             let gateway_name = gateway.ecu_name.clone();
+            let known_gateway = KnownGateway::from(&gateway);
+            let topology = Arc::clone(&self.state.topology);
+            let (connection_done, connection_done_rx) = tokio::sync::oneshot::channel::<bool>();
+            initial_connections.push((gateway.logical_address, connection_done_rx));
             let gateway_ecu_names = gateway_ecu_name_map
                 .get(&gateway.logical_address)
                 .cloned()
@@ -441,14 +853,14 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                 doip_connections: Arc::clone(&doip_connections),
                 ecus: Arc::clone(&self.state.ecus),
                 gateway_ecu_map: gateway_ecu_map.clone(),
-                connection_tasks: Arc::clone(&connection_tasks),
+                connection_tasks: Arc::clone(connection_tasks),
             };
             let connectivity_handler = Arc::clone(&self.connectivity_handler);
             spawn_connection_task(
-                &connection_tasks,
+                connection_tasks,
                 &format!("doip-gateway-connect-{gateway_name}"),
                 async move {
-                    match connections::handle_gateway_connection::<T>(
+                    let connected = match connections::handle_gateway_connection::<T>(
                         gateway,
                         &transport_config,
                         &gateway_state,
@@ -457,6 +869,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                     .await
                     {
                         Ok(logical_address) => {
+                            topology.record_connected(known_gateway);
                             let connection_index =
                                 doip_connections.read().await.iter().position(|connection| {
                                     connection.ecus.contains_key(&logical_address)
@@ -477,6 +890,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                                     "Failed to trigger variant detection after gateway connection"
                                 );
                             }
+                            true
                         }
                         Err(error) => {
                             tracing::warn!(
@@ -484,28 +898,25 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                                 error = %error,
                                 "Failed to establish initial gateway connection"
                             );
+                            false
                         }
-                    }
+                    };
+                    // Sent after the variant detection request was queued, so the
+                    // detection already counts as pending once discovery settles.
+                    let _ = connection_done.send(connected);
                 },
             )
             .await;
         }
-
-        let listener = vir_vam::listen_for_vams(
-            transport_config,
-            mask,
-            self.state.clone(),
-            Arc::clone(&connection_tasks),
-            self.variant_detection.clone(),
-            Arc::clone(&self.connectivity_handler),
-            shutdown,
-        )
-        .await;
-        operation.vam_listener = Some(listener);
-        Ok(())
+        initial_connections
     }
 
     async fn stop(&self, operation: &mut DoipGatewayOperation) {
+        // Before the tasks are shut down, so no connect on first use starts after.
+        self.state.lazy.pending.lock().await.clear();
+        if let Some(context) = self.state.lazy.context.lock().await.take() {
+            context.cancel.cancel();
+        }
         operation.shutdown().await;
         self.state.socket.lock().await.take();
         self.state.doip_connections.write().await.clear();
@@ -517,6 +928,18 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     }
 
     async fn get_doip_connection(
+        &self,
+        logical_address: u16,
+    ) -> Result<Arc<DoipConnection>, DiagServiceError> {
+        match self.lookup_doip_connection(logical_address).await {
+            Err(DiagServiceError::EcuOffline(_)) if self.connect_pending(logical_address).await => {
+                self.lookup_doip_connection(logical_address).await
+            }
+            result => result,
+        }
+    }
+
+    async fn lookup_doip_connection(
         &self,
         logical_address: u16,
     ) -> Result<Arc<DoipConnection>, DiagServiceError> {
@@ -690,14 +1113,16 @@ impl<T: EcuAddresses + DoipComParams> PhysicalTransport for DoipDiagGateway<T> {
         ecu_name: &str,
         ecu_db: &RwLock<E>,
     ) -> Result<(), DiagServiceError> {
-        let ecu_lock = ecu_db.read().await;
-
-        let doip_conn = self
-            .get_doip_connection(ecu_lock.logical_gateway_address())
-            .await?;
+        let (gateway_address, logical_address) = {
+            let ecu = ecu_db.read().await;
+            (ecu.logical_gateway_address(), ecu.logical_address())
+        };
+        // A reachability check never connects a gateway pending after a lazy
+        // start: whole-vehicle detection must not connect every gateway.
+        let doip_conn = self.lookup_doip_connection(gateway_address).await?;
         doip_conn
             .ecus
-            .get(&ecu_lock.logical_address())
+            .get(&logical_address)
             .ok_or_else(|| DiagServiceError::EcuOffline(ecu_name.to_owned()))?;
         Ok(())
     }
@@ -866,9 +1291,13 @@ impl<T: EcuAddresses + DoipComParams> TransportProbe for DoipDiagGateway<T> {
         let Some(ecu_lock) = self.state.ecus.get(&ecu_name) else {
             return RouteStatus::NotConfigured;
         };
-        // Check if the gateway connection for this ECU is established
+        // Check if the gateway connection for this ECU is established. A gateway
+        // pending after a lazy start is routable too: it connects on the first
+        // send, never on a route check.
         let gateway_addr = ecu_lock.read().await.logical_gateway_address();
-        if self.get_doip_connection(gateway_addr).await.is_ok() {
+        if self.lookup_doip_connection(gateway_addr).await.is_ok()
+            || self.state.lazy.is_pending(gateway_addr).await
+        {
             RouteStatus::Ready
         } else {
             // DoIP addressing is gateway-scoped, so there is
@@ -1439,6 +1868,10 @@ mod tests {
             ecus: Arc::new(HashMap::new()),
             socket: Arc::new(Mutex::new(Some(udp_socket))),
             netmask: 0,
+            topology: cda_interfaces::topology::TopologyRuntime::new(
+                cda_interfaces::topology::DiscoveryPlan::Broadcast,
+            ),
+            lazy: Arc::new(crate::LazyGateways::default()),
         };
 
         DoipDiagGateway {
@@ -1461,8 +1894,76 @@ mod tests {
         .await
         .expect("task registration must not await connection completion");
 
-        assert_eq!(tasks.0.lock().await.len(), 1);
+        assert_eq!(tasks.0.lock().await.as_ref().map(Vec::len), Some(1));
         tasks.shutdown().await;
+    }
+
+    /// A task pushed after shutdown (e.g. a connect on first use racing with the
+    /// transport stop) must not outlive it.
+    #[tokio::test]
+    async fn connection_task_pushed_after_shutdown_is_aborted() {
+        let tasks = Arc::new(ConnectionTasks::new());
+        tasks.shutdown().await;
+        let task = tokio::spawn(std::future::pending::<()>());
+        let abort = task.abort_handle();
+        tasks.push(task).await;
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(10)).await;
+        assert!(abort.is_finished());
+    }
+
+    async fn gateway_with_ecus(config: &DoipConfig) -> DoipDiagGateway<TestEcu> {
+        let mut ecus = HashMap::new();
+        ecus.insert("gw".to_owned(), RwLock::new(TestEcu::new(0x1000, 0x1000)));
+        DoipDiagGateway::<TestEcu>::new(
+            config,
+            Arc::new(ecus),
+            VariantDetectionSender::new(mpsc::channel(1).0),
+            Arc::new(TestConnectivityHandler),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Route and reachability checks never connect a gateway pending after a lazy
+    /// start; only a send does. Otherwise the activation's variant detection would
+    /// connect every gateway.
+    /// [[ test~doip-lazy-route-check, Route checks do not connect pending gateways, test ]]
+    #[tokio::test]
+    async fn route_checks_do_not_connect_pending_gateways() {
+        use cda_interfaces::{RouteStatus, TransportProbe as _};
+
+        let gateway = gateway_with_ecus(&DoipConfig::default()).await;
+        gateway.state.lazy.pending.lock().await.insert(0x1000, None);
+
+        assert_eq!(gateway.route_status("gw").await, RouteStatus::Ready);
+        let ecu = gateway.state.ecus.get("gw").unwrap();
+        assert!(matches!(
+            gateway.ecu_online("gw", ecu).await,
+            Err(DiagServiceError::EcuOffline(_))
+        ));
+        assert!(
+            gateway.state.lazy.is_pending(0x1000).await,
+            "a check must not start or give up the connect"
+        );
+    }
+
+    /// A requested lazy start is consumed by every start, also one that does not
+    /// reconnect, so it cannot make a later start lazy.
+    /// [[ test~doip-lazy-start-consumed, Every transport start consumes a lazy start request, test ]]
+    #[tokio::test]
+    async fn every_start_consumes_a_lazy_start_request() {
+        // An address that is not local, so binding the discovery socket fails.
+        let config = DoipConfig {
+            tester_address: "192.0.2.1".to_owned(),
+            ..DoipConfig::default()
+        };
+        let gateway = gateway_with_ecus(&config).await;
+        gateway.state.topology.request_lazy_start();
+
+        let mut operation = crate::DoipGatewayOperation::default();
+        assert!(gateway.start(&mut operation).await.is_err());
+        operation.shutdown().await;
+        assert!(!gateway.state.topology.take_lazy_start());
     }
 
     /// Constructing a gateway must never create or bind a UDP socket,

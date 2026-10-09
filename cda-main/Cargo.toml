@@ -45,10 +45,13 @@ cda-health = { workspace = true }
 cda-extra = { workspace = true, optional = true }
 cda-plugin-communication-management = { workspace = true }
 cda-plugin-runtime-update = { workspace = true }
+cda-plugin-vehicle-topology = { workspace = true }
 cda-storage = { workspace = true }
 # args
 clap = { workspace = true, features = ["derive", "env"] }
 backon = { workspace = true }
+chrono = { workspace = true }
+tokio-util = { workspace = true }
 # config
 figment = { workspace = true, features = ["env", "toml"] }
 toml = { workspace = true }
@@ -80,7 +83,6 @@ tracing-subscriber = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
-chrono = { workspace = true }
 tempfile = { workspace = true }
 override-macros = { workspace = true }
 linkme = { workspace = true }

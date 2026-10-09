@@ -436,8 +436,23 @@ impl ConfigSanity for Configuration {
         self.validate_can_mappings()?;
         self.validate_transport_overrides()?;
         self.locks.validate_sanity()?;
+        self.warn_ineffective_communication_settings();
         // Add more checks for Configuration fields here if needed
         Ok(())
+    }
+}
+
+impl Configuration {
+    /// Logs settings that are valid but have no effect in combination.
+    fn warn_ineffective_communication_settings(&self) {
+        if self.communication.init_mode == CommunicationInitMode::WhenNotPersisted
+            && !self.communication.ecu_list_persistence.enabled
+        {
+            tracing::warn!(
+                "communication.init_mode = \"WhenNotPersisted\" behaves like \"Always\" while \
+                 communication.ecu_list_persistence.enabled is false"
+            );
+        }
     }
 }
 
@@ -1021,6 +1036,10 @@ parameter_validation = true
             defaults.communication.post_update_mode,
             PostUpdateCommunicationMode::Enabled
         );
+        assert!(
+            !defaults.communication.ecu_list_persistence.enabled,
+            "ECU list persistence must be disabled by default"
+        );
 
         for init_mode in ["OnDemand", "Disabled"] {
             let config_str = format!(
@@ -1044,6 +1063,65 @@ parameter_validation = true
                 PostUpdateCommunicationMode::Deferred
             );
             assert_eq!(config.communication.deferred_retry_after_seconds, 7);
+        }
+    }
+
+    /// [[ test~ecu-list-persistence-config, ECU list persistence is configurable and off by default, test ]]
+    #[test]
+    fn ecu_list_persistence_is_parsed_from_toml() {
+        let config_str = r#"
+[communication]
+init_mode = "WhenNotPersisted"
+
+[communication.ecu_list_persistence]
+enabled = true
+detection_settle_timeout_seconds = 12
+"#;
+        let config: Configuration = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str))
+            .extract()
+            .unwrap();
+        assert_eq!(
+            config.communication.init_mode,
+            CommunicationInitMode::WhenNotPersisted
+        );
+        assert!(config.communication.ecu_list_persistence.enabled);
+        assert_eq!(
+            config.communication.vam_handling_mode,
+            cda_interfaces::communication_control::VamHandlingMode::Always
+        );
+        assert_eq!(
+            config
+                .communication
+                .ecu_list_persistence
+                .detection_settle_timeout_seconds,
+            12
+        );
+    }
+
+    #[test]
+    fn vam_handling_mode_is_parsed_from_toml() {
+        for (value, expected) in [
+            (
+                "always",
+                cda_interfaces::communication_control::VamHandlingMode::Always,
+            ),
+            (
+                "persisted-only",
+                cda_interfaces::communication_control::VamHandlingMode::PersistedOnly,
+            ),
+            (
+                "never",
+                cda_interfaces::communication_control::VamHandlingMode::Never,
+            ),
+        ] {
+            let config_str = format!("[communication]\nvam_handling_mode = \"{value}\"\n");
+            let config: Configuration =
+                Figment::from(Serialized::defaults(Configuration::default()))
+                    .merge(Toml::string(&config_str))
+                    .extract()
+                    .unwrap();
+            assert_eq!(config.communication.vam_handling_mode, expected);
         }
     }
 }

@@ -137,6 +137,7 @@ where
     let factory = Arc::new(CdaMainVehicleFactory::<SP>::new(
         health_for_factory,
         Arc::clone(&infra.communication_access),
+        Arc::clone(&infra.topology.runtime),
     ));
 
     let reloader_infra = ReloaderContext {

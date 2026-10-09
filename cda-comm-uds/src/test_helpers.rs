@@ -179,6 +179,7 @@ pub(crate) struct TestEcuDb {
     repeat_req_count_app: u32,
     tester_present_message: Vec<u8>,
     tester_present_response_expected: bool,
+    runtime_state: EcuRuntimeState,
 }
 
 impl TestEcuDb {
@@ -189,6 +190,7 @@ impl TestEcuDb {
             repeat_req_count_app: 2,
             tester_present_message: vec![0x3E, 0x00],
             tester_present_response_expected: true,
+            runtime_state: EcuRuntimeState::new(),
         }
     }
 
@@ -200,6 +202,7 @@ impl TestEcuDb {
             repeat_req_count_app: 2,
             tester_present_message: vec![0x3E, 0x00],
             tester_present_response_expected: true,
+            runtime_state: EcuRuntimeState::new(),
         }
     }
 
@@ -215,6 +218,7 @@ impl TestEcuDb {
             repeat_req_count_app,
             tester_present_message: vec![0x3E, 0x00],
             tester_present_response_expected: true,
+            runtime_state: EcuRuntimeState::new(),
         }
     }
 
@@ -229,6 +233,7 @@ impl TestEcuDb {
             repeat_req_count_app: 2,
             tester_present_message,
             tester_present_response_expected,
+            runtime_state: EcuRuntimeState::new(),
         }
     }
 }
@@ -740,7 +745,7 @@ impl cda_interfaces::EcuManager for TestEcuDb {
     }
 
     fn runtime_state(&self) -> EcuRuntimeState {
-        unimplemented!()
+        self.runtime_state.clone()
     }
 }
 
