@@ -177,8 +177,9 @@ pub mod service {
 
         #[derive(Serialize, schemars::JsonSchema)]
         pub struct Response<T> {
+            /// Spec Table 189: `AnyValue`, so scalars and arrays are valid as well as objects.
             #[serde(skip_serializing_if = "Option::is_none")]
-            pub parameters: Option<serde_json::Map<String, serde_json::Value>>,
+            pub parameters: Option<serde_json::Value>,
             #[serde(skip_serializing_if = "Option::is_none")]
             pub error: Option<DataError<T>>,
             #[schemars(skip)]
@@ -243,9 +244,9 @@ pub struct AsyncGetByIdResponse<T> {
     pub status: ExecutionStatus,
     /// Capability executed at the moment (always `execute` for CDA routines).
     pub capability: GetByIdCapability,
-    /// Response parameters of the operation, if any.
+    /// Response parameters of the operation, if any (`AnyValue`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parameters: Option<serde_json::Map<String, serde_json::Value>>,
+    pub parameters: Option<serde_json::Value>,
     /// Progress in percent, if available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<u8>,
