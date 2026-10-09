@@ -1057,24 +1057,6 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
                 x_sovd2uds_download::transferexit::docs_put,
             ),
         )
-        .route(
-            "/x-sovd2uds-bulk-data",
-            routing::get(x_sovd2uds_bulk_data::get),
-        )
-        .api_route(
-            "/x-sovd2uds-bulk-data/mdd-embedded-files",
-            routing::get_with(
-                x_sovd2uds_bulk_data::mdd_embedded_files::get,
-                x_sovd2uds_bulk_data::mdd_embedded_files::docs_get,
-            ),
-        )
-        .api_route(
-            "/x-sovd2uds-bulk-data/mdd-embedded-files/{id}",
-            routing::get_with(
-                x_sovd2uds_bulk_data::mdd_embedded_files::id::get,
-                x_sovd2uds_bulk_data::mdd_embedded_files::id::docs_get,
-            ),
-        )
         .api_route(
             "/faults",
             routing::get_with(faults::get, faults::docs_get)
@@ -1085,11 +1067,60 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
             routing::get_with(faults::id::get, faults::id::docs_get)
                 .delete_with(faults::id::delete, faults::id::docs_delete),
         )
-        .with_state(ecu_state)
+        .with_state(ecu_state.clone())
         .with_path_items(crate::openapi::defunct_lock_path)
         .with_path_items(|op| op.tag(ecu_name));
 
-    Ok((ecu_path, router))
+    Ok((
+        ecu_path,
+        router.merge(bulk_data_routes(ecu_state, ecu_name)),
+    ))
+}
+
+/// Bulk-data routes (Table 7). They are also served under the former
+/// `x-sovd2uds-bulk-data` path, so existing clients keep working.
+fn bulk_data_routes<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
+    ecu_state: WebserverEcuState<T, U>,
+    ecu_name: &str,
+) -> Router {
+    [
+        (x_sovd2uds_bulk_data::BULK_DATA_PATH, false),
+        (x_sovd2uds_bulk_data::DEPRECATED_BULK_DATA_PATH, true),
+    ]
+    .into_iter()
+    .fold(Router::new(), |router, (prefix, deprecated)| {
+        router
+            .route(prefix, routing::get(x_sovd2uds_bulk_data::get))
+            .api_route(
+                &format!("{prefix}/mdd-embedded-files"),
+                routing::get_with(x_sovd2uds_bulk_data::mdd_embedded_files::get, move |op| {
+                    mark_deprecated(
+                        x_sovd2uds_bulk_data::mdd_embedded_files::docs_get(op),
+                        deprecated,
+                    )
+                }),
+            )
+            .api_route(
+                &format!("{prefix}/mdd-embedded-files/{{id}}"),
+                routing::get_with(
+                    x_sovd2uds_bulk_data::mdd_embedded_files::id::get,
+                    move |op| {
+                        mark_deprecated(
+                            x_sovd2uds_bulk_data::mdd_embedded_files::id::docs_get(op),
+                            deprecated,
+                        )
+                    },
+                ),
+            )
+    })
+    .with_state(ecu_state)
+    .with_path_items(crate::openapi::defunct_lock_path)
+    .with_path_items(|op| op.tag(ecu_name))
+}
+
+fn mark_deprecated(mut op: TransformOperation<'_>, deprecated: bool) -> TransformOperation<'_> {
+    op.inner_mut().deprecated = deprecated;
+    op
 }
 
 fn get_payload_data<'a, T>(

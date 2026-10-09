@@ -21,23 +21,27 @@ pub mod operations;
 
 /// Connection and variant detection state of an ECU, reported by the status
 /// resource (`x-sovd2uds-state`) and the network structure.
-#[derive(Debug, Default, Serialize, Deserialize, schemars::JsonSchema, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, PartialEq)]
 pub enum State {
     Online,
     Offline,
-    #[default]
     NotTested,
     Duplicate,
     Disconnected,
     NoVariantDetected,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct Variant {
-    pub name: String,
-    pub is_base_variant: bool,
-    pub state: State,
-    pub logical_address: String,
+/// Variant identification of an ECU (Table 53 C3): a map of string values.
+pub type Variant = HashMap<String, String>;
+
+/// Keys of the [`Variant`] map.
+pub mod variant {
+    /// Name of the detected variant.
+    pub const NAME: &str = "name";
+    /// Logical address of the ECU as hex string, e.g. `0x1000`.
+    pub const LOGICAL_ADDRESS: &str = "logical_address";
+    /// `true` if the base variant is in use because no variant was detected.
+    pub const IS_BASE_VARIANT: &str = "is_base_variant";
 }
 
 /// Capability document of an ECU component (ISO 17978-3 Table 53).
@@ -598,15 +602,18 @@ pub mod faults {
         pub status: Option<FaultStatus>,
     }
 
+    /// DTC status bits, keyed as in ISO 14229-1 Annex D.2.3 (ISO 17978-3 Table 61 Note).
     #[derive(Serialize, Deserialize, Debug, schemars::JsonSchema)]
+    #[serde(rename_all = "camelCase")]
     pub struct FaultStatus {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub test_failed: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub test_failed_this_operation_cycle: Option<bool>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        // `rename_all` would give `pendingDtc`; ISO 14229-1 spells the bit `pendingDTC`.
+        #[serde(rename = "pendingDTC", skip_serializing_if = "Option::is_none")]
         pub pending_dtc: Option<bool>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "confirmedDTC", skip_serializing_if = "Option::is_none")]
         pub confirmed_dtc: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub test_not_completed_since_last_clear: Option<bool>,
@@ -630,9 +637,9 @@ pub mod faults {
             /// Filters the elements based on a status, if the value ia a full match.
             /// To allow multiple values the parameter is repeated. (0..*), they are 'OR' combined.
             /// Currently supported  (case-insensitive) keys are:
-            /// * confirmedDtc
+            /// * confirmedDTC
             /// * mask
-            /// * pendingDtc
+            /// * pendingDTC
             /// * testFailed
             /// * testFailedSinceLastClear
             /// * testFailedThisOperationCycle
@@ -645,7 +652,7 @@ pub mod faults {
             ///
             /// Example:
             ///
-            /// `?status[confirmedDtc]=true&status[warningIndicatorRequested]=1`
+            /// `?status[confirmedDTC]=true&status[warningIndicatorRequested]=1`
             pub status: Option<HashMap<String, serde_json::Value>>,
             /// Filters the elements based on their severity
             pub severity: Option<u32>,

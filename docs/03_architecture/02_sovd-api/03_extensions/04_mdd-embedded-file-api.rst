@@ -40,16 +40,17 @@ MDD Embedded Files API
          - Path
          - Description
        * - GET
-         - /x-sovd2uds-bulk-data/mdd-embedded-files
+         - /bulk-data/mdd-embedded-files
          - Returns a list of items which represent the files and their metadata
        * - GET
-         - /x-sovd2uds-bulk-data/mdd-embedded-files/{id}
+         - /bulk-data/mdd-embedded-files/{id}
          - Returns an item, which is the data that was embedded
 
     Other methods are not allowed (e.g. data can't be modified), and will return an HTTP 405 error code.
 
+    The endpoints are also served under the former ``/x-sovd2uds-bulk-data`` path, marked deprecated, so
+    existing clients keep working.
+
     .. uml:: /03_architecture/02_sovd-api/03_extensions/images/mdd_embedded_files.puml
 
 .. todo:: OpenAPI?
-
-.. todo:: maybe move to a general bulk-data endpoint?

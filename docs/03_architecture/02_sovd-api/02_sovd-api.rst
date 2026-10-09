@@ -155,12 +155,13 @@ Entities
     Returns detailed information about a specific ECU entity, including:
 
     - The ECU identifier and name
-    - Variant information (name, base variant flag, connectivity state, and logical address)
+    - Variant identification (ISO 17978-3 Table 53 C3) as a map of strings with the keys ``name``,
+      ``logical_address`` (hex string, e.g. ``0x1000``) and ``is_base_variant`` (``true``/``false``)
     - A ``last_seen`` timestamp of the last successful diagnostic contact with the ECU (see
       :need:`arch~dt-ecu-states`), if the ECU has ever been contacted (either in the current session, or,
       when loaded from a persisted ECU list, in a previous session)
     - URI references to the standardized resource collection endpoints: data, operations, configurations, faults,
-      modes, locks, and extension endpoints. A reference is only present if the ECU provides the
+      modes, locks, bulk-data, and extension endpoints. A reference is only present if the ECU provides the
       collection (ISO 17978-3 Table 53 C1); e.g. ``data`` is absent for an ECU without read services.
 
     **GET /components/{ecu-name}/status**
@@ -614,7 +615,7 @@ Operations
     An ECU is reset through ``PUT /status/restart`` (ISO 17978-3 §7.19.4, §8.7). The request body
     ``{"parameters": {"ResetType": "<reset service>"}}`` selects one of the reset services of the ECU. The
     CDA answers ``202 Accepted`` with a ``Location`` header pointing at ``/status``, ``400`` for an unknown
-    reset type, and ``409`` with the error code ``preconditions-not-fulfilled`` when the ECU refuses the reset
+    reset type, and ``409`` with the error code ``precondition-not-fulfilled`` when the ECU refuses the reset
     with a negative response.
 
     For compatibility with SOVD version 1.0 and earlier, the deprecated operations ``/operations/ecureset``
@@ -964,10 +965,10 @@ Faults -- SID 14\ :sub:`16` & 19\ :sub:`16`
     It can be used multiple times to combine different status flags. The values correspond to the DTC status bits
     defined in ISO 14229-1.
 
-    Available keys:
+    Available keys (matched case-insensitively), as spelled in ISO 14229-1 Annex D.2.3:
 
-    - confirmedDtc
-    - pendingDtc
+    - confirmedDTC
+    - pendingDTC
     - testFailed
     - testFailedSinceLastClear
     - testFailedThisOperationCycle
@@ -976,6 +977,9 @@ Faults -- SID 14\ :sub:`16` & 19\ :sub:`16`
     - warningIndicatorRequested
 
     All values are either boolean values (true/false), or a bit value (0/1).
+
+    The ``status`` object of a returned fault uses the same keys (ISO 17978-3 Table 61 Note), plus ``mask``
+    with the complete status byte as hex string.
 
     Additionally, a special key called ``mask`` is available, which takes a hexadecimal mask as a value
     to allow filtering by the complete status byte. Using other keys together with ``mask`` is not supported.

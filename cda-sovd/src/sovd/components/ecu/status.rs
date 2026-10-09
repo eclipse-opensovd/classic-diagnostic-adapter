@@ -164,7 +164,7 @@ pub(crate) mod restart_entity {
             DiagServiceResponseType::Negative => match response.as_nrc() {
                 Ok(nrc) => {
                     let mut error = nrc_to_api_error_response(nrc, false);
-                    error.error_code = ErrorCode::PreconditionsNotFulfilled;
+                    error.error_code = ErrorCode::PreconditionNotFulfilled;
                     (StatusCode::CONFLICT, Json(error)).into_response()
                 }
                 Err(e) => err_response(ApiError::InternalServerError(Some(format!(

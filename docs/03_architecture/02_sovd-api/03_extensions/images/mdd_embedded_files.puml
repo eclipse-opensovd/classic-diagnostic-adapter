@@ -20,7 +20,7 @@ participant "File Manager" as FM
 
 == List embedded files ==
 
-Client -> HTTP : GET /components/{ecu}/x-sovd2uds-bulk-data/mdd-embedded-files
+Client -> HTTP : GET /components/{ecu}/bulk-data/mdd-embedded-files
 activate HTTP
 
 HTTP -> SEC : authenticate & authorize
@@ -44,7 +44,7 @@ deactivate HTTP
 
 == Download embedded file ==
 
-Client -> HTTP : GET /components/{ecu}/x-sovd2uds-bulk-data/mdd-embedded-files/{id}
+Client -> HTTP : GET /components/{ecu}/bulk-data/mdd-embedded-files/{id}
 activate HTTP
 
 HTTP -> SEC : authenticate & authorize

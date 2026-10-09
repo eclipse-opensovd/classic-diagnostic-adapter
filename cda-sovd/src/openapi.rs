@@ -317,7 +317,7 @@ pub(crate) fn error_conflict(op: TransformOperation) -> TransformOperation {
         res.description("Conflict: The preconditions to execute the method are not fulfilled.")
             .example(ApiErrorResponse {
                 message: "Conflict".to_string(),
-                error_code: sovd_interfaces::error::ErrorCode::PreconditionsNotFulfilled,
+                error_code: sovd_interfaces::error::ErrorCode::PreconditionNotFulfilled,
                 vendor_code: None,
                 parameters: None,
                 error_source: None,

@@ -521,7 +521,7 @@ async fn ecu_variant_state(
 ) -> sovd_interfaces::components::ecu::State {
     let response = send_cda_request(
         config,
-        ecu_endpoint,
+        &format!("{ecu_endpoint}/status"),
         http::StatusCode::OK,
         http::Method::GET,
         None,
@@ -529,10 +529,10 @@ async fn ecu_variant_state(
         None,
     )
     .await
-    .expect("Failed to get ecu component");
-    let ecu: sovd_interfaces::components::ecu::get::Response =
-        response_to_t(&response).expect("Failed to parse ecu component response");
-    ecu.variant.state
+    .expect("Failed to get ecu status");
+    let status: sovd_interfaces::components::ecu::status::get::Response =
+        response_to_t(&response).expect("Failed to parse ecu status response");
+    status.state
 }
 
 /// Polls `ecu_endpoint`'s variant state until it matches `expected`, or

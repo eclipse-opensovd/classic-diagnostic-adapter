@@ -21,6 +21,12 @@ use opensovd_axum_extra::ExtractHost;
 
 use crate::sovd::{error::ApiError, resource_response};
 
+/// Bulk-data collection of a component (ISO 17978-3 Table 7, Table 293).
+pub(crate) const BULK_DATA_PATH: &str = "/bulk-data";
+/// Former vendor-specific path of the bulk-data collection, kept as a deprecated
+/// alias for existing clients.
+pub(crate) const DEPRECATED_BULK_DATA_PATH: &str = "/x-sovd2uds-bulk-data";
+
 pub(crate) async fn get(
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::IncludeSchemaQuery>,

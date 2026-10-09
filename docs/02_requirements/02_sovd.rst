@@ -1143,8 +1143,11 @@ MDD Embedded files
     :status: draft
 
     The CDA must support reading embedded files from the MDD file, and provide them via the
-    ``/components/{ecuName}/x-sovd2uds-bulk-data/mdd-embedded-files`` endpoint (listing) and
-    ``/components/{ecuName}/x-sovd2uds-bulk-data/mdd-embedded-files/{id}`` endpoint (retrieval).
+    ``/components/{ecuName}/bulk-data/mdd-embedded-files`` endpoint (listing) and
+    ``/components/{ecuName}/bulk-data/mdd-embedded-files/{id}`` endpoint (retrieval), i.e. within the
+    standard ``bulk-data`` collection (ISO 17978-3 Table 7).
+
+    The former ``x-sovd2uds-bulk-data`` path remains available as a deprecated alias.
 
     **Rationale**
 

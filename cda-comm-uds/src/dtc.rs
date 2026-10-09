@@ -65,6 +65,25 @@ fn get_dtc_status_for_mask(mask: u8) -> datatypes::DtcStatus {
     }
 }
 
+/// Computes the `ReadDTCInformation` status mask from the `status[...]` filter of a
+/// fault query. Keys are matched case-insensitively, so both the ISO 14229-1 spelling
+/// (`pendingDTC`) and camel case (`pendingDtc`) select the bit. Without any selected
+/// mask bit all DTCs are requested.
+fn status_filter_mask(status: &HashMap<String, serde_json::Value>) -> Result<u8, DiagServiceError> {
+    let mut mask = 0x00u8;
+    for mask_bit in DtcMask::iter() {
+        let mask_bit_str = mask_bit.to_string();
+        if let Some(val) = status
+            .iter()
+            .find_map(|(key, val)| key.eq_ignore_ascii_case(&mask_bit_str).then_some(val))
+            && status_value_to_bool(val)?
+        {
+            mask |= mask_bit as u8;
+        }
+    }
+    Ok(if mask == 0 { u8::MAX } else { mask })
+}
+
 fn status_value_to_bool(val: &serde_json::Value) -> Result<bool, DiagServiceError> {
     fn int_to_bool(int_val: u64) -> Result<bool, DiagServiceError> {
         if int_val != 0 && int_val != 1 {
@@ -488,27 +507,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
             )));
         }
 
-        let mask = if let Some(status) = status {
-            let mut mask = 0x00u8;
-            // Status can contain more than the mask bits, thus we need to track
-            // if any of the status fields is a mask bit.
-            // If not use the default mask.
-            let mut any_mask_bit_set = false;
-
-            for mask_bit in DtcMask::iter() {
-                let mask_bit_str = mask_bit.to_string().to_lowercase();
-                if let Some(val) = status.get(&mask_bit_str)
-                    && status_value_to_bool(val)?
-                {
-                    any_mask_bit_set = true;
-                    mask |= mask_bit as u8;
-                }
-            }
-
-            if any_mask_bit_set { mask } else { u8::MAX }
-        } else {
-            u8::MAX
-        };
+        let mask = status.as_ref().map_or(Ok(u8::MAX), status_filter_mask)?;
 
         for (read_info, lookup) in scoped_services {
             let mut payload = vec![mask];
@@ -964,6 +963,33 @@ mod tests {
     fn test_decode_dtc_from_str_invalid() {
         assert!(decode_dtc_from_str("12345").is_err());
         assert!(decode_dtc_from_str("00ZZZZ").is_err());
+    }
+
+    #[test]
+    fn test_status_filter_mask_matches_keys_case_insensitively() {
+        let status =
+            |key: &str, val: serde_json::Value| HashMap::from_iter([(key.to_owned(), val)]);
+        for key in ["pendingDTC", "pendingDtc", "pendingdtc"] {
+            assert_eq!(
+                super::status_filter_mask(&status(key, serde_json::json!("1"))).unwrap(),
+                DtcMask::PendingDtc as u8,
+                "{key}"
+            );
+        }
+        assert_eq!(
+            super::status_filter_mask(&status("confirmedDTC", serde_json::json!("true"))).unwrap(),
+            DtcMask::ConfirmedDtc as u8
+        );
+        // An unset or unknown key requests all DTCs.
+        assert_eq!(
+            super::status_filter_mask(&status("pendingDTC", serde_json::json!("0"))).unwrap(),
+            u8::MAX
+        );
+        assert_eq!(
+            super::status_filter_mask(&status("unknown", serde_json::json!("1"))).unwrap(),
+            u8::MAX
+        );
+        assert!(super::status_filter_mask(&status("testFailed", serde_json::json!("2"))).is_err());
     }
 
     #[test]

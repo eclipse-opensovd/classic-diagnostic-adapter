@@ -330,7 +330,7 @@ impl IntoResponse for ErrorWrapper {
             ApiError::Conflict(message) => (
                 StatusCode::CONFLICT,
                 message,
-                ErrorCode::PreconditionsNotFulfilled,
+                ErrorCode::PreconditionNotFulfilled,
                 None,
                 None,
             ),

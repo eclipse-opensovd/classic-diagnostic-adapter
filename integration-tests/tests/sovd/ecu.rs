@@ -284,7 +284,7 @@ async fn test_ecu_session_switching() {
         .await
         .unwrap();
     assert!(ecu.name.eq_ignore_ascii_case("flxc1000"));
-    assert_eq!(ecu.variant.name, "FLXC1000_App_0101".to_string());
+    assert_eq!(variant_name(&ecu), "FLXC1000_App_0101");
 
     switch_session(
         "this status does not exist",
@@ -394,7 +394,7 @@ async fn test_ecu_session_switching() {
     let ecu = ecu_status(&runtime.config, &auth, ecu_endpoint)
         .await
         .unwrap();
-    assert_eq!(ecu.variant.name, "FLXC1000_Boot_Variant".to_string());
+    assert_eq!(variant_name(&ecu), "FLXC1000_Boot_Variant");
 
     let seed_response = request_seed(
         "Level_5_RequestSeed".to_owned(),
@@ -668,11 +668,23 @@ async fn test_variant_detection_duplicates() {
     let ecu = ecu_status(&runtime.config, &auth, sovd::ECU_FLXC1000_ENDPOINT)
         .await
         .unwrap();
+    let entity_status = ecu_entity_status(&runtime.config, &auth, sovd::ECU_FLXC1000_ENDPOINT)
+        .await
+        .unwrap();
     assert_eq!(
-        ecu.variant.state,
+        entity_status.state,
         sovd_interfaces::components::ecu::State::Online
     );
-    assert_eq!(ecu.variant.logical_address, "0x1000");
+    assert_eq!(
+        entity_status.status,
+        sovd_interfaces::components::ecu::status::EntityStatus::Ready
+    );
+    assert_eq!(
+        ecu.variant
+            .get(sovd_interfaces::components::ecu::variant::LOGICAL_ADDRESS)
+            .map(String::as_str),
+        Some("0x1000")
+    );
 
     // Switch variant, and check if the NG variant is now online.
     ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION2")
@@ -764,11 +776,11 @@ async fn test_variant_detection_duplicates() {
 
     // wait in loop, to check if the CDA receives the spontaneous VAM when is online
     for attempt in 0..=5 {
-        let status = ecu_status(&runtime.config, &auth, sovd::ECU_FLXC1000_ENDPOINT)
+        let status = ecu_entity_status(&runtime.config, &auth, sovd::ECU_FLXC1000_ENDPOINT)
             .await
             .expect("failed to get ecu status");
 
-        if status.variant.state == sovd_interfaces::components::ecu::State::Online {
+        if status.state == sovd_interfaces::components::ecu::State::Online {
             break;
         }
 
@@ -1052,7 +1064,7 @@ async fn test_boot_variant_service_inheritance() {
     let ecu = ecu_status(&runtime.config, &auth, ecu_endpoint)
         .await
         .unwrap();
-    assert_eq!(ecu.variant.name, "FLXC1000_Boot_Variant".to_string());
+    assert_eq!(variant_name(&ecu), "FLXC1000_Boot_Variant");
 
     let data_services = get_data_services(&runtime.config, &auth, ecu_endpoint)
         .await
@@ -1454,17 +1466,17 @@ async fn validate_ecu_state(
     expected_state: sovd_interfaces::components::ecu::State,
 ) {
     let started = std::time::Instant::now();
-    let mut status = ecu_status(&runtime.config, auth, ecu)
+    let mut status = ecu_entity_status(&runtime.config, auth, ecu)
         .await
         .expect("failed to get ecu status");
-    while status.variant.state != expected_state && started.elapsed() < Duration::from_secs(10) {
+    while status.state != expected_state && started.elapsed() < Duration::from_secs(10) {
         cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(200)).await;
-        status = ecu_status(&runtime.config, auth, ecu)
+        status = ecu_entity_status(&runtime.config, auth, ecu)
             .await
             .expect("failed to get ecu status");
     }
     assert_eq!(
-        status.variant.state, expected_state,
+        status.state, expected_state,
         "ECU {ecu} state does not match {status:?}"
     );
 }
@@ -1634,6 +1646,30 @@ async fn ecu_status(
     )
     .await?;
     response_to_t(&http_response)
+}
+
+async fn ecu_entity_status(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+) -> Result<sovd_interfaces::components::ecu::status::get::Response, TestingError> {
+    let http_response = send_cda_request(
+        config,
+        &format!("{ecu_endpoint}/status"),
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(headers),
+        None,
+    )
+    .await?;
+    response_to_t(&http_response)
+}
+
+fn variant_name(ecu: &sovd_interfaces::components::ecu::get::Response) -> &str {
+    ecu.variant
+        .get(sovd_interfaces::components::ecu::variant::NAME)
+        .map_or("", String::as_str)
 }
 
 async fn force_variant_detection(
