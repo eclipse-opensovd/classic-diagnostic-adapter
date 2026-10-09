@@ -48,7 +48,7 @@ components:
             $ref: "#/components/schemas/MddEmbeddedFilesListEntry"
 
 paths:
-  /components/{ecu-name}/x-sovd2uds-bulk-data/mdd-embedded-files:
+  /components/{ecu-name}/bulk-data/mdd-embedded-files:
     parameters:
       - $ref: "common.yaml#/components/parameters/EcuName"
     get:
@@ -63,7 +63,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/MddEmbeddedFilesList"
 
-  /components/{ecu-name}/x-sovd2uds-bulk-data/mdd-embedded-files/{id}:
+  /components/{ecu-name}/bulk-data/mdd-embedded-files/{id}:
     parameters:
       - $ref: "common.yaml#/components/parameters/EcuName"
       - name: id

@@ -54,7 +54,12 @@ pub(crate) mod x_sovd2uds_download;
 
 // [[ dimpl~sovd-api-component-sdgsd, GET /components/{ecu} SDG handler ]]
 pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+    State(WebserverEcuState {
+        ecu_name,
+        uds,
+        mdd_embedded_files,
+        ..
+    }): State<WebserverEcuState<T, U>>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::components::ComponentQuery>,
         ApiError,
@@ -141,6 +146,7 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
             modes: link(true, "modes"),
             sdgs,
             single_ecu_jobs: link(available.single_ecu_jobs, "x-single-ecu-jobs"),
+            bulk_data: link(!mdd_embedded_files.list().await.is_empty(), "bulk-data"),
             schema,
             ..Default::default()
         }),
@@ -203,6 +209,7 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
                 single_ecu_jobs: Some(format!("{EXAMPLE_BASE}/x-single-ecu-jobs")),
                 faults: Some(format!("{EXAMPLE_BASE}/faults")),
                 modes: Some(format!("{EXAMPLE_BASE}/modes")),
+                bulk_data: Some(format!("{EXAMPLE_BASE}/bulk-data")),
                 ..Default::default()
             })
             .description("Response with ECU information (i.e. detected variant) and service URLs")
