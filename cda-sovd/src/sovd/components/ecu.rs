@@ -11,11 +11,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use aide::{axum::IntoApiResponse, transform::TransformOperation};
+use aide::{UseApi, axum::IntoApiResponse, transform::TransformOperation};
 use axum::{
     Json,
     body::Bytes,
-    extract::{Query, State},
+    extract::{OriginalUri, Query, State},
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
@@ -26,6 +26,7 @@ use cda_interfaces::{
 };
 use cda_plugin_security::SecurityPlugin;
 use http::{HeaderMap, StatusCode};
+use opensovd_axum_extra::ExtractHost;
 
 use crate::{
     openapi,
@@ -58,9 +59,11 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
         Query<sovd_interfaces::components::ComponentQuery>,
         ApiError,
     >,
+    UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
+    OriginalUri(uri): OriginalUri,
 ) -> impl IntoApiResponse {
     let include_schema = query.include_schema;
-    let base_path = format!("http://localhost:20002/vehicle/v15/components/{ecu_name}");
+    let base_path = format!("http://{host}{}", uri.path());
     let status = match uds.get_ecu_state(&ecu_name).await {
         Ok(v) => v,
         Err(e) => {
@@ -116,27 +119,61 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
         None
     };
 
+    let available = AvailableCollections::query(&uds, &ecu_name).await;
+    let link =
+        |present: bool, collection: &str| present.then(|| format!("{base_path}/{collection}"));
+
     (
         StatusCode::OK,
         Json(sovd_interfaces::components::ecu::get::Response {
             id: ecu_name.to_lowercase(),
             name: ecu_name.clone(),
             variant,
-            locks: format!("{base_path}/locks"),
-            operations: format!("{base_path}/operations"),
-            configurations: format!("{base_path}/configurations"),
-            data: format!("{base_path}/data"),
+            // Locks, modes, faults and the comparam operations are provided by the CDA
+            // for every ECU, independent of the diagnostic description.
+            // `configurations/{service}` serves every DID, even when no service is in a
+            // configuration functional class, so the collection is always available.
+            locks: link(true, "locks"),
+            operations: link(true, "operations"),
+            configurations: link(true, "configurations"),
+            data: link(available.data, "data"),
+            faults: link(true, "faults"),
+            modes: link(true, "modes"),
             sdgs,
-            single_ecu_jobs: format!("{base_path}/x-single-ecu-jobs"),
-            faults: format!("{base_path}/faults"),
-            modes: format!("{base_path}/modes"),
+            single_ecu_jobs: link(available.single_ecu_jobs, "x-single-ecu-jobs"),
             schema,
+            ..Default::default()
         }),
     )
         .into_response()
 }
 
+/// Collections whose presence depends on the diagnostic description of the ECU.
+struct AvailableCollections {
+    data: bool,
+    single_ecu_jobs: bool,
+}
+
+impl AvailableCollections {
+    /// Looks the collections up without a security plugin: the capability document
+    /// describes what the ECU provides, not what the caller may access.
+    async fn query<T: UdsEcu>(uds: &T, ecu_name: &str) -> Self {
+        let unrestricted: DynamicPlugin = Box::new(());
+        Self {
+            data: uds
+                .get_components_data_info(ecu_name, &unrestricted)
+                .await
+                .is_ok_and(|items| !items.is_empty()),
+            single_ecu_jobs: uds
+                .get_components_single_ecu_jobs_info(ecu_name)
+                .await
+                .is_ok_and(|items| !items.is_empty()),
+        }
+    }
+}
+
 pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+    const EXAMPLE_BASE: &str = "http://localhost:20002/vehicle/v15/components/my_ecu";
     op.description("Get ECU details")
         .response_with::<200, Json<sovd_interfaces::components::ecu::Ecu>, _>(|res| {
             res.example(sovd_interfaces::components::ecu::Ecu {
@@ -148,20 +185,14 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
                     state: sovd_interfaces::components::ecu::State::Online,
                     logical_address: "0x42".to_owned(),
                 },
-                locks: "http://localhost:20002/vehicle/v15/components/my_ecu/locks".to_string(),
-                operations: "http://localhost:20002/vehicle/v15/components/my_ecu/operations"
-                    .to_string(),
-                data: "http://localhost:20002/vehicle/v15/components/my_ecu/data".to_string(),
-                configurations:
-                    "http://localhost:20002/vehicle/v15/components/my_ecu/configurations"
-                        .to_string(),
-                sdgs: None,
-                single_ecu_jobs:
-                    "http://localhost:20002/vehicle/v15/components/my_ecu/x-single-ecu-jobs"
-                        .to_string(),
-                faults: "http://localhost:20002/vehicle/v15/components/my_ecu/faults".to_string(),
-                modes: "http://localhost:20002/vehicle/v15/components/my_ecu/modes".to_string(),
-                schema: None,
+                locks: Some(format!("{EXAMPLE_BASE}/locks")),
+                operations: Some(format!("{EXAMPLE_BASE}/operations")),
+                data: Some(format!("{EXAMPLE_BASE}/data")),
+                configurations: Some(format!("{EXAMPLE_BASE}/configurations")),
+                single_ecu_jobs: Some(format!("{EXAMPLE_BASE}/x-single-ecu-jobs")),
+                faults: Some(format!("{EXAMPLE_BASE}/faults")),
+                modes: Some(format!("{EXAMPLE_BASE}/modes")),
+                ..Default::default()
             })
             .description("Response with ECU information (i.e. detected variant) and service URLs")
         })

@@ -159,7 +159,9 @@ Entities
     - A ``last_seen`` timestamp of the last successful diagnostic contact with the ECU (see
       :need:`arch~dt-ecu-states`), if the ECU has ever been contacted (either in the current session, or,
       when loaded from a persisted ECU list, in a previous session)
-    - URI references to the standardized resource collection endpoints: data, operations, configurations, faults, modes, locks, and extension endpoints
+    - URI references to the standardized resource collection endpoints: data, operations, configurations, faults,
+      modes, locks, and extension endpoints. A reference is only present if the ECU provides the
+      collection (ISO 17978-3 Table 53 C1); e.g. ``data`` is absent for an ECU without read services.
 
     **GET /components/{ecu-name}/status**
 
