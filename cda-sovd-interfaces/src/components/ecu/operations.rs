@@ -76,21 +76,14 @@ pub mod comparams {
     #[derive(Clone)]
     pub struct Execution {
         pub capability: executions::Capability,
-        pub status: executions::Status,
+        pub status: super::ExecutionStatus,
         pub comparam_override: HashMap<String, ComParamValue>,
     }
 
     pub mod executions {
         use super::{ComParamValue, Deserialize, HashMap, Serialize};
-
-        #[derive(Deserialize, Serialize, Clone)]
-        #[serde(rename_all = "lowercase")]
-        #[derive(schemars::JsonSchema)]
-        pub enum Status {
-            Running,
-            Completed,
-            Failed,
-        }
+        // Spec Table 185: comparam executions share the status set (incl. `stopped`).
+        use crate::components::ecu::operations::ExecutionStatus;
 
         #[derive(Deserialize, Serialize, Clone)]
         #[serde(rename_all = "lowercase")]
@@ -109,7 +102,9 @@ pub mod comparams {
         }
 
         pub mod update {
-            use super::{Capability, ComParamValue, Deserialize, HashMap, Serialize, Status};
+            use super::{
+                Capability, ComParamValue, Deserialize, ExecutionStatus, HashMap, Serialize,
+            };
             // todo: which ones are optional or not
             #[derive(Deserialize)]
             #[allow(
@@ -129,7 +124,7 @@ pub mod comparams {
             #[schemars(rename = "UpdateExecutionResponse")]
             pub struct Response {
                 pub id: String,
-                pub status: Status,
+                pub status: ExecutionStatus,
                 #[schemars(skip)]
                 #[serde(skip_serializing_if = "Option::is_none")]
                 pub schema: Option<schemars::Schema>,
@@ -147,9 +142,9 @@ pub mod comparams {
         }
 
         pub mod id {
-            use super::{Capability, ComParamValue, HashMap, Serialize, Status};
+            use super::{Capability, ComParamValue, ExecutionStatus, HashMap, Serialize};
             pub mod get {
-                use super::{Capability, ComParamValue, HashMap, Serialize, Status};
+                use super::{Capability, ComParamValue, ExecutionStatus, HashMap, Serialize};
                 #[derive(Serialize, schemars::JsonSchema)]
                 #[schemars(rename = "GetExecutionResponse")]
                 pub struct Response {
@@ -157,7 +152,7 @@ pub mod comparams {
                     // todo: probably out of scope for now:
                     // use trait items here to allow for other execution types than comparam
                     pub parameters: HashMap<String, ComParamValue>,
-                    pub status: Status,
+                    pub status: ExecutionStatus,
                     #[schemars(skip)]
                     #[serde(skip_serializing_if = "Option::is_none")]
                     pub schema: Option<schemars::Schema>,
