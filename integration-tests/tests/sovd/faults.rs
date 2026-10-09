@@ -1654,3 +1654,66 @@ async fn test_dtc_read_by_fault_id_fault_memory() {
     )
     .await;
 }
+
+/// User-memory fault status must come from `statusOfDTC`, not the DTC's low byte.
+#[tokio::test]
+async fn test_user_memory_fault_status_uses_status_byte() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let ecu_name = "flxc1000";
+    let user_fault_memory = "UserMem";
+    let dtc_code = "01E245";
+    let status_mask = "29";
+
+    for memory in ["Standard", user_fault_memory] {
+        ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, memory)
+            .await
+            .expect("Failed to clear DTCs in simulator");
+    }
+
+    // Different DTC and status bytes expose a shifted user-memory status lookup.
+    ecusim::add_dtc(
+        &runtime.ecu_sim,
+        ecu_name,
+        user_fault_memory,
+        &DtcMinimal {
+            id: dtc_code.into(),
+            status_mask: status_mask.into(),
+            emissions_related: false,
+        },
+    )
+    .await
+    .expect("Failed to add UserMem DTC in simulator");
+
+    let faults = get_faults(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .expect("Failed to get faults");
+    let fault_by_id = get_fault(&runtime.config, &auth, ecu_endpoint, dtc_code)
+        .await
+        .expect("Failed to get UserMem fault by ID");
+
+    // Clean up before the regression assertions so a failure leaves no stored faults.
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, user_fault_memory)
+        .await
+        .expect("Failed to clear UserMem DTCs in simulator");
+
+    let listed_fault = faults
+        .into_iter()
+        .find(|fault| fault.code == dtc_code)
+        .expect("UserMem fault should be present in the fault collection");
+    for (endpoint, fault) in [
+        ("Fault collection", listed_fault),
+        ("Fault by ID", fault_by_id),
+    ] {
+        let status = fault
+            .status
+            .expect("UserMem fault status should be present");
+        assert_eq!(
+            status.mask.as_deref(),
+            Some(status_mask),
+            "{endpoint}: UserMem DTC {dtc_code} must report status {status_mask}, not its low \
+             byte 45"
+        );
+    }
+}

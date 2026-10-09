@@ -65,6 +65,21 @@ fn get_dtc_status_for_mask(mask: u8) -> datatypes::DtcStatus {
     }
 }
 
+fn get_dtc_status_for_record(
+    raw: &[u8],
+    byte_pos: u32,
+    read_info: DtcReadInformationFunction,
+    dtc_code: DtcCode,
+) -> Result<datatypes::DtcStatus, DiagServiceError> {
+    // The raw data starts at the first DATA parameter. For user memory this is
+    // MemorySelection, one byte before DTCStatusAvailabilityMask.
+    let status_pos = byte_pos.saturating_add(u32::from(read_info.is_user_scope()));
+    let status_byte = raw.get(status_pos as usize).copied().ok_or_else(|| {
+        DiagServiceError::BadPayload(format!("Failed to get status byte for DTC {dtc_code:X}"))
+    })?;
+    Ok(get_dtc_status_for_mask(status_byte))
+}
+
 fn status_value_to_bool(val: &serde_json::Value) -> Result<bool, DiagServiceError> {
     fn int_to_bool(int_val: u64) -> Result<bool, DiagServiceError> {
         if int_val != 0 && int_val != 1 {
@@ -469,6 +484,9 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             ])?
             .into_iter()
             .filter(|(_, lookup)| lookup.dtcs.iter().any(|dtc| dtc.code == dtc_code))
+            // Prefer fault memory if the same code is defined in both memories.
+            .min_by_key(|(service_type, _)| *service_type as u8)
+            .into_iter()
             .collect();
         if scoped_services.is_empty() {
             return Err(DiagServiceError::InvalidRequest(format!(
@@ -544,23 +562,17 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 .map(|(f, _)| f.byte_pos)
                 .unwrap_or_default();
             for (field, record) in active_dtcs {
-                // Skip bytes that are reserved for the DTC code.
-                // The mask byte comes right after that.
+                // Each record contains a DTC code followed by its status byte.
+                // The initial offset accounts for DTCStatusAvailabilityMask.
                 byte_pos = byte_pos.saturating_add(field.bit_len.div_ceil(8).saturating_add(1));
-                let status_byte =
-                    raw.get(byte_pos as usize)
-                        .copied()
-                        .ok_or(DiagServiceError::BadPayload(format!(
-                            "Failed to get status byte for DTC {:X}",
-                            record.code
-                        )))?;
+                let status = get_dtc_status_for_record(raw, byte_pos, read_info, record.code)?;
 
                 all_dtcs.insert(
                     record.code,
                     DtcRecordAndStatus {
                         record,
                         scope: lookup.scope,
-                        status: get_dtc_status_for_mask(status_byte),
+                        status,
                     },
                 );
             }
@@ -1013,6 +1025,54 @@ mod tests {
     fn test_decode_dtc_from_str_invalid() {
         assert!(decode_dtc_from_str("12345").is_err());
         assert!(decode_dtc_from_str("00ZZZZ").is_err());
+    }
+
+    #[test]
+    fn test_user_memory_dtc_status_uses_status_byte() {
+        // Raw DATA excludes SID and subfunction, but includes MemorySelection.
+        let raw = [0x01, 0xFF, 0x01, 0xE2, 0x45, 0x29, 0x01, 0xE2, 0x46, 0x08];
+        let read_info = DtcReadInformationFunction::UserMemoryDtcByStatusMask;
+
+        let first = get_dtc_status_for_record(&raw, 4, read_info, 0x01_E245).unwrap();
+        assert_eq!(first.mask, 0x29);
+        assert!(first.test_failed);
+        assert!(first.confirmed_dtc);
+        assert!(first.test_failed_since_last_clear);
+        assert!(!first.pending_dtc);
+        assert!(!first.test_not_completed_this_operation_cycle);
+
+        let second = get_dtc_status_for_record(&raw, 8, read_info, 0x01_E246).unwrap();
+        assert_eq!(second.mask, 0x08);
+    }
+
+    #[test]
+    fn test_fault_memory_dtc_status_uses_status_byte() {
+        let raw = [0xFF, 0x01, 0xE2, 0x40, 0x29, 0x01, 0xE2, 0x41, 0x08];
+        let read_info = DtcReadInformationFunction::FaultMemoryByStatusMask;
+
+        let first = get_dtc_status_for_record(&raw, 4, read_info, 0x01_E240).unwrap();
+        assert_eq!(first.mask, 0x29);
+
+        let second = get_dtc_status_for_record(&raw, 8, read_info, 0x01_E241).unwrap();
+        assert_eq!(second.mask, 0x08);
+    }
+
+    #[test]
+    fn test_user_memory_dtc_missing_status_byte() {
+        let raw = [0x01, 0xFF, 0x01, 0xE2, 0x45];
+        let error = get_dtc_status_for_record(
+            &raw,
+            4,
+            DtcReadInformationFunction::UserMemoryDtcByStatusMask,
+            0x01_E245,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, DiagServiceError::BadPayload(_)));
+        assert_eq!(
+            error.to_string(),
+            "Bad payload: Failed to get status byte for DTC 1E245"
+        );
     }
 
     #[test]

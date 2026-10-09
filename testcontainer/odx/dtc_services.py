@@ -222,7 +222,7 @@ def add_dtc_read_by_mask_service(
     name: str,
     subfunction: int,
     description: str,
-    dtc_record_dop: OdxLinkRef,
+    dtc_and_status_records_dop: OdxLinkRef,
     user_memory: bool = False,
 ):
     """
@@ -233,7 +233,7 @@ def add_dtc_read_by_mask_service(
         name: Service name (e.g., "reportDTCByStatusMask")
         subfunction: The subfunction value (e.g, 0x02)
         description: Description of the service
-        dtc_record_dop: OdxLinkRef for the DTC structure,
+        dtc_and_status_records_dop: OdxLinkRef for the DTC and status records,
         user_memory: Whether the memory selection is included
     """
     request = Request(
@@ -287,7 +287,7 @@ def add_dtc_read_by_mask_service(
                     short_name="DTCAndStatusRecord",
                     semantic="DATA",
                     byte_position=4 if user_memory else 3,
-                    dop_ref=dtc_record_dop,
+                    dop_ref=dtc_and_status_records_dop,
                 ),
             ]
         ),
@@ -433,6 +433,7 @@ def add_dtc_read_snapshots_by_dtc_number_service(
     subfunction: int,
     description: str,
     dtc_record_dop: OdxLinkRef,
+    dtc_and_status_record_dop: OdxLinkRef,
     dtc_snapshot_record_dop: DataObjectProperty,
     dtc_snapshot_end_of_pdu: EndOfPduField,
     user_memory: bool = False,
@@ -446,6 +447,7 @@ def add_dtc_read_snapshots_by_dtc_number_service(
         subfunction: The subfunction value (e.g, 0x04)
         description: Description of the service
         dtc_record_dop: OdxLinkRef for the DTC record,
+        dtc_and_status_record_dop: OdxLinkRef for the DTC and status record,
         dtc_snapshot_record_dop: DataObjectProperty for the DTC snapshot record,
         dtc_snapshot_end_of_pdu: EndOfPduField for the end of the DTC snapshot PDU,
         user_memory: Whether the memory selection is included
@@ -513,7 +515,7 @@ def add_dtc_read_snapshots_by_dtc_number_service(
                     short_name="DTCAndStatusRecord",
                     semantic="DATA",
                     byte_position=3 if user_memory else 2,
-                    dop_ref=dtc_record_dop,
+                    dop_ref=dtc_and_status_record_dop,
                 ),
                 ValueParameter(
                     short_name="DTCSnapshotRecords",
@@ -654,6 +656,7 @@ def add_dtc_read_ext_data_by_dtc_number_service(
     subfunction: int,
     description: str,
     dtc_record_dop: OdxLinkRef,
+    dtc_and_status_record_dop: OdxLinkRef,
     dtc_req_ext_data_record_number_dop: DataObjectProperty,
     dtc_ext_data_end_of_pdu: EndOfPduField,
     user_memory: bool = False,
@@ -667,6 +670,7 @@ def add_dtc_read_ext_data_by_dtc_number_service(
         subfunction: The subfunction value (e.g, 0x06)
         description: Description of the service
         dtc_record_dop: OdxLinkRef for the DTC record,
+        dtc_and_status_record_dop: OdxLinkRef for the DTC and status record,
         dtc_req_ext_data_record_number_dop: DataObjectProperty for the DTC extended data record,
         dtc_ext_data_end_of_pdu: EndOfPduField for the end of the DTC extended data PDU,
         user_memory: Whether the memory selection is included
@@ -734,7 +738,7 @@ def add_dtc_read_ext_data_by_dtc_number_service(
                     short_name="DTCAndStatusRecord",
                     semantic="DATA",
                     byte_position=3 if user_memory else 2,
-                    dop_ref=dtc_record_dop,
+                    dop_ref=dtc_and_status_record_dop,
                 ),
                 ValueParameter(
                     short_name="DTCExtDataRecords",
@@ -864,16 +868,33 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
                     byte_position=0,
                     dop_ref=ref(dtc_dop.odx_id),
                 ),
+            ],
+        ),
+    )
+
+    # Create structure DOP for DTC records
+    dtc_and_status_record_structure = Structure(
+        odx_id=derived_id(dlr, "STRUCT.DTCAndStatusRecord"),
+        short_name="DTCAndStatusRecord",
+        parameters=NamedItemList(
+            [
+                ValueParameter(
+                    short_name="DTCRecord",
+                    semantic="DATA",
+                    byte_position=0,
+                    dop_ref=ref(dtc_dop.odx_id),
+                ),
                 *dtc_status_parameters(dlr, 3),
             ],
         ),
     )
+    dlr.diag_data_dictionary_spec.structures.append(dtc_and_status_record_structure)
     dlr.diag_data_dictionary_spec.structures.append(dtc_record_structure)
 
     dtc_end_of_pdu = EndOfPduField(
-        odx_id=derived_id(dlr, "EndOfPdu.DTCRecords"),
-        short_name="DTCRecords",
-        structure_ref=ref(dtc_record_structure.odx_id),
+        odx_id=derived_id(dlr, "EndOfPdu.DTCAndStatusRecords"),
+        short_name="DTCAndStatusRecords",
+        structure_ref=ref(dtc_and_status_record_structure.odx_id),
     )
     dlr.diag_data_dictionary_spec.end_of_pdu_fields.append(dtc_end_of_pdu)
 
@@ -904,9 +925,26 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
     )
     dlr.diag_data_dictionary_spec.dtc_dops.append(user_fault_memory_dtc_dop)
 
+    # Create structure DOP for User Memory DTC records
     user_mem_fault_memory_dtc_record_structure = Structure(
         odx_id=derived_id(dlr, "STRUCT.UserMemoryDTCRecord"),
         short_name="UserMemoryDTCRecord",
+        parameters=NamedItemList(
+            [
+                ValueParameter(
+                    short_name="UserMemoryDTCRecord",
+                    semantic="DATA",
+                    byte_position=0,
+                    dop_ref=ref(user_fault_memory_dtc_dop.odx_id),
+                ),
+            ],
+        ),
+    )
+
+    # Create structure DOP with Status for User Memory DTC records
+    user_mem_fault_memory_dtc_and_status_record_structure = Structure(
+        odx_id=derived_id(dlr, "STRUCT.UserMemoryDTCStatusAndRecord"),
+        short_name="UserMemoryDTCStatusAndRecord",
         parameters=NamedItemList(
             [
                 ValueParameter(
@@ -920,11 +958,14 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
         ),
     )
     dlr.diag_data_dictionary_spec.structures.append(user_mem_fault_memory_dtc_record_structure)
+    dlr.diag_data_dictionary_spec.structures.append(
+        user_mem_fault_memory_dtc_and_status_record_structure
+    )
 
     user_mem_fault_memory_dtc_end_of_pdu = EndOfPduField(
-        odx_id=derived_id(dlr, "EndOfPdu.UserMemoryDTCRecords"),
-        short_name="UserMemoryDTCRecords",
-        structure_ref=ref(user_mem_fault_memory_dtc_record_structure.odx_id),
+        odx_id=derived_id(dlr, "EndOfPdu.UserMemoryDTCAndStatusRecords"),
+        short_name="UserMemoryDTCAndStatusRecords",
+        structure_ref=ref(user_mem_fault_memory_dtc_and_status_record_structure.odx_id),
     )
     dlr.diag_data_dictionary_spec.end_of_pdu_fields.append(user_mem_fault_memory_dtc_end_of_pdu)
 
@@ -947,6 +988,7 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
         0x04,
         "Report DTC Snapshot Record By DTC Number",
         ref(dtc_record_structure.odx_id),
+        ref(dtc_and_status_record_structure.odx_id),
         dtc_snapshot_record_dop,
         dtc_snapshot_end_of_pdu,
     )
@@ -958,6 +1000,7 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
         0x06,
         "Report DTC Extended Data Record By DTC Number",
         ref(dtc_record_structure.odx_id),
+        ref(dtc_and_status_record_structure.odx_id),
         dtc_req_ext_data_record_number_dop,
         dtc_ext_data_end_of_pdu,
     )
@@ -979,6 +1022,7 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
         0x18,
         "Report User Memory Fault DTC Snapshot Record By DTC Number",
         ref(user_mem_fault_memory_dtc_record_structure.odx_id),
+        ref(user_mem_fault_memory_dtc_and_status_record_structure.odx_id),
         dtc_snapshot_record_dop,
         dtc_snapshot_end_of_pdu,
         user_memory=True,
@@ -991,6 +1035,7 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
         0x19,
         "Report User Memory Fault DTC Extended Data Record By DTC Number",
         ref(user_mem_fault_memory_dtc_record_structure.odx_id),
+        ref(user_mem_fault_memory_dtc_and_status_record_structure.odx_id),
         dtc_req_ext_data_record_number_dop,
         dtc_ext_data_end_of_pdu,
         user_memory=True,
