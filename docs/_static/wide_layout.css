@@ -1,0 +1,44 @@
+/* SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+ *
+ * See the NOTICE file(s) distributed with this work for additional
+ * information regarding copyright ownership.
+ *
+ * This program and the accompanying materials are made available under the
+ * terms of the Apache License Version 2.0 which is available at
+ * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
+ * Furo limits the content column to a fixed width (46em) and distributes the
+ * remaining space to the sidebars, which leaves wide empty margins on large
+ * screens and cuts off wide tables. Let the content column take all space
+ * that is not needed by the sidebars instead.
+ */
+.content {
+  width: auto;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+@media (min-width: 63em) {
+  .sidebar-drawer {
+    width: 15em;
+    flex: 0 0 auto;
+  }
+}
+
+@media (min-width: 82em) {
+  .toc-drawer {
+    flex: 0 0 auto;
+  }
+}
+
+/* Scroll wide tables (including sphinx-needs tables) instead of clipping them. */
+article table.docutils,
+article table.need {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
