@@ -118,6 +118,61 @@ pub mod get {
     pub type Response = Ecu;
 }
 
+/// The status resource of an entity (ISO 17978-3 §7.19).
+pub mod status {
+    use super::{Deserialize, Serialize, State};
+
+    /// Runtime status of an entity (Table 281).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    #[serde(rename_all = "camelCase")]
+    pub enum EntityStatus {
+        /// The entity is able to answer requests of the SOVD server.
+        Ready,
+        /// The entity is not able to answer requests of the SOVD server.
+        NotReady,
+    }
+
+    /// Response body of `GET {entity}/status` (Table 280).
+    #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct EntityStatusResponse {
+        pub status: EntityStatus,
+        /// The resource which controls the restart of the entity. Only present if the
+        /// ECU supports `ECUReset` (§8.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub restart: Option<String>,
+        /// Connection and variant detection state of the ECU.
+        #[serde(rename = "x-sovd2uds-state")]
+        pub state: State,
+        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub schema: Option<schemars::Schema>,
+    }
+
+    pub mod get {
+        pub type Response = super::EntityStatusResponse;
+        pub type Query = crate::IncludeSchemaQuery;
+    }
+
+    pub mod restart {
+        pub mod put {
+            use serde::Deserialize;
+
+            /// Name of the parameter selecting the `ECUReset` subfunction (§8.7).
+            pub const RESET_TYPE_PARAMETER: &str = "ResetType";
+
+            /// Request body of `PUT {entity}/status/restart` (Table 284).
+            #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+            #[schemars(rename = "RestartEntityRequest")]
+            pub struct Request {
+                /// Parameters of the restart. The CDA expects an object with a
+                /// `ResetType` member naming one of the ECU's reset services.
+                #[serde(default)]
+                pub parameters: Option<serde_json::Value>,
+            }
+        }
+    }
+}
+
 pub mod configurations {
     use super::{Deserialize, Serialize};
 
