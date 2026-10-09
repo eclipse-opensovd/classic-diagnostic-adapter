@@ -155,7 +155,8 @@ Entities
     Returns detailed information about a specific ECU entity, including:
 
     - The ECU identifier and name
-    - Variant information (name, base variant flag, connectivity state, and logical address)
+    - Variant identification (ISO 17978-3 Table 53 C3) as a map of strings with the keys ``name``,
+      ``logical_address`` (hex string, e.g. ``0x1000``) and ``is_base_variant`` (``true``/``false``)
     - A ``last_seen`` timestamp of the last successful diagnostic contact with the ECU (see
       :need:`arch~dt-ecu-states`), if the ECU has ever been contacted (either in the current session, or,
       when loaded from a persisted ECU list, in a previous session)

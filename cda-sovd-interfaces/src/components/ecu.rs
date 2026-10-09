@@ -21,23 +21,27 @@ pub mod operations;
 
 /// Connection and variant detection state of an ECU, reported by the status
 /// resource (`x-sovd2uds-state`) and the network structure.
-#[derive(Debug, Default, Serialize, Deserialize, schemars::JsonSchema, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, PartialEq)]
 pub enum State {
     Online,
     Offline,
-    #[default]
     NotTested,
     Duplicate,
     Disconnected,
     NoVariantDetected,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct Variant {
-    pub name: String,
-    pub is_base_variant: bool,
-    pub state: State,
-    pub logical_address: String,
+/// Variant identification of an ECU (Table 53 C3): a map of string values.
+pub type Variant = HashMap<String, String>;
+
+/// Keys of the [`Variant`] map.
+pub mod variant {
+    /// Name of the detected variant.
+    pub const NAME: &str = "name";
+    /// Logical address of the ECU as hex string, e.g. `0x1000`.
+    pub const LOGICAL_ADDRESS: &str = "logical_address";
+    /// `true` if the base variant is in use because no variant was detected.
+    pub const IS_BASE_VARIANT: &str = "is_base_variant";
 }
 
 /// Capability document of an ECU component (ISO 17978-3 Table 53).

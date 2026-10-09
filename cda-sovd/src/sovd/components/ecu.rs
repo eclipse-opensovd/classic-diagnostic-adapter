@@ -85,12 +85,12 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
         }
     };
 
-    let variant = sovd_interfaces::components::ecu::Variant {
-        name: status.name().unwrap_or("Unknown").to_owned(),
-        is_base_variant: status.is_base_variant(),
-        state: status.into_sovd(),
-        logical_address: format!("0x{logical_address:02x}"),
-    };
+    // The connection state is entity status, reported by `{entity}/status` (§7.19.2).
+    let variant = variant_map(
+        status.name().unwrap_or("Unknown"),
+        logical_address,
+        status.is_base_variant(),
+    );
 
     let sdgs = if query.include_sdgs {
         match uds.get_sdgs(&ecu_name, None).await {
@@ -148,6 +148,22 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
         .into_response()
 }
 
+fn variant_map(
+    name: &str,
+    logical_address: u16,
+    is_base_variant: bool,
+) -> sovd_interfaces::components::ecu::Variant {
+    use sovd_interfaces::components::ecu::variant;
+    [
+        (variant::NAME, name.to_owned()),
+        (variant::LOGICAL_ADDRESS, format!("0x{logical_address:02x}")),
+        (variant::IS_BASE_VARIANT, is_base_variant.to_string()),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value))
+    .collect()
+}
+
 /// Collections whose presence depends on the diagnostic description of the ECU.
 struct AvailableCollections {
     data: bool,
@@ -179,12 +195,7 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
             res.example(sovd_interfaces::components::ecu::Ecu {
                 id: "my_ecu".to_string(),
                 name: "My ECU".to_string(),
-                variant: sovd_interfaces::components::ecu::Variant {
-                    name: "Variant Name".to_owned(),
-                    is_base_variant: false,
-                    state: sovd_interfaces::components::ecu::State::Online,
-                    logical_address: "0x42".to_owned(),
-                },
+                variant: variant_map("Variant Name", 0x42, false),
                 locks: Some(format!("{EXAMPLE_BASE}/locks")),
                 operations: Some(format!("{EXAMPLE_BASE}/operations")),
                 data: Some(format!("{EXAMPLE_BASE}/data")),
