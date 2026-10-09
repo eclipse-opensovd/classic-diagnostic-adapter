@@ -260,8 +260,9 @@ async fn functions_description(
         Json(sovd_interfaces::ResourceResponse {
             items: vec![sovd_interfaces::Resource {
                 href: "http://localhost:20002/vehicle/v15/functions/functionalgroups".to_owned(),
-                id: None,
+                id: "functionalgroups".to_owned(),
                 name: "functionalgroups".to_owned(),
+                translation_id: None,
             }],
             schema,
         }),
@@ -290,8 +291,9 @@ fn functional_groups_description(include_schema: bool, functional_groups: Vec<St
                     href: format!(
                         "http://localhost:20002/vehicle/v15/functions/functionalgroups/{group}"
                     ),
-                    id: Some(group.to_lowercase()),
+                    id: group.to_lowercase(),
                     name: group,
+                    translation_id: None,
                 })
                 .collect::<Vec<_>>(),
             schema,
@@ -307,8 +309,9 @@ fn docs_functionalgroups(op: TransformOperation) -> TransformOperation {
                 items: vec![sovd_interfaces::Resource {
                     href: "http://localhost:20002/vehicle/v15/functions/functionalgroups/group_a"
                         .into(),
-                    id: Some("group_a".into()),
+                    id: "group_a".into(),
                     name: "Group_A".into(),
+                    translation_id: None,
                 }],
                 schema: None,
             })
