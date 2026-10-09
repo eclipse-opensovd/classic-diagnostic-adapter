@@ -14,22 +14,25 @@
 use cda_interfaces::HashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::Items;
+use crate::{Items, version_info::UriReference};
 
 pub mod modes;
 pub mod operations;
 
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, PartialEq)]
+/// Connection and variant detection state of an ECU, reported by the status
+/// resource (`x-sovd2uds-state`) and the network structure.
+#[derive(Debug, Default, Serialize, Deserialize, schemars::JsonSchema, PartialEq)]
 pub enum State {
     Online,
     Offline,
+    #[default]
     NotTested,
     Duplicate,
     Disconnected,
     NoVariantDetected,
 }
 
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Variant {
     pub name: String,
     pub is_base_variant: bool,
@@ -37,23 +40,69 @@ pub struct Variant {
     pub logical_address: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+/// Capability document of an ECU component (ISO 17978-3 Table 53).
+///
+/// A collection link is only present if the ECU supports the collection
+/// (Table 53 C1); its absence is how the standard reports "not supported".
+#[derive(Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Ecu {
     pub id: String,
     pub name: String,
     pub variant: Variant,
-    pub locks: String,
-    pub operations: String,
-    pub data: String,
-    pub configurations: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locks: Option<UriReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operations: Option<UriReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<UriReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configurations: Option<UriReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faults: Option<UriReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modes: Option<UriReference>,
+    #[serde(default, rename = "bulk-data", skip_serializing_if = "Option::is_none")]
+    pub bulk_data: Option<UriReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updates: Option<UriReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logs: Option<UriReference>,
+    #[serde(
+        default,
+        rename = "data-lists",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub data_lists: Option<UriReference>,
+    #[serde(
+        default,
+        rename = "cyclic-subscriptions",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cyclic_subscriptions: Option<UriReference>,
+    #[serde(
+        default,
+        rename = "communication-logs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub communication_logs: Option<UriReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subcomponents: Option<UriReference>,
+    #[serde(
+        default,
+        rename = "belongs-to",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub belongs_to: Option<UriReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sdgs: Option<Vec<SdSdg>>,
-    #[serde(rename = "x-single-ecu-jobs")]
-    pub single_ecu_jobs: String,
-    pub faults: String,
-    pub modes: String,
+    #[serde(
+        default,
+        rename = "x-single-ecu-jobs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub single_ecu_jobs: Option<UriReference>,
     #[schemars(skip)]
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<schemars::Schema>,
 }
 
@@ -116,6 +165,61 @@ pub struct ServiceSdgs {
 pub mod get {
     use super::Ecu;
     pub type Response = Ecu;
+}
+
+/// The status resource of an entity (ISO 17978-3 §7.19).
+pub mod status {
+    use super::{Deserialize, Serialize, State};
+
+    /// Runtime status of an entity (Table 281).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    #[serde(rename_all = "camelCase")]
+    pub enum EntityStatus {
+        /// The entity is able to answer requests of the SOVD server.
+        Ready,
+        /// The entity is not able to answer requests of the SOVD server.
+        NotReady,
+    }
+
+    /// Response body of `GET {entity}/status` (Table 280).
+    #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct EntityStatusResponse {
+        pub status: EntityStatus,
+        /// The resource which controls the restart of the entity. Only present if the
+        /// ECU supports `ECUReset` (§8.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub restart: Option<String>,
+        /// Connection and variant detection state of the ECU.
+        #[serde(rename = "x-sovd2uds-state")]
+        pub state: State,
+        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub schema: Option<schemars::Schema>,
+    }
+
+    pub mod get {
+        pub type Response = super::EntityStatusResponse;
+        pub type Query = crate::IncludeSchemaQuery;
+    }
+
+    pub mod restart {
+        pub mod put {
+            use serde::Deserialize;
+
+            /// Name of the parameter selecting the `ECUReset` subfunction (§8.7).
+            pub const RESET_TYPE_PARAMETER: &str = "ResetType";
+
+            /// Request body of `PUT {entity}/status/restart` (Table 284).
+            #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+            #[schemars(rename = "RestartEntityRequest")]
+            pub struct Request {
+                /// Parameters of the restart. The CDA expects an object with a
+                /// `ResetType` member naming one of the ECU's reset services.
+                #[serde(default)]
+                pub parameters: Option<serde_json::Value>,
+            }
+        }
+    }
 }
 
 pub mod configurations {

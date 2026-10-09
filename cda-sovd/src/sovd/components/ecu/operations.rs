@@ -1099,9 +1099,8 @@ pub(crate) mod service {
                 }
                 .into_response()
             };
-            if service == "reset" {
+            if service == ECU_RESET_SERVICE {
                 return ecu_reset_handler::<T>(
-                    service,
                     ecu_name,
                     uds,
                     body,
@@ -1521,12 +1520,40 @@ pub(crate) mod service {
             }
         }
 
+        /// Name of the ECU reset service, shared by the deprecated `operations/reset`
+        /// resource (§8.6.2) and `status/restart` (§8.7).
+        pub(crate) const ECU_RESET_SERVICE: &str = "reset";
+
+        /// Validates `reset_type` against the reset services of the ECU and returns
+        /// the diagnostic service that performs it.
+        pub(crate) async fn resolve_ecu_reset_service<T: UdsEcu>(
+            ecu_name: &str,
+            uds: &T,
+            reset_type: &str,
+        ) -> Result<DiagComm, ApiError> {
+            let allowed_values = uds.get_ecu_reset_services(ecu_name).await?;
+            if !allowed_values
+                .iter()
+                .any(|v| v.eq_ignore_ascii_case(reset_type))
+            {
+                return Err(ApiError::BadRequest(format!(
+                    "Invalid value for reset service: {reset_type}. Allowed values: [{}]",
+                    allowed_values.join(", ")
+                )));
+            }
+            Ok(DiagComm {
+                name: ECU_RESET_SERVICE.to_owned(),
+                type_: DiagCommType::Modes, // ecureset is in modes
+                lookup_name: Some(reset_type.to_owned()),
+                subfunction_id: None,
+            })
+        }
+
         #[allow(
             clippy::too_many_lines,
             reason = "Current implementation has little potential to extract smaller functions"
         )]
         async fn ecu_reset_handler<T: UdsEcu + SchemaProvider + Clone>(
-            service: String,
             ecu_name: &str,
             uds: &T,
             body: Bytes,
@@ -1566,37 +1593,15 @@ pub(crate) mod service {
                 .into_response();
             };
 
-            let allowed_values = uds.get_ecu_reset_services(ecu_name).await;
-            let allowed_values = match allowed_values {
+            let diag_service = match resolve_ecu_reset_service(ecu_name, uds, value_str).await {
                 Ok(v) => v,
-                Err(e) => {
+                Err(error) => {
                     return ErrorWrapper {
-                        error: e.into(),
+                        error,
                         include_schema,
                     }
                     .into_response();
                 }
-            };
-
-            if !allowed_values
-                .iter()
-                .any(|v| v.eq_ignore_ascii_case(value_str))
-            {
-                return ErrorWrapper {
-                    error: ApiError::BadRequest(format!(
-                        "Invalid value for reset service: {value_str}. Allowed values: [{}]",
-                        allowed_values.join(", ")
-                    )),
-                    include_schema,
-                }
-                .into_response();
-            }
-
-            let diag_service = DiagComm {
-                name: service.clone(),
-                type_: DiagCommType::Modes, // ecureset is in modes
-                lookup_name: Some(value_str.to_owned()),
-                subfunction_id: None,
             };
 
             let schema = if include_schema {

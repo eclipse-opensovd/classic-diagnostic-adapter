@@ -63,7 +63,7 @@ use uuid::Uuid;
 use crate::{
     VendorErrorCode,
     sovd::components::ecu::{
-        configurations, data, data_categories, faults, genericservice, modes, operations,
+        configurations, data, data_categories, faults, genericservice, modes, operations, status,
         x_single_ecu_jobs, x_sovd2uds_bulk_data, x_sovd2uds_download,
     },
 };
@@ -972,6 +972,14 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
             .delete_with(
                 operations::service::executions::id::delete,
                 operations::service::executions::id::docs_delete,
+            ),
+        )
+        .api_route("/status", routing::get_with(status::get, status::docs_get))
+        .api_route(
+            "/status/restart",
+            routing::put_with(
+                status::restart_entity::put,
+                status::restart_entity::docs_put,
             ),
         )
         .api_route("/modes", routing::get_with(modes::get, modes::docs_get))
