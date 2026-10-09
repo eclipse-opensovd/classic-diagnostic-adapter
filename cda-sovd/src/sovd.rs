@@ -631,10 +631,14 @@ pub(crate) fn resource_response(
     let base_path = format!("http://{host}{uri}");
     let items = resources
         .into_iter()
-        .map(|(name, href)| sovd_interfaces::Resource {
-            name: name.to_string(),
-            href: format!("{base_path}/{}", href.unwrap_or(name)),
-            id: None,
+        .map(|(name, path)| {
+            let id = path.unwrap_or(name);
+            sovd_interfaces::Resource {
+                name: name.to_string(),
+                href: format!("{base_path}/{id}"),
+                id: id.to_string(),
+                translation_id: None,
+            }
         })
         .collect();
 
@@ -740,8 +744,9 @@ async fn get_components<T: UdsEcu + SchemaProvider + Clone>(
     fn ecu_to_resource(ecu: String) -> Resource {
         Resource {
             href: format!("http://localhost:20002/Vehicle/v15/components/{ecu}"),
-            id: Some(ecu.to_lowercase()),
+            id: ecu.to_lowercase(),
             name: ecu,
+            translation_id: None,
         }
     }
     let ecus = state.uds.get_physical_ecus().await;
@@ -790,8 +795,9 @@ fn docs_components(op: TransformOperation) -> TransformOperation {
             res.example(sovd_interfaces::ResourceResponse {
                 items: vec![sovd_interfaces::Resource {
                     href: "http://localhost:20002/Vehicle/v15/components/my_ecu".into(),
-                    id: Some("my_ecu".into()),
+                    id: "my_ecu".into(),
                     name: "My ECU".into(),
+                    translation_id: None,
                 }],
                 schema: None,
             })
