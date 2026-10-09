@@ -70,7 +70,7 @@ pub enum ErrorCode {
     InsufficientAccessRights,
 
     /// The preconditions to execute the method are not fulfilled.
-    PreconditionsNotFulfilled,
+    PreconditionNotFulfilled,
 
     /// A lock previously held by the client was broken by another client.
     LockBroken,

@@ -79,7 +79,7 @@ impl IntoResponse for DbUpdateErrorResponse {
             RuntimeUpdateError::OperationsInProgress(_) | RuntimeUpdateError::LockConflict(_) => {
                 build_api_error_response(
                     StatusCode::CONFLICT,
-                    ErrorCode::PreconditionsNotFulfilled,
+                    ErrorCode::PreconditionNotFulfilled,
                     None,
                     None,
                 )

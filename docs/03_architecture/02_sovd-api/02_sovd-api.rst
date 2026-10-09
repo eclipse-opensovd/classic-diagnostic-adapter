@@ -614,7 +614,7 @@ Operations
     An ECU is reset through ``PUT /status/restart`` (ISO 17978-3 §7.19.4, §8.7). The request body
     ``{"parameters": {"ResetType": "<reset service>"}}`` selects one of the reset services of the ECU. The
     CDA answers ``202 Accepted`` with a ``Location`` header pointing at ``/status``, ``400`` for an unknown
-    reset type, and ``409`` with the error code ``preconditions-not-fulfilled`` when the ECU refuses the reset
+    reset type, and ``409`` with the error code ``precondition-not-fulfilled`` when the ECU refuses the reset
     with a negative response.
 
     For compatibility with SOVD version 1.0 and earlier, the deprecated operations ``/operations/ecureset``
