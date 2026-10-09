@@ -114,7 +114,9 @@ pub(crate) mod comparams {
         use cda_plugin_security::Secured;
         use indexmap::IndexMap;
         use opensovd_axum_extra::ExtractHost;
-        use sovd_interfaces::components::ecu::operations::comparams as sovd_comparams;
+        use sovd_interfaces::components::ecu::operations::{
+            ExecutionStatus, comparams as sovd_comparams,
+        };
         use tokio::sync::RwLock;
         use uuid::Uuid;
 
@@ -215,7 +217,7 @@ pub(crate) mod comparams {
                         res.description("Comparam execution created successfully.")
                             .example(sovd_comparams::executions::update::Response {
                                 id: "b7e2c1a2-3f4d-4e6a-9c8b-2a1d5e7f8c9b".to_string(),
-                                status: sovd_comparams::executions::Status::Running,
+                                status: ExecutionStatus::Running,
                                 schema: None,
                             })
                     },
@@ -287,7 +289,7 @@ pub(crate) mod comparams {
 
             let create_execution_response = sovd_comparams::executions::update::Response {
                 id: id.to_string(),
-                status: sovd_comparams::executions::Status::Running,
+                status: ExecutionStatus::Running,
                 schema,
             };
             // Publish the lease before the execution becomes observable to DELETE.
@@ -405,7 +407,7 @@ pub(crate) mod comparams {
                                 .example(sovd_comparams::executions::id::get::Response {
                                     capability: sovd_comparams::executions::Capability::Execute,
                                     parameters: HashMap::new(),
-                                    status: sovd_comparams::executions::Status::Running,
+                                    status: ExecutionStatus::Running,
                                     schema: None,
                                 })
                         },
@@ -533,7 +535,7 @@ pub(crate) mod comparams {
                             res.description("Comparam execution updated successfully.")
                                 .example(sovd_comparams::executions::update::Response {
                                     id: "example_id".to_string(),
-                                    status: sovd_comparams::executions::Status::Running,
+                                    status: ExecutionStatus::Running,
                                     schema: None,
                                 })
                         },
@@ -2051,7 +2053,7 @@ mod tests {
             crate::sovd::ComparamExecution::new(
                 comparams::Execution {
                     capability: executions::Capability::Execute,
-                    status: executions::Status::Running,
+                    status: sovd_interfaces::components::ecu::operations::ExecutionStatus::Running,
                     comparam_override: HashMap::new(),
                 },
                 communication_access

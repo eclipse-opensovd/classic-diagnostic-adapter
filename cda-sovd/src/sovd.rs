@@ -1550,7 +1550,7 @@ pub(crate) mod tests {
             ComparamExecution::new(
                 sovd_ecu::operations::comparams::Execution {
                     capability: sovd_ecu::operations::comparams::executions::Capability::Execute,
-                    status: sovd_ecu::operations::comparams::executions::Status::Running,
+                    status: sovd_ecu::operations::ExecutionStatus::Running,
                     comparam_override: HashMap::default(),
                 },
                 communication_guard,
