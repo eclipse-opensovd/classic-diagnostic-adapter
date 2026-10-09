@@ -31,6 +31,7 @@ use crate::util::{
     },
 };
 
+mod conformance;
 mod custom_routes;
 mod data;
 mod deferred_init;
