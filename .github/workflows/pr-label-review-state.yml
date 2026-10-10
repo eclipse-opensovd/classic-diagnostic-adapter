@@ -146,9 +146,8 @@ jobs:
               );
 
             if (isDraft) {
-              core.info('PR is a draft, removing review labels.');
+              core.info('PR is a draft, removing other review labels.');
               await removeLabel(NEEDS_REVIEW);
-              await removeLabel(CHANGES_REQUESTED);
               await removeLabel(READY_TO_MERGE);
               return;
             }
@@ -165,17 +164,14 @@ jobs:
             } else if (allApproved && !hasUnresolvedThreads) {
               await addLabel(READY_TO_MERGE);
               await removeLabel(NEEDS_REVIEW);
-              await removeLabel(CHANGES_REQUESTED);
 
             } else if (eventName === 'pull_request_target' && action === 'synchronize') {
               await addLabel(NEEDS_REVIEW);
-              await removeLabel(CHANGES_REQUESTED);
               await removeLabel(READY_TO_MERGE);
 
             } else if (hasUnresolvedThreads && authorRepliedToAll) {
               // Author replied to every reviewer thread - ready for re-review
               await addLabel(NEEDS_REVIEW);
-              await removeLabel(CHANGES_REQUESTED);
               await removeLabel(READY_TO_MERGE);
 
             } else if (hasUnresolvedThreads) {
@@ -185,6 +181,5 @@ jobs:
 
             } else {
               await addLabel(NEEDS_REVIEW);
-              await removeLabel(CHANGES_REQUESTED);
               await removeLabel(READY_TO_MERGE);
             }
