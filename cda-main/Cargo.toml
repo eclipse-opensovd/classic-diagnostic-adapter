@@ -55,7 +55,7 @@ toml = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 # allocator
-mimalloc = { git = "https://github.com/theswiftfox/mimalloc.git", rev = "afbaaa5" }
+mimalloc = { git = "https://github.com/theswiftfox/mimalloc.git", rev = "f1b43de8bcd208a4b0c9469a87fe0920b540da40" }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

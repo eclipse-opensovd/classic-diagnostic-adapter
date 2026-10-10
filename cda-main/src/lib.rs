@@ -57,6 +57,24 @@ pub use setup::Setup;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// Environment variable to override the purge delay of mimalloc in milliseconds.
+#[cfg(not(feature = "heap-profiling"))]
+const MIMALLOC_PURGE_DELAY_ENV: &str = "MIMALLOC_PURGE_DELAY";
+
+/// Configures mimalloc to return unused memory to the OS immediately.
+///
+/// mimalloc only executes delayed purges when the owning thread calls into the
+/// allocator again. Idle tokio worker threads therefore keep freed memory (e.g. from
+/// startup or from serving `openapi.json`) resident indefinitely. Purging immediately
+/// cuts the resident memory after startup roughly in half.
+/// Can be overridden with the `MIMALLOC_PURGE_DELAY` environment variable.
+fn configure_allocator() {
+    #[cfg(not(feature = "heap-profiling"))]
+    if std::env::var_os(MIMALLOC_PURGE_DELAY_ENV).is_none() {
+        mimalloc::options::option_set(mimalloc::options::MiOption::PurgeDelay, 0);
+    }
+}
+
 const DOIP_HEALTH_COMPONENT_KEY: &str = "doip";
 
 #[cfg(feature = "health")]
@@ -250,6 +268,8 @@ where
         // Exiting after generating config is on purpose.
         return generate_config_cmd(output.as_ref());
     }
+
+    configure_allocator();
 
     let config_file = match &args.config {
         Some(config_file) => {
