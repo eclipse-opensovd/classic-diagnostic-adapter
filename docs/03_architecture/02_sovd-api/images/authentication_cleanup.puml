@@ -1,0 +1,37 @@
+' SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+'
+' See the NOTICE file(s) distributed with this work for additional
+' information regarding copyright ownership.
+'
+' This program and the accompanying materials are made available under the
+' terms of the Apache License Version 2.0 which is available at
+' https://www.apache.org/licenses/LICENSE-2.0
+'
+' SPDX-License-Identifier: Apache-2.0
+
+
+@startuml
+title Authentication -- SID 29 -- deAuthenticate on lock release / expiry, mode_expiration, ECU cleanup
+
+participant "Lock Manager /\nECU Cleanup" as TRIGGER
+participant "Diagnostic\nKernel" as DIAG
+participant ECU
+
+TRIGGER -> DIAG : lock released / expired,\nmode_expiration elapsed\nor ECU cleanup
+activate DIAG
+
+alt tracked state == authenticated
+  DIAG -> ECU : 29 00 (deAuthenticate)
+  alt positive response
+    ECU -> DIAG : 69 00
+  else negative response / timeout
+    ECU -> DIAG : 7F 29 {NRC}
+    DIAG -> DIAG : log warning
+  end
+  DIAG -> DIAG : tracked state = deAuthenticated
+end
+
+DIAG -> DIAG : continue cleanup\n(reset security access and session)
+deactivate DIAG
+
+@enduml
