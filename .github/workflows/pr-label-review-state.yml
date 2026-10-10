@@ -160,8 +160,15 @@ jobs:
               await addLabel(CHANGES_REQUESTED);
               await removeLabel(NEEDS_REVIEW);
               await removeLabel(READY_TO_MERGE);
+              return;
+            }
 
-            } else if (allApproved && !hasUnresolvedThreads) {
+            if (hasChangesRequested) {
+              core.info('Changes are requested; the author must manually add the needs review label.');
+              return;
+            }
+
+            if (allApproved && !hasUnresolvedThreads) {
               await addLabel(READY_TO_MERGE);
               await removeLabel(NEEDS_REVIEW);
 

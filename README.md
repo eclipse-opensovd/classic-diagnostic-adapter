@@ -252,6 +252,11 @@ $env:OPENSSL_INCLUDE_DIR="C:\Program Files\OpenSSL-Win64\include"
 
 ## developing
 
+### Pull request review labels
+
+When a reviewer requests changes, the `changes requested` label is retained until someone removes it manually.
+After addressing the feedback, the author must manually add the `needs review` label to request another review.
+
 ### pre commit
 
 Check staged files:
