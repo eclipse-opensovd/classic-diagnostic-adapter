@@ -11,6 +11,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use cda_interfaces::ResetOutcome;
+
 use super::*;
 use crate::sovd::locks::acquisition::stop_tester_present_unless_needed;
 
