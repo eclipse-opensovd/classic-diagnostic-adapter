@@ -34,19 +34,33 @@ type RouteGroups = Arc<RwLock<IndexMap<u64, RouteGroup>>>;
 ///
 /// The [`ApiRouter`] is split once on registration, so recompositions only clone the
 /// cheap axum router instead of the whole [`ApiRouter`] including its documentation.
+/// The paths are kept as serialized JSON, which is several times smaller than the
+/// in-memory [`Paths`] and only needs to be parsed when `openapi.json` is requested.
 struct RouteGroup {
     router: axum::Router,
-    paths: Option<Paths>,
+    paths_json: Option<Box<[u8]>>,
+}
+
+impl RouteGroup {
+    fn paths(&self) -> Option<Paths> {
+        let json = self.paths_json.as_deref()?;
+        serde_json::from_slice(json)
+            .inspect_err(|e| tracing::error!(error = %e, "Failed to deserialize OpenAPI paths"))
+            .ok()
+    }
 }
 
 impl From<ApiRouter> for RouteGroup {
     fn from(routes: ApiRouter) -> Self {
         let mut api = OpenApi::default();
         let router = routes.finish_api(&mut api);
-        Self {
-            router,
-            paths: api.paths,
-        }
+        let paths_json = api.paths.and_then(|paths| {
+            serde_json::to_vec(&paths)
+                .inspect_err(|e| tracing::error!(error = %e, "Failed to serialize OpenAPI paths"))
+                .ok()
+                .map(Vec::into_boxed_slice)
+        });
+        Self { router, paths_json }
     }
 }
 
@@ -140,13 +154,10 @@ impl DynamicRouter {
             .values()
             .rev()
             .fold(OpenApi::default(), |mut api, group| {
-                if let Some(paths) = &group.paths {
+                if let Some(paths) = group.paths() {
                     let api_paths = api.paths.get_or_insert_with(Default::default);
-                    for (path, item) in &paths.paths {
-                        api_paths
-                            .paths
-                            .entry(path.clone())
-                            .or_insert_with(|| item.clone());
+                    for (path, item) in paths.paths {
+                        api_paths.paths.entry(path).or_insert(item);
                     }
                 }
                 api
