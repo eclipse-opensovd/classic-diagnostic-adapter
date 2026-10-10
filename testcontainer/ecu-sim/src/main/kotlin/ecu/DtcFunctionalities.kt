@@ -94,6 +94,20 @@ fun RequestsData.addDtcRequests() {
         ack(response.asByteArray)
     }
 
+    request("19 17 []", "User_Fault_Memory_ReportDTCByStatusMask") {
+        val request = UserFaultMemReportDTCByStatusMaskRequest.parse(messagePayload())
+        val faults = ecu.dtcFaults(FaultMemory.UserMem).values.filter { it.status.matches(request.statusMask) }
+
+        val response =
+            UserFaultMemReportDTCByStatusMaskResponse(
+                memorySelection = request.memorySelection,
+                //          Status Availability Mask with all bits set to true, meaning all bit are supported by this ECU
+                availabilityStatusMask = AllAvailableStatusMask,
+                records = faults.map { it.toDTCAndStatusRecord() },
+            )
+        ack(response.asByteArray)
+    }
+
     request("19 04 []", "ReadDTCInformation_ReportDTCSnapshotRecordByDTCNbr") {
         val request = ReadDtcDTCWithSnapshotRecordByDTCNbrRequest.parse(messagePayload())
 
@@ -103,6 +117,24 @@ fun RequestsData.addDtcRequests() {
         } else {
             val response =
                 ReadDtcDTCWithSnapshotRecordByDTCNbrResponse(
+                    dtc = fault.id,
+                    status = fault.status,
+                    parameters = fault.snapshots,
+                )
+            ack(response.asByteArray)
+        }
+    }
+
+    request("19 18 []", "User_Fault_Memory_ReportDTCSnapshotRecordByDTCNbr") {
+        val request = UserFaultMemReportDTCSnapshotRecordByDTCNbrRequest.parse(messagePayload())
+
+        val fault = ecu.dtcFaults(FaultMemory.UserMem)[request.dtc]
+        if (fault == null) {
+            nrc(NrcError.RequestOutOfRange)
+        } else {
+            val response =
+                UserFaultMemReportDTCSnapshotRecordByDTCNbrResponse(
+                    memorySelection = request.memorySelection,
                     dtc = fault.id,
                     status = fault.status,
                     parameters = fault.snapshots,
@@ -133,10 +165,33 @@ fun RequestsData.addDtcRequests() {
         }
     }
 
+    request("19 19 []", "User_Fault_Memory_ReportDTCExtendedDataByDTCNbr") {
+        val request = UserFaultMemReportDTCExtendedDataByDTCNbrRequest.parse(messagePayload())
+        val fault = ecu.dtcFaults(FaultMemory.UserMem)[request.dtc]
+        if (fault == null) {
+            nrc(NrcError.RequestOutOfRange)
+        } else {
+            val response =
+                UserFaultMemReportDTCExtendedDataByDTCNbrResponse(
+                    memorySelection = request.memorySelection,
+                    dtc = fault.id,
+                    statusMask = fault.status,
+                    extendedDataRecords =
+                        fault.extendedData.map {
+                            ExtendedDataRecord(
+                                recordNumber = it.recordNumber,
+                                recordData = it,
+                            )
+                        },
+                )
+            ack(response.asByteArray)
+        }
+    }
+
     request("31 01 42 00", "Clear_Diagnostic_User_Memory") {
-        val devFaults = ecu.dtcFaults(FaultMemory.Development)
-        devFaults.clear()
-        ecu.logger.info("Cleared all Development DTCs via Clear_Diagnostic_User_Memory routine")
+        val userMemFaults = ecu.dtcFaults(FaultMemory.UserMem)
+        userMemFaults.clear()
+        ecu.logger.info("Cleared all User Memory DTCs via Clear_Diagnostic_User_Memory routine")
         ack()
     }
 }
@@ -148,6 +203,40 @@ class ReadDtcDTCByStatusMaskResponse(
     val asByteArray: ByteArray
         get() {
             return availabilityStatusMask.asByteArray + records.map { it.asByteArray }.concat()
+        }
+}
+
+class UserFaultMemReportDTCByStatusMaskRequest(
+    val statusMask: DTCStatusMask,
+    val memorySelection: Byte,
+) {
+    companion object {
+        fun parse(buffer: ByteBuffer): UserFaultMemReportDTCByStatusMaskRequest {
+            val statusMask = DTCStatusMask.parse(buffer)
+            val memorySelection = buffer.get()
+            // TBD - CDA sends 0x00 for memory selection, but this is not a valid value for user memory selection. (https://github.com/eclipse-opensovd/classic-diagnostic-adapter/issues/599)
+            // The ECU simulator will accept it, but the CDA should be fixed to send based on the fault memory selection in the request.
+            // if (memorySelection == 0x00.toByte()) { // 0x00 is not a valid user memory selection, it is reserved for standard memory selection
+            //     throw IllegalArgumentException("Invalid memory selection: ${memorySelection.toString(16)}")
+            // }
+            return UserFaultMemReportDTCByStatusMaskRequest(
+                statusMask = statusMask,
+                memorySelection = memorySelection,
+            )
+        }
+    }
+}
+
+class UserFaultMemReportDTCByStatusMaskResponse(
+    val memorySelection: Byte,
+    val availabilityStatusMask: DTCStatusMask,
+    val records: List<DTCAndStatusRecord> = emptyList(),
+) {
+    val asByteArray: ByteArray
+        get() {
+            return byteArrayOf(memorySelection) +
+                availabilityStatusMask.asByteArray +
+                records.map { it.asByteArray }.concat()
         }
 }
 
@@ -213,5 +302,79 @@ class ReadDtcReportDTCExtendedDataByDTCNbrResponse(
     val asByteArray: ByteArray
         get() {
             return dtc.to24BitByteArray() + statusMask.asByteArray + extendedDataRecords.map { it.asByteArray }.concat()
+        }
+}
+
+class UserFaultMemReportDTCSnapshotRecordByDTCNbrRequest(
+    val dtc: Int, // 24 bit
+    val recordNumber: Byte, // 0x10 = First occurrence; 0x20 = Last occurrence; 0xff = all snapshot records
+    val memorySelection: Byte,
+) {
+    companion object {
+        fun parse(buffer: ByteBuffer): UserFaultMemReportDTCSnapshotRecordByDTCNbrRequest {
+            val dtc = buffer.get24BitInt()
+            val recordNumber = buffer.get()
+            val memorySelection = buffer.get()
+            // TBD - CDA sends 0x00 for memory selection, but this is not a valid value for user memory selection. (https://github.com/eclipse-opensovd/classic-diagnostic-adapter/issues/599)
+            // The ECU simulator will accept it, but the CDA should be fixed to send based on the fault memory selection in the request.
+            // if (memorySelection == 0x00.toByte()) { // 0x00 is not a valid user memory selection, it is reserved for standard memory selection
+            //     throw IllegalArgumentException("Invalid memory selection: ${memorySelection.toString(16)}")
+            // }
+            return UserFaultMemReportDTCSnapshotRecordByDTCNbrRequest(
+                dtc = dtc,
+                recordNumber = recordNumber,
+                memorySelection = memorySelection,
+            )
+        }
+    }
+}
+
+class UserFaultMemReportDTCSnapshotRecordByDTCNbrResponse(
+    val memorySelection: Byte,
+    val dtc: Int, // 24 bit
+    val status: DTCStatusMask,
+    val parameters: List<DTCSnapshotParameter>,
+) {
+    val asByteArray: ByteArray
+        get() {
+            return byteArrayOf(memorySelection) + dtc.to24BitByteArray() + status.asByteArray +
+                parameters.map { it.asByteArray }.concat()
+        }
+}
+
+class UserFaultMemReportDTCExtendedDataByDTCNbrRequest(
+    val dtc: Int, // 24 bit
+    val recordNumber: Byte = 0x01, // 0x01 = Standard Environment, 0xFF = All
+    val memorySelection: Byte,
+) {
+    companion object {
+        fun parse(buffer: ByteBuffer): UserFaultMemReportDTCExtendedDataByDTCNbrRequest {
+            val dtc = buffer.get24BitInt()
+            val recordNumber = buffer.get()
+            val memorySelection = buffer.get()
+            // TBD - CDA sends 0x00 for memory selection, but this is not a valid value for user memory selection. (https://github.com/eclipse-opensovd/classic-diagnostic-adapter/issues/599)
+            // The ECU simulator will accept it, but the CDA should be fixed to send based on the fault memory selection in the request.
+            // if (memorySelection == 0x00.toByte()) { // 0x00 is not a valid user memory selection, it is reserved for standard memory selection
+            //     throw IllegalArgumentException("Invalid memory selection: ${memorySelection.toString(16)}")
+            // }
+            return UserFaultMemReportDTCExtendedDataByDTCNbrRequest(
+                dtc = dtc,
+                recordNumber = recordNumber,
+                memorySelection = memorySelection,
+            )
+        }
+    }
+}
+
+class UserFaultMemReportDTCExtendedDataByDTCNbrResponse(
+    val memorySelection: Byte,
+    val dtc: Int,
+    val statusMask: DTCStatusMask,
+    val extendedDataRecords: List<ExtendedDataRecord> = emptyList(),
+) {
+    val asByteArray: ByteArray
+        get() {
+            return byteArrayOf(memorySelection) + dtc.to24BitByteArray() + statusMask.asByteArray +
+                extendedDataRecords.map { it.asByteArray }.concat()
         }
 }

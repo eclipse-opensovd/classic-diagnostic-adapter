@@ -25,7 +25,7 @@ enum class FaultMemory(
     val memory: Byte,
 ) {
     Standard(0x00),
-    Development(0x01),
+    UserMem(0x01),
     ;
 
     companion object {
