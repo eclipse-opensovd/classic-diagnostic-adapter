@@ -121,10 +121,7 @@ async fn test_dtc_setting() {
     let current_setting = get_dtc_setting(&runtime.config, &auth, ecu_endpoint)
         .await
         .unwrap();
-    assert_eq!(
-        current_setting.value.as_ref().map(|s| s.to_lowercase()),
-        Some(dtcs_on.to_owned())
-    );
+    assert_eq!(current_setting.value.to_lowercase(), dtcs_on);
 
     // Validate that ECU sim received and stored the DTC setting
     let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
@@ -153,10 +150,7 @@ async fn test_dtc_setting() {
     let current_setting = get_dtc_setting(&runtime.config, &auth, ecu_endpoint)
         .await
         .unwrap();
-    assert_eq!(
-        current_setting.value.as_ref().map(|s| s.to_lowercase()),
-        Some(dtcs_off.to_owned())
-    );
+    assert_eq!(current_setting.value.to_lowercase(), dtcs_off);
 
     // Validate that ECU sim received and stored the DTC setting
     let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
@@ -185,10 +179,7 @@ async fn test_dtc_setting() {
     let current_setting = get_dtc_setting(&runtime.config, &auth, ecu_endpoint)
         .await
         .unwrap();
-    assert_eq!(
-        current_setting.value.as_ref().map(|s| s.to_lowercase()),
-        Some(dtcs_time_travel.to_owned())
-    );
+    assert_eq!(current_setting.value.to_lowercase(), dtcs_time_travel);
 
     // Validate that ECU sim received and stored the DTC setting
     let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
@@ -915,7 +906,7 @@ fn assert_fault_data(sim_dtc: &DtcExtended, result_fault: ExtendedFault<VendorEr
 ///     }
 fn assert_dtc_snapshot_data(
     sim_snapshots: &Vec<SnapshotRecord>,
-    result_snapshots: ExtendedSnapshots<VendorErrorCode>,
+    result_snapshots: ExtendedSnapshots,
 ) {
     let result_snapshots = result_snapshots
         .data
@@ -1023,7 +1014,7 @@ fn assert_dtc_snapshot_data(
 ///     }
 fn assert_dtc_extended_data(
     sim_ext_data: &Vec<ExtDataRecord>,
-    result_extended_data: ExtendedDataRecords<VendorErrorCode>,
+    result_extended_data: ExtendedDataRecords,
 ) {
     let result_ext_data = result_extended_data
         .data
