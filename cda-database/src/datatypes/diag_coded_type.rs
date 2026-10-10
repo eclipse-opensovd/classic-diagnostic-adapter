@@ -536,10 +536,43 @@ impl DiagCodedType {
     /// `DiagServiceError::BadPayload`, if the payload is invalid or not enough data is available.
     pub fn encode(
         &self,
+        input_data: Vec<u8>,
+        uds_payload: &mut Vec<u8>,
+        byte_pos: usize,
+        bit_pos: usize,
+    ) -> Result<(), DiagServiceError> {
+        self.encode_impl(input_data, uds_payload, byte_pos, bit_pos, false)
+    }
+
+    /// Encodes input data into a UDS payload like [`DiagCodedType::encode`], but
+    /// *replaces* the bits occupied by this coded type instead of OR-ing into them.
+    ///
+    /// All bits in the target range (`bit_pos .. bit_pos + bit_length`) are cleared before
+    /// the new value is injected. When a bit mask is defined, only the bits selected by the
+    /// mask are cleared, so bits not covered by the mask are preserved.
+    ///
+    /// This is needed when a value has to overwrite data that was already written to the
+    /// payload by another parameter, e.g. the item count of a dynamic length field that
+    /// is only known after the items have been encoded.
+    /// # Errors
+    /// Same as [`DiagCodedType::encode`].
+    pub fn encode_replace(
+        &self,
+        input_data: Vec<u8>,
+        uds_payload: &mut Vec<u8>,
+        byte_pos: usize,
+        bit_pos: usize,
+    ) -> Result<(), DiagServiceError> {
+        self.encode_impl(input_data, uds_payload, byte_pos, bit_pos, true)
+    }
+
+    fn encode_impl(
+        &self,
         mut input_data: Vec<u8>,
         uds_payload: &mut Vec<u8>,
         byte_pos: usize,
         bit_pos: usize,
+        replace: bool,
     ) -> Result<(), DiagServiceError> {
         self.validate_bit_pos(bit_pos)?;
         let (packed_bytes, bit_len, mask) = match &self.type_ {
@@ -674,6 +707,10 @@ impl DiagCodedType {
                 bit_len,
                 bit_pos,
             )?;
+        } else if replace {
+            // Without a mask all bits of the target range belong to this value;
+            // an empty mask clears every bit in `bit_pos .. bit_pos + bit_len`.
+            apply_bit_mask(&mut pdu_cut_out, &[], bit_len, bit_pos)?;
         }
 
         inject_bits(bit_len, bit_pos, &mut pdu_cut_out, &packed_bytes)?;
@@ -3063,5 +3100,90 @@ mod tests {
                 "MinMaxLengthType max_length 5 cannot be less than min_length 10".to_owned()
             )
         );
+    }
+
+    #[test]
+    fn test_encode_replace_clears_target_bits() {
+        let diag_type = DiagCodedType::new_high_low_byte_order(
+            DataType::UInt32,
+            DiagCodedTypeVariant::StandardLength(StandardLengthType {
+                bit_length: 8,
+                bit_mask: None,
+                condensed: false,
+            }),
+        )
+        .unwrap();
+
+        // `encode` ORs into existing data
+        let mut payload = vec![0xAA, 0xF0, 0xBB];
+        diag_type.encode(vec![0x0F], &mut payload, 1, 0).unwrap();
+        assert_eq!(payload, vec![0xAA, 0xFF, 0xBB]);
+
+        // `encode_replace` overwrites the target byte, neighbours untouched
+        let mut payload = vec![0xAA, 0xF0, 0xBB];
+        diag_type
+            .encode_replace(vec![0x0F], &mut payload, 1, 0)
+            .unwrap();
+        assert_eq!(payload, vec![0xAA, 0x0F, 0xBB]);
+
+        // growing the payload works the same as with `encode`
+        let mut payload = vec![0xAA];
+        diag_type
+            .encode_replace(vec![0x05], &mut payload, 2, 0)
+            .unwrap();
+        assert_eq!(payload, vec![0xAA, 0x00, 0x05]);
+    }
+
+    #[test]
+    fn test_encode_replace_partial_byte_and_little_endian() {
+        // 4 bits at bit position 2: only bits 2..=5 are replaced
+        let nibble = DiagCodedType::new_high_low_byte_order(
+            DataType::UInt32,
+            DiagCodedTypeVariant::StandardLength(StandardLengthType {
+                bit_length: 4,
+                bit_mask: None,
+                condensed: false,
+            }),
+        )
+        .unwrap();
+        let mut payload = vec![0xFF];
+        nibble
+            .encode_replace(vec![0x05], &mut payload, 0, 2)
+            .unwrap();
+        assert_eq!(payload, vec![0b1101_0111]);
+
+        let u16_le = DiagCodedType::new(
+            DataType::UInt32,
+            DiagCodedTypeVariant::StandardLength(StandardLengthType {
+                bit_length: 16,
+                bit_mask: None,
+                condensed: false,
+            }),
+            false,
+        )
+        .unwrap();
+        let mut payload = vec![0xFF, 0xFF, 0xFF];
+        u16_le
+            .encode_replace(vec![0x12, 0x34], &mut payload, 1, 0)
+            .unwrap();
+        assert_eq!(payload, vec![0xFF, 0x34, 0x12]);
+    }
+
+    #[test]
+    fn test_encode_replace_with_mask_preserves_unmasked_bits() {
+        let diag_type = DiagCodedType::new_high_low_byte_order(
+            DataType::UInt32,
+            DiagCodedTypeVariant::StandardLength(StandardLengthType {
+                bit_length: 8,
+                bit_mask: Some(vec![0x0F]),
+                condensed: false,
+            }),
+        )
+        .unwrap();
+        let mut payload = vec![0xFF];
+        diag_type
+            .encode_replace(vec![0x03], &mut payload, 0, 0)
+            .unwrap();
+        assert_eq!(payload, vec![0xF3]);
     }
 }

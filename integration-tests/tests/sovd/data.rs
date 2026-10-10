@@ -11,13 +11,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use http::{Method, StatusCode};
+use std::time::Duration;
+
+use http::{HeaderMap, Method, StatusCode};
+use opensovd_cda_lib::config::configfile::Configuration;
+use serde_json::json;
 
 use crate::{
-    sovd::hook_cleanup,
+    sovd::{
+        hook_cleanup,
+        locks::{ECU_ENDPOINT as ECU_LOCK_ENDPOINT, create_lock, lock_operation},
+    },
     util::{
         ecusim,
-        http::{auth_header, send_cda_request},
+        http::{
+            auth_header, extract_field_from_json, response_to_json, send_cda_json_request,
+            send_cda_request,
+        },
         runtime::{EcuSim, setup_integration_test},
     },
 };
@@ -156,4 +166,125 @@ async fn cleanup_truncated(ecu_sim: &EcuSim) {
     if let Err(e) = ecusim::clear_interceptor(ecu_sim, "FLXC1000", "truncated_response").await {
         eprintln!("Failed to clear truncated response interceptor: {e}");
     }
+}
+
+const TIMELINE_ENDPOINT: &str = "components/flxc1000/data/fluxcapacitortimeline";
+
+async fn write_timeline(config: &Configuration, auth: &HeaderMap, data: &serde_json::Value) {
+    send_cda_json_request(
+        config,
+        TIMELINE_ENDPOINT,
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        &json!({ "data": data }),
+        Some(auth),
+    )
+    .await
+    .expect("Failed to write FluxCapacitorTimeline");
+}
+
+async fn read_timeline(config: &Configuration, auth: &HeaderMap) -> serde_json::Value {
+    let response = send_cda_request(
+        config,
+        TIMELINE_ENDPOINT,
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(auth),
+        None,
+    )
+    .await
+    .expect("Failed to read FluxCapacitorTimeline");
+    extract_field_from_json(
+        &response_to_json(&response).expect("response should be JSON"),
+        "data",
+    )
+    .expect("response should contain data")
+}
+
+/// Writes and reads DID 0xF300 (`FluxCapacitorTimeline`), whose data record consists of
+/// three chained DYNAMIC-LENGTH-FIELDs (see `testcontainer/odx/dynamic_length_fields.py`):
+///
+/// * `Destinations` with an explicit BYTE-POSITION, 8 bit count,
+/// * `Waypoints` without BYTE-POSITION, whose items contain a nested
+///   DYNAMIC-LENGTH-FIELD `Readings`,
+/// * `Passengers` without BYTE-POSITION, 16 bit count and OFFSET 2.
+///
+/// The ECU simulator parses written data strictly and rejects any layout mismatch,
+/// so a successful round trip verifies both the encoder (0x2E) and the decoder (0x22).
+/// The exact request bytes are additionally checked via the simulator recorder.
+#[tokio::test]
+async fn test_chained_dynamic_length_fields_write_and_read() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+
+    let ecu_lock = create_lock(
+        Duration::from_secs(60),
+        ECU_LOCK_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let lock_id = extract_field_from_json::<String>(
+        &response_to_json(&ecu_lock).expect("lock response should be JSON"),
+        "id",
+    )
+    .expect("lock response should contain an id");
+
+    let timeline = json!({
+        "Destinations": [
+            { "Year": 1885, "Month": 9 },
+            { "Year": 2015, "Month": 10 },
+            { "Year": 1955, "Month": 11 },
+        ],
+        "Waypoints": [
+            { "WaypointId": 7, "Readings": [{ "Reading": 1210 }, { "Reading": 88 }] },
+            { "WaypointId": 8, "Readings": [] },
+        ],
+        "Passengers": [{ "PassengerId": 1 }, { "PassengerId": 3 }],
+    });
+    let empty_timeline = json!({ "Destinations": [], "Waypoints": [], "Passengers": [] });
+
+    ecusim::start_recording(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("failed to start ECU sim recording");
+    write_timeline(&runtime.config, &auth, &timeline).await;
+    let read_back = read_timeline(&runtime.config, &auth).await;
+    write_timeline(&runtime.config, &auth, &empty_timeline).await;
+    let read_back_empty = read_timeline(&runtime.config, &auth).await;
+    let frames = ecusim::stop_and_clear_recording(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("failed to stop ECU sim recording");
+
+    lock_operation(
+        ECU_LOCK_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    let writes: Vec<String> = frames
+        .iter()
+        .map(|f| f.to_ascii_lowercase())
+        .filter(|f| f.starts_with("2ef300"))
+        .collect();
+    assert_eq!(
+        writes,
+        [
+            concat!(
+                "2ef300", "03", "075d09", "07df0a", "07a30b", // Destinations
+                "02", "07", "02", "04ba", "0058", "08", "00", // Waypoints (nested Readings)
+                "0002", "01", "03", // Passengers (16 bit count)
+            ),
+            concat!("2ef300", "00", "00", "0000"),
+        ],
+        "unexpected WriteDataByIdentifier requests, all frames: {frames:?}"
+    );
+
+    assert_eq!(read_back, timeline);
+    assert_eq!(read_back_empty, empty_timeline);
 }
