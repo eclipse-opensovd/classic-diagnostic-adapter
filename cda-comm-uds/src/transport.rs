@@ -151,7 +151,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
 
     /// Inner send path that skips the variant detection guard.
     /// Used by `detect_variant` to avoid infinite recursion.
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "Arguments mirror the public send path plus variant-detection readiness"
     )]
@@ -240,12 +240,12 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
 }
 
 impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
-    #[allow(
+    #[expect(
         clippy::needless_continue,
         reason = "Explicit continue improves readability to make it clearer, which loop is being \
                   continued"
     )]
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "Splitting the send/receive flow would reduce readability"
     )]

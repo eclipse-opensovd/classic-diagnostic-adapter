@@ -573,7 +573,7 @@ async fn create_tls_stream(
     ))
 }
 
-#[allow(
+#[expect(
     clippy::used_underscore_binding,
     reason = "Variables are unused in the function but required as named tracing fields"
 )]

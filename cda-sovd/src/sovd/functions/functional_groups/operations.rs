@@ -390,15 +390,9 @@ pub(crate) mod diag_service {
         }
     }
 
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "Axum extractors cannot be combined without a new custom extractor"
-    )]
-    #[allow(
-        clippy::too_many_lines,
-        reason = "Keeping execution reservation, UDS Start, and reservation rollback together \
-                  makes cleanup on every failure path visible. Splitting the transaction would \
-                  obscure that invariant"
     )]
     pub(crate) async fn post<T: UdsEcu + Clone>(
         headers: HeaderMap,
@@ -601,12 +595,6 @@ pub(crate) mod diag_service {
         .with(openapi::error_bad_gateway)
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "Keeping execution guarding, UDS Stop, and execution-state cleanup together \
-                  makes cleanup on every response path visible. Splitting the flow would obscure \
-                  that invariant"
-    )]
     pub(crate) async fn delete<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         Path(OperationAndIdPathParam { operation, id }): Path<OperationAndIdPathParam>,

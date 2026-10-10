@@ -191,11 +191,11 @@ impl TryInto<u32> for &Limit {
                 self.value
             )));
         }
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             reason = "Value range validated above"
         )]
-        #[allow(clippy::cast_sign_loss, reason = "Value range validated above")]
+        #[expect(clippy::cast_sign_loss, reason = "Value range validated above")]
         Ok(f as u32)
     }
 }
@@ -211,7 +211,7 @@ impl TryInto<i32> for &Limit {
             )));
         }
 
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             reason = "Value range validated above"
         )]
@@ -272,11 +272,11 @@ impl TryInto<Vec<u8>> for &Limit {
                             "Invalid value for float, error={e}"
                         ))
                     })?;
-                    #[allow(
+                    #[expect(
                         clippy::cast_possible_truncation,
                         reason = "Expected behavior when converting from float to u8"
                     )]
-                    #[allow(
+                    #[expect(
                         clippy::cast_sign_loss,
                         reason = "Expected behavior when converting from float to u8"
                     )]

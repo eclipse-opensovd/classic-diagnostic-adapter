@@ -87,7 +87,7 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
         ),
         err
     )]
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "Keeping the function together makes structural sense. Splitting would hurt \
                   readability"

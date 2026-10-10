@@ -196,7 +196,7 @@ fn compu_lookup(
                 let lookup: u32 = lookup.try_into()?;
                 if lookup <= 0xFF {
                     Ok(DiagDataValue::String(
-                        #[allow(
+                        #[expect(
                             clippy::cast_possible_truncation,
                             reason = "NRC is defined as u8. truncation is correct by spec"
                         )]
@@ -376,7 +376,7 @@ fn parse_json_to_f64(
         return Ok(num);
     }
 
-    #[allow(
+    #[expect(
         clippy::cast_precision_loss,
         reason = "Precision loss is acceptable since value is converted to f64 for compu method \
                   application"
@@ -452,11 +452,11 @@ fn parse_json_to_f64(
 
 /// Helper function to convert an internal value to bytes based on data type
 // Casting and truncating is defined in the ISO instead of rounding
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     reason = "Casting behavior is defined by ISO spec, not rounding"
 )]
-#[allow(
+#[expect(
     clippy::cast_sign_loss,
     reason = "Casting behavior is defined by ISO spec"
 )]
@@ -855,7 +855,7 @@ fn process_numeric_json_value(
         }
         DataType::Float32 =>
         {
-            #[allow(
+            #[expect(
                 clippy::cast_possible_truncation,
                 reason = "Truncating f64 to f32 is intentional here"
             )]
@@ -1755,7 +1755,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(
+    #[expect(
         clippy::float_cmp,
         reason = "Test verifies exact float values by specification"
     )]
@@ -1814,11 +1814,11 @@ mod tests {
     }
 
     #[test]
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "Test data is large. keeping together aids comprehension"
     )]
-    #[allow(
+    #[expect(
         clippy::float_cmp,
         reason = "Test verifies exact float values by specification"
     )]
@@ -2061,7 +2061,7 @@ mod tests {
 
     #[test]
     // allowed because we expect an exact match on floating point values in this test
-    #[allow(
+    #[expect(
         clippy::float_cmp,
         reason = "Test verifies exact float values. Precision is controlled by specification"
     )]
@@ -2217,7 +2217,7 @@ mod tests {
 
     #[test]
     // the given data in the tests allows and requires exact float comparisons
-    #[allow(
+    #[expect(
         clippy::float_cmp,
         reason = "Test data requires exact float comparisons"
     )]

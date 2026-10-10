@@ -75,7 +75,7 @@ pub struct EcuManagerConfig {
     pub strict_parameter_validation: bool,
 }
 
-#[allow(
+#[expect(
     clippy::struct_excessive_bools,
     reason = "Struct holds multiple independent boolean config flags"
 )]
@@ -340,7 +340,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     }
 
     fn revision(&self) -> String {
-        #[allow(
+        #[expect(
             clippy::redundant_closure_for_method_calls,
             reason = "Cannot remove closure: underlying flatbuf type is not exported from the \
                       database crate"
@@ -558,7 +558,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         }
     }
 
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "Keeping the function together makes structural sense"
     )]

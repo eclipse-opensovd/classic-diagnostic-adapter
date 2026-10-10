@@ -24,7 +24,7 @@ pub use mdd_data::{
 };
 use serde::{Deserialize, Serialize};
 
-#[allow(
+#[expect(
     clippy::struct_excessive_bools,
     reason = "Configuration struct legitimately has multiple independent boolean fields"
 )]

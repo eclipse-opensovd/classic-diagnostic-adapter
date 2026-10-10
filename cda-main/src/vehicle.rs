@@ -157,7 +157,7 @@ pub async fn load_vehicle_data<S: SecurityPlugin>(
     })
 }
 
-#[allow(
+#[expect(
     clippy::implicit_hasher,
     reason = "Type alias does not allow specifying hasher. Hasher is set globally"
 )]
@@ -167,7 +167,7 @@ pub async fn load_vehicle_data<S: SecurityPlugin>(
         dlt_context = dlt_ctx!("MAIN"),
     )
 )]
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "Combining parameters into a struct is not preferred here, to keep constructor call \
               semantics explicit"
@@ -198,7 +198,7 @@ pub fn create_uds_manager<S: SecurityPlugin>(
 ///
 /// # Errors
 /// Returns [`AppError`] if database loading or diagnostic gateway creation fails.
-#[allow(
+#[expect(
     clippy::implicit_hasher,
     reason = "Type alias doesn't allow specifying hasher"
 )]

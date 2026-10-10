@@ -928,7 +928,7 @@ pub(crate) mod service {
                 })
         }
 
-        #[allow(
+        #[expect(
             clippy::too_many_arguments,
             reason = "Axum extractors cannot be combined without a new custom extractor"
         )]
@@ -1526,7 +1526,7 @@ pub(crate) mod service {
             }
         }
 
-        #[allow(
+        #[expect(
             clippy::too_many_lines,
             reason = "Current implementation has little potential to extract smaller functions"
         )]
@@ -1862,12 +1862,6 @@ pub(crate) mod service {
                 .with(openapi::error_bad_gateway)
             }
 
-            #[allow(
-                clippy::too_many_lines,
-                reason = "Keeping validation, execution guarding, UDS Stop, and guard cleanup \
-                          together makes cleanup on every response path visible. Splitting the \
-                          flow would obscure that state invariant"
-            )]
             pub(crate) async fn delete<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
                 UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
                 Path(ServiceAndIdPathParam { service, id }): Path<ServiceAndIdPathParam>,
@@ -2257,7 +2251,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::float_cmp, reason = "Test verifies exact deserialized values")]
+    #[expect(clippy::float_cmp, reason = "Test verifies exact deserialized values")]
     fn com_param_simple_deserialization() {
         let json_data_string = "\"example_value\"";
         let deserialized_string: ComParamSimpleValue =

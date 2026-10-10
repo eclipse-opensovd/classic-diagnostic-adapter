@@ -211,7 +211,7 @@ pub fn pending_nrc_from_raw(data: &[u8], source_address: u16) -> Option<PendingN
     if !is_pending_nrc(data) {
         return None;
     }
-    #[allow(
+    #[expect(
         clippy::indexing_slicing,
         reason = "is_pending_nrc guarantees len >= 3"
     )]
