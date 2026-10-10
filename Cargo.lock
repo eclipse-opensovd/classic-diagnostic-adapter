@@ -2560,7 +2560,7 @@ dependencies = [
 [[package]]
 name = "mimalloc"
 version = "3.0.1"
-source = "git+https://github.com/theswiftfox/mimalloc.git?rev=afbaaa5#afbaaa50e6df2e28be0c721c55463cc52e86b89a"
+source = "git+https://github.com/froks-contrib/mimalloc.git?rev=df625ab#df625ab247a4ebd76b95fef45bf7d95815970c80"
 dependencies = [
  "cc",
  "libc",
