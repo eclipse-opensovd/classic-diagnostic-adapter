@@ -11,15 +11,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#![cfg_attr(
-    nightly,
-    allow(
-        unknown_lints,
-        clippy::duration_suboptimal_units,
-        reason = "Literal duration for test clarity. Lint not available in all toolchains"
-    )
-)]
-
 use cda_interfaces::ResetOutcome;
 
 use super::*;
