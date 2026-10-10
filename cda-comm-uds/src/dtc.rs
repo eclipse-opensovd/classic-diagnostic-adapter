@@ -554,16 +554,6 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
                     },
                 );
             }
-
-            if mask == 0xFF || mask == 0x00 {
-                for record in lookup.dtcs {
-                    all_dtcs.entry(record.code).or_insert(DtcRecordAndStatus {
-                        record,
-                        scope: lookup.scope,
-                        status: get_dtc_status_for_mask(0),
-                    });
-                }
-            }
         }
 
         Ok(all_dtcs
