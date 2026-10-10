@@ -45,6 +45,7 @@ COPY cda-plugin-lock-priority/Cargo.toml ./cda-plugin-lock-priority/Cargo.toml
 COPY cda-plugin-security/Cargo.toml ./cda-plugin-security/Cargo.toml
 COPY cda-plugin-runtime-update/Cargo.toml ./cda-plugin-runtime-update/Cargo.toml
 COPY cda-plugin-communication-management/Cargo.toml ./cda-plugin-communication-management/Cargo.toml
+COPY cda-plugin-vehicle-topology/Cargo.toml ./cda-plugin-vehicle-topology/Cargo.toml
 COPY cda-sovd/Cargo.toml ./cda-sovd/Cargo.toml
 COPY cda-tracing/Cargo.toml ./cda-tracing/Cargo.toml
 COPY cda-sovd-interfaces/Cargo.toml ./cda-sovd-interfaces/Cargo.toml
@@ -110,6 +111,7 @@ COPY cda-plugin-lock-priority ./cda-plugin-lock-priority
 COPY cda-plugin-security ./cda-plugin-security
 COPY cda-plugin-runtime-update ./cda-plugin-runtime-update
 COPY cda-plugin-communication-management ./cda-plugin-communication-management
+COPY cda-plugin-vehicle-topology ./cda-plugin-vehicle-topology
 COPY cda-sovd ./cda-sovd
 COPY cda-tracing ./cda-tracing
 COPY cda-sovd-interfaces ./cda-sovd-interfaces

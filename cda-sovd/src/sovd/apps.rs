@@ -103,6 +103,7 @@ impl IntoSovd for cda_interfaces::datatypes::Ecu {
             state: format!("{state:?}"),
             logical_address: self.logical_address,
             logical_link: self.logical_link,
+            last_seen: self.last_seen.map(super::format_sovd_timestamp),
         }
     }
 }

@@ -735,6 +735,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cda-plugin-vehicle-topology"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cda-interfaces",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "cda-sovd"
 version = "0.1.0"
 dependencies = [
@@ -2868,6 +2880,7 @@ dependencies = [
  "cda-plugin-lock-priority",
  "cda-plugin-runtime-update",
  "cda-plugin-security",
+ "cda-plugin-vehicle-topology",
  "cda-sovd",
  "cda-storage",
  "cda-tracing",
@@ -2885,6 +2898,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "tracing-subscriber",

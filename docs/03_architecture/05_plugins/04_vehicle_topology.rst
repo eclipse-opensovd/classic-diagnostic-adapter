@@ -37,13 +37,16 @@ Vehicle Topology Plugin
       that gateway.
     - **ECUs** -- a qualifier (name), current variant/connectivity state (with the internal AssumedOnline
       state, see :need:`arch~dt-ecu-states`, reported as ``Online``), a ``last_seen`` timestamp, logical
-      address, and logical link name, for each ECU listed under a functional group or a gateway.
+      address, and logical link name, for each ECU listed under a functional group or a gateway. The
+      timestamp is serialized as ``LastSeen`` (following the PascalCase naming of this response) in RFC 3339
+      UTC format, and omitted for an ECU that was never contacted.
 
     While a ``networkreset`` execution is in progress, this endpoint must respond with ``409 Conflict``, to
     avoid returning stale or partially updated topology data during the reset.
 
 .. arch:: Vehicle Topology Plugin - Reset
     :id: arch~plugin-vehicle-topology-reset
+    :links: dimpl~plugin-vehicle-topology-reset, dimpl~plugin-vehicle-topology-reset-http, test~plugin-vehicle-topology-reset-flags
     :status: draft
 
     The plugin must provide a ``networkreset`` operation, following the standard SOVD operations semantics
@@ -79,6 +82,24 @@ Vehicle Topology Plugin
     Triggering a reset must cause the plugin to start re-discovering/re-reporting the vehicle's network
     structure, so that subsequent reads of ``GET /apps/sovd2uds/data/networkstructure`` reflect the
     up-to-date topology once the execution has completed.
+
+    **Realization**
+
+    - The plugin is a separate crate (``cda-plugin-vehicle-topology``) and can be replaced via
+      ``Setup::with_vehicle_topology_plugin``. It works on narrow interfaces only: the persisted topology and
+      ECU states, a rediscovery trigger handled by the communication plugin
+      (``DetectionCause::TopologyRediscovery``), the exclusive transport disable lease, the lock state, and the
+      HTTP protection registry.
+    - The ``409 Conflict`` of the network structure endpoint is an HTTP protection installed for the duration
+      of the execution, limited to ``GET /apps/sovd2uds/data/networkstructure``.
+    - All preconditions are checked before ``202 Accepted`` is returned: a running execution or ECU or
+      functional group locks are rejected with ``409``, and a missing or foreign vehicle lock with ``403``.
+      For an execution that triggers detection, the exclusive transport disable lease is acquired up front;
+      if diagnostic operations are using communication, the request is rejected with ``409``.
+    - ``DELETE`` on a running execution cancels the wait for the rediscovery to settle; steps already started
+      (clearing, enabling communication) complete. The execution is then removed.
+    - ``GET /apps/sovd2uds/operations`` lists ``networkreset`` (and ``runtimefilesupdate`` when the runtime
+      update plugin is mounted).
 
     Starting a ``networkreset`` execution requires the caller to already hold an exclusive vehicle lock,
     acquired independently beforehand, to ensure that no diagnostic operations are in progress while the
@@ -163,6 +184,24 @@ Reset with Persisted List Control
     When ``communication.ecu_list_persistence.enabled`` is ``false`` (see :need:`arch~dt-ecu-list-persistence`), there is
     no ``ecu-topology`` bucket to operate on; ``clear_persisted`` is then a no-op regardless of its value,
     and only ``trigger_detection`` has an observable effect (running or skipping a live detection).
+
+    **Clearing**
+
+    Clearing cancels a pending topology write first, so it cannot bring the cleared data back. The next
+    transport start runs a full broadcast discovery. ECUs still assumed online from the cleared topology (not
+    contacted since startup) are reset to NotTested, so they are no longer reported Online, as if the topology
+    had never been persisted. A clear-only execution needs no transport disable lease, since it causes no
+    vehicle communication; it still requires the exclusive vehicle lock and no ECU or functional group locks.
+    Later detection runs are persisted again as usual.
+
+    **Detection**
+
+    A detection run first takes the exclusive disable lease, which stops communication and guarantees that
+    no diagnostic operation is in progress. It then resets all ECU states (keeping ``last_seen``), plans a full
+    broadcast discovery, and finishes the lease without resuming communication. The rediscovery trigger then
+    brings communication up exactly once, in every ``init_mode`` (including ``Disabled``). The execution
+    completes when the discovery and variant detection have settled and, with persistence enabled, the result
+    has been persisted.
 
     .. uml::
         :caption: networkreset with Persisted List Control

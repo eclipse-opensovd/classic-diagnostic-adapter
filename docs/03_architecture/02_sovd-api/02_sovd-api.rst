@@ -158,7 +158,9 @@ Entities
     - Variant information (name, base variant flag, connectivity state, and logical address)
     - A ``last_seen`` timestamp of the last successful diagnostic contact with the ECU (see
       :need:`arch~dt-ecu-states`), if the ECU has ever been contacted (either in the current session, or,
-      when loaded from a persisted ECU list, in a previous session)
+      when loaded from a persisted ECU list, in a previous session). It is formatted as RFC 3339 in UTC with
+      millisecond precision (e.g. ``"last_seen": "2026-10-09T08:15:00.123Z"``) and omitted if the ECU was
+      never contacted.
     - URI references to the standardized resource collection endpoints: data, operations, configurations, faults, modes, locks, and extension endpoints
 
     The connectivity state of an ECU reflects its current diagnostic reachability and variant detection status:

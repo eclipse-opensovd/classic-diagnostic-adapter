@@ -24,10 +24,11 @@ use cda_comm_uds::{UdsManager, state_coordinator::EcuStateCoordinator};
 use cda_core::EcuManager;
 use cda_database::FileManager;
 use cda_interfaces::{
-    EcuConnectivityHandler, EcuRuntimeState, FunctionalDescriptionConfig, HashMap,
-    HashMapExtensions, TransportType, VariantDetectionReceiver, VariantDetectionSender,
+    DetectionTracker, EcuConnectivityHandler, EcuRuntimeState, FunctionalDescriptionConfig,
+    HashMap, HashMapExtensions, TransportType, VariantDetectionReceiver, VariantDetectionSender,
     communication_control::CommunicationAccess, component_slot::ComponentSlot,
     datatypes::FaultConfig, dlt_ctx, health::HealthProvider, lock_priority_api::LockPriorityPolicy,
+    topology::TopologyRuntime,
 };
 use cda_plugin_security::SecurityPlugin;
 use cda_sovd::Locks;
@@ -39,6 +40,7 @@ use crate::{
     AppError, DOIP_HEALTH_COMPONENT_KEY,
     config::configfile::Configuration,
     mdd::{self, load_databases, resolve_mdd_paths},
+    topology::TopologyContext,
 };
 
 pub type DatabaseMap<S> = HashMap<String, RwLock<EcuManager<S>>>;
@@ -91,6 +93,7 @@ pub async fn load_vehicle_data<S: SecurityPlugin>(
     health: Option<&cda_health::HealthState>,
     storage: &LocalStorage,
     lock_priority_policy: Arc<dyn LockPriorityPolicy>,
+    topology: &TopologyContext,
 ) -> Result<VehicleData<S>, AppError> {
     let mdd_paths: Vec<PathBuf> = {
         let paths = resolve_mdd_paths(storage, &config.database.dir).await;
@@ -137,8 +140,18 @@ pub async fn load_vehicle_data<S: SecurityPlugin>(
         None
     };
 
-    let prepared =
-        prepare_vehicle_components::<S>(config, &mdd_paths, health_providers.as_ref()).await?;
+    let prepared = prepare_vehicle_components::<S>(
+        config,
+        &mdd_paths,
+        health_providers.as_ref(),
+        &topology.runtime,
+    )
+    .await?;
+    // Only at startup: after a runtime database update, states are detected anew,
+    // since the variants may have changed with the databases.
+    topology
+        .restore_at_startup(config, &prepared.databases)
+        .await;
 
     // Gateway constructors are passive. The selected plugin is built before
     // consumers receive narrow views over the communication framework.
@@ -207,8 +220,12 @@ pub async fn create_vehicle_components<S: SecurityPlugin>(
     mdd_paths: &[PathBuf],
     health_providers: Option<&HashMap<String, Arc<dyn HealthProvider>>>,
     communication_access: Arc<dyn CommunicationAccess>,
+    topology_runtime: &Arc<TopologyRuntime>,
 ) -> Result<VehicleComponents<S>, AppError> {
-    let prepared = prepare_vehicle_components(config, mdd_paths, health_providers).await?;
+    let prepared =
+        prepare_vehicle_components(config, mdd_paths, health_providers, topology_runtime).await?;
+    // Gateways added by the new databases are not persisted yet: search them.
+    crate::topology::refresh_reconnect_search(topology_runtime, &prepared.databases).await;
     Ok(finish_vehicle_components(
         prepared,
         config,
@@ -220,6 +237,7 @@ async fn prepare_vehicle_components<S: SecurityPlugin>(
     config: &Configuration,
     mdd_paths: &[PathBuf],
     health_providers: Option<&HashMap<String, Arc<dyn HealthProvider>>>,
+    topology_runtime: &Arc<TopologyRuntime>,
 ) -> Result<PreparedVehicleComponents<S>, AppError> {
     let db_provider: Option<&Arc<dyn HealthProvider>> =
         health_providers.and_then(|h| h.get(mdd::DB_HEALTH_COMPONENT_KEY));
@@ -229,8 +247,12 @@ async fn prepare_vehicle_components<S: SecurityPlugin>(
     let (databases, file_managers) = load_databases::<S>(config, mdd_paths, db_provider).await?;
 
     let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
-    let variant_detection_tx = VariantDetectionSender::new(variant_detection_tx);
-    let variant_detection_rx = VariantDetectionReceiver::new(variant_detection_rx);
+    // Shared, so queued requests and running detections count on one tracker.
+    let detection_tracker = DetectionTracker::new();
+    let variant_detection_tx =
+        VariantDetectionSender::with_tracker(variant_detection_tx, detection_tracker.clone());
+    let variant_detection_rx =
+        VariantDetectionReceiver::with_tracker(variant_detection_rx, detection_tracker);
     let databases = Arc::new(databases);
 
     let runtime_states = build_runtime_states(&databases).await;
@@ -246,6 +268,7 @@ async fn prepare_vehicle_components<S: SecurityPlugin>(
         variant_detection_tx,
         connectivity_handler,
         doip_provider,
+        Arc::clone(topology_runtime),
     )
     .await?;
 
@@ -296,7 +319,14 @@ pub(crate) fn finish_vehicle_components<S: SecurityPlugin>(
 }
 
 #[tracing::instrument(
-    skip(databases, transports, variant_detection, connectivity_handler, doip_health_provider),
+    skip(
+        databases,
+        transports,
+        variant_detection,
+        connectivity_handler,
+        doip_health_provider,
+        topology_runtime
+    ),
     fields(
         database_count = databases.len(),
         dlt_context = dlt_ctx!("MAIN"),
@@ -313,6 +343,7 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     variant_detection: VariantDetectionSender,
     connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     doip_health_provider: Option<&Arc<dyn HealthProvider>>,
+    topology_runtime: Arc<TopologyRuntime>,
 ) -> Result<DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>, AppError> {
     let TransportConfigs {
         doip: doip_config,
@@ -355,7 +386,7 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     )
     .await?
     {
-        gateway = gateway.with_doip(doip);
+        gateway = gateway.with_doip(doip.with_topology_runtime(topology_runtime));
     }
 
     #[cfg(feature = "can")]

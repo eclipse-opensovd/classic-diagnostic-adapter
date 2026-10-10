@@ -44,6 +44,7 @@ pub mod config;
 pub mod error;
 pub mod mdd;
 pub mod setup;
+pub mod topology;
 pub mod update;
 pub mod vehicle;
 
@@ -363,12 +364,15 @@ where
         return Ok(());
     };
 
+    let topology = topology::TopologyContext::new(&config, Arc::clone(&storage));
+
     let Some(vehicle_data) = await_startup_stage(
         vehicle::load_vehicle_data::<SP>(
             &config,
             webserver_state.health_state.as_ref(),
             &storage,
             setup.lock_priority_policy,
+            &topology,
         ),
         webserver_state.shutdown_signal.clone(),
     )
@@ -394,6 +398,8 @@ where
             setup.build_update_plugin,
             setup.build_communication_plugin,
             storage,
+            Arc::clone(&topology),
+            setup.build_vehicle_topology_plugin,
         ),
         webserver_state.shutdown_signal.clone(),
     )
@@ -416,6 +422,8 @@ where
     // Wait for shutdown signal
     webserver_state.shutdown_signal.clone().await;
     tracing::info!("Shutting down...");
+    // Before communication shuts down, which cancels pending topology writes.
+    topology.persist_last_seen_on_shutdown().await;
     cda_interfaces::Shutdown::shutdown(&*communication_runtime.plugin).await;
     webserver_state.join().await
 }

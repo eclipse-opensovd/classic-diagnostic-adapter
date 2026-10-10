@@ -121,6 +121,21 @@ Persistence
     representing a named, logically separated set of key-value pairs. The API is accessed through an exchangeable
     provider, enabling different storage backends without affecting consuming code.
 
+    **Current Realization**
+
+    The Persistence API is currently realized on top of the Storage Access Abstraction (see
+    :need:`arch~system-storage-access-abstraction`) and its local file system implementation:
+
+    - A Bucket is a collection (``CollectionName::Custom``), and each key-value pair is one entry of that
+      collection.
+    - ``flush`` corresponds to committing a transaction. A commit is durable when it returns (the write-ahead
+      log is synced), so callers group related writes into one transaction instead of flushing per entry.
+    - Values are stored as UTF-8 JSON documents chosen by the consumer, e.g. the ``ecu-topology`` Bucket (see
+      :need:`arch~dt-ecu-list-persistence`).
+
+    The redb provider (see :need:`arch~system-default-redb-persistence-provider`) remains an optional
+    alternative backend and is not shipped yet.
+
     .. uml::
 
         @startuml

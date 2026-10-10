@@ -26,6 +26,8 @@ pub struct Ecu {
     pub logical_address: String,
     /// Logical link name (e.g. `"ECU_on_UDS_Ethernet_DoIP"`).
     pub logical_link: String,
+    /// Time of the last successful diagnostic contact, if any.
+    pub last_seen: Option<std::time::SystemTime>,
 }
 
 /// Gateway record, converted to SOVD JSON via [`IntoSovd`]
