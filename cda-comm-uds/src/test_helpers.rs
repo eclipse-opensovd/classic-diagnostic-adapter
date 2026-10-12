@@ -177,6 +177,7 @@ pub(crate) struct TestEcuDb {
     /// Pre-send authorization policy; `None` allows every request.
     request_send_policy: Option<Arc<RequestSendPolicy>>,
     service_states: tokio::sync::Mutex<std::collections::HashMap<u8, String>>,
+    variant_detection_requests: HashMap<String, DiagComm>,
     /// Configurable `CP_P6Max`-backed timeout, so tests can verify that
     /// callers fall back to this comparam-derived value instead of using a
     /// hardcoded literal. Defaults to 5s to match the previous fixed value.
@@ -201,6 +202,7 @@ impl TestEcuDb {
         Self {
             request_send_policy: None,
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            variant_detection_requests: HashMap::new(),
             timeout_default: Duration::from_secs(5),
             repeat_req_count_app: 2,
             tester_present_message: vec![0x3E, 0x00],
@@ -213,6 +215,7 @@ impl TestEcuDb {
         Self {
             request_send_policy: None,
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            variant_detection_requests: HashMap::new(),
             timeout_default,
             repeat_req_count_app: 2,
             tester_present_message: vec![0x3E, 0x00],
@@ -229,6 +232,7 @@ impl TestEcuDb {
         Self {
             request_send_policy: None,
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            variant_detection_requests: HashMap::new(),
             timeout_default,
             repeat_req_count_app,
             tester_present_message: vec![0x3E, 0x00],
@@ -244,10 +248,33 @@ impl TestEcuDb {
         Self {
             request_send_policy: None,
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            variant_detection_requests: HashMap::new(),
             timeout_default: Duration::from_secs(5),
             repeat_req_count_app: 2,
             tester_present_message,
             tester_present_response_expected,
+        }
+    }
+
+    /// Create a test double with one session-control request used for variant detection.
+    pub fn with_variant_detection_request(timeout_default: Duration) -> Self {
+        let request = DiagComm {
+            name: "variant-detection-session".to_owned(),
+            type_: DiagCommType::Modes,
+            lookup_name: Some("variant-detection-session".to_owned()),
+            subfunction_id: Some(SESSION_SUBFUNCTION),
+        };
+        Self {
+            request_send_policy: None,
+            service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            variant_detection_requests: HashMap::from_iter([(
+                "variant-detection-session".to_owned(),
+                request,
+            )]),
+            timeout_default,
+            repeat_req_count_app: 0,
+            tester_present_message: vec![0x3E, 0x00],
+            tester_present_response_expected: true,
         }
     }
 }
@@ -445,11 +472,11 @@ impl VariantDetection for TestEcuDb {
         &mut self,
         _service_responses: HashMap<String, T>,
     ) -> Result<(), DiagServiceError> {
-        unimplemented!()
+        Ok(())
     }
 
     fn get_variant_detection_requests(&self) -> &HashMap<String, DiagComm> {
-        unimplemented!()
+        &self.variant_detection_requests
     }
 
     async fn mark_as_duplicate(&mut self) {

@@ -83,7 +83,7 @@ async fn test_flash_download_transfer_sequence() {
     send_cda_request(
         &runtime.config,
         ecu_endpoint,
-        StatusCode::CREATED,
+        StatusCode::OK,
         Method::PUT,
         None,
         Some(&auth),
@@ -469,7 +469,7 @@ async fn test_flash_transfer_zero_length_rejected() {
     send_cda_request(
         &runtime.config,
         ecu_endpoint,
-        StatusCode::CREATED,
+        StatusCode::OK,
         Method::PUT,
         None,
         Some(&auth),
@@ -718,7 +718,7 @@ async fn test_security_access_supplier_level() {
     send_cda_request(
         &runtime.config,
         ecu_endpoint,
-        StatusCode::CREATED,
+        StatusCode::OK,
         Method::PUT,
         None,
         Some(&auth),
