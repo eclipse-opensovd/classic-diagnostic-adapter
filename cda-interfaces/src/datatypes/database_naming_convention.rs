@@ -29,13 +29,14 @@ use crate::{
 /// - `configuration_functional_classes`: Functional class names for filtering services that
 ///   are routed to `/configurations` instead of `/data`.
 /// - `category_mapping`: Maps a functional class name to a `/data` category for 0x22/0x2E
-///   services that are *not* routed to `/configurations`. A functional class must not appear
-///   both here and in `configuration_functional_classes`, and each functional class may only be
-///   mapped once (compared case-insensitively). Categories other than `identData`,
+///   services. A functional class may appear both here and in
+///   `configuration_functional_classes`, in which case its services are available in both
+///   `/data` and `/configurations`. Each functional class may only be mapped once (compared
+///   case-insensitively). Categories other than `identData`,
 ///   `currentData`, `storedData`, `sysInfo` or `x-`-prefixed ones are accepted but trigger a
 ///   warning, as they are not conformant to ISO 17978-3.
 /// - `default_category`: Fallback category used for 0x22/0x2E services whose functional class
-///   is not present in `category_mapping` (and not in `configuration_functional_classes`).
+///   is not present in `category_mapping`.
 ///   The same ISO 17978-3 conformance warning as for `category_mapping` applies.
 /// - `short_name_affixes`: List of lowercase affixes for short names.
 ///   **Each affix must match the specified `short_name_affix_position`
@@ -67,9 +68,8 @@ pub struct DatabaseNamingConvention {
     pub configuration_service_parameter_semantic_id: String,
     /// Functional class names used to route 0x22/0x2E services to `/configurations`.
     pub configuration_functional_classes: Vec<String>,
-    /// Maps a functional class name to a `/data` category for 0x22/0x2E services that are not
-    /// routed to `/configurations`. A functional class must not appear both here and in
-    /// `configuration_functional_classes`.
+    /// Maps a functional class name to a `/data` category for 0x22/0x2E services. A functional
+    /// class may also be listed in `configuration_functional_classes`.
     #[serde(default)]
     pub category_mapping: Vec<FunctionalClassCategoryMapping>,
     /// Fallback category for 0x22/0x2E services whose functional class has no entry in
@@ -229,25 +229,6 @@ impl ConfigSanity for DatabaseNamingConvention {
         for (pos, affixes) in self.service_affixes.values() {
             for affix in affixes {
                 validate_affix(affix, pos, SERVICE_NAME_AFFIX_KEY)?;
-            }
-        }
-
-        // A functional class must not be routed to /configurations and also have a category
-        // mapping to /data at the same time.
-        for mapping in &self.category_mapping {
-            if self
-                .configuration_functional_classes
-                .iter()
-                .any(|fc| fc.eq_ignore_ascii_case(&mapping.functional_class))
-            {
-                return Err(ConfigSanityError::InvalidValue {
-                    field: "database_naming_convention.category_mapping".to_owned(),
-                    reason: format!(
-                        "functional class '{}' is present in both \
-                         'configuration_functional_classes' and 'category_mapping'",
-                        mapping.functional_class
-                    ),
-                });
             }
         }
 
@@ -909,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_sanity_rejects_functional_class_in_both_lists() {
+    fn test_validate_sanity_accepts_functional_class_in_both_lists() {
         let conv = DatabaseNamingConvention {
             configuration_functional_classes: vec!["varcoding".to_owned()],
             category_mapping: vec![FunctionalClassCategoryMapping {
@@ -918,12 +899,9 @@ mod tests {
             }],
             ..make_convention(false)
         };
-        let result = conv.validate_sanity();
-        assert!(result.is_err());
-        assert!(matches!(
-            result,
-            Err(ConfigSanityError::InvalidValue { .. })
-        ));
+        assert!(conv.validate_sanity().is_ok());
+        assert!(conv.is_configuration_functional_class("varcoding"));
+        assert_eq!(conv.category_for_functional_class("varcoding"), "identData");
     }
 
     #[test]

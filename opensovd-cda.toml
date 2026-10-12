@@ -540,13 +540,14 @@
 # - `configuration_functional_classes`: Functional class names for filtering services that
 #   are routed to `/configurations` instead of `/data`.
 # - `category_mapping`: Maps a functional class name to a `/data` category for 0x22/0x2E
-#   services that are *not* routed to `/configurations`. A functional class must not appear
-#   both here and in `configuration_functional_classes`, and each functional class may only be
-#   mapped once (compared case-insensitively). Categories other than `identData`,
+#   services. A functional class may appear both here and in
+#   `configuration_functional_classes`, in which case its services are available in both
+#   `/data` and `/configurations`. Each functional class may only be mapped once (compared
+#   case-insensitively). Categories other than `identData`,
 #   `currentData`, `storedData`, `sysInfo` or `x-`-prefixed ones are accepted but trigger a
 #   warning, as they are not conformant to ISO 17978-3.
 # - `default_category`: Fallback category used for 0x22/0x2E services whose functional class
-#   is not present in `category_mapping` (and not in `configuration_functional_classes`).
+#   is not present in `category_mapping`.
 #   The same ISO 17978-3 conformance warning as for `category_mapping` applies.
 # - `short_name_affixes`: List of lowercase affixes for short names.
 #   **Each affix must match the specified `short_name_affix_position`
@@ -587,9 +588,8 @@
 #     "CAN",
 #     "ISO_11898",
 # ]
-# Maps a functional class name to a `/data` category for 0x22/0x2E services that are not
-# routed to `/configurations`. A functional class must not appear both here and in
-# `configuration_functional_classes`.
+# Maps a functional class name to a `/data` category for 0x22/0x2E services. A functional
+# class may also be listed in `configuration_functional_classes`.
 # category_mapping = []
 # Functional class names used to route 0x22/0x2E services to `/configurations`.
 # configuration_functional_classes = ["varcoding"]
