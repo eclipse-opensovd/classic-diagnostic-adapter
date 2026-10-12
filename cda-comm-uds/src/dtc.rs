@@ -275,7 +275,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 .get_param_properties()?
                 .values()
                 .filter_map(|p| p.as_object())
-                .find(|obj| obj.contains_key("any-of"));
+                .find(|obj| obj.contains_key("anyOf"));
 
             schema.map(|schema| serde_json::Value::Object(schema.clone()))
         }
