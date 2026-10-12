@@ -13,7 +13,7 @@ name: PR Review Labels
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize, review_requested, ready_for_review, converted_to_draft]
+    types: [opened, reopened, synchronize, review_requested, ready_for_review, converted_to_draft, labeled]
   pull_request_review:
     types: [submitted, dismissed]
   pull_request_review_comment:
@@ -146,9 +146,8 @@ jobs:
               );
 
             if (isDraft) {
-              core.info('PR is a draft, removing review labels.');
+              core.info('PR is a draft, removing other review labels.');
               await removeLabel(NEEDS_REVIEW);
-              await removeLabel(CHANGES_REQUESTED);
               await removeLabel(READY_TO_MERGE);
               return;
             }
@@ -156,26 +155,37 @@ jobs:
             const eventName = context.eventName;
             const action = context.payload.action;
 
+            if (eventName === 'pull_request_target' && action === 'labeled'
+                && context.payload.label?.name?.toLowerCase() === NEEDS_REVIEW) {
+              core.info('PR marked as needing review; removing the changes requested label.');
+              await removeLabel(CHANGES_REQUESTED);
+              return;
+            }
+
             if (eventName === 'pull_request_review' && action === 'submitted'
                 && context.payload.review.state === 'changes_requested') {
               await addLabel(CHANGES_REQUESTED);
               await removeLabel(NEEDS_REVIEW);
               await removeLabel(READY_TO_MERGE);
+              return;
+            }
 
-            } else if (allApproved && !hasUnresolvedThreads) {
+            if (hasChangesRequested) {
+              core.info('Changes are requested; the author must manually add the needs review label.');
+              return;
+            }
+
+            if (allApproved && !hasUnresolvedThreads) {
               await addLabel(READY_TO_MERGE);
               await removeLabel(NEEDS_REVIEW);
-              await removeLabel(CHANGES_REQUESTED);
 
             } else if (eventName === 'pull_request_target' && action === 'synchronize') {
               await addLabel(NEEDS_REVIEW);
-              await removeLabel(CHANGES_REQUESTED);
               await removeLabel(READY_TO_MERGE);
 
             } else if (hasUnresolvedThreads && authorRepliedToAll) {
               // Author replied to every reviewer thread - ready for re-review
               await addLabel(NEEDS_REVIEW);
-              await removeLabel(CHANGES_REQUESTED);
               await removeLabel(READY_TO_MERGE);
 
             } else if (hasUnresolvedThreads) {
@@ -185,6 +195,5 @@ jobs:
 
             } else {
               await addLabel(NEEDS_REVIEW);
-              await removeLabel(CHANGES_REQUESTED);
               await removeLabel(READY_TO_MERGE);
             }
