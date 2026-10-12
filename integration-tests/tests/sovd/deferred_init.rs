@@ -576,10 +576,10 @@ async fn trigger_variant_detection(
     headers: &HeaderMap,
     ecu_endpoint: &str,
 ) {
-    send_cda_request(
+    let response = send_cda_request(
         config,
         ecu_endpoint,
-        http::StatusCode::CREATED,
+        http::StatusCode::OK,
         http::Method::PUT,
         None,
         Some(headers),
@@ -587,6 +587,8 @@ async fn trigger_variant_detection(
     )
     .await
     .expect("Failed to trigger variant detection");
+    response_to_t::<sovd_interfaces::components::ecu::Variant>(&response)
+        .expect("Variant detection response should contain the detected variant");
 }
 
 /// `variant_detection = Never` must still bring the transport up under `Always`
