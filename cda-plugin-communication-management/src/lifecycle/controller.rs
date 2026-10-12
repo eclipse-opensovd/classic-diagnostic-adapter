@@ -19,9 +19,9 @@ use std::{fmt::Display, sync::Arc};
 
 use cda_interfaces::{
     communication_control::{
-        CommunicationError, CommunicationGuard, CommunicationInitMode, CommunicationLifecycle,
-        CommunicationOperation, CommunicationOperationFailure, CommunicationState,
-        CommunicationVariantDetection, TransportControl, VariantDetectionMode,
+        CommunicationError, CommunicationGuard, CommunicationGuardReason, CommunicationInitMode,
+        CommunicationLifecycle, CommunicationOperation, CommunicationOperationFailure,
+        CommunicationState, CommunicationVariantDetection, TransportControl, VariantDetectionMode,
     },
     dlt_ctx,
 };
@@ -94,12 +94,19 @@ impl CommunicationHandle {
     /// # Errors
     ///
     /// Returns an error when communication is not enabled.
-    pub fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+    pub fn acquire(
+        &self,
+        reason: CommunicationGuardReason,
+    ) -> Result<CommunicationGuard, CommunicationError> {
         let mut state = self.state.lock();
         transition::guard_admission(&state.state)?;
         // Must be atomic with the admission check above. Otherwise a
         // `disable()` could claim `Enabled -> Disabling` in the gap.
-        Ok(ActiveGuard::register(&mut state, Arc::clone(&self.state)))
+        Ok(ActiveGuard::register(
+            &mut state,
+            Arc::clone(&self.state),
+            reason,
+        ))
     }
 
     /// Registers a hook that runs during subsequent lifecycle transitions.
@@ -602,7 +609,20 @@ impl CommunicationHandle {
                         resume_detects,
                     });
                 }
-                LifecycleDecision::GuardsHeld => return Err(DisableError::InUse),
+                LifecycleDecision::GuardsHeld => {
+                    let active_guard_reasons = state
+                        .active_guards
+                        .values()
+                        .map(CommunicationGuardReason::as_str)
+                        .collect::<Vec<_>>();
+                    tracing::warn!(
+                        disable_reason = ?reason,
+                        ?active_guard_reasons,
+                        variant_detection_in_flight = state.detection_in_flight.is_some(),
+                        "Disable rejected: communication is in use"
+                    );
+                    return Err(DisableError::InUse);
+                }
                 LifecycleDecision::ShuttingDown => {
                     return Err(DisableError::Failed(
                         CommunicationOperationFailure::ShuttingDown {
@@ -901,6 +921,10 @@ mod tests {
         .expect("timed out waiting for expected state");
     }
 
+    fn guard_reason() -> CommunicationGuardReason {
+        CommunicationGuardReason::new("test diagnostic activity")
+    }
+
     struct RecordingControl {
         enable_count: AtomicUsize,
         disable_count: AtomicUsize,
@@ -1008,7 +1032,7 @@ mod tests {
              was torn down"
         );
         assert_eq!(control.disable_count.load(Ordering::Relaxed), 1);
-        assert!(handle.acquire().is_err());
+        assert!(handle.acquire(guard_reason()).is_err());
     }
 
     #[derive(Default)]
@@ -1477,7 +1501,7 @@ mod tests {
             Ok(CommunicationState::Enabled)
         );
 
-        let guard = handle.acquire().unwrap();
+        let guard = handle.acquire(guard_reason()).unwrap();
         assert!(matches!(
             handle.disable(DisableReason::RuntimeUpdate).await,
             Err(DisableError::InUse)
@@ -1807,7 +1831,7 @@ mod tests {
             Ok(CommunicationState::Enabled)
         );
 
-        let guard = handle.acquire().unwrap();
+        let guard = handle.acquire(guard_reason()).unwrap();
         assert_eq!(
             handle.redetect().await,
             Err(CommunicationOperationFailure::GuardsHeld {
@@ -1904,7 +1928,7 @@ mod tests {
         // keep being granted. Moving to `Enabling` would fail this acquisition.
         assert_eq!(handle.state(), CommunicationState::Enabled);
         let guard = handle
-            .acquire()
+            .acquire(guard_reason())
             .expect("diagnostics must keep being served during a sweep");
         drop(guard);
 
@@ -1957,8 +1981,8 @@ mod tests {
         );
         assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
 
-        assert!(handle.acquire().is_ok());
-        assert!(handle.acquire().is_ok());
+        assert!(handle.acquire(guard_reason()).is_ok());
+        assert!(handle.acquire(guard_reason()).is_ok());
     }
 
     /// A failed detection must not publish `Error(_)`. `Error` means the
@@ -2322,8 +2346,10 @@ mod tests {
             }
             async fn on_enabled(&self) {
                 *self.observed_state.lock().unwrap() = Some(self.handle.state());
-                self.observed_acquire_ok
-                    .store(self.handle.acquire().is_ok(), Ordering::Relaxed);
+                self.observed_acquire_ok.store(
+                    self.handle.acquire(guard_reason()).is_ok(),
+                    Ordering::Relaxed,
+                );
             }
         }
 

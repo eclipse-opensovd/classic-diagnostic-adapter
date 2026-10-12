@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, HashMapExtensions,
     PayloadDecoder, ServicePayload, TransmissionParameters, UdsFunctionalGroup, UdsTransport,
+    communication_control::CommunicationGuardReason,
     datatypes::{ComponentDataInfo, ComponentOperationsInfo, RoutineSubfunctions},
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     dlt_ctx,
@@ -216,7 +217,10 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
             return HashMap::new();
         }
 
-        let _guard = match self.require_communication_ready() {
+        let _guard = match self.require_communication_ready(CommunicationGuardReason::new(format!(
+            "UDS service '{}' for functional group '{functional_group}'",
+            service.name
+        ))) {
             Ok(guard) => guard,
             Err(error) => {
                 let mut result_map = HashMap::new();

@@ -39,7 +39,9 @@ use axum_extra::extract::WithRejection;
 use cda_interfaces::{
     Connectivity, FunctionalDescriptionConfig, HashMap, HashMapExtensions as _, SchemaProvider,
     UdsEcu, VariantState,
-    communication_control::{ActivationCause, CommunicationAccess, CommunicationGuard},
+    communication_control::{
+        ActivationCause, CommunicationAccess, CommunicationGuard, CommunicationGuardReason,
+    },
     datatypes::ComponentsConfig,
     diagservices::{FieldParseError, UdsPayloadData},
     file_manager::FileManager,
@@ -142,8 +144,9 @@ pub(crate) fn with_retry_after(mut response: Response, retry_after: Option<Durat
 /// [[ dimpl~deferred-sovd-admission, Deferred diagnostic request admission, dimpl ]]
 pub(crate) fn acquire_communication_activity(
     communication_access: &dyn CommunicationAccess,
+    reason: CommunicationGuardReason,
 ) -> Result<CommunicationGuard, ApiError> {
-    match communication_access.acquire() {
+    match communication_access.acquire(reason) {
         Ok(activity) => Ok(activity),
         Err(error) => {
             communication_access.request_activate(ActivationCause::DiagnosticRequest);
@@ -556,13 +559,14 @@ pub(crate) fn acquire_and_reserve_execution<E: ExecutionStatus>(
     display_name: &str,
     include_schema: bool,
 ) -> Result<ExecutionReservation<E>, error::ErrorWrapper> {
-    let communication_guard =
-        acquire_communication_activity(communication_access).map_err(|error| {
-            error::ErrorWrapper {
-                error,
-                include_schema,
-            }
-        })?;
+    let communication_guard = acquire_communication_activity(
+        communication_access,
+        CommunicationGuardReason::new(format!("SOVD operation '{display_name}'")),
+    )
+    .map_err(|error| error::ErrorWrapper {
+        error,
+        include_schema,
+    })?;
     let exec_id = Uuid::new_v4();
     reserve_execution(
         &executions,
@@ -1392,7 +1396,10 @@ pub(crate) mod tests {
             CommunicationState::Enabled
         }
 
-        fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+        fn acquire(
+            &self,
+            _reason: CommunicationGuardReason,
+        ) -> Result<CommunicationGuard, CommunicationError> {
             Ok(CommunicationGuard::new(Arc::clone(&self.active)))
         }
 
@@ -1414,7 +1421,10 @@ pub(crate) mod tests {
             CommunicationState::Disabled
         }
 
-        fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+        fn acquire(
+            &self,
+            _reason: CommunicationGuardReason,
+        ) -> Result<CommunicationGuard, CommunicationError> {
             Err(CommunicationError::Disabled)
         }
 
@@ -1439,7 +1449,10 @@ pub(crate) mod tests {
             activation_requests: AtomicUsize::new(0),
         };
 
-        let Err(error) = acquire_communication_activity(&access) else {
+        let Err(error) = acquire_communication_activity(
+            &access,
+            CommunicationGuardReason::new("test diagnostic activity"),
+        ) else {
             panic!("disabled communication must reject acquisition");
         };
 
@@ -1534,7 +1547,9 @@ pub(crate) mod tests {
         let access = CountingCommunicationAccess {
             active: Arc::new(()),
         };
-        let Ok(communication_guard) = access.acquire() else {
+        let Ok(communication_guard) =
+            access.acquire(CommunicationGuardReason::new("test diagnostic activity"))
+        else {
             panic!("enabled communication must provide a guard");
         };
         let id = Uuid::new_v4();

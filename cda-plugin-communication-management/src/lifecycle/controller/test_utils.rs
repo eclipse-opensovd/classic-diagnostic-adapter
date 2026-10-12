@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use cda_interfaces::communication_control::{
     CommControlError, CommunicationAccess, CommunicationError, CommunicationGuard,
-    CommunicationState, DisableCommunication, TransportControl, TransportState,
-    VariantDetectionMode,
+    CommunicationGuardReason, CommunicationState, DisableCommunication, TransportControl,
+    TransportState, VariantDetectionMode,
 };
 
 struct TestTransport(TransportState);
@@ -121,8 +121,11 @@ pub fn enabled_communication_for_test()
             self.0.state()
         }
 
-        fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
-            self.0.acquire()
+        fn acquire(
+            &self,
+            reason: CommunicationGuardReason,
+        ) -> Result<CommunicationGuard, CommunicationError> {
+            self.0.acquire(reason)
         }
 
         fn request_activate(

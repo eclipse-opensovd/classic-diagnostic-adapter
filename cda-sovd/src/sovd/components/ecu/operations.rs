@@ -108,7 +108,8 @@ pub(crate) mod comparams {
         };
         use axum_extra::extract::WithRejection;
         use cda_interfaces::{
-            HashMap, HashMapExtensions, UdsEcu, communication_control::CommunicationAccess,
+            HashMap, HashMapExtensions, UdsEcu,
+            communication_control::{CommunicationAccess, CommunicationGuardReason},
             file_manager::FileManager,
         };
         use cda_plugin_security::Secured;
@@ -254,17 +255,19 @@ pub(crate) mod comparams {
         ) -> Response {
             // todo: not in scope for now: request can take body with
             // { timeout: INT, parameters: { ... }, proximity_response: STRING }
-            let communication_activity =
-                match acquire_communication_activity(&*communication_access) {
-                    Ok(activity) => activity,
-                    Err(error) => {
-                        return ErrorWrapper {
-                            error,
-                            include_schema,
-                        }
-                        .into_response();
+            let communication_activity = match acquire_communication_activity(
+                &*communication_access,
+                CommunicationGuardReason::new("SOVD communication-parameter execution"),
+            ) {
+                Ok(activity) => activity,
+                Err(error) => {
+                    return ErrorWrapper {
+                        error,
+                        include_schema,
                     }
-                };
+                    .into_response();
+                }
+            };
             let id = Uuid::new_v4();
             let mut comparam_override: HashMap<String, sovd_comparams::ComParamValue> =
                 HashMap::new();
@@ -2019,7 +2022,8 @@ mod tests {
         use axum::extract::{OriginalUri, Path, Query, State};
         use axum_extra::extract::WithRejection;
         use cda_interfaces::{
-            HashMap, HashMapExtensions, file_manager::mock::MockFileManager, mock::MockUdsEcu,
+            HashMap, HashMapExtensions, communication_control::CommunicationGuardReason,
+            file_manager::mock::MockFileManager, mock::MockUdsEcu,
         };
         use cda_plugin_security::{
             Secured, SecurityPlugin,
@@ -2082,7 +2086,7 @@ mod tests {
                     comparam_override: HashMap::new(),
                 },
                 communication_access
-                    .acquire()
+                    .acquire(CommunicationGuardReason::new("test diagnostic activity"))
                     .expect("Test communication must be enabled"),
             )
         }
