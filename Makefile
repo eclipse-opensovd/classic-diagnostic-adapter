@@ -22,7 +22,7 @@ PROTOC_VERSION := 34.1
 	lint lint-all-features lint-nightly lint-nightly-all-features fmt fmt-check \
 	precommit precommit-all-features \
 	coverage coverage-can integration-coverage deny \
-	generate-config generate-flatbuffers generate-protos docs rustdoc \
+	generate-config generate-test-config generate-flatbuffers generate-protos docs rustdoc \
 	tool-versions setup-devenv doctor run profile depgraph clean clean-doc help
 
 build:
@@ -38,13 +38,13 @@ test:
 	cargo +$(STABLE) test --locked --workspace $(ARGS)
 
 integration-test:
-	cargo +$(STABLE) test --locked -p integration-tests --features integration-tests -- --show-output
+	cargo +$(STABLE) test --locked -p integration-tests --features integration-tests
 
 integration-test-can:
-	CDA_INTEGRATION_TEST_USE_CAN=true cargo +$(STABLE) test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
+	CDA_INTEGRATION_TEST_USE_CAN=true cargo +$(STABLE) test --locked -p integration-tests --features can-integration-tests --test integration_tests
 
 integration-test-mixed:
-	CDA_INTEGRATION_TEST_USE_MIXED=true cargo +$(STABLE) test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
+	CDA_INTEGRATION_TEST_USE_MIXED=true cargo +$(STABLE) test --locked -p integration-tests --features can-integration-tests --test integration_tests
 
 build-all-features:
 	$(MAKE) build ARGS="--all-features $(ARGS)"
@@ -96,6 +96,9 @@ deny:
 
 generate-config:
 	cargo +$(STABLE) run --locked --all-features -- generate-config --output $(or $(OUTPUT),opensovd-cda.toml)
+
+generate-test-config:
+	cargo +$(STABLE) test --locked --workspace --all-features --test integration_tests -- --exact --ignored util::config::tests::generate_compose_configs
 
 generate-flatbuffers:
 	$(MAKE) build ARGS="-p cda-database --features gen-flatbuffers $(ARGS)"
@@ -196,8 +199,8 @@ help:
 		'check                        Check the workspace' \
 		'test ARGS="..."              Run workspace unit tests' \
 		'integration-test             Run DoIP integration tests' \
-		'integration-test-can         Run serial CAN integration tests' \
-		'integration-test-mixed       Run serial mixed DoIP/CAN integration tests' \
+		'integration-test-can         Run CAN integration tests' \
+		'integration-test-mixed       Run mixed DoIP/CAN integration tests' \
 		'build-all-features           Build with all features' \
 		'build-mbedtls                Build CDA with only mbedTLS' \
 		'build-minimal                Build the workspace without default features' \
@@ -215,6 +218,7 @@ help:
 		'integration-coverage         Generate integration-test LCOV coverage' \
 		'deny ARGS="..."              Run all or selected cargo-deny checks' \
 		'generate-config              Regenerate opensovd-cda.toml' \
+		'generate-test-config         Generate testcontainer/cda-test-config*.toml for docker compose' \
 		'generate-flatbuffers         Regenerate FlatBuffers sources' \
 		'generate-protos              Regenerate protobuf sources' \
 		'docs                         Rebuild Sphinx documentation' \

@@ -24,26 +24,18 @@ workspace = true
 [dependencies]
 # internal dependencies
 cda-interfaces = { workspace = true }
-cda-core = { workspace = true }
-cda-database = { workspace = true }
 cda-sovd = { workspace = true }
-cda-plugin-communication-management = { workspace = true }
 sovd-interfaces = { workspace = true }
-cda-plugin-lock-priority = { workspace = true }
 cda-tracing = { workspace = true }
-cda-plugin-security = { workspace = true }
-cda-comm-doip = { workspace = true }
-cda-comm-uds = { workspace = true }
 cda-health = { workspace = true }
 opensovd_cda_lib = { workspace = true, features = ["integration-tests"] }
 
 # External dependencies
 # tokio
-tokio = { workspace = true, features = ["rt", "sync", "io-util", "time"] }
+tokio = { workspace = true, features = ["rt", "sync", "io-util", "time", "signal"] }
 # serde
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-serde_qs = { workspace = true, features = ["axum"] }
 # http
 aide = { workspace = true, features = ["axum"] }
 axum = { workspace = true }
@@ -53,23 +45,10 @@ mime = { workspace = true }
 schemars = { workspace = true }
 url = { workspace = true }
 urlencoding = { workspace = true }
-# logging
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true, features = [
-  "ansi",
-  "chrono",
-  "env-filter",
-  "fmt",
-  "json",
-  "parking_lot",
-  "std",
-] }
 # error
 thiserror = { workspace = true }
 # toml serialization
 toml = { workspace = true }
-# config merging
-figment = { workspace = true, features = ["toml"] }
 # time
 chrono = { workspace = true }
 # future
@@ -82,6 +61,8 @@ const_format = { workspace = true }
 tempfile = { workspace = true }
 # temp containers for testing
 testcontainers = { workspace = true }
+# enum names
+strum = { workspace = true, features = ["derive"] }
 
 [build-dependencies]
 cda-build = { workspace = true }
@@ -94,9 +75,12 @@ cargo_metadata = { workspace = true }
 default = ["opensovd_cda_lib/health"]
 integration-tests = []
 # Variant of the integration tests that exercises the CAN transport
-# (`CDA_INTEGRATION_TEST_USE_CAN=true`). Compiles in `can-socketcand` so the
-# CDA-side socketcand backend is actually wired in; the ECU simulator reaches
-# the same vcan bus through a socketcand daemon.
+# (`CDA_INTEGRATION_TEST_USE_CAN=true` or `CDA_INTEGRATION_TEST_USE_MIXED=true`).
+# The CDA runs in a container built with `can-socketcand`, but the harness
+# validates the CAN test configuration in the test process
+# (`Configuration::validate_sanity`), which rejects a `[can]` section unless
+# the `can` feature is compiled in. `can-socketcand` enables it, and unlike
+# `can` alone it also builds off Linux.
 can-integration-tests = ["integration-tests", "opensovd_cda_lib/can-socketcand"]
 
 # Integration tests are only compiled when the feature is enabled.

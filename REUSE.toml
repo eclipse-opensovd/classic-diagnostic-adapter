@@ -18,7 +18,6 @@ path = [
   "NOTICE",
   "CONTRIBUTORS",
   "LICENSES/**.txt",
-  "**/.env.example",
   "**/.gitkeep",
   "**/.markdownlintignore",
   "**/*.fbs",

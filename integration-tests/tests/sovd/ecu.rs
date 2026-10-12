@@ -12,8 +12,7 @@
  */
 use std::{collections::HashMap, time::Duration};
 
-use http::{HeaderMap, Method, StatusCode};
-use opensovd_cda_lib::config::configfile::Configuration;
+use http::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use sovd_interfaces::components::ecu::modes::{
@@ -22,21 +21,19 @@ use sovd_interfaces::components::ecu::modes::{
 
 use crate::{
     sovd::{
-        self, compute_security_key, get_ecu_component,
-        locks::{self, create_lock, lock_operation},
-        put_mode,
+        self, ECU_FLXC1000, ECU_FSNR2000, ECU_HOVR4000, ECU_JGWT5000, ECU_TMCC3000,
+        compute_security_key, ecu_status, force_variant_detection, get_ecu_component, put_mode,
     },
     util::{
         TestingError,
         ecusim::{self},
+        endpoints::APPS_SOVD2UDS_DATA_NETWORKSTRUCTURE,
         http::{
-            QueryParams, auth_header, extract_field_from_json, response_to_json, response_to_t,
-            send_cda_request,
+            QueryParams, extract_field_from_json, response_to_json, response_to_t,
+            send_authenticated_cda_request, send_cda_request,
         },
-        runtime::{
-            TestRuntime, restart_cda, setup_integration_test, skip_for_can, skip_for_doip,
-            start_ecu_sim, stop_ecu_sim,
-        },
+        locks::{self, create_lock, lock_operation},
+        test_env::{TestEnv, Transport, skip_unless},
     },
 };
 
@@ -44,17 +41,13 @@ use crate::{
 /// component listing (served from the loaded MDD even when the ECU is dead),
 /// this request only succeeds if the ECU actually answers on the bus, so it
 /// proves end-to-end liveness.
-async fn assert_ecu_answers_on_bus(runtime: &TestRuntime, ecu_endpoint: &str) {
-    let auth = auth_header(&runtime.config, None)
-        .await
-        .expect("auth header should be obtainable");
-    let response = send_cda_request(
-        &runtime.config,
+async fn assert_ecu_answers_on_bus(test_env: &TestEnv, ecu_endpoint: &str) {
+    let response = send_authenticated_cda_request(
+        test_env,
         &format!("{ecu_endpoint}/data/identification"),
         StatusCode::OK,
         Method::GET,
         None,
-        Some(&auth),
         None,
     )
     .await
@@ -70,11 +63,11 @@ async fn assert_ecu_answers_on_bus(runtime: &TestRuntime, ecu_endpoint: &str) {
 /// The test verifies that the ECU is reachable and reports the correct name and state.
 #[tokio::test]
 async fn test_tmcc3000_ecu_online() {
-    let (runtime, _lock) = setup_integration_test(false).await.unwrap();
+    let test_env = TestEnv::builder().await.unwrap();
 
     let json = get_ecu_component(
-        &runtime.config,
-        sovd::ECU_TMCC3000_ENDPOINT,
+        &test_env.config,
+        sovd::COMPONENTS_TMCC3000_BASE,
         StatusCode::OK,
         None,
     )
@@ -87,11 +80,11 @@ async fn test_tmcc3000_ecu_online() {
         .expect("Response should contain 'name' field");
     assert_eq!(
         name.to_lowercase(),
-        "tmcc3000",
+        ECU_TMCC3000,
         "Component name should be tmcc3000"
     );
 
-    assert_ecu_answers_on_bus(runtime, sovd::ECU_TMCC3000_ENDPOINT).await;
+    assert_ecu_answers_on_bus(&test_env, sovd::COMPONENTS_TMCC3000_BASE).await;
 }
 
 /// HOVR4000 uses a non-default protocol (`DMC_DoIP`) in its MDD. The global
@@ -100,11 +93,11 @@ async fn test_tmcc3000_ecu_online() {
 /// `protocol` config override works correctly.
 #[tokio::test]
 async fn test_hovr4000_per_ecu_protocol_override() {
-    let (runtime, _lock) = setup_integration_test(false).await.unwrap();
+    let test_env = TestEnv::builder().await.unwrap();
 
     let json = get_ecu_component(
-        &runtime.config,
-        sovd::ECU_HOVR4000_ENDPOINT,
+        &test_env.config,
+        sovd::COMPONENTS_HOVR4000_BASE,
         StatusCode::OK,
         None,
     )
@@ -117,11 +110,11 @@ async fn test_hovr4000_per_ecu_protocol_override() {
         .expect("Response should contain 'name' field");
     assert_eq!(
         name.to_lowercase(),
-        "hovr4000",
+        ECU_HOVR4000,
         "Component name should be hovr4000"
     );
 
-    assert_ecu_answers_on_bus(runtime, sovd::ECU_HOVR4000_ENDPOINT).await;
+    assert_ecu_answers_on_bus(&test_env, sovd::COMPONENTS_HOVR4000_BASE).await;
 }
 
 /// JGWT5000 has a non-default protocol (`DMC_DoIP`) in its MDD but no per-ECU
@@ -129,11 +122,11 @@ async fn test_hovr4000_per_ecu_protocol_override() {
 /// back to the single DB protocol and com-param lookup matches by name alone.
 #[tokio::test]
 async fn test_jgwt5000_ignore_protocol_with_db_protocol() {
-    let (runtime, _lock) = setup_integration_test(false).await.unwrap();
+    let test_env = TestEnv::builder().await.unwrap();
 
     let json = get_ecu_component(
-        &runtime.config,
-        sovd::ECU_JGWT5000_ENDPOINT,
+        &test_env.config,
+        sovd::COMPONENTS_JGWT5000_BASE,
         StatusCode::OK,
         None,
     )
@@ -146,11 +139,11 @@ async fn test_jgwt5000_ignore_protocol_with_db_protocol() {
         .expect("Response should contain 'name' field");
     assert_eq!(
         name.to_lowercase(),
-        "jgwt5000",
+        ECU_JGWT5000,
         "Component name should be jgwt5000"
     );
 
-    assert_ecu_answers_on_bus(runtime, sovd::ECU_JGWT5000_ENDPOINT).await;
+    assert_ecu_answers_on_bus(&test_env, sovd::COMPONENTS_JGWT5000_BASE).await;
 }
 
 /// A CAN-only ECU must be usable purely from configuration: TMCC3000's MDD
@@ -161,22 +154,22 @@ async fn test_jgwt5000_ignore_protocol_with_db_protocol() {
 /// over a CAN network address and answers a live read on the bus.
 #[tokio::test]
 async fn test_can_only_ecu_from_configuration() {
-    if skip_for_doip(
-        "test_can_only_ecu_from_configuration",
+    if skip_unless(
+        Transport::uses_can,
         "needs the CAN transport (pure-CAN or mixed mode)",
     ) {
         return;
     }
-    let (runtime, _lock) = setup_integration_test(false).await.unwrap();
+    let test_env = TestEnv::builder().await.unwrap();
 
     // Live read proves the ECU answers on the bus at all.
-    assert_ecu_answers_on_bus(runtime, sovd::ECU_TMCC3000_ENDPOINT).await;
+    assert_ecu_answers_on_bus(&test_env, sovd::COMPONENTS_TMCC3000_BASE).await;
 
     // The network structure must serve TMCC3000 behind a CAN network address
     // (can:// scheme) carrying the configured request/response CAN IDs.
     let response = send_cda_request(
-        &runtime.config,
-        "apps/sovd2uds/data/networkstructure",
+        &test_env.config,
+        APPS_SOVD2UDS_DATA_NETWORKSTRUCTURE,
         StatusCode::OK,
         Method::GET,
         None,
@@ -206,7 +199,7 @@ async fn test_can_only_ecu_from_configuration() {
                     ecus.iter().any(|ecu| {
                         ecu.get("Qualifier")
                             .and_then(|q| q.as_str())
-                            .is_some_and(|q| q.eq_ignore_ascii_case("tmcc3000"))
+                            .is_some_and(|q| q.eq_ignore_ascii_case(ECU_TMCC3000))
                     })
                 })
         })
@@ -231,22 +224,20 @@ async fn test_ecu_session_switching() {
     // TODO(can): SecurityAccess seed/key/lock sequencing is not yet reliable
     // over the CAN transport. Re-enable once the CAN session/security path
     // is hardened, see #444
-    if skip_for_can(
-        "test_ecu_session_switching",
+    if skip_unless(
+        Transport::uses_doip,
         "SecurityAccess sequencing not yet supported over CAN",
     ) {
         return;
     }
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-    let auth = auth_header(&runtime.config, None).await.unwrap();
-    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let test_env = TestEnv::builder().await.unwrap();
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
 
     // We have no lock yet, thus the CDA should reject the request to send the key.
     send_key(
         "Level_5".to_owned(),
         "0x42".to_owned(),
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         StatusCode::CONFLICT,
     )
@@ -256,10 +247,9 @@ async fn test_ecu_session_switching() {
     let expiration_timeout = Duration::from_secs(60);
     let ecu_lock = create_lock(
         expiration_timeout,
-        locks::ECU_ENDPOINT,
+        locks::COMPONENTS_FLXC1000_LOCKS,
         StatusCode::CREATED,
-        &runtime.config,
-        &auth,
+        &test_env,
     )
     .await;
     let lock_id =
@@ -267,29 +257,25 @@ async fn test_ecu_session_switching() {
 
     // Lock the ECU
     lock_operation(
-        locks::ECU_ENDPOINT,
+        locks::COMPONENTS_FLXC1000_LOCKS,
         Some(&lock_id),
-        &runtime.config,
-        &auth,
+        &test_env,
         StatusCode::OK,
         Method::GET,
     )
     .await;
 
-    force_variant_detection(&runtime.config, &auth, ecu_endpoint)
+    force_variant_detection(&test_env, ecu_endpoint)
         .await
         .unwrap();
 
-    let ecu = ecu_status(&runtime.config, &auth, ecu_endpoint)
-        .await
-        .unwrap();
-    assert!(ecu.name.eq_ignore_ascii_case("flxc1000"));
+    let ecu = ecu_status(&test_env, ecu_endpoint).await.unwrap();
+    assert!(ecu.name.eq_ignore_ascii_case(ECU_FLXC1000));
     assert_eq!(ecu.variant.name, "FLXC1000_App_0101".to_string());
 
     switch_session(
         "this status does not exist",
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         StatusCode::NOT_FOUND,
     )
@@ -298,8 +284,7 @@ async fn test_ecu_session_switching() {
 
     // Get the active diagnostic session using the Configuration GET method.
     let get_config_result = get_configurations(
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         "activediagnosticsessiondataidentifier",
     )
@@ -317,18 +302,12 @@ async fn test_ecu_session_switching() {
         .expect("Missing or invalid EcuSessionType");
     assert_eq!(session_type, "Default");
 
-    let switch_session_result = switch_session(
-        "extended",
-        &runtime.config,
-        &auth,
-        ecu_endpoint,
-        StatusCode::OK,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let switch_session_result = switch_session("extended", &test_env, ecu_endpoint, StatusCode::OK)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(switch_session_result.value.to_lowercase(), "extended");
-    let session_result = session(&runtime.config, &auth, ecu_endpoint).await.unwrap();
+    let session_result = session(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(
         session_result.value.map(|s| s.to_lowercase()),
         Some("extended".to_owned())
@@ -337,8 +316,7 @@ async fn test_ecu_session_switching() {
 
     // After switching to extended session, fetch again using configuraion GET and verify.
     let get_config_result = get_configurations(
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         "activediagnosticsessiondataidentifier",
     )
@@ -357,17 +335,11 @@ async fn test_ecu_session_switching() {
     assert_eq!(session_type, "Extended");
 
     // Reset the ECU using the reset service and verify the session goes back to default
-    reset_ecu(
-        "hardreset",
-        &runtime.config,
-        &auth,
-        ecu_endpoint,
-        StatusCode::NO_CONTENT,
-    )
-    .await
-    .unwrap();
+    reset_ecu("hardreset", &test_env, ecu_endpoint, StatusCode::NO_CONTENT)
+        .await
+        .unwrap();
 
-    let session_result_after_reset = session(&runtime.config, &auth, ecu_endpoint).await.unwrap();
+    let session_result_after_reset = session(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(
         session_result_after_reset.value.map(|s| s.to_lowercase()),
         Some("default".to_owned()),
@@ -375,46 +347,32 @@ async fn test_ecu_session_switching() {
     );
 
     // Switch back to extended session so the remaining test steps work
-    let switch_back_result = switch_session(
-        "extended",
-        &runtime.config,
-        &auth,
-        ecu_endpoint,
-        StatusCode::OK,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let switch_back_result = switch_session("extended", &test_env, ecu_endpoint, StatusCode::OK)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(switch_back_result.value.to_lowercase(), "extended");
 
     // switch ECU sim state to BOOT
-    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "BOOT")
+    ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "BOOT")
         .await
         .unwrap();
-    force_variant_detection(&runtime.config, &auth, ecu_endpoint)
+    force_variant_detection(&test_env, ecu_endpoint)
         .await
         .unwrap();
-    let ecu = ecu_status(&runtime.config, &auth, ecu_endpoint)
-        .await
-        .unwrap();
+    let ecu = ecu_status(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(ecu.variant.name, "FLXC1000_Boot_Variant".to_string());
 
-    let seed_response = request_seed(
-        "Level_5_RequestSeed".to_owned(),
-        &runtime.config,
-        &auth,
-        ecu_endpoint,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let seed_response = request_seed("Level_5_RequestSeed".to_owned(), &test_env, ecu_endpoint)
+        .await
+        .unwrap()
+        .unwrap();
 
     // Key is too short
     send_key(
         "Level_5".to_owned(),
         "0x42".to_owned(),
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         StatusCode::BAD_GATEWAY,
     )
@@ -424,8 +382,7 @@ async fn test_ecu_session_switching() {
     send_key(
         "Level_5".to_owned(),
         seed_response.seed.request_seed.clone(),
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         StatusCode::BAD_GATEWAY,
     )
@@ -437,25 +394,21 @@ async fn test_ecu_session_switching() {
     send_key(
         "Level_5".to_owned(),
         key,
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         StatusCode::OK,
     )
     .await
     .unwrap();
-    let security_result = security(&runtime.config, &auth, ecu_endpoint)
-        .await
-        .unwrap();
+    let security_result = security(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(security_result.value, Some("Level_5".to_owned()));
     assert_eq!(security_result.name, Some("Security access".to_owned()));
 
     // Delete the ECU lock
     lock_operation(
-        locks::ECU_ENDPOINT,
+        locks::COMPONENTS_FLXC1000_LOCKS,
         Some(&lock_id),
-        &runtime.config,
-        &auth,
+        &test_env,
         StatusCode::NO_CONTENT,
         Method::DELETE,
     )
@@ -466,28 +419,24 @@ async fn test_ecu_session_switching() {
 /// simulator rejects the seed request unless it receives the configured byte.
 #[tokio::test]
 async fn request_seed_forwards_parameters_to_fsnr2000() {
-    if skip_for_can(
-        "request_seed_forwards_parameters_to_fsnr2000",
+    if skip_unless(
+        Transport::uses_doip,
         "SecurityAccess sequencing not yet supported over CAN",
     ) {
         return;
     }
 
-    let (runtime, _lock) = setup_integration_test(true)
+    let test_env = TestEnv::builder()
         .await
-        .expect("integration test runtime should start");
-    let auth = auth_header(&runtime.config, None)
-        .await
-        .expect("auth header should be obtainable");
-    let ecu_endpoint = sovd::ECU_FSNR2000_ENDPOINT;
+        .expect("test environment should start");
+    let ecu_endpoint = sovd::COMPONENTS_FSNR2000_BASE;
     let lock_endpoint = format!("{ecu_endpoint}/locks");
 
     let ecu_lock = create_lock(
         Duration::from_secs(60),
         &lock_endpoint,
         StatusCode::CREATED,
-        &runtime.config,
-        &auth,
+        &test_env,
     )
     .await;
     let lock_id = extract_field_from_json::<String>(
@@ -498,34 +447,25 @@ async fn request_seed_forwards_parameters_to_fsnr2000() {
     lock_operation(
         &lock_endpoint,
         Some(&lock_id),
-        &runtime.config,
-        &auth,
+        &test_env,
         StatusCode::OK,
         Method::GET,
     )
     .await;
 
-    ecusim::switch_variant(&runtime.ecu_sim, "FSNR2000", "BOOT")
+    ecusim::switch_variant(&test_env.ecu_sim, "FSNR2000", "BOOT")
         .await
         .expect("FSNR2000 should switch to the boot variant");
-    force_variant_detection(&runtime.config, &auth, ecu_endpoint)
+    force_variant_detection(&test_env, ecu_endpoint)
         .await
         .expect("FSNR2000 boot variant should be detected");
 
-    assert_request_seed_rejected(
-        &runtime.config,
-        &auth,
-        ecu_endpoint,
-        None,
-        StatusCode::BAD_REQUEST,
-    )
-    .await;
+    assert_request_seed_rejected(&test_env, ecu_endpoint, None, StatusCode::BAD_REQUEST).await;
 
     let mut parameters = HashMap::new();
     parameters.insert("Invalid".to_owned(), json!(0x5A));
     assert_request_seed_rejected(
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         Some(parameters),
         StatusCode::BAD_REQUEST,
@@ -535,23 +475,22 @@ async fn request_seed_forwards_parameters_to_fsnr2000() {
     let mut parameters = HashMap::new();
     parameters.insert("SeedRequestParameter".to_owned(), json!(0x5B));
     assert_request_seed_rejected(
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         Some(parameters),
         StatusCode::BAD_GATEWAY,
     )
     .await;
 
-    ecusim::start_recording(&runtime.ecu_sim, "fsnr2000")
+    let recorder = test_env
+        .record(ECU_FSNR2000)
         .await
         .expect("FSNR2000 recording should start");
 
     let mut parameters = HashMap::new();
     parameters.insert("SeedRequestParameter".to_owned(), json!(0x5A));
     let response: Option<RequestSeedResponse> = put_mode(
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         "security",
         sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
@@ -566,7 +505,8 @@ async fn request_seed_forwards_parameters_to_fsnr2000() {
     .expect("RequestSeed with parameters should succeed");
     assert!(response.is_some(), "RequestSeed should return a seed");
 
-    let frames = ecusim::stop_and_clear_recording(&runtime.ecu_sim, "fsnr2000")
+    let frames = recorder
+        .stop()
         .await
         .expect("FSNR2000 recording should stop");
     assert!(
@@ -577,24 +517,20 @@ async fn request_seed_forwards_parameters_to_fsnr2000() {
 
 #[tokio::test]
 async fn send_key_rejects_request_seed_parameters() {
-    if skip_for_can(
-        "send_key_rejects_request_seed_parameters",
+    if skip_unless(
+        Transport::uses_doip,
         "SecurityAccess sequencing not yet supported over CAN",
     ) {
         return;
     }
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-    let auth = auth_header(&runtime.config, None)
-        .await
-        .expect("auth header should be obtainable");
-    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let test_env = TestEnv::builder().await.unwrap();
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
 
     let ecu_lock = create_lock(
         Duration::from_secs(60),
-        locks::ECU_ENDPOINT,
+        locks::COMPONENTS_FLXC1000_LOCKS,
         StatusCode::CREATED,
-        &runtime.config,
-        &auth,
+        &test_env,
     )
     .await;
     let lock_id = extract_field_from_json::<String>(
@@ -603,10 +539,9 @@ async fn send_key_rejects_request_seed_parameters() {
     )
     .expect("lock response should contain an id");
     lock_operation(
-        locks::ECU_ENDPOINT,
+        locks::COMPONENTS_FLXC1000_LOCKS,
         Some(&lock_id),
-        &runtime.config,
-        &auth,
+        &test_env,
         StatusCode::OK,
         Method::GET,
     )
@@ -615,8 +550,7 @@ async fn send_key_rejects_request_seed_parameters() {
     let mut parameters = HashMap::new();
     parameters.insert("Foo".to_owned(), json!(90));
     let response: Option<modes::security_and_session::put::Response<String>> = put_mode(
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         "security",
         modes::security_and_session::put::SecurityRequest {
@@ -637,10 +571,9 @@ async fn send_key_rejects_request_seed_parameters() {
     );
 
     lock_operation(
-        locks::ECU_ENDPOINT,
+        locks::COMPONENTS_FLXC1000_LOCKS,
         Some(&lock_id),
-        &runtime.config,
-        &auth,
+        &test_env,
         StatusCode::NO_CONTENT,
         Method::DELETE,
     )
@@ -652,23 +585,22 @@ async fn test_variant_detection_duplicates() {
     // DoIP-only: relies on spontaneous VAM announcements and restarts the sim's
     // DoIP entities (which has no CAN-hub equivalent), so it cannot run over the
     // CAN transport.
-    if skip_for_can(
-        "test_variant_detection_duplicates",
+    if skip_unless(
+        Transport::uses_doip,
         "depends on DoIP VAM announcements and sim restart",
     ) {
         return;
     }
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let mut test_env = TestEnv::builder().await.unwrap();
 
     // Switch variant, and check if the NG variant is now online.
-    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
+    ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "APPLICATION")
         .await
         .unwrap();
-    force_variant_detection(&runtime.config, &auth, sovd::ECU_FLXC1000_ENDPOINT)
+    force_variant_detection(&test_env, sovd::COMPONENTS_FLXC1000_BASE)
         .await
         .unwrap();
-    let ecu = ecu_status(&runtime.config, &auth, sovd::ECU_FLXC1000_ENDPOINT)
+    let ecu = ecu_status(&test_env, sovd::COMPONENTS_FLXC1000_BASE)
         .await
         .unwrap();
     assert_eq!(
@@ -678,96 +610,89 @@ async fn test_variant_detection_duplicates() {
     assert_eq!(ecu.variant.logical_address, "0x1000");
 
     // Switch variant, and check if the NG variant is now online.
-    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION2")
+    ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "APPLICATION2")
         .await
         .unwrap();
-    force_variant_detection(&runtime.config, &auth, sovd::ECU_FLXC1000_ENDPOINT)
+    force_variant_detection(&test_env, sovd::COMPONENTS_FLXC1000_BASE)
         .await
         .unwrap();
 
     validate_ecu_state(
-        runtime,
-        &auth,
-        sovd::ECU_FLXC1000_ENDPOINT,
+        &test_env,
+        sovd::COMPONENTS_FLXC1000_BASE,
         sovd_interfaces::components::ecu::State::Duplicate,
     )
     .await;
 
     validate_ecu_state(
-        runtime,
-        &auth,
-        sovd::ECU_FLXCNG1000_ENDPOINT,
+        &test_env,
+        sovd::COMPONENTS_FLXCNG1000_BASE,
         sovd_interfaces::components::ecu::State::Online,
     )
     .await;
 
     // No variant associated with APPLICATION3, check if both ECUs are marked as NoVariantDetected
-    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION3")
+    ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "APPLICATION3")
         .await
         .unwrap();
-    force_variant_detection(&runtime.config, &auth, sovd::ECU_FLXC1000_ENDPOINT)
+    force_variant_detection(&test_env, sovd::COMPONENTS_FLXC1000_BASE)
         .await
         .unwrap();
     validate_ecu_state(
-        runtime,
-        &auth,
-        sovd::ECU_FLXC1000_ENDPOINT,
+        &test_env,
+        sovd::COMPONENTS_FLXC1000_BASE,
         sovd_interfaces::components::ecu::State::NoVariantDetected,
     )
     .await;
     validate_ecu_state(
-        runtime,
-        &auth,
-        sovd::ECU_FLXCNG1000_ENDPOINT,
+        &test_env,
+        sovd::COMPONENTS_FLXCNG1000_BASE,
         sovd_interfaces::components::ecu::State::NoVariantDetected,
     )
     .await;
 
     // Stop sim and check if ECUs are marked as disconnected after variant detection
-    stop_ecu_sim().await.unwrap();
-    force_variant_detection(&runtime.config, &auth, sovd::ECU_FLXCNG1000_ENDPOINT)
+    test_env.stop_ecu_sim().await.unwrap();
+    force_variant_detection(&test_env, sovd::COMPONENTS_FLXCNG1000_BASE)
         .await
         .unwrap();
 
     validate_ecu_state(
-        runtime,
-        &auth,
-        sovd::ECU_FLXC1000_ENDPOINT,
+        &test_env,
+        sovd::COMPONENTS_FLXC1000_BASE,
         sovd_interfaces::components::ecu::State::Disconnected,
     )
     .await;
     validate_ecu_state(
-        runtime,
-        &auth,
-        sovd::ECU_FLXCNG1000_ENDPOINT,
+        &test_env,
+        sovd::COMPONENTS_FLXCNG1000_BASE,
         sovd_interfaces::components::ecu::State::Disconnected,
     )
     .await;
 
     // restart CDA while sim is offline and check if ECUs are marked as offline
-    restart_cda(&runtime.config).await.unwrap();
+    let config = test_env.default_config().clone();
+    test_env.replace_cda(&config).await.unwrap();
     validate_ecu_state(
-        runtime,
-        &auth,
-        sovd::ECU_FLXC1000_ENDPOINT,
+        &test_env,
+        sovd::COMPONENTS_FLXC1000_BASE,
         sovd_interfaces::components::ecu::State::Offline,
     )
     .await;
     validate_ecu_state(
-        runtime,
-        &auth,
-        sovd::ECU_FLXCNG1000_ENDPOINT,
+        &test_env,
+        sovd::COMPONENTS_FLXCNG1000_BASE,
         sovd_interfaces::components::ecu::State::Offline,
     )
     .await;
 
     // restart sim and wait for ECUs to come online,
     // status should be detected without manual variant detection
-    start_ecu_sim(&runtime.ecu_sim).await.unwrap();
+    test_env.start_ecu_sim().await.unwrap();
 
     // wait in loop, to check if the CDA receives the spontaneous VAM when is online
     for attempt in 0..=5 {
-        let status = ecu_status(&runtime.config, &auth, sovd::ECU_FLXC1000_ENDPOINT)
+        let status = ecu_status(&test_env, sovd::COMPONENTS_FLXC1000_BASE)
             .await
             .expect("failed to get ecu status");
 
@@ -783,9 +708,8 @@ async fn test_variant_detection_duplicates() {
     }
 
     validate_ecu_state(
-        runtime,
-        &auth,
-        sovd::ECU_FLXCNG1000_ENDPOINT,
+        &test_env,
+        sovd::COMPONENTS_FLXCNG1000_BASE,
         sovd_interfaces::components::ecu::State::Duplicate,
     )
     .await;
@@ -794,16 +718,14 @@ async fn test_variant_detection_duplicates() {
 #[tokio::test]
 #[allow(clippy::too_many_lines, reason = "Keep the test together")]
 async fn test_communication_control() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-    let auth = auth_header(&runtime.config, None).await.unwrap();
-    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let test_env = TestEnv::builder().await.unwrap();
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
 
     // Without lock, the CDA should reject the request
     set_comm_control(
         "EnableRxAndEnableTx",
         None,
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         StatusCode::CONFLICT,
     )
@@ -814,10 +736,9 @@ async fn test_communication_control() {
     let expiration_timeout = Duration::from_secs(60);
     let ecu_lock = create_lock(
         expiration_timeout,
-        locks::ECU_ENDPOINT,
+        locks::COMPONENTS_FLXC1000_LOCKS,
         StatusCode::CREATED,
-        &runtime.config,
-        &auth,
+        &test_env,
     )
     .await;
     let lock_id =
@@ -825,8 +746,7 @@ async fn test_communication_control() {
 
     // Sending an invalid value should return BAD_REQUEST with possible values
     sovd::validate_invalid_parameter_error(
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         "commctrl",
         modes::commctrl::put::Request {
@@ -850,8 +770,7 @@ async fn test_communication_control() {
     let result = set_comm_control(
         "EnableRxAndEnableTx",
         None,
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         StatusCode::OK,
     )
@@ -860,9 +779,7 @@ async fn test_communication_control() {
     .unwrap();
     assert_eq!(result.value, "EnableRxAndEnableTx");
 
-    let current_state = get_comm_control(&runtime.config, &auth, ecu_endpoint)
-        .await
-        .unwrap();
+    let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(
         current_state.value.as_ref().map(|s| s.to_lowercase()),
         Some(enable_rx_and_enable_tx.to_owned())
@@ -872,8 +789,7 @@ async fn test_communication_control() {
     let result = set_comm_control(
         "EnableRxAndDisableTx",
         None,
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         StatusCode::OK,
     )
@@ -882,9 +798,7 @@ async fn test_communication_control() {
     .unwrap();
     assert_eq!(result.value, "EnableRxAndDisableTx");
 
-    let current_state = get_comm_control(&runtime.config, &auth, ecu_endpoint)
-        .await
-        .unwrap();
+    let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(
         current_state.value.as_ref().map(|s| s.to_lowercase()),
         Some(enable_rx_and_disable_tx.to_owned())
@@ -894,8 +808,7 @@ async fn test_communication_control() {
     let result = set_comm_control(
         "DisableRxAndEnableTx",
         None,
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         StatusCode::OK,
     )
@@ -904,9 +817,7 @@ async fn test_communication_control() {
     .unwrap();
     assert_eq!(result.value, "DisableRxAndEnableTx");
 
-    let current_state = get_comm_control(&runtime.config, &auth, ecu_endpoint)
-        .await
-        .unwrap();
+    let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(
         current_state.value.as_ref().map(|s| s.to_lowercase()),
         Some(disable_rx_and_enable_tx.to_owned())
@@ -916,8 +827,7 @@ async fn test_communication_control() {
     let result = set_comm_control(
         "DisableRxAndDisableTx",
         None,
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         StatusCode::OK,
     )
@@ -926,9 +836,7 @@ async fn test_communication_control() {
     .unwrap();
     assert_eq!(result.value, "DisableRxAndDisableTx");
 
-    let current_state = get_comm_control(&runtime.config, &auth, ecu_endpoint)
-        .await
-        .unwrap();
+    let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(
         current_state.value.as_ref().map(|s| s.to_lowercase()),
         Some(disable_rx_and_disable_tx.to_owned())
@@ -939,8 +847,7 @@ async fn test_communication_control() {
     let result = set_comm_control(
         "EnableRxAndDisableTxWithEnhancedAddressInformation",
         None,
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         StatusCode::OK,
     )
@@ -952,9 +859,7 @@ async fn test_communication_control() {
         "EnableRxAndDisableTxWithEnhancedAddressInformation"
     );
 
-    let current_state = get_comm_control(&runtime.config, &auth, ecu_endpoint)
-        .await
-        .unwrap();
+    let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(
         current_state.value.as_ref().map(|s| s.to_lowercase()),
         Some(enable_rx_and_disable_tx_with_enhanced.to_owned())
@@ -964,8 +869,7 @@ async fn test_communication_control() {
     let result = set_comm_control(
         "EnableRxAndTxWithEnhancedAddressInformation",
         None,
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         StatusCode::OK,
     )
@@ -974,9 +878,7 @@ async fn test_communication_control() {
     .unwrap();
     assert_eq!(result.value, "EnableRxAndTxWithEnhancedAddressInformation");
 
-    let current_state = get_comm_control(&runtime.config, &auth, ecu_endpoint)
-        .await
-        .unwrap();
+    let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(
         current_state.value.as_ref().map(|s| s.to_lowercase()),
         Some(enable_rx_and_tx_with_enhanced.to_owned())
@@ -994,8 +896,7 @@ async fn test_communication_control() {
     let result = set_comm_control(
         "TemporalSync",
         Some(parameters),
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         StatusCode::OK,
     )
@@ -1004,16 +905,14 @@ async fn test_communication_control() {
     .unwrap();
     assert_eq!(result.value, "TemporalSync");
 
-    let current_state = get_comm_control(&runtime.config, &auth, ecu_endpoint)
-        .await
-        .unwrap();
+    let current_state = get_comm_control(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(
         current_state.value.as_ref().map(|s| s.to_lowercase()),
         Some(temporal_sync.to_owned())
     );
 
     // Validate that ECU sim received and stored the temporalEraId
-    let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
+    let ecu_state = ecusim::get_ecu_state(&test_env.ecu_sim, ECU_FLXC1000)
         .await
         .expect("Failed to get ECU sim state");
     assert_eq!(
@@ -1028,10 +927,9 @@ async fn test_communication_control() {
 
     // Delete the ECU lock
     lock_operation(
-        locks::ECU_ENDPOINT,
+        locks::COMPONENTS_FLXC1000_LOCKS,
         Some(&lock_id),
-        &runtime.config,
-        &auth,
+        &test_env,
         StatusCode::NO_CONTENT,
         Method::DELETE,
     )
@@ -1041,8 +939,7 @@ async fn test_communication_control() {
     set_comm_control(
         "EnableRxAndEnableTx",
         None,
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         StatusCode::CONFLICT,
     )
@@ -1052,26 +949,21 @@ async fn test_communication_control() {
 
 #[tokio::test]
 async fn test_boot_variant_service_inheritance() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-    let auth = auth_header(&runtime.config, None).await.unwrap();
-    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let test_env = TestEnv::builder().await.unwrap();
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
 
     // Switch ECU sim to BOOT variant
-    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "BOOT")
+    ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "BOOT")
         .await
         .unwrap();
-    force_variant_detection(&runtime.config, &auth, ecu_endpoint)
+    force_variant_detection(&test_env, ecu_endpoint)
         .await
         .unwrap();
 
-    let ecu = ecu_status(&runtime.config, &auth, ecu_endpoint)
-        .await
-        .unwrap();
+    let ecu = ecu_status(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(ecu.variant.name, "FLXC1000_Boot_Variant".to_string());
 
-    let data_services = get_data_services(&runtime.config, &auth, ecu_endpoint)
-        .await
-        .unwrap();
+    let data_services = get_data_services(&test_env, ecu_endpoint).await.unwrap();
     let service_ids: Vec<_> = data_services
         .items
         .iter()
@@ -1085,11 +977,6 @@ async fn test_boot_variant_service_inheritance() {
         service_ids.join(", ")
     );
 
-    // reset ecu-sim variant
-    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
-        .await
-        .unwrap();
-
     // As long as test_ecu_session_switching also works we know that services
     // specific to the boot variant are still looked up correct, otherwise we cannot find
     // RequestSeed and SendKey services, no need to test this again here.
@@ -1100,24 +987,22 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
     // TODO(can): session expiry depends on TesterPresent keepalive cadence,
     // which is not yet reliable over the CAN transport (per-transaction
     // sockets + busy-poll dispatcher are too slow), see #444
-    if skip_for_can(
-        "test_ecu_session_reset_on_lock_reacquire",
+    if skip_unless(
+        Transport::uses_doip,
         "session-expiry keepalive timing not yet reliable over CAN",
     ) {
         return;
     }
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-    let auth = auth_header(&runtime.config, None).await.unwrap();
-    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let test_env = TestEnv::builder().await.unwrap();
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
 
     // Create and acquire lock with 30s timeout
     let lock_expiration_timeout = Duration::from_secs(30);
     let ecu_lock = create_lock(
         lock_expiration_timeout,
-        locks::ECU_ENDPOINT,
+        locks::COMPONENTS_FLXC1000_LOCKS,
         StatusCode::CREATED,
-        &runtime.config,
-        &auth,
+        &test_env,
     )
     .await;
     let lock_id =
@@ -1126,8 +1011,7 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
     // Set session with 2s expiry
     let session_expiration = 2u64;
     let switch_session_result: modes::security_and_session::put::Response<String> = put_mode(
-        &runtime.config,
-        &auth,
+        &test_env,
         ecu_endpoint,
         "session",
         modes::security_and_session::put::SessionRequest {
@@ -1142,7 +1026,7 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
     assert_eq!(switch_session_result.value.to_lowercase(), "extended");
 
     // Verify ECU sim is in extended session
-    let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
+    let ecu_state = ecusim::get_ecu_state(&test_env.ecu_sim, ECU_FLXC1000)
         .await
         .expect("Failed to get ECU sim state");
     assert_eq!(
@@ -1155,7 +1039,7 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(session_expiration + 1)).await;
 
     // Check if the sim is back to default
-    let ecu_state_after_expiry = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
+    let ecu_state_after_expiry = ecusim::get_ecu_state(&test_env.ecu_sim, ECU_FLXC1000)
         .await
         .expect("Failed to get ECU sim state after session expiry");
 
@@ -1166,7 +1050,7 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
     );
 
     // Also verify through CDA API
-    let session_result_after = session(&runtime.config, &auth, ecu_endpoint).await.unwrap();
+    let session_result_after = session(&test_env, ecu_endpoint).await.unwrap();
     assert_eq!(
         session_result_after.value.map(|s| s.to_lowercase()),
         Some("default".to_owned())
@@ -1174,10 +1058,9 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
 
     // Delete the lock
     lock_operation(
-        locks::ECU_ENDPOINT,
+        locks::COMPONENTS_FLXC1000_LOCKS,
         Some(&lock_id),
-        &runtime.config,
-        &auth,
+        &test_env,
         StatusCode::NO_CONTENT,
         Method::DELETE,
     )
@@ -1187,17 +1070,22 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
 /// [[ itest~sovd-api-component-sdgsd, ECU-level SDG retrieval, itest ]]
 #[tokio::test]
 async fn test_ecu_sdg_retrieval() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let test_env = TestEnv::builder().await.unwrap();
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
 
     // Retrieve sdgs and verify contents
     let params = QueryParams(HashMap::from_iter([(
         "x-sovd2uds-includesdgs".to_string(),
         "true".to_string(),
     )]));
-    let data = get_ecu_component(&runtime.config, ecu_endpoint, StatusCode::OK, Some(&params))
-        .await
-        .unwrap();
+    let data = get_ecu_component(
+        &test_env.config,
+        ecu_endpoint,
+        StatusCode::OK,
+        Some(&params),
+    )
+    .await
+    .unwrap();
 
     let d = data
         .get("data")
@@ -1288,17 +1176,22 @@ async fn test_ecu_sdg_retrieval() {
 /// [[ itest~sovd-api-component-alias-sdgsd, ECU-level SDG retrieval (alias param), itest ]]
 #[tokio::test]
 async fn test_ecu_sdg_retrieval_alias() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let test_env = TestEnv::builder().await.unwrap();
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
 
     // Retrieve sdgs and verify contents
     let params = QueryParams(HashMap::from_iter([(
         "x-include-sdgs".to_string(),
         "true".to_string(),
     )]));
-    let data = get_ecu_component(&runtime.config, ecu_endpoint, StatusCode::OK, Some(&params))
-        .await
-        .unwrap();
+    let data = get_ecu_component(
+        &test_env.config,
+        ecu_endpoint,
+        StatusCode::OK,
+        Some(&params),
+    )
+    .await
+    .unwrap();
 
     let sdgs = data
         .get("sdgs")
@@ -1329,23 +1222,21 @@ async fn test_ecu_sdg_retrieval_alias() {
 /// [[ itest~sovd-api-component-data-sdgsd, Data-level SDG retrieval, itest ]]
 #[tokio::test]
 async fn test_data_sdg_retrieval() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let test_env = TestEnv::builder().await.unwrap();
 
     let params = QueryParams(HashMap::from_iter([(
         "x-sovd2uds-includesdgs".to_string(),
         "true".to_string(),
     )]));
-    let response = send_cda_request(
-        &runtime.config,
+    let response = send_authenticated_cda_request(
+        &test_env,
         &format!(
             "{}/data/FluxCapacitorPowerConsumption",
-            sovd::ECU_FLXC1000_ENDPOINT
+            sovd::COMPONENTS_FLXC1000_BASE
         ),
         StatusCode::OK,
         Method::GET,
         None,
-        Some(&auth),
         Some(&params),
     )
     .await
@@ -1405,20 +1296,18 @@ async fn test_data_sdg_retrieval() {
 /// [[ itest~sovd-api-component-operations-sdgsd, Operation-level SDG retrieval, itest ]]
 #[tokio::test]
 async fn test_operation_sdg_retrieval() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let test_env = TestEnv::builder().await.unwrap();
 
     let params = QueryParams(HashMap::from_iter([(
         "x-sovd2uds-includesdgs".to_string(),
         "true".to_string(),
     )]));
-    let response = send_cda_request(
-        &runtime.config,
-        &format!("{}/operations/SelfTest", sovd::ECU_FLXC1000_ENDPOINT),
+    let response = send_authenticated_cda_request(
+        &test_env,
+        &format!("{}/operations/SelfTest", sovd::COMPONENTS_FLXC1000_BASE),
         StatusCode::OK,
         Method::GET,
         None,
-        Some(&auth),
         Some(&params),
     )
     .await
@@ -1479,18 +1368,17 @@ async fn test_operation_sdg_retrieval() {
 /// the startup/detection loop - especially in mixed mode where undetected
 /// CAN-mapped ECUs cost a probe timeout each before the loop moves on.
 async fn validate_ecu_state(
-    runtime: &TestRuntime,
-    auth: &HeaderMap,
+    test_env: &TestEnv,
     ecu: &str,
     expected_state: sovd_interfaces::components::ecu::State,
 ) {
     let started = std::time::Instant::now();
-    let mut status = ecu_status(&runtime.config, auth, ecu)
+    let mut status = ecu_status(test_env, ecu)
         .await
         .expect("failed to get ecu status");
     while status.variant.state != expected_state && started.elapsed() < Duration::from_secs(10) {
         cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(200)).await;
-        status = ecu_status(&runtime.config, auth, ecu)
+        status = ecu_status(test_env, ecu)
             .await
             .expect("failed to get ecu status");
     }
@@ -1501,31 +1389,28 @@ async fn validate_ecu_state(
 }
 
 async fn session(
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
 ) -> Result<
     sovd_interfaces::components::ecu::modes::security_and_session::get::Response,
     TestingError,
 > {
-    get_mode(config, headers, ecu_endpoint, "session").await
+    get_mode(test_env, ecu_endpoint, "session").await
 }
 
 async fn security(
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
 ) -> Result<
     sovd_interfaces::components::ecu::modes::security_and_session::get::Response,
     TestingError,
 > {
-    get_mode(config, headers, ecu_endpoint, "security").await
+    get_mode(test_env, ecu_endpoint, "security").await
 }
 
 pub(crate) async fn switch_session(
     name: &str,
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
     expected_status: StatusCode,
 ) -> Result<
@@ -1533,8 +1418,7 @@ pub(crate) async fn switch_session(
     TestingError,
 > {
     put_mode(
-        config,
-        headers,
+        test_env,
         ecu_endpoint,
         "session",
         sovd_interfaces::components::ecu::modes::security_and_session::put::SessionRequest {
@@ -1548,16 +1432,14 @@ pub(crate) async fn switch_session(
 
 async fn request_seed(
     name: String,
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
 ) -> Result<
     Option<sovd_interfaces::components::ecu::modes::security_and_session::put::RequestSeedResponse>,
     TestingError,
 > {
     put_mode(
-        config,
-        headers,
+        test_env,
         ecu_endpoint,
         "security",
         sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
@@ -1572,15 +1454,13 @@ async fn request_seed(
 }
 
 async fn assert_request_seed_rejected(
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
     parameters: Option<HashMap<String, serde_json::Value>>,
     expected_status: StatusCode,
 ) {
     let response: Option<RequestSeedResponse> = put_mode(
-        config,
-        headers,
+        test_env,
         ecu_endpoint,
         "security",
         sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
@@ -1602,8 +1482,7 @@ async fn assert_request_seed_rejected(
 async fn send_key(
     name: String,
     key: String,
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
     excepted_status: StatusCode,
 ) -> Result<
@@ -1611,8 +1490,7 @@ async fn send_key(
     TestingError,
 > {
     put_mode(
-        config,
-        headers,
+        test_env,
         ecu_endpoint,
         "security",
         sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
@@ -1631,80 +1509,39 @@ async fn send_key(
 }
 
 async fn get_mode<T: DeserializeOwned>(
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
     sub_path: &str,
 ) -> Result<T, TestingError> {
-    let http_response = send_cda_request(
-        config,
+    let http_response = send_authenticated_cda_request(
+        test_env,
         &format!("{ecu_endpoint}/modes/{sub_path}"),
         StatusCode::OK,
         Method::GET,
         None,
-        Some(headers),
         None,
     )
     .await?;
     response_to_t(&http_response)
-}
-
-async fn ecu_status(
-    config: &Configuration,
-    headers: &HeaderMap,
-    ecu_endpoint: &str,
-) -> Result<sovd_interfaces::components::ecu::get::Response, TestingError> {
-    let http_response = send_cda_request(
-        config,
-        ecu_endpoint,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        Some(headers),
-        None,
-    )
-    .await?;
-    response_to_t(&http_response)
-}
-
-async fn force_variant_detection(
-    config: &Configuration,
-    headers: &HeaderMap,
-    ecu_endpoint: &str,
-) -> Result<(), TestingError> {
-    send_cda_request(
-        config,
-        ecu_endpoint,
-        StatusCode::CREATED,
-        Method::PUT,
-        None,
-        Some(headers),
-        None,
-    )
-    .await?;
-    Ok(())
 }
 
 async fn get_comm_control(
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
 ) -> Result<modes::commctrl::get::Response, TestingError> {
-    get_mode(config, headers, ecu_endpoint, "commctrl").await
+    get_mode(test_env, ecu_endpoint, "commctrl").await
 }
 
 async fn set_comm_control(
     value: &str,
     parameters: Option<cda_interfaces::HashMap<String, serde_json::Value>>,
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
     expected_status: StatusCode,
 ) -> Result<Option<sovd_interfaces::components::ecu::modes::commctrl::put::Response>, TestingError>
 {
     put_mode(
-        config,
-        headers,
+        test_env,
         ecu_endpoint,
         "commctrl",
         modes::commctrl::put::Request {
@@ -1717,26 +1554,23 @@ async fn set_comm_control(
 }
 
 pub(crate) async fn get_dtc_setting(
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
 ) -> Result<dtcsetting::get::Response, TestingError> {
-    get_mode(config, headers, ecu_endpoint, "dtcsetting").await
+    get_mode(test_env, ecu_endpoint, "dtcsetting").await
 }
 
 async fn get_configurations(
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
     service: &str,
 ) -> Result<sovd_interfaces::components::ecu::configurations::ServiceResponse, TestingError> {
-    let http_response = send_cda_request(
-        config,
+    let http_response = send_authenticated_cda_request(
+        test_env,
         &format!("{ecu_endpoint}/configurations/{service}"),
         StatusCode::OK,
         Method::GET,
         None,
-        Some(headers),
         None,
     )
     .await?;
@@ -1745,8 +1579,7 @@ async fn get_configurations(
 
 async fn reset_ecu(
     value: &str,
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
     expected_status: StatusCode,
 ) -> Result<(), TestingError> {
@@ -1754,13 +1587,12 @@ async fn reset_ecu(
         "parameters": {"value": value}
     })
     .to_string();
-    send_cda_request(
-        config,
+    send_authenticated_cda_request(
+        test_env,
         &format!("{ecu_endpoint}/operations/reset/executions"),
         expected_status,
         Method::POST,
         Some(&body),
-        Some(headers),
         None,
     )
     .await?;
@@ -1768,17 +1600,15 @@ async fn reset_ecu(
 }
 
 async fn get_data_services(
-    config: &Configuration,
-    headers: &HeaderMap,
+    test_env: &TestEnv,
     ecu_endpoint: &str,
 ) -> Result<sovd_interfaces::components::ecu::data::get::Response, TestingError> {
-    let http_response = send_cda_request(
-        config,
+    let http_response = send_authenticated_cda_request(
+        test_env,
         &format!("{ecu_endpoint}/data"),
         StatusCode::OK,
         Method::GET,
         None,
-        Some(headers),
         None,
     )
     .await?;
