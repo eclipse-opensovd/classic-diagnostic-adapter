@@ -152,6 +152,18 @@ impl EcuCoordinatorHandle {
             None
         }
     }
+
+    /// Acquires the variant-detection slot without coalescing the caller.
+    ///
+    /// Explicit client requests use this path: each request must wait for any
+    /// in-flight detection and then perform its own fresh probe. Automatic
+    /// discovery and reconnect triggers use [`Self::begin_detection`] instead,
+    /// so bursts of those triggers can still be coalesced.
+    pub async fn begin_forced_detection(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        std::sync::Arc::clone(&self.detection_lock)
+            .lock_owned()
+            .await
+    }
 }
 
 /// Set a single service state entry (e.g. session or security level after UDS response).

@@ -725,9 +725,17 @@ async fn test_variant_detection_duplicates() {
 
     // Stop sim and check if ECUs are marked as disconnected after variant detection
     stop_ecu_sim().await.unwrap();
-    force_variant_detection(&runtime.config, &auth, sovd::ECU_FLXCNG1000_ENDPOINT)
-        .await
-        .unwrap();
+    send_cda_request(
+        &runtime.config,
+        sovd::ECU_FLXCNG1000_ENDPOINT,
+        StatusCode::GATEWAY_TIMEOUT,
+        Method::PUT,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await
+    .expect("manual variant detection should report the unreachable ECU");
 
     validate_ecu_state(
         runtime,
@@ -1672,16 +1680,17 @@ async fn force_variant_detection(
     headers: &HeaderMap,
     ecu_endpoint: &str,
 ) -> Result<(), TestingError> {
-    send_cda_request(
+    let response = send_cda_request(
         config,
         ecu_endpoint,
-        StatusCode::CREATED,
+        StatusCode::OK,
         Method::PUT,
         None,
         Some(headers),
         None,
     )
     .await?;
+    response_to_t::<sovd_interfaces::components::ecu::Variant>(&response)?;
     Ok(())
 }
 

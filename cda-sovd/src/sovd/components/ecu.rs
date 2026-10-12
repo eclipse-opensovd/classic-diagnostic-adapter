@@ -20,7 +20,7 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    DiagComm, DynamicPlugin, SchemaProvider, UdsEcu,
+    DiagComm, DiagServiceError, DynamicPlugin, SchemaProvider, UdsEcu,
     diagservices::{DiagServiceJsonResponse, DiagServiceResponseType},
     file_manager::FileManager,
 };
@@ -60,7 +60,7 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
 ) -> impl IntoApiResponse {
     let include_schema = query.include_schema;
     let base_path = format!("http://localhost:20002/vehicle/v15/components/{ecu_name}");
-    let status = match uds.get_ecu_state(&ecu_name).await {
+    let variant = match get_variant(&ecu_name, &uds).await {
         Ok(v) => v,
         Err(e) => {
             return ErrorWrapper {
@@ -69,23 +69,6 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
             }
             .into_response();
         }
-    };
-    let logical_address = match uds.get_logical_address(&ecu_name).await {
-        Ok(v) => v,
-        Err(e) => {
-            return ErrorWrapper {
-                error: e.into(),
-                include_schema,
-            }
-            .into_response();
-        }
-    };
-
-    let variant = sovd_interfaces::components::ecu::Variant {
-        name: status.name().unwrap_or("Unknown").to_owned(),
-        is_base_variant: status.is_base_variant(),
-        state: status.into_sovd(),
-        logical_address: format!("0x{logical_address:02x}"),
     };
 
     let sdgs = if query.include_sdgs {
@@ -176,8 +159,8 @@ pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
 //
 // Handles PUT requests on /components/{ecuName} to trigger variant detection.
 // Delegates to the UDS layer which sends diagnostic requests to the ECU and
-// evaluates the responses against known variant patterns. Returns 201 on
-// success or an error response if detection fails.
+// evaluates the responses against known variant patterns. Returns 200 with
+// the resulting variant on success or an error response if detection fails.
 pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
 ) -> Response {
@@ -186,18 +169,42 @@ pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
 
 pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
     op.description("Trigger ECU variant detection")
-        .response_with::<201, (), _>(|res| res.description("ECU variant detection triggered."))
+        .response_with::<200, Json<sovd_interfaces::components::ecu::Variant>, _>(|res| {
+            res.description("ECU variant detection completed.")
+        })
 }
 
 async fn update<T: UdsEcu + Clone>(ecu_name: &str, uds: T) -> Response {
-    match uds.detect_variant(ecu_name).await {
-        Ok(()) => (StatusCode::CREATED, ()).into_response(),
+    if let Err(e) = uds.detect_variant(ecu_name).await {
+        return ErrorWrapper {
+            error: e.into(),
+            include_schema: false,
+        }
+        .into_response();
+    }
+
+    match get_variant(ecu_name, &uds).await {
+        Ok(variant) => (StatusCode::OK, Json(variant)).into_response(),
         Err(e) => ErrorWrapper {
             error: e.into(),
             include_schema: false,
         }
         .into_response(),
     }
+}
+
+async fn get_variant<T: UdsEcu>(
+    ecu_name: &str,
+    uds: &T,
+) -> Result<sovd_interfaces::components::ecu::Variant, DiagServiceError> {
+    let status = uds.get_ecu_state(ecu_name).await?;
+    let logical_address = uds.get_logical_address(ecu_name).await?;
+    Ok(sovd_interfaces::components::ecu::Variant {
+        name: status.name().unwrap_or("Unknown").to_owned(),
+        is_base_variant: status.is_base_variant(),
+        state: status.into_sovd(),
+        logical_address: format!("0x{logical_address:02x}"),
+    })
 }
 
 impl IntoSovd for cda_interfaces::datatypes::ComplexComParamValue {

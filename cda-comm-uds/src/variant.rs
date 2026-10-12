@@ -58,12 +58,15 @@ async fn claim_detection(
     let Some(lock_handle) = lock_handle else {
         return DetectionPermit::Run(None);
     };
+
+    if matches!(trigger, DetectionTrigger::Forced) {
+        return DetectionPermit::Run(Some(lock_handle.begin_forced_detection().await));
+    }
+
     let Some(guard) = lock_handle.begin_detection().await else {
         return DetectionPermit::Skip;
     };
-    if matches!(trigger, DetectionTrigger::IfNeeded)
-        && state_handle.is_some_and(|handle| !needs_variant_detection(&handle.ecu_status()))
-    {
+    if state_handle.is_some_and(|handle| !needs_variant_detection(&handle.ecu_status())) {
         return DetectionPermit::Skip;
     }
     DetectionPermit::Run(Some(guard))
@@ -110,7 +113,14 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             return Ok(());
         };
 
-        let service_responses = self.gather_detection_responses(ecu_name, ecu).await?;
+        let service_responses = match self.gather_detection_responses(ecu_name, ecu).await {
+            Ok(responses) => responses,
+            Err(error) if is_connectivity_failure(&error) => {
+                self.mark_group_unreachable(ecu).await?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         if service_responses.is_empty() {
             return self.mark_group_unreachable(ecu).await;
         }
@@ -346,6 +356,12 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             .map(|(name, service)| Ok((name.to_owned(), service.clone())))
             .collect::<Result<Vec<(String, DiagComm)>, DiagServiceError>>()?;
 
+        if requests.is_empty() {
+            return Err(DiagServiceError::InvalidConfiguration(format!(
+                "No variant detection services are configured for ECU {ecu_name}"
+            )));
+        }
+
         if !ecu.read().await.is_loaded() {
             ecu.write().await.load().map_err(|e| {
                 DiagServiceError::ResourceError(format!("Failed to load ECU data: {e:?}"))
@@ -366,6 +382,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         self.state_coordinator
             .suppress_disconnect_handling(ecu_name)
             .await;
+        let mut send_error = None;
         for (name, service) in requests {
             match self
                 .send_without_variant_guard(
@@ -388,11 +405,13 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                     service_responses.insert(name, response);
                 }
                 Err(e) => {
-                    tracing::debug!(
+                    tracing::warn!(
+                        ecu_name,
                         request_name = %name,
                         error = %e,
                         "Failed to send variant detection request"
                     );
+                    send_error = Some(e);
                     break;
                 }
             }
@@ -400,6 +419,10 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         self.state_coordinator
             .restore_disconnect_handling(ecu_name)
             .await;
+
+        if let Some(error) = send_error {
+            return Err(error);
+        }
 
         Ok(service_responses)
     }
@@ -532,6 +555,17 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     }
 }
 
+fn is_connectivity_failure(error: &DiagServiceError) -> bool {
+    matches!(
+        error,
+        DiagServiceError::ConnectionClosed(_)
+            | DiagServiceError::EcuOffline(_)
+            | DiagServiceError::NoResponse(_)
+            | DiagServiceError::SendFailed(_)
+            | DiagServiceError::Timeout
+    )
+}
+
 #[async_trait]
 impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
     #[tracing::instrument(skip(self), err,
@@ -647,10 +681,23 @@ impl<S: EcuGateway, T: EcuManager> CommunicationVariantDetection for UdsManager<
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::{Connectivity, VariantState};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use cda_interfaces::{
+        Connectivity, DiagServiceError, HashMap, UdsVariant, VariantState, datatypes::FaultConfig,
+    };
+    use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
+    use tokio::sync::RwLock;
 
     use super::{DetectionPermit, DetectionTrigger, claim_detection};
-    use crate::coordinator::EcuCoordinatorHandle;
+    use crate::{
+        UdsManager,
+        coordinator::EcuCoordinatorHandle,
+        test_helpers::{TestEcuDb, TestGateway},
+    };
 
     #[tokio::test]
     async fn queued_automatic_detection_is_skipped_after_success() {
@@ -730,6 +777,132 @@ mod tests {
                 DetectionPermit::Run(Some(_))
             ),
             "explicit detection must not be suppressed by healthy state"
+        );
+    }
+
+    #[tokio::test]
+    async fn forced_detection_is_not_superseded_by_automatic_trigger() {
+        let handle = EcuCoordinatorHandle::spawn("TestECU".to_owned());
+        let in_flight = handle.begin_detection().await.expect("first entrant");
+
+        let forced_handle = handle.clone();
+        let forced = tokio::spawn(async move {
+            claim_detection(
+                Some(&forced_handle),
+                Some(&forced_handle),
+                DetectionTrigger::Forced,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+
+        let automatic_handle = handle.clone();
+        let automatic = tokio::spawn(async move {
+            claim_detection(
+                Some(&automatic_handle),
+                Some(&automatic_handle),
+                DetectionTrigger::IfNeeded,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        drop(in_flight);
+
+        let forced_permit = forced.await.expect("forced trigger");
+        assert!(
+            matches!(forced_permit, DetectionPermit::Run(Some(_))),
+            "explicit detection must not be coalesced"
+        );
+        drop(forced_permit);
+
+        assert!(
+            matches!(
+                automatic.await.expect("automatic trigger"),
+                DetectionPermit::Run(Some(_))
+            ),
+            "latest unresolved automatic trigger must still run"
+        );
+    }
+
+    #[test]
+    fn only_transport_failures_are_connectivity_failures() {
+        assert!(super::is_connectivity_failure(&DiagServiceError::Timeout));
+        assert!(super::is_connectivity_failure(
+            &DiagServiceError::NoResponse("TestECU".to_owned())
+        ));
+        assert!(!super::is_connectivity_failure(
+            &DiagServiceError::VariantDetectionError("No services".to_owned())
+        ));
+        assert!(!super::is_connectivity_failure(
+            &DiagServiceError::BadPayload("Invalid request".to_owned())
+        ));
+    }
+
+    #[tokio::test]
+    async fn forced_detection_without_requests_returns_error_without_sending() {
+        let send_count = Arc::new(AtomicUsize::new(0));
+        let gateway_send_count = Arc::clone(&send_count);
+        let gateway = TestGateway {
+            send_fn: Arc::new(move |_, _| {
+                gateway_send_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+        };
+        let ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_owned(),
+            RwLock::new(TestEcuDb::new()),
+        )]));
+        let manager = UdsManager::new_for_raw_payload_tests(
+            gateway,
+            ecus,
+            FaultConfig::default(),
+            enabled_communication_access_for_test(),
+        );
+
+        let result = manager.detect_variant("TestECU").await;
+
+        assert!(matches!(
+            result,
+            Err(DiagServiceError::InvalidConfiguration(message))
+                if message.contains("No variant detection services")
+        ));
+        assert_eq!(
+            send_count.load(Ordering::SeqCst),
+            0,
+            "an empty detection configuration must not reach the gateway"
+        );
+    }
+
+    #[tokio::test]
+    async fn forced_detection_timeout_is_returned_after_sending() {
+        let send_count = Arc::new(AtomicUsize::new(0));
+        let gateway_send_count = Arc::clone(&send_count);
+        let gateway = TestGateway {
+            send_fn: Arc::new(move |_, _| {
+                gateway_send_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+        };
+        let ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_owned(),
+            RwLock::new(TestEcuDb::with_variant_detection_request(
+                std::time::Duration::from_millis(1),
+            )),
+        )]));
+        let manager = UdsManager::new_for_raw_payload_tests(
+            gateway,
+            ecus,
+            FaultConfig::default(),
+            enabled_communication_access_for_test(),
+        );
+
+        let result = manager.detect_variant("TestECU").await;
+
+        assert_eq!(result, Err(DiagServiceError::Timeout));
+        assert_eq!(
+            send_count.load(Ordering::SeqCst),
+            1,
+            "forced detection must make one gateway send before reporting the timeout"
         );
     }
 
