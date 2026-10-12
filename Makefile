@@ -83,7 +83,7 @@ endif
 bazel-check:
 	python3 bazel/check_mbedtls_revision.py
 	bazel query //...
-	@openssl_targets="$$(bazel cquery 'filter("openssl", deps(//:cda_mbedtls))' --output=label)"; \
+	@openssl_targets="$$(bazel cquery 'filter("openssl", deps(//:cda_mbedtls))' --output=label)" || exit $$?; \
 	if [ -n "$$openssl_targets" ]; then \
 		printf '%s\n' '::error::mbedTLS target graph contains OpenSSL targets:' "$$openssl_targets"; \
 		exit 1; \

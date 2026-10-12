@@ -260,6 +260,27 @@ custom routes, and a vendor override. It validates the supported external
 consumption contract without relying on this repository's `.bazelrc` or
 package visibility.
 
+Consuming workspaces that enable Bazel stamping must configure their root
+workspace to provide `STABLE_BUILD_DATE` and `STABLE_GIT_COMMIT_HASH`. CDA's
+`.bazelrc` and workspace-status command do not propagate through Bzlmod
+dependencies. For example, the consumer's `.bazelrc` can contain:
+
+```text
+build --stamp
+build --workspace_status_command=./path/to/workspace_status
+```
+
+The configured command must print both values in Bazel workspace-status
+format:
+
+```text
+STABLE_BUILD_DATE 2026-10-12T10:30:00Z
+STABLE_GIT_COMMIT_HASH abc1234
+```
+
+See `bazel/workspace_status.py` for the implementation used by this repository.
+Consumers that do not enable stamping do not need to provide these values.
+
 Until `mbedtls-rs` is published in a neutral Bazel registry, consuming modules
 must provide the same `git_override` revision used in this repository. Bzlmod
 overrides are intentionally controlled by the root module and do not propagate

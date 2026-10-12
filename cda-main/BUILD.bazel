@@ -43,6 +43,7 @@ workspace_rust_library(
         "config-optional",
         "health",
         "mbedtls",
+        "systemd-notify",
     ] + select({
         "//:can_enabled": ["can"],
         "//conditions:default": [],
@@ -64,6 +65,7 @@ workspace_rust_library(
         "//cda-comm-uds:cda_comm_uds",
         "//cda-core:cda_core",
         "//cda-database:cda_database",
+        "//cda-extra:cda_extra",
         "//cda-health:cda_health",
         "//cda-interfaces:cda_interfaces",
         "//cda-plugin-communication-management:cda_plugin_communication_management",

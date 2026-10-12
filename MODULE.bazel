@@ -69,6 +69,15 @@ can_crate_universe.spec(
     package = "tokio-socketcan-isotp",
     tag = "v0.6.0",
 )
+can_crate_universe.spec(
+    package = "sd-notify",
+    version = "=0.5.0",
+)
+# CAN must share CDA's Tokio crate so sockets can register with its runtime.
+can_crate_universe.annotation(
+    crate = "tokio",
+    override_target_lib = "@cda_crates//:tokio",
+)
 can_crate_universe.from_specs(
     name = "can_crates",
 )

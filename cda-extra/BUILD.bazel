@@ -14,6 +14,14 @@ load("//bazel:rust_crate.bzl", "workspace_rust_library")
 workspace_rust_library(
     name = "cda_extra",
     srcs = glob(["src/**/*.rs"]),
+    crate_features = ["systemd-notify"],
     crate_name = "cda_extra",
     crate_root = "src/lib.rs",
+    deps = [
+        "@can_crates//:sd-notify",
+        "@cda_crates//:tokio",
+        "@cda_crates//:tracing",
+        "//cda-health:cda_health",
+        "//cda-interfaces:cda_interfaces",
+    ],
 )
