@@ -14,6 +14,7 @@
 use cda_database::datatypes;
 use cda_interfaces::{
     DiagServiceError, DynamicPlugin, EcuSecurity, EcuStateManager, HashSet, SecurityAccess,
+    authentication::AuthenticationSubFunction,
     dlt_ctx,
     request_authorization::{UdsRequestSendContext, UdsRequestTarget},
     service_ids,
@@ -110,6 +111,37 @@ impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
             return check_request_send_plugin::<S>(security_plugin, &enriched);
         }
         check_request_send_plugin::<S>(security_plugin, context)
+    }
+
+    fn lookup_authentication_service(
+        &self,
+        sub_function: AuthenticationSubFunction,
+    ) -> Result<cda_interfaces::DiagComm, DiagServiceError> {
+        let service = self.find_authentication_service(sub_function)?;
+        let short_name = service
+            .diag_comm()
+            .and_then(|dc| dc.short_name())
+            .ok_or_else(|| {
+                DiagServiceError::InvalidDatabase(
+                    "Authentication service has no short name".to_owned(),
+                )
+            })?;
+        Ok(cda_interfaces::DiagComm {
+            name: self
+                .database_naming_convention
+                .trim_short_name_affixes(short_name),
+            type_: cda_interfaces::DiagCommType::Modes,
+            lookup_name: Some(short_name.to_owned()),
+            subfunction_id: None,
+        })
+    }
+
+    fn authentication_return_value(
+        &self,
+        sub_function: AuthenticationSubFunction,
+        raw_response: &[u8],
+    ) -> Result<Option<u64>, DiagServiceError> {
+        self.decode_authentication_return_value(sub_function, raw_response)
     }
 }
 

@@ -27,9 +27,10 @@ pub(crate) type EcuIdentifier = String;
 pub(crate) enum ResetType {
     Session,
     SecurityAccess,
+    Authentication,
 }
 
-/// State of a session or security-access reset entry, keyed by ECU.
+/// State of a session, security-access or authentication reset entry, keyed by ECU.
 pub(crate) enum ResetTask {
     /// A task that resets the ECU once its delay has passed: a timed reset
     /// after a session or security-access change with an expiration, or a
