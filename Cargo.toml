@@ -65,7 +65,7 @@ cda-storage = { path = "cda-storage" }
 cda-extra = { path = "cda-extra" }
 sovd-interfaces = { path = "cda-sovd-interfaces" }
 cda-build = { path = "cda-build" }
-mbedtls-rs = { git = "https://github.com/eclipse-opensovd/mbedtls-rs.git", rev = "f55669ea6d5b4e58c5251aa2054a25b61bb15876" }
+mbedtls-rs = { git = "https://github.com/eclipse-opensovd/mbedtls-rs.git", rev = "00247f4486fd4c627db714657af1a9c067720786" }
 override-macros = { path = "override-macros" }
 
 # ---- common crates ----
