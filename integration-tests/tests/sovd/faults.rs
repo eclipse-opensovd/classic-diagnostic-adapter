@@ -432,11 +432,16 @@ async fn test_get_faults_with_different_dtc_masks() {
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
     let ecu_name = "flxc1000";
     let fault_memory = "Standard";
+    let user_fault_memory = "UserMem";
 
     // Clear any existing DTCs from the simulator
     ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
         .await
         .expect("Failed to clear DTCs in simulator");
+
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, user_fault_memory)
+        .await
+        .expect("Failed to clear UserMemory DTCs in simulator");
 
     // Scenario 1: Test with testFailed=true, confirmedDtc=true, testFailedSinceLastClear=true
     // Status mask: 0x29 (binary: 00101001)
@@ -523,14 +528,38 @@ async fn test_get_faults_with_different_dtc_masks() {
         dtcs_in_sim.dtcs.len()
     );
 
-    // Test GET /faults - should return all 6 faults
+    // add UserMemory dtcs
+    ecusim::add_dtc(
+        &runtime.ecu_sim,
+        ecu_name,
+        user_fault_memory,
+        &DtcMinimal {
+            id: "01E245".into(),
+            status_mask: "29".into(),
+            emissions_related: false,
+        },
+    )
+    .await
+    .expect("Failed to add UserMemory DTC 0x01E245");
+
+    let user_memory_dtcs_in_sim = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, user_fault_memory)
+        .await
+        .expect("Failed to get UserMemory DTCs in Simulator");
+    assert_eq!(
+        user_memory_dtcs_in_sim.dtcs.len(),
+        1,
+        "Expected 1 UserMemory DTC in simulator, got {}",
+        user_memory_dtcs_in_sim.dtcs.len()
+    );
+
+    // Test GET /faults - should return all 7 faults (6 from standard memory, 1 from user memory)
     let faults = get_faults(&runtime.config, &auth, ecu_endpoint)
         .await
         .expect("Failed to get faults via SOVD");
     assert_eq!(
         faults.len(),
-        6,
-        "Expected 6 faults via SOVD, got {}",
+        7,
+        "Expected 7 faults via SOVD, got {}",
         faults.len()
     );
 
@@ -766,6 +795,10 @@ async fn test_get_faults_with_different_dtc_masks() {
         .await
         .expect("Failed to clear DTCs in simulator");
 
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, user_fault_memory)
+        .await
+        .expect("Failed to clear UserMemory DTCs in simulator");
+
     // Verify no faults remain
     let failed_faults_after_clear = get_faults(&runtime.config, &auth, ecu_endpoint)
         .await
@@ -786,11 +819,15 @@ async fn test_get_fault_with_extended_dtc() {
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
     let ecu_name = "flxc1000";
     let fault_memory = "Standard";
+    let user_fault_memory = "UserMem";
 
     // Clear any existing DTCs from the simulator
     ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
         .await
         .expect("Failed to clear DTCs in simulator");
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, user_fault_memory)
+        .await
+        .expect("Failed to clear UserMemory DTCs in simulator");
 
     // Snapshot DID 19 FE for Record FE with 4 example bytes
     let rcd_data_1 = SnapshotData {
@@ -1131,11 +1168,15 @@ async fn test_get_faults_empty() {
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
     let ecu_name = "flxc1000";
     let fault_memory = "Standard";
+    let user_fault_memory = "UserMem";
 
     // Clear all DTCs
     ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
         .await
         .expect("Failed to clear DTCs in simulator");
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, user_fault_memory)
+        .await
+        .expect("Failed to clear UserMemory DTCs in simulator");
 
     // Get faults - should return no faults with test_failed==true
     let faults = get_faults(&runtime.config, &auth, ecu_endpoint)
@@ -1162,7 +1203,7 @@ fn filter_failed_faults(faults: Vec<Fault>) -> Vec<Fault> {
 /// This test verifies:
 /// 1. Deleting a single DTC with a scope is rejected (`BadRequest`).
 /// 2. Clearing all faults with a scope calls the configured service (31 01 42 00)
-///    and clears only the Development faults in the ECU sim.
+///    and clears only the `UserMem` faults in the ECU sim.
 /// 3. Standard fault memory faults are not affected by the scoped clear.
 #[tokio::test]
 #[allow(
@@ -1175,7 +1216,7 @@ async fn test_dtc_deletion_user_memory() {
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
     let ecu_name = "flxc1000";
     let fault_memory = "Standard";
-    let dev_memory = "Development";
+    let user_memory = "UserMem";
     let scope = &runtime.config.faults.user_memory_scope;
 
     // Create and acquire lock
@@ -1191,13 +1232,13 @@ async fn test_dtc_deletion_user_memory() {
     let lock_id =
         extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
 
-    // Clear any existing DTCs from both Standard and Development memories
+    // Clear any existing DTCs from both Standard and UserMem memories
     ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
         .await
         .expect("Failed to clear Standard DTCs in simulator");
-    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, dev_memory)
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, user_memory)
         .await
-        .expect("Failed to clear Development DTCs in simulator");
+        .expect("Failed to clear UserMem DTCs in simulator");
 
     // Add Standard DTCs
     ecusim::add_dtc(
@@ -1226,11 +1267,11 @@ async fn test_dtc_deletion_user_memory() {
     .await
     .expect("Failed to add Standard DTC 0x039447");
 
-    // Add Development DTCs
+    // Add UserMem DTCs
     ecusim::add_dtc(
         &runtime.ecu_sim,
         ecu_name,
-        dev_memory,
+        user_memory,
         &DtcMinimal {
             id: "0AA000".into(),
             status_mask: "29".into(),
@@ -1238,12 +1279,12 @@ async fn test_dtc_deletion_user_memory() {
         },
     )
     .await
-    .expect("Failed to add Development DTC 0x0AA000");
+    .expect("Failed to add UserMem DTC 0x0AA000");
 
     ecusim::add_dtc(
         &runtime.ecu_sim,
         ecu_name,
-        dev_memory,
+        user_memory,
         &DtcMinimal {
             id: "0BB111".into(),
             status_mask: "0C".into(),
@@ -1251,7 +1292,7 @@ async fn test_dtc_deletion_user_memory() {
         },
     )
     .await
-    .expect("Failed to add Development DTC 0x0BB111");
+    .expect("Failed to add UserMem DTC 0x0BB111");
 
     // Verify DTCs were added to both memories
     let standard_dtcs = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
@@ -1264,14 +1305,14 @@ async fn test_dtc_deletion_user_memory() {
         standard_dtcs.dtcs.len()
     );
 
-    let dev_dtcs = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, dev_memory)
+    let user_memory_dtcs = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, user_memory)
         .await
-        .expect("Failed to get Development DTCs");
+        .expect("Failed to get UserMem DTCs");
     assert_eq!(
-        dev_dtcs.dtcs.len(),
+        user_memory_dtcs.dtcs.len(),
         2,
-        "Expected 2 Development DTCs, got {}",
-        dev_dtcs.dtcs.len()
+        "Expected 2 UserMem DTCs, got {}",
+        user_memory_dtcs.dtcs.len()
     );
 
     // Deleting all faults with an invalid scope should be rejected (BadRequest)
@@ -1298,17 +1339,17 @@ async fn test_dtc_deletion_user_memory() {
     .expect("Expected single DTC deletion with scope to be rejected");
 
     // Verify nothing was deleted after the rejected request
-    let dev_dtcs_after_reject = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, dev_memory)
+    let user_memory_dtcs_after_reject = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, user_memory)
         .await
-        .expect("Failed to get Development DTCs after rejected delete");
+        .expect("Failed to get UserMem DTCs after rejected delete");
     assert_eq!(
-        dev_dtcs_after_reject.dtcs.len(),
+        user_memory_dtcs_after_reject.dtcs.len(),
         2,
-        "Expected 2 Development DTCs after rejected single delete, got {}",
-        dev_dtcs_after_reject.dtcs.len()
+        "Expected 2 UserMem DTCs after rejected single delete, got {}",
+        user_memory_dtcs_after_reject.dtcs.len()
     );
 
-    // Clearing all faults with scope should clear Development faults only
+    // Clearing all faults with scope should clear UserMem faults only
     delete_all_faults_with_scope(
         &runtime.config,
         &auth,
@@ -1319,15 +1360,15 @@ async fn test_dtc_deletion_user_memory() {
     .await
     .expect("Failed to delete all faults with scope");
 
-    // Verify Development faults were cleared
-    let dev_dtcs_after_clear = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, dev_memory)
+    // Verify UserMem faults were cleared
+    let user_memory_dtcs_after_clear = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, user_memory)
         .await
-        .expect("Failed to get Development DTCs after scoped clear");
+        .expect("Failed to get UserMem DTCs after scoped clear");
     assert_eq!(
-        dev_dtcs_after_clear.dtcs.len(),
+        user_memory_dtcs_after_clear.dtcs.len(),
         0,
-        "Expected 0 Development DTCs after scoped clear, got {}",
-        dev_dtcs_after_clear.dtcs.len()
+        "Expected 0 UserMem DTCs after scoped clear, got {}",
+        user_memory_dtcs_after_clear.dtcs.len()
     );
 
     // Standard fault memory should NOT be affected
@@ -1388,4 +1429,291 @@ async fn test_dtc_deletion_user_memory() {
         Method::DELETE,
     )
     .await;
+}
+
+/// Returns the `ReadDTCInformation` (0x19) sub-functions of the recorded requests, in order.
+///
+/// The recorder stores each request as hex without separators, starting at the SID
+/// (`WebserverRoutes.kt:117`), so the sub-function is characters 2..4.
+/// Other services (e.g. `TesterPresent`) are ignored.
+fn read_dtc_info_subfunctions(requests: &[String]) -> Vec<String> {
+    requests
+        .iter()
+        .map(|r| r.to_ascii_uppercase())
+        .filter(|r| r.starts_with("19"))
+        .filter_map(|r| r.get(2..4).map(str::to_owned))
+        .collect()
+}
+
+/// Test that reading DTCs by fault ID with a `UserFaultMemory` scope works correctly.
+///
+/// This test verifies:
+/// 1. Reading a single DTC of `UserFaultMemory` requests only relevant subfunctions
+///    0x19 0x17 followed by 0x19 0x18 and 0x19 0x19 and returns the correct DTC information.
+/// 2. `FaultMem` read by status mask is not requested when reading by fault ID
+///    with a `UserFaultMemory` scope.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "test scenario is easier to understand kept together"
+)]
+async fn test_dtc_read_by_fault_id_user_fault_memory() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let ecu_name = "flxc1000";
+    let fault_memory = "Standard";
+    let user_fault_memory = "UserMem";
+
+    // create and acquire lock
+    let expiration_timeout = Duration::from_secs(30);
+    let ecu_lock = locks::create_lock(
+        expiration_timeout,
+        locks::ECU_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let lock_id =
+        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+
+    // clear any existing dtcs from both standard and user memories
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+        .await
+        .expect("failed to clear standard dtcs in simulator");
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, user_fault_memory)
+        .await
+        .expect("failed to clear UserMemory dtcs in simulator");
+
+    // add UserMemory dtcs
+    ecusim::add_dtc(
+        &runtime.ecu_sim,
+        ecu_name,
+        user_fault_memory,
+        &DtcMinimal {
+            id: "01E245".into(),
+            status_mask: "29".into(),
+            emissions_related: false,
+        },
+    )
+    .await
+    .expect("failed to add UserMemory dtc 0x01E245");
+
+    let user_memory_dtcs = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, user_fault_memory)
+        .await
+        .expect("failed to get UserMemory dtcs");
+    assert_eq!(
+        user_memory_dtcs.dtcs.len(),
+        1,
+        "expected 1 UserMemory dtc, got {}",
+        user_memory_dtcs.dtcs.len()
+    );
+
+    // Start recording in ecu-sim to capture the requests made during the test
+    ecusim::start_recording(&runtime.ecu_sim, ecu_name)
+        .await
+        .expect("failed to start recording in ecu-sim");
+
+    // Request Read of UserMemory DTC by fault ID
+    let fault = get_fault(&runtime.config, &auth, ecu_endpoint, "01E245")
+        .await
+        .expect("Failed to get fault 0x01E245");
+
+    assert_eq!(fault.code, "01E245");
+
+    // Stop recording in ecu-sim to capture the requests made during the test
+    let requests = ecusim::stop_and_clear_recording(&runtime.ecu_sim, ecu_name)
+        .await
+        .expect("failed to stop recording in ecu-sim");
+
+    // User Fault memory must be read with 0x17, 0x18, 0x19 only.
+    assert_eq!(
+        read_dtc_info_subfunctions(&requests),
+        ["17", "18", "19"],
+        "unexpected ReadDTCInformation requests for UserMem DTC 01E245, all requests: {requests:?}"
+    );
+
+    // clear all dtcs from UserMemory memory to clean up
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, user_fault_memory)
+        .await
+        .expect("Failed to clear UserMemory DTCs in simulator");
+
+    // clean up - delete the ecu lock
+    locks::lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+}
+
+/// Test that reading DTCs by fault ID with a Fault Memory scope works correctly.
+///
+/// This test verifies:
+/// 1. Reading a single DTC of Fault Memory requests only relevant subfunctions 0x19 0x02
+///    followed by 0x19 0x04 and 0x19 0x06 and returns the correct DTC information.
+/// 2. `UserMemoryFaultMemory` read by status mask is not requested when reading by fault ID
+///    with a `FaultMem` scope.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Test scenario is easier to understand kept together"
+)]
+async fn test_dtc_read_by_fault_id_fault_memory() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let ecu_name = "flxc1000";
+    let fault_memory = "Standard";
+    let user_fault_memory = "UserMem";
+
+    // Create and acquire lock
+    let expiration_timeout = Duration::from_secs(30);
+    let ecu_lock = locks::create_lock(
+        expiration_timeout,
+        locks::ECU_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let lock_id =
+        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+
+    // Clear any existing DTCs from both Standard and UserMem memories
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+        .await
+        .expect("Failed to clear Standard DTCs in simulator");
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, user_fault_memory)
+        .await
+        .expect("Failed to clear UserMemory DTCs in simulator");
+
+    // Add Standard DTCs
+    ecusim::add_dtc(
+        &runtime.ecu_sim,
+        ecu_name,
+        fault_memory,
+        &DtcMinimal {
+            id: "01E240".into(),
+            status_mask: "29".into(),
+            emissions_related: false,
+        },
+    )
+    .await
+    .expect("Failed to add Standard DTC 0x01E240");
+
+    let std_dtcs = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+        .await
+        .expect("Failed to get Standard DTCs");
+    assert!(
+        !std_dtcs.dtcs.is_empty(),
+        "Expected at least 1 Standard DTC, got 0"
+    );
+
+    // Start recording in ecu-sim to capture the requests made during the test
+    ecusim::start_recording(&runtime.ecu_sim, ecu_name)
+        .await
+        .expect("Failed to start recording in ecu-sim");
+
+    // Request Read of Standard DTC by fault ID without specifying a scope (should default to Fault Memory)
+    let fault = get_fault(&runtime.config, &auth, ecu_endpoint, "01E240")
+        .await
+        .expect("Failed to get fault 0x01E240");
+    assert_eq!(fault.code, "01E240");
+
+    // Stop recording in ecu-sim to capture the requests made during the test
+    let requests = ecusim::stop_and_clear_recording(&runtime.ecu_sim, ecu_name)
+        .await
+        .expect("Failed to stop recording in ecu-sim");
+
+    // Fault memory must be read with 0x02, 0x04, 0x06 only.
+    assert_eq!(
+        read_dtc_info_subfunctions(&requests),
+        ["02", "04", "06"],
+        "unexpected ReadDTCInformation requests for Standard DTC 01E240, all requests: \
+         {requests:?}"
+    );
+
+    // Clear all DTCs from Standard memory to clean up
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+        .await
+        .expect("Failed to clear Standard DTCs in simulator");
+
+    // Clean up - delete the ECU lock
+    locks::lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+}
+
+/// User-memory fault status must come from `statusOfDTC`, not the DTC's low byte.
+#[tokio::test]
+async fn test_user_memory_fault_status_uses_status_byte() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let ecu_name = "flxc1000";
+    let user_fault_memory = "UserMem";
+    let dtc_code = "01E245";
+    let status_mask = "29";
+
+    for memory in ["Standard", user_fault_memory] {
+        ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, memory)
+            .await
+            .expect("Failed to clear DTCs in simulator");
+    }
+
+    // Different DTC and status bytes expose a shifted user-memory status lookup.
+    ecusim::add_dtc(
+        &runtime.ecu_sim,
+        ecu_name,
+        user_fault_memory,
+        &DtcMinimal {
+            id: dtc_code.into(),
+            status_mask: status_mask.into(),
+            emissions_related: false,
+        },
+    )
+    .await
+    .expect("Failed to add UserMem DTC in simulator");
+
+    let faults = get_faults(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .expect("Failed to get faults");
+    let fault_by_id = get_fault(&runtime.config, &auth, ecu_endpoint, dtc_code)
+        .await
+        .expect("Failed to get UserMem fault by ID");
+
+    // Clean up before the regression assertions so a failure leaves no stored faults.
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, user_fault_memory)
+        .await
+        .expect("Failed to clear UserMem DTCs in simulator");
+
+    let listed_fault = faults
+        .into_iter()
+        .find(|fault| fault.code == dtc_code)
+        .expect("UserMem fault should be present in the fault collection");
+    for (endpoint, fault) in [
+        ("Fault collection", listed_fault),
+        ("Fault by ID", fault_by_id),
+    ] {
+        let status = fault
+            .status
+            .expect("UserMem fault status should be present");
+        assert_eq!(
+            status.mask.as_deref(),
+            Some(status_mask),
+            "{endpoint}: UserMem DTC {dtc_code} must report status {status_mask}, not its low \
+             byte 45"
+        );
+    }
 }

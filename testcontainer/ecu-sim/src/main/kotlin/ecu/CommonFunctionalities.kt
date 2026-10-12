@@ -80,8 +80,8 @@ fun SimEcu.dtcFaults(faultMemory: FaultMemory = FaultMemory.Standard): MutableMa
             dtcFaults
         }
 
-        FaultMemory.Development -> {
-            val dtcFaultsDevelopment: MutableMap<Int, DtcFault> by this.storedProperty { mutableMapOf() }
-            dtcFaultsDevelopment
+        FaultMemory.UserMem -> {
+            val dtcFaultsUserMem: MutableMap<Int, DtcFault> by this.storedProperty { mutableMapOf() }
+            dtcFaultsUserMem
         }
     }
