@@ -856,7 +856,8 @@ Authentication -- SID 29\ :sub:`16`
     :status: draft
 
     .. note::
-       Not yet implemented.
+       Implemented. Integration tests against the ECU simulator are pending, since the
+       test diagnostic description does not yet contain sub-functions 01\ :sub:`16` -- 07\ :sub:`16`.
 
     .. note::
        This is technically a deviation from Table 343 in the ISO API. The table in the ISO is misleading, since 8.3.2

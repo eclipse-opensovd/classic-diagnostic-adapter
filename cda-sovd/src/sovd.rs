@@ -1004,6 +1004,14 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
                 .put_with(modes::security::put, modes::security::docs_put),
         )
         .api_route(
+            &format!(
+                "/modes/{}",
+                sovd_interfaces::common::modes::AUTHENTICATION_ID
+            ),
+            routing::get_with(modes::authentication::get, modes::authentication::docs_get)
+                .put_with(modes::authentication::put, modes::authentication::docs_put),
+        )
+        .api_route(
             &format!("/modes/{}", sovd_interfaces::common::modes::COMM_CONTROL_ID),
             routing::get_with(modes::commctrl::get, modes::commctrl::docs_get)
                 .put_with(modes::commctrl::put, modes::commctrl::docs_put),

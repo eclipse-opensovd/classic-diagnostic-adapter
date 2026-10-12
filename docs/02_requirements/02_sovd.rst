@@ -1179,7 +1179,8 @@ Authentication (UDS 29\ :sub:`16`)
     :status: draft
 
     .. note::
-       Not yet implemented.
+       Implemented. Integration tests against the ECU simulator are pending, since the
+       test diagnostic description does not yet contain sub-functions 01\ :sub:`16` -- 07\ :sub:`16`.
 
     The CDA must provide the UDS service Authentication (SID 29\ :sub:`16`, ISO 14229-1 clause
     10.6) for components via ``/modes/authentication``, separately from ``/modes/security``

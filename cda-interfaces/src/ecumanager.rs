@@ -18,6 +18,7 @@ use strum_macros::Display;
 use crate::{
     DiagComm, DiagServiceError, DoipComParams, DynamicPlugin, EcuSchemas, HashMap,
     HashMapExtensions, HashSet, SecurityAccess, UDS_ID_RESPONSE_BITMASK, UdsComParams,
+    authentication::{AuthenticationState, AuthenticationSubFunction},
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
         ComponentOperationsInfo, DtcLookup, DtcReadInformationFunction, RoutineSubfunctions, SdSdg,
@@ -258,6 +259,9 @@ pub struct EcuRuntimeState {
     pub ecu_state: std::sync::Arc<std::sync::RwLock<EcuState>>,
     /// Active service states keyed by SID (0x10 = session, 0x27 = security, etc.).
     pub service_states: std::sync::Arc<std::sync::RwLock<HashMap<u8, String>>>,
+    /// Authentication state (SID 0x29), tracked separately because it is
+    /// independent of session and security access (ISO 14229-1 clause 10.6.4).
+    pub authentication: std::sync::Arc<std::sync::RwLock<AuthenticationState>>,
     /// Publishes every write to `ecu_state.variant_state`, so callers can await
     /// variant detection's conclusion instead of polling. `Arc`-wrapped so that
     /// cloning `EcuRuntimeState` shares one channel, like `ecu_state` itself.
@@ -272,6 +276,9 @@ impl EcuRuntimeState {
         Self {
             ecu_state: std::sync::Arc::new(std::sync::RwLock::new(EcuState::default())),
             service_states: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
+            authentication: std::sync::Arc::new(std::sync::RwLock::new(
+                AuthenticationState::default(),
+            )),
             variant_state_tx: std::sync::Arc::new(variant_state_tx),
         }
     }
@@ -683,6 +690,12 @@ pub trait EcuStateManager: Send + Sync + 'static {
     /// # Errors
     /// Will return `DiagServiceError` if the default states cannot be resolved from the database.
     fn set_default_states(&self) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
+
+    /// Returns the tracked authentication state (SID 0x29).
+    fn authentication_state(&self) -> AuthenticationState;
+
+    /// Replaces the tracked authentication state (SID 0x29).
+    fn set_authentication_state(&self, state: AuthenticationState);
 }
 
 /// Validates security access and service preconditions.
@@ -738,6 +751,29 @@ pub trait EcuSecurity: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
         std::future::ready(Ok(()))
     }
+
+    /// Looks up the Authentication (SID 0x29) service of the current variant whose
+    /// request contains the given sub-function as coded constant.
+    /// # Errors
+    /// * `DiagServiceError::NotFound` if no such service exists.
+    fn lookup_authentication_service(
+        &self,
+        sub_function: AuthenticationSubFunction,
+    ) -> Result<DiagComm, DiagServiceError>;
+
+    /// Extracts the `authenticationReturnParameter` from a raw positive response of the
+    /// Authentication service for `sub_function`. The parameter is located via the positive response
+    /// of the service in the diagnostic description: it is the first value parameter
+    /// following the response SID and sub-function.
+    /// Returns `None` if the description defines no such parameter.
+    /// # Errors
+    /// Returns `DiagServiceError` if the service cannot be found or the value
+    /// cannot be decoded from the payload.
+    fn authentication_return_value(
+        &self,
+        sub_function: AuthenticationSubFunction,
+        raw_response: &[u8],
+    ) -> Result<Option<u64>, DiagServiceError>;
 }
 
 /// Provides component metadata: data identifiers, routines, configurations, and jobs.

@@ -28,6 +28,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod authentication;
 pub mod coordinator;
 mod data_transfer;
 mod dtc;
@@ -113,6 +114,8 @@ pub struct UdsManager<S: EcuGateway, T: UdsEcuDb> {
     session_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, ResetTask>>>,
     /// Pending security-access resets, one per ECU. See [`ResetTask`].
     security_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, ResetTask>>>,
+    /// Pending deAuthenticate after `mode_expiration`, one per ECU. See [`ResetTask`].
+    authentication_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, ResetTask>>>,
     state_coordinator: EcuStateCoordinator,
     functional_description_database: String,
     fault_config: FaultConfig,
@@ -207,6 +210,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             tester_present_tasks: Arc::new(RwLock::new(HashMap::new())),
             session_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
             security_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
+            authentication_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
             state_coordinator,
             functional_description_database: functional_description_config
                 .description_database
@@ -374,6 +378,7 @@ impl<S: Clone + EcuGateway, T: UdsEcuDb> Clone for UdsManager<S, T> {
             tester_present_tasks: Arc::clone(&self.tester_present_tasks),
             session_reset_tasks: Arc::clone(&self.session_reset_tasks),
             security_reset_tasks: Arc::clone(&self.security_reset_tasks),
+            authentication_reset_tasks: Arc::clone(&self.authentication_reset_tasks),
             state_coordinator: self.state_coordinator.clone(),
             functional_description_database: self.functional_description_database.clone(),
             fault_config: self.fault_config.clone(),
@@ -394,6 +399,7 @@ impl<S: EcuGateway, T: EcuManager> cda_interfaces::Shutdown for UdsManager<S, T>
         let mut tester_present_tasks = self.tester_present_tasks.write().await;
         let mut session_reset_tasks = self.session_reset_tasks.write().await;
         let mut security_reset_tasks = self.security_reset_tasks.write().await;
+        let mut authentication_reset_tasks = self.authentication_reset_tasks.write().await;
         let mut data_transfers = self.data_transfers.lock().await;
         tester_present_tasks
             .drain()
@@ -405,6 +411,11 @@ impl<S: EcuGateway, T: EcuManager> cda_interfaces::Shutdown for UdsManager<S, T>
             )
             .chain(
                 security_reset_tasks
+                    .drain()
+                    .filter_map(|(_, task)| task.into_scheduled()),
+            )
+            .chain(
+                authentication_reset_tasks
                     .drain()
                     .filter_map(|(_, task)| task.into_scheduled()),
             )

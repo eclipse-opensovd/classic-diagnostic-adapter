@@ -15,8 +15,8 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, ResetOutcome, UdsSecurity,
-    UdsSession,
+    DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, ResetOutcome,
+    UdsAuthentication, UdsSecurity, UdsSession,
     diagservices::{DiagServiceResponse, DiagServiceResponseType},
     dlt_ctx,
     util::tokio_ext,
@@ -45,6 +45,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         match reset_type {
             ResetType::Session => &self.session_reset_tasks,
             ResetType::SecurityAccess => &self.security_reset_tasks,
+            ResetType::Authentication => &self.authentication_reset_tasks,
         }
     }
 
@@ -74,6 +75,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             let result = match reset_type {
                 ResetType::Session => uds.reset_ecu_session(&ecu_name).await,
                 ResetType::SecurityAccess => uds.reset_ecu_security_access(&ecu_name).await,
+                ResetType::Authentication => uds.reset_ecu_authentication(&ecu_name).await,
             };
 
             if let Err(e) = result {
@@ -136,7 +138,11 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     /// round-trips, so each reset runs in its own task. A reset whose task
     /// finds communication disabled again is deferred again.
     pub(crate) async fn resume_deferred_resets(&self) {
-        for reset_type in [ResetType::Session, ResetType::SecurityAccess] {
+        for reset_type in [
+            ResetType::Session,
+            ResetType::SecurityAccess,
+            ResetType::Authentication,
+        ] {
             let mut tasks = self.reset_tasks(reset_type).write().await;
             let deferred: Vec<EcuIdentifier> = tasks
                 .iter()

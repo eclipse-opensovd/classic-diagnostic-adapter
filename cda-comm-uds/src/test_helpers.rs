@@ -24,6 +24,7 @@ use cda_interfaces::{
     ResponseParameterInfo, SchemaDescription, SecurityAccess, ServiceParameterMetadata,
     ServicePayload, TransmissionParameters, TransportResponse, UDS_ID_RESPONSE_BITMASK,
     UdsComParams, VariantDetection, VariantState,
+    authentication::{AuthenticationState, AuthenticationSubFunction},
     datatypes::{
         AddressingMode, ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
         ComponentOperationsInfo, DtcLookup, DtcReadInformationFunction, RetryPolicy,
@@ -177,6 +178,7 @@ pub(crate) struct TestEcuDb {
     /// Pre-send authorization policy; `None` allows every request.
     request_send_policy: Option<Arc<RequestSendPolicy>>,
     service_states: tokio::sync::Mutex<std::collections::HashMap<u8, String>>,
+    authentication: std::sync::Mutex<AuthenticationState>,
     /// Configurable `CP_P6Max`-backed timeout, so tests can verify that
     /// callers fall back to this comparam-derived value instead of using a
     /// hardcoded literal. Defaults to 5s to match the previous fixed value.
@@ -201,6 +203,7 @@ impl TestEcuDb {
         Self {
             request_send_policy: None,
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            authentication: std::sync::Mutex::new(AuthenticationState::default()),
             timeout_default: Duration::from_secs(5),
             repeat_req_count_app: 2,
             tester_present_message: vec![0x3E, 0x00],
@@ -213,6 +216,7 @@ impl TestEcuDb {
         Self {
             request_send_policy: None,
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            authentication: std::sync::Mutex::new(AuthenticationState::default()),
             timeout_default,
             repeat_req_count_app: 2,
             tester_present_message: vec![0x3E, 0x00],
@@ -229,6 +233,7 @@ impl TestEcuDb {
         Self {
             request_send_policy: None,
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            authentication: std::sync::Mutex::new(AuthenticationState::default()),
             timeout_default,
             repeat_req_count_app,
             tester_present_message: vec![0x3E, 0x00],
@@ -244,6 +249,7 @@ impl TestEcuDb {
         Self {
             request_send_policy: None,
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            authentication: std::sync::Mutex::new(AuthenticationState::default()),
             timeout_default: Duration::from_secs(5),
             repeat_req_count_app: 2,
             tester_present_message,
@@ -423,6 +429,19 @@ impl EcuStateManager for TestEcuDb {
     fn set_default_states(&self) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
         std::future::ready(Ok(()))
     }
+
+    fn authentication_state(&self) -> AuthenticationState {
+        self.authentication
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default()
+    }
+
+    fn set_authentication_state(&self, state: AuthenticationState) {
+        if let Ok(mut s) = self.authentication.lock() {
+            *s = state;
+        }
+    }
 }
 
 #[async_trait]
@@ -461,6 +480,9 @@ impl VariantDetection for TestEcuDb {
     }
 }
 
+/// Name prefix of the authentication services returned by [`TestEcuDb`].
+pub(crate) const AUTHENTICATION_SERVICE_PREFIX: &str = "Authentication_";
+
 /// Subfunction byte used for every session change encoded by [`TestEcuDb`].
 const SESSION_SUBFUNCTION: u8 = 0x02;
 
@@ -480,8 +502,21 @@ impl PayloadEncoder for TestEcuDb {
         _data: Option<UdsPayloadData>,
         _functional_group_name: Option<&str>,
     ) -> impl Future<Output = Result<ServicePayload, DiagServiceError>> + Send {
+        if let Some(sub_function) = diag_service
+            .name
+            .strip_prefix(AUTHENTICATION_SERVICE_PREFIX)
+            .and_then(|sf| sf.parse::<AuthenticationSubFunction>().ok())
+        {
+            return std::future::ready(Ok(ServicePayload {
+                data: vec![service_ids::AUTHENTICATION, sub_function.id()],
+                source_address: self.tester_address(),
+                target_address: self.logical_address(),
+                new_session: None,
+                new_security: None,
+            }));
+        }
         // This double has no database to encode against, so it only knows how
-        // to build session-control frames. Fail loudly rather than silently
+        // to build session-control and authentication frames. Fail loudly rather than silently
         // mis-encoding some other service as `10 xx`.
         assert!(
             matches!(diag_service.type_, DiagCommType::Modes),
@@ -575,6 +610,28 @@ impl EcuSecurity for TestEcuDb {
                 .as_ref()
                 .map_or(Ok(()), |policy| policy(context)),
         )
+    }
+
+    fn lookup_authentication_service(
+        &self,
+        sub_function: AuthenticationSubFunction,
+    ) -> Result<DiagComm, DiagServiceError> {
+        let name = format!("{AUTHENTICATION_SERVICE_PREFIX}{sub_function}");
+        Ok(DiagComm {
+            name: name.clone(),
+            type_: DiagCommType::Modes,
+            lookup_name: Some(name),
+            subfunction_id: Some(sub_function.id()),
+        })
+    }
+
+    /// The return parameter is the byte following SID and sub-function.
+    fn authentication_return_value(
+        &self,
+        _sub_function: AuthenticationSubFunction,
+        raw_response: &[u8],
+    ) -> Result<Option<u64>, DiagServiceError> {
+        Ok(raw_response.get(2).copied().map(u64::from))
     }
 }
 

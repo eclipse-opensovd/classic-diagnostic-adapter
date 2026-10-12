@@ -203,6 +203,19 @@ pub(super) async fn reset_ecu_session_and_security<T: UdsEcu>(
     ecu_name: &str,
     context: &str,
 ) {
+    // Deauthenticate first, so a following client does not inherit the
+    // authenticated state. A failure must not prevent the remaining cleanup.
+    match uds.reset_ecu_authentication(ecu_name).await {
+        Ok(ResetOutcome::Completed) => {
+            tracing::debug!("ECU authentication reset for ECU {ecu_name} during {context}");
+        }
+        Ok(ResetOutcome::Deferred) => tracing::info!(
+            "ECU authentication reset for ECU {ecu_name} during {context} deferred until \
+             communication is enabled"
+        ),
+        Err(e) => tracing::warn!("Failed to deauthenticate ECU {ecu_name} during {context}: {e}"),
+    }
+
     match uds.reset_ecu_session(ecu_name).await {
         Ok(ResetOutcome::Completed) => {
             tracing::info!("ECU session reset for ECU {ecu_name} during {context}");

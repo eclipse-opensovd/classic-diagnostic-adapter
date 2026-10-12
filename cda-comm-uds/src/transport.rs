@@ -672,6 +672,16 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuSecurity> UdsManager<S, 
                     .set_service_state(service_ids::SECURITY_ACCESS, new_security)
                     .await;
             }
+            // An ECU reset ends the authenticated state (ISO 14229-1 clause 10.6.4).
+            // A pending expiration finds the ECU deauthenticated and sends nothing.
+            if sent_sid == service_ids::ECU_RESET
+                && ecu_read.authentication_state().is_authenticated()
+            {
+                tracing::info!(ecu_name, "ECU reset, authentication state reset");
+                ecu_read.set_authentication_state(
+                    cda_interfaces::authentication::AuthenticationState::default(),
+                );
+            }
         }
 
         let finish = start.elapsed().saturating_sub(sent_after);
@@ -1075,6 +1085,7 @@ pub(crate) mod send_tests {
                 tester_present_tasks: Arc::new(RwLock::new(HashMap::default())),
                 session_reset_tasks: Arc::new(RwLock::new(HashMap::default())),
                 security_reset_tasks: Arc::new(RwLock::new(HashMap::default())),
+                authentication_reset_tasks: Arc::new(RwLock::new(HashMap::default())),
                 state_coordinator,
                 functional_description_database: String::new(),
                 fault_config,
