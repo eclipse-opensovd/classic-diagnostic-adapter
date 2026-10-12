@@ -31,8 +31,8 @@ use crate::{
 
 pub mod files;
 
-// "MDD version 0      \u0000";
-const FILE_MAGIC_HEX_STR: &str = "4d44442076657273696f6e203020202020202000";
+// "MDD version 1      \u0000";
+const FILE_MAGIC_HEX_STR: &str = "4d44442076657273696f6e203120202020202000";
 const FILE_MAGIC_BYTES_LEN: usize = FILE_MAGIC_HEX_STR.len() / 2;
 
 // Allowed because constant functions cannot functions like .get() are not allowed in const fn.
@@ -156,6 +156,11 @@ impl From<&ChunkType> for ChunkDataType {
     }
 }
 
+/// The result of loading proto data from an MDD file: the `ECUInfo` entries
+/// describing all ECUs contained in the file, and the requested chunks
+/// grouped by [`ChunkType`].
+pub type ProtoData = (Vec<fileformat::EcuInfo>, HashMap<ChunkType, Vec<Chunk>>);
+
 /// Read the chunk data from the MDD file if it has not been loaded yet.
 /// # Errors
 /// Returns an error if the chunk data cannot be loaded, such as if the MDD file is not found,
@@ -182,9 +187,14 @@ pub fn load_chunk<'a>(chunk: &'a mut Chunk, mdd_file: &str) -> Result<&'a Bytes,
 }
 
 /// Load the ECU data from the given MDD file.
+///
+/// Returns the list of `ECUInfo` entries describing all ECUs contained in the
+/// file (the file may contain data for multiple ECUs sharing a single
+/// diagnostic-description flatbuffer chunk), together with the raw
+/// diagnostic-description payload bytes (an `OdxData` flatbuffer blob).
 /// # Errors
 /// See `load_proto_data` for details on possible errors.
-pub fn load_ecudata(mdd_file: &str) -> Result<(String, Bytes), MddError> {
+pub fn load_ecudata(mdd_file: &str) -> Result<(Vec<fileformat::EcuInfo>, Bytes), MddError> {
     load_proto_data(
         mdd_file,
         &[ProtoLoadConfig {
@@ -193,7 +203,7 @@ pub fn load_ecudata(mdd_file: &str) -> Result<(String, Bytes), MddError> {
             name: None,
         }],
     )
-    .and_then(|(name, data)| {
+    .and_then(|(ecu_infos, data)| {
         data.into_iter()
             .next()
             .and_then(|(_, chunks)| {
@@ -201,7 +211,7 @@ pub fn load_ecudata(mdd_file: &str) -> Result<(String, Bytes), MddError> {
                     let payload = c.payload.ok_or_else(|| {
                         MddError::MissingData("No diagnostic payload found in MDD file".to_owned())
                     })?;
-                    Ok((name, payload))
+                    Ok((ecu_infos, payload))
                 })
             })
             .transpose()
@@ -254,7 +264,7 @@ fn load_chunk_data(mdd_file: &str, chunk: &Chunk) -> Result<Bytes, MddError> {
 pub fn load_proto_data(
     mdd_file_path: &str,
     load_info: &[ProtoLoadConfig],
-) -> Result<(String, HashMap<ChunkType, Vec<Chunk>>), MddError> {
+) -> Result<ProtoData, MddError> {
     tracing::trace!("Loading ECU data from file");
     let start = Instant::now();
     let mdd_file = mmap_and_decode_mdd(mdd_file_path)?;
@@ -309,21 +319,24 @@ pub fn load_proto_data(
     let end = Instant::now();
 
     tracing::trace!(
-        ecu_name = %mdd_file.ecu_name,
+        ecu_names = ?mdd_file.ecu_infos.iter().map(|e| e.ecu_name.as_str()).collect::<Vec<_>>(),
         duration = ?end.saturating_duration_since(start),
         chunks_loaded = proto_data.len(),
         "Loaded ECU data"
     );
-    Ok((mdd_file.ecu_name.clone(), proto_data))
+    Ok((mdd_file.ecu_infos.clone(), proto_data))
 }
 
-pub(crate) fn read_ecudata<'a>(
+/// Parse the raw diagnostic-description flatbuffer blob into its `OdxData`
+/// root, which may contain data for one or more ECUs (see `EcuData` within
+/// `OdxData::ecus`) plus cross-cutting `SharedData`.
+pub(crate) fn read_odxdata<'a>(
     bytes: &'a [u8],
     flatbuf_config: &FlatbBufConfig,
-) -> Result<dataformat::EcuData<'a>, String> {
+) -> Result<dataformat::OdxData<'a>, String> {
     let start = Instant::now();
-    let ecu_data = if flatbuf_config.verify {
-        dataformat::root_as_ecu_data_with_opts(
+    let odx_data = if flatbuf_config.verify {
+        dataformat::root_as_odx_data_with_opts(
             &VerifierOptions {
                 max_depth: flatbuf_config.max_depth,
                 max_tables: flatbuf_config.max_tables,
@@ -332,23 +345,22 @@ pub(crate) fn read_ecudata<'a>(
             },
             bytes,
         )
-        .map_err(|e| format!("Failed to parse ECU data: {e}"))
+        .map_err(|e| format!("Failed to parse ODX data: {e}"))
     } else {
         Ok(unsafe {
             // unsafe but around 10x faster.
             // can be used when previously verified and trusted data is loaded.
-            dataformat::root_as_ecu_data_unchecked(bytes)
+            dataformat::root_as_odx_data_unchecked(bytes)
         })
     };
 
     let end = Instant::now();
     tracing::trace!(
         duration = ?end.saturating_duration_since(start),
-        ecu_name = %ecu_data.as_ref()
-            .ok().and_then(dataformat::EcuData::ecu_name).unwrap_or("unknown"),
+        ecu_count = odx_data.as_ref().ok().and_then(dataformat::OdxData::ecus).map_or(0, |e| e.len()),
         "Parsed flatbuff data"
     );
-    ecu_data
+    odx_data
 }
 
 /// Rewrite the MDD file with  uncompressed data, if it is not already uncompressed.

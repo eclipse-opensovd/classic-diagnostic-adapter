@@ -154,7 +154,7 @@ fn mdd_revision(path: &Path) -> Option<String> {
         .ok_or_else(|| "path is not valid UTF-8".to_owned())
         .and_then(|path| crate::mmap_and_decode_mdd(path).map_err(|e| e.to_string()));
     match decoded {
-        Ok(mdd) => mdd.revision,
+        Ok(mdd) => mdd.ecu_infos.into_iter().next().and_then(|e| e.revision),
         Err(error) => {
             tracing::error!(path = %path.display(), %error, "Cannot read the MDD revision.");
             None
@@ -425,12 +425,19 @@ mod tests {
 
     /// Like [`mdd`], with a format `version` whose length controls the file size.
     fn mdd_with_version(ecu: &str, revision: &str, version: &str) -> Vec<u8> {
-        let mut buf = b"MDD version 0      \0".to_vec();
-        for (tag, value) in [(0x0A, version), (0x1A, ecu), (0x22, revision)] {
-            buf.push(tag);
-            buf.push(u8::try_from(value.len()).unwrap());
-            buf.extend_from_slice(value.as_bytes());
+        use prost::Message as _;
+        let mut buf = b"MDD version 1      \0".to_vec();
+        crate::proto::fileformat::MddFile {
+            version: version.to_owned(),
+            ecu_infos: vec![crate::proto::fileformat::EcuInfo {
+                ecu_name: ecu.to_owned(),
+                revision: Some(revision.to_owned()),
+                ..Default::default()
+            }],
+            ..Default::default()
         }
+        .encode(&mut buf)
+        .expect("encoding into a Vec cannot fail");
         buf
     }
 

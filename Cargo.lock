@@ -2856,6 +2856,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "backon",
+ "bytes",
  "cda-comm-can",
  "cda-comm-doip",
  "cda-comm-uds",

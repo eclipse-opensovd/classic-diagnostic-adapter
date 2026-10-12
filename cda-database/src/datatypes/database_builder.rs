@@ -212,28 +212,21 @@ impl<'a> EcuDataBuilder<'a> {
 
     fn ecu_data_args(
         &mut self,
-        params: EcuDataParams<'a>,
+        params: &EcuDataParams<'a>,
         ecu_name_offset: WIPOffset<&'a str>,
         revision_offset: WIPOffset<&'a str>,
-        version_offset: WIPOffset<&'a str>,
     ) -> EcuDataArgs<'a> {
         dataformat::EcuDataArgs {
             ecu_name: Some(ecu_name_offset),
             revision: Some(revision_offset),
-            version: Some(version_offset),
-            variants: params.variants.map(|v| self.fbb.create_vector(&v)),
-            metadata: params.metadata.map(|v| self.fbb.create_vector(&v)),
-            feature_flags: params
-                .feature_flags
-                .as_ref()
-                .map(|flags| self.fbb.create_vector(flags)),
-            functional_groups: params.functional_groups.map(|v| self.fbb.create_vector(&v)),
-            dtcs: params.dtcs.map(|v| self.fbb.create_vector(&v)),
+            variants: params.variants.clone().map(|v| self.fbb.create_vector(&v)),
+            dtcs: params.dtcs.clone().map(|v| self.fbb.create_vector(&v)),
         }
     }
 
-    /// Serialize the given [`EcuDataParams`] into a flatbuffer, wrap the result
-    /// in a [`DiagnosticDatabase`] and return it.  Consumes the builder.
+    /// Serialize the given [`EcuDataParams`] into a flatbuffer, wrapped in an
+    /// `OdxData` root, wrap the result in a [`DiagnosticDatabase`] and return
+    /// it.  Consumes the builder.
     ///
     /// [`DiagnosticDatabase`]: super::DiagnosticDatabase
     ///
@@ -243,20 +236,18 @@ impl<'a> EcuDataBuilder<'a> {
     /// Using panic here, because the database builder is not intended for production use
     /// and only is a helper to build databases for tests.
     #[must_use]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "consuming builder-style API; params is only read via Copy/Clone fields \
+                  internally, but taking it by value keeps the call-site ergonomic"
+    )]
     pub fn finish(mut self, params: EcuDataParams<'a>) -> super::DiagnosticDatabase {
-        let ecu_name_offset = self.fbb.create_string(params.ecu_name);
-        let revision_offset = self.fbb.create_string(params.revision);
-        let version_offset = self.fbb.create_string(params.version);
-
-        let ecu_data_args =
-            self.ecu_data_args(params, ecu_name_offset, revision_offset, version_offset);
-
-        let ecu_data = dataformat::EcuData::create(&mut self.fbb, &ecu_data_args);
-        self.fbb.finish(ecu_data, None);
-        let blob = self.fbb.finished_data().to_vec();
+        let ecu_name = params.ecu_name;
+        let blob = self.build_odx_data(&params);
 
         super::DiagnosticDatabase::new_from_vec(
             String::default(),
+            ecu_name.to_owned(),
             blob,
             cda_interfaces::datatypes::FlatbBufConfig::default(),
             super::DatabaseConfig::default(),
@@ -271,27 +262,72 @@ impl<'a> EcuDataBuilder<'a> {
     ///
     /// Returns [`DiagServiceError`](cda_interfaces::DiagServiceError) if the
     /// database cannot be constructed from the built ECU data.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "consuming builder-style API; params is only read via Copy/Clone fields \
+                  internally, but taking it by value keeps the call-site ergonomic"
+    )]
     pub fn finish_with_config(
         mut self,
         params: EcuDataParams<'a>,
         config: super::DatabaseConfig,
     ) -> Result<super::DiagnosticDatabase, cda_interfaces::DiagServiceError> {
-        let ecu_name_offset = self.fbb.create_string(params.ecu_name);
-        let revision_offset = self.fbb.create_string(params.revision);
-        let version_offset = self.fbb.create_string(params.version);
-        let ecu_data_args =
-            self.ecu_data_args(params, ecu_name_offset, revision_offset, version_offset);
-
-        let ecu_data = dataformat::EcuData::create(&mut self.fbb, &ecu_data_args);
-        self.fbb.finish(ecu_data, None);
-        let blob = self.fbb.finished_data().to_vec();
+        let ecu_name = params.ecu_name;
+        let blob = self.build_odx_data(&params);
 
         super::DiagnosticDatabase::new_from_vec(
             String::default(),
+            ecu_name.to_owned(),
             blob,
             cda_interfaces::datatypes::FlatbBufConfig::default(),
             config,
         )
+    }
+
+    /// Builds a single-ECU `OdxData` root (containing the one [`EcuData`]
+    /// described by `params`, and a `SharedData` populated from
+    /// `params.functional_groups`) and returns the serialized bytes.
+    fn build_odx_data(&mut self, params: &EcuDataParams<'a>) -> Vec<u8> {
+        let ecu_name_offset = self.fbb.create_string(params.ecu_name);
+        let revision_offset = self.fbb.create_string(params.revision);
+        let version_offset = self.fbb.create_string(params.version);
+
+        let functional_groups = params
+            .functional_groups
+            .clone()
+            .map(|v| self.fbb.create_vector(&v));
+        let metadata = params.metadata.clone().map(|v| self.fbb.create_vector(&v));
+        let feature_flags = params
+            .feature_flags
+            .as_ref()
+            .map(|flags| self.fbb.create_vector(flags));
+
+        let ecu_data_args = self.ecu_data_args(params, ecu_name_offset, revision_offset);
+        let ecu_data = dataformat::EcuData::create(&mut self.fbb, &ecu_data_args);
+        let ecus = self.fbb.create_vector(&[ecu_data]);
+        let ecu_names = self.fbb.create_vector(&[ecu_name_offset]);
+
+        let shared = dataformat::SharedData::create(
+            &mut self.fbb,
+            &dataformat::SharedDataArgs {
+                functional_groups,
+                ecu_shared_data: None,
+            },
+        );
+
+        let odx_data = dataformat::OdxData::create(
+            &mut self.fbb,
+            &dataformat::OdxDataArgs {
+                version: Some(version_offset),
+                ecu_names: Some(ecu_names),
+                metadata,
+                feature_flags,
+                ecus: Some(ecus),
+                shared: Some(shared),
+            },
+        );
+        self.fbb.finish(odx_data, None);
+        self.fbb.finished_data().to_vec()
     }
 
     /// Finishes the builder into a [`DiagnosticDatabase`]
@@ -369,6 +405,7 @@ impl<'a> EcuDataBuilder<'a> {
             is_base_variant,
             variant_pattern: variant_pattern.map(|v| self.fbb.create_vector(&v)),
             parent_refs: parent_refs.map(|v| self.fbb.create_vector(&v)),
+            revision: None,
         };
 
         dataformat::Variant::create(&mut self.fbb, &variant_args)

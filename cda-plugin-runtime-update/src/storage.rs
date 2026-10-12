@@ -106,7 +106,16 @@ fn mdd_revision(key: &str, path: &Path) -> Result<Option<String>, RuntimeUpdateE
     })?;
     Ok(cda_database::mmap_and_decode_mdd(path_str)
         .ok()
-        .and_then(|mdd| mdd.revision))
+        .and_then(|mdd| {
+            if mdd.ecu_infos.len() > 1 {
+                tracing::warn!(
+                    key = %key,
+                    ecu_count = mdd.ecu_infos.len(),
+                    "MDD file contains multiple ECUs; using revision of the first ECU"
+                );
+            }
+            mdd.ecu_infos.into_iter().next().and_then(|e| e.revision)
+        }))
 }
 
 /// Lists all files in a collection, optionally enriching each item with size and hash metadata.
