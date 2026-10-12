@@ -21,6 +21,7 @@ use futures::{FutureExt, future::BoxFuture};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod authentication;
 mod can_id;
 pub use can_id::*;
 mod com_param_handling;

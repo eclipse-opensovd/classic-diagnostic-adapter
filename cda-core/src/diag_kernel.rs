@@ -21,6 +21,7 @@ use cda_interfaces::{DiagServiceError, HashMap};
 use serde::{Serialize, Serializer};
 
 mod additional_fields;
+mod authentication;
 pub(crate) mod comparam;
 pub(crate) mod component_info;
 pub(crate) mod diag_comm_lookup;

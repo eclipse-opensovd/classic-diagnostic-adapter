@@ -263,6 +263,10 @@ impl Message<EcuDisconnected> for EcuCoordinator {
                 "ECU disconnected. Setting connectivity to Offline"
             );
             ecu_state.connectivity = Connectivity::Offline;
+            // The ECU may lose its authenticated state while unreachable. A pending
+            // expiration finds the ECU deauthenticated and sends nothing.
+            *std_ext::lock_write(&self.state.authentication) =
+                cda_interfaces::authentication::AuthenticationState::default();
         } else {
             tracing::debug!(
                 ecu = %self.ecu_name,
@@ -514,6 +518,27 @@ mod tests {
         assert_eq!(handle.connectivity(), Connectivity::Offline);
         // Variant state should be untouched
         assert_eq!(handle.ecu_status().variant_state, VariantState::NotTested);
+    }
+
+    #[tokio::test]
+    async fn ecu_disconnected_resets_authentication_state() {
+        use cda_interfaces::authentication::{AuthenticationState, AuthenticationStatus};
+
+        let handle = spawn_test_coordinator("TestECU");
+        handle.state.ecu_state.write().unwrap().connectivity = Connectivity::Online;
+        handle.state.authentication.write().unwrap().status = AuthenticationStatus::Authenticated;
+
+        handle
+            .actor_ref
+            .tell(EcuDisconnected)
+            .await
+            .expect("Actor should be alive");
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            *handle.state.authentication.read().unwrap(),
+            AuthenticationState::default()
+        );
     }
 
     #[tokio::test]
