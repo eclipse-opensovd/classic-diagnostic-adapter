@@ -3009,15 +3009,6 @@
       "crate": "cda-plugin-communication-management"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/connection_receiver.rs",
-      "function": "handle_send_pending",
-      "line": 31,
-      "cyclomatic": 5.0,
-      "coverage": 61.53846153846154,
-      "crap": 6.422394173873464,
-      "crate": "cda-comm-doip"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
       "function": "EcuManager::check_genericservice",
       "line": 31,
@@ -3990,6 +3981,15 @@
       "crate": "cda-plugin-security"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/variant.rs",
+      "function": "UdsManager::start_variant_detection_for_ecus",
+      "line": 195,
+      "cyclomatic": 5.0,
+      "coverage": 70.83333333333334,
+      "crap": 5.6202980324074066,
+      "crate": "cda-comm-uds"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::validate_and_parse_write_request",
       "line": 1025,
@@ -3997,6 +3997,15 @@
       "coverage": 72.22222222222221,
       "crap": 5.535836762688615,
       "crate": "cda-sovd"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/connection_receiver.rs",
+      "function": "handle_send_pending",
+      "line": 31,
+      "cyclomatic": 5.0,
+      "coverage": 73.07692307692307,
+      "crap": 5.487881201638599,
+      "crate": "cda-comm-doip"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_decode.rs",
@@ -4134,15 +4143,6 @@
       "crate": "cda-database"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-transport-router/src/lib.rs",
-      "function": "DiagnosticTransportRouter::get_ecu_network_address",
-      "line": 358,
-      "cyclomatic": 5.0,
-      "coverage": 85.71428571428571,
-      "crap": 5.072886297376093,
-      "crate": "cda-transport-router"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-plugin-communication-management/src/lifecycle/controller.rs",
       "function": "CommunicationHandle::request_claimed",
       "line": 317,
@@ -4251,15 +4251,6 @@
       "crate": "cda-transport-router"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/variant.rs",
-      "function": "UdsManager::start_variant_detection_for_ecus",
-      "line": 195,
-      "cyclomatic": 5.0,
-      "coverage": 91.66666666666666,
-      "crap": 5.014467592592593,
-      "crate": "cda-comm-uds"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-plugin-runtime-update/src/storage.rs",
       "function": "get_collection_items",
       "line": 550,
@@ -4294,6 +4285,15 @@
       "coverage": 92.85714285714286,
       "crap": 5.009110787172012,
       "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-transport-router/src/lib.rs",
+      "function": "DiagnosticTransportRouter::get_ecu_network_address",
+      "line": 358,
+      "cyclomatic": 5.0,
+      "coverage": 92.85714285714286,
+      "crap": 5.009110787172012,
+      "crate": "cda-transport-router"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/data.rs",
@@ -5952,15 +5952,6 @@
       "crate": "cda-interfaces"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-transport-router/src/lib.rs",
-      "function": "DiagnosticTransportRouter::can_ecu_network_address",
-      "line": 133,
-      "cyclomatic": 3.0,
-      "coverage": 87.5,
-      "crap": 3.017578125,
-      "crate": "cda-transport-router"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-plugin-communication-management/src/lifecycle/controller.rs",
       "function": "build_communication_runtime",
       "line": 834,
@@ -6040,15 +6031,6 @@
       "coverage": 89.0909090909091,
       "crap": 3.011684447783621,
       "crate": "cda-database"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/coordinator.rs",
-      "function": "EcuCoordinator::handle",
-      "line": 232,
-      "cyclomatic": 3.0,
-      "coverage": 89.47368421052632,
-      "crap": 3.010497157019974,
-      "crate": "cda-comm-uds"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/state.rs",
@@ -6691,6 +6673,15 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-transport-router/src/lib.rs",
+      "function": "DiagnosticTransportRouter::can_ecu_network_address",
+      "line": 133,
+      "cyclomatic": 3.0,
+      "coverage": 100.0,
+      "crap": 3.0,
+      "crate": "cda-transport-router"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-transport-router/src/lib.rs",
       "function": "DiagnosticTransportRouter::shutdown",
       "line": 390,
       "cyclomatic": 3.0,
@@ -6774,6 +6765,15 @@
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/query.rs",
       "function": "UdsManager::ecu_exec_service_from_function_class",
       "line": 345,
+      "cyclomatic": 3.0,
+      "coverage": 100.0,
+      "crap": 3.0,
+      "crate": "cda-comm-uds"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/coordinator.rs",
+      "function": "EcuCoordinator::handle",
+      "line": 232,
       "cyclomatic": 3.0,
       "coverage": 100.0,
       "crap": 3.0,
