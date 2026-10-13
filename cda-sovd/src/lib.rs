@@ -274,11 +274,14 @@ pub fn routes_accessible_during_update() -> Vec<HttpRouteMatcher> {
 /// the address the client actually used to reach CDA.
 pub async fn add_openapi_routes(dynamic_router: &DynamicRouter) {
     let dr = dynamic_router.clone();
+    // Created once: aide leaks the Swagger UI HTML (~1.6 MB) for every route it creates,
+    // while the finalizer runs on every recomposition (e.g. each runtime database reload).
+    let swagger_route: axum::routing::MethodRouter =
+        Swagger::new(OPENAPI_JSON_ROUTE).axum_route().into();
     dynamic_router
         .add_finalizer(Arc::new(move |router: axum::Router| -> axum::Router {
             let dr = dr.clone();
-            let swagger_route: axum::routing::MethodRouter =
-                Swagger::new(OPENAPI_JSON_ROUTE).axum_route().into();
+            let swagger_route = swagger_route.clone();
             let openapi_route: axum::routing::MethodRouter =
                 routing::get(move |ExtractHost(host): ExtractHost| {
                     let dr = dr.clone();
@@ -372,6 +375,35 @@ where
                 },
             ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    use super::{OPENAPI_JSON_ROUTE, add_openapi_routes, dynamic_router::DynamicRouter};
+
+    #[tokio::test]
+    async fn openapi_route_is_available_without_vehicle_routes() {
+        let dynamic_router = DynamicRouter::new();
+        add_openapi_routes(&dynamic_router).await;
+
+        let response = dynamic_router
+            .get_router()
+            .await
+            .oneshot(
+                Request::builder()
+                    .uri(OPENAPI_JSON_ROUTE)
+                    .header("host", "127.0.0.1:20002")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
 }
 
 #[cfg(test)]

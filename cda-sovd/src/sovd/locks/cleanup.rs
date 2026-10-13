@@ -14,13 +14,15 @@
 use std::{pin::Pin, sync::Arc, time::SystemTime};
 
 use cda_interfaces::{
-    DynamicPlugin, HashMap, UdsEcu,
+    DynamicPlugin, HashMap, ResetOutcome, UdsEcu,
     lock_priority_api::{LockId, LockLifecycleEvent},
 };
 use futures::FutureExt;
 use tokio::time::{Instant, sleep_until};
 
-use super::{ActiveLock, ApiError, Locks, active_snapshot, enqueue_lock_event};
+use super::{
+    ActiveLock, ApiError, LockState, Locks, ScopeKey, active_snapshot, enqueue_lock_event,
+};
 use crate::sovd::lock_state::ExpirationStart;
 
 /// Type alias for the async cleanup closure called when dropping a lock
@@ -82,7 +84,9 @@ impl Locks {
                     let mut store = reservation.write_store().await;
                     match store.state.begin_expiration(&lock_id, SystemTime::now()) {
                         Ok(ExpirationStart::Expired(removed)) => {
-                            let cleanups = take_cleanups(&mut store.cleanups, &removed);
+                            let store = &mut *store;
+                            let cleanups =
+                                take_cleanups(&store.state, &mut store.cleanups, &removed);
                             Ok(Some((removed, cleanups)))
                         }
                         Ok(ExpirationStart::Stale) => Ok(None),
@@ -166,12 +170,31 @@ pub(super) async fn run_cleanups(pending: Vec<LockCleanupFnHelper>) {
 }
 
 pub(super) fn take_cleanups(
+    state: &LockState,
     cleanups: &mut HashMap<LockId, LockCleanupFnHelper>,
     removed: &[ActiveLock],
 ) -> Vec<LockCleanupFnHelper> {
     removed
         .iter()
-        .filter_map(|lock| cleanups.remove(&lock.id))
+        .filter_map(|lock| {
+            let cleanup = cleanups.remove(&lock.id)?;
+            let ScopeKey::Ecu(ecu_name) = &lock.scope else {
+                return Some(cleanup);
+            };
+            if state
+                .covering_functional_group(&lock.principal.subject, ecu_name)
+                .is_some()
+            {
+                // A functional-group lock of the same client still covers
+                // this ECU: it still owns the ECU's tester present and
+                // session/security state, and releasing it will run this
+                // cleanup later. Running it now would stop tester present
+                // and reset state the functional-group lock still needs.
+                None
+            } else {
+                Some(cleanup)
+            }
+        })
         .collect()
 }
 
@@ -181,20 +204,32 @@ pub(super) async fn reset_ecu_session_and_security<T: UdsEcu>(
     context: &str,
     security_plugin: &DynamicPlugin,
 ) {
-    if let Err(e) = uds.reset_ecu_session(ecu_name, security_plugin).await {
-        tracing::error!("Failed to reset ECU session for ECU {ecu_name} during {context}: {e}");
-    } else {
-        tracing::info!("ECU session reset for ECU {ecu_name} during {context}");
+    match uds.reset_ecu_session(ecu_name, security_plugin).await {
+        Ok(ResetOutcome::Completed) => {
+            tracing::info!("ECU session reset for ECU {ecu_name} during {context}");
+        }
+        Ok(ResetOutcome::Deferred) => tracing::info!(
+            "ECU session reset for ECU {ecu_name} during {context} deferred until communication \
+             is enabled"
+        ),
+        Err(e) => {
+            tracing::error!("Failed to reset ECU session for ECU {ecu_name} during {context}: {e}");
+        }
     }
 
-    if let Err(e) = uds
+    match uds
         .reset_ecu_security_access(ecu_name, security_plugin)
         .await
     {
-        tracing::error!(
+        Ok(ResetOutcome::Completed) => {
+            tracing::info!("ECU security access reset for ECU {ecu_name} during {context}");
+        }
+        Ok(ResetOutcome::Deferred) => tracing::info!(
+            "ECU security access reset for ECU {ecu_name} during {context} deferred until \
+             communication is enabled"
+        ),
+        Err(e) => tracing::error!(
             "Failed to reset ECU security access for ECU {ecu_name} during {context}: {e}"
-        );
-    } else {
-        tracing::info!("ECU security access reset for ECU {ecu_name} during {context}");
+        ),
     }
 }

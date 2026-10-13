@@ -969,6 +969,7 @@ mod tests {
                         bit_len: 8,
                         data_type: DataType::UInt32,
                         compu_method: None,
+                        physical_type: None,
                     }),
                 )
             })

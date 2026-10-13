@@ -1226,6 +1226,10 @@ fn extract_coverage_from_container() -> Result<(), TestingError> {
 
 /// Registers a custom panic hook that dumps docker logs before the default panic handler runs.
 /// This ensures container logs are captured on any test failure (assert, unwrap, etc.)
+///
+/// The panic message is logged before the dump as well: the dump can be large
+/// enough that CI truncates the output after it, and the message is what says
+/// which test step failed.
 fn register_panic_hook() {
     use std::sync::Once;
     static HOOK_REGISTERED: Once = Once::new();
@@ -1233,6 +1237,9 @@ fn register_panic_hook() {
     HOOK_REGISTERED.call_once(|| {
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |panic_info| {
+            let thread = std::thread::current();
+            let thread = thread.name().unwrap_or("<unnamed>");
+            tracing::error!("Test panicked in thread '{thread}': {panic_info}");
             // Dump docker logs before the default panic output
             dump_docker_logs();
             // Call the default panic handler to print the panic message and backtrace

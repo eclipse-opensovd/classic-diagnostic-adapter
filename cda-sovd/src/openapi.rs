@@ -23,7 +23,7 @@ use indexmap::IndexMap;
 use schemars::JsonSchema;
 use sovd_interfaces::error::ApiErrorResponse;
 
-use crate::sovd::{self, error::VendorErrorCode};
+use crate::sovd::error::VendorErrorCode;
 
 pub(crate) fn lock_details_example() -> sovd_interfaces::locking::id::get::Response {
     sovd_interfaces::locking::id::get::Response {
@@ -243,19 +243,19 @@ pub(crate) fn ecu_service_response(op: TransformOperation) -> TransformOperation
 }
 
 pub(crate) fn lock_not_found(op: TransformOperation) -> TransformOperation {
-    op.response_with::<404, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
+    op.response_with::<404, Json<ApiErrorResponse<VendorErrorCode>>, _>(|res| {
         res.description("Given lock does not exist.")
     })
 }
 
 pub(crate) fn lock_not_owned(op: TransformOperation) -> TransformOperation {
-    op.response_with::<403, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
+    op.response_with::<403, Json<ApiErrorResponse<VendorErrorCode>>, _>(|res| {
         res.description("Lock is not owned.")
     })
 }
 
 pub(crate) fn error_forbidden(op: TransformOperation) -> TransformOperation {
-    op.response_with::<403, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
+    op.response_with::<403, Json<ApiErrorResponse<VendorErrorCode>>, _>(|res| {
         res.description(
             "Forbidden: The SOVD client does not have the right to access the resource.",
         )
@@ -271,12 +271,12 @@ pub(crate) fn error_forbidden(op: TransformOperation) -> TransformOperation {
 }
 
 pub(crate) fn error_not_found(op: TransformOperation) -> TransformOperation {
-    op.response_with::<404, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
+    op.response_with::<404, Json<ApiErrorResponse<VendorErrorCode>>, _>(|res| {
         res.description("Not Found: The requested resource does not exist.")
             .example(ApiErrorResponse {
                 message: "Not found".to_string(),
                 error_code: sovd_interfaces::error::ErrorCode::VendorSpecific,
-                vendor_code: Some(sovd::error::VendorErrorCode::NotFound),
+                vendor_code: Some(VendorErrorCode::NotFound),
                 parameters: None,
                 error_source: None,
                 schema: None,
@@ -285,7 +285,7 @@ pub(crate) fn error_not_found(op: TransformOperation) -> TransformOperation {
 }
 
 pub(crate) fn error_bad_gateway(op: TransformOperation) -> TransformOperation {
-    op.response_with::<502, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
+    op.response_with::<502, Json<ApiErrorResponse<VendorErrorCode>>, _>(|res| {
         res.description("Bad Gateway: ECU responded with an NRC")
             .example(ApiErrorResponse {
                 message: "NRC".to_string(),
@@ -299,7 +299,7 @@ pub(crate) fn error_bad_gateway(op: TransformOperation) -> TransformOperation {
 }
 
 pub(crate) fn error_internal_server(op: TransformOperation) -> TransformOperation {
-    op.response_with::<500, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
+    op.response_with::<500, Json<ApiErrorResponse<VendorErrorCode>>, _>(|res| {
         res.description("Internal Server Error: An internal error occurred in the SOVD server.")
             .example(ApiErrorResponse {
                 message: "Internal Server Error".to_string(),
@@ -313,7 +313,7 @@ pub(crate) fn error_internal_server(op: TransformOperation) -> TransformOperatio
 }
 
 pub(crate) fn error_conflict(op: TransformOperation) -> TransformOperation {
-    op.response_with::<409, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
+    op.response_with::<409, Json<ApiErrorResponse<VendorErrorCode>>, _>(|res| {
         res.description("Conflict: The preconditions to execute the method are not fulfilled.")
             .example(ApiErrorResponse {
                 message: "Conflict".to_string(),
@@ -328,19 +328,19 @@ pub(crate) fn error_conflict(op: TransformOperation) -> TransformOperation {
 
 /// Documents lock and update-guard failures shared by diagnostic routes.
 pub(crate) fn lock_responses(op: TransformOperation) -> TransformOperation {
-    op.response_with::<409, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
+    op.response_with::<409, Json<ApiErrorResponse<VendorErrorCode>>, _>(|res| {
         res.description(
             "Conflict: A required lock is missing or broken, or an operation conflicts with the \
              current state.",
         )
     })
-    .response_with::<423, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
+    .response_with::<423, Json<ApiErrorResponse<VendorErrorCode>>, _>(|res| {
         res.description(
             "Locked: Another client holds an incompatible lock, or the vendor-specific lock \
              priority policy denied acquisition.",
         )
     })
-    .response_with::<503, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
+    .response_with::<503, Json<ApiErrorResponse<VendorErrorCode>>, _>(|res| {
         res.description("Service Unavailable: Lock state cannot currently be evaluated.")
     })
 }
@@ -362,25 +362,24 @@ pub(crate) fn defunct_lock_path(mut path: TransformPathItem) -> TransformPathIte
         .into_iter()
         .flatten()
         {
-            let _ = TransformOperation::new(operation).response_with::<409, Json<
-                ApiErrorResponse<sovd::error::VendorErrorCode>,
-            >, _>(|response| {
-                response.description(
-                    "Conflict: A lock previously held by this client was broken by preemption.",
-                )
-            });
+            let _ = TransformOperation::new(operation)
+                .response_with::<409, Json<ApiErrorResponse<VendorErrorCode>>, _>(|response| {
+                    response.description(
+                        "Conflict: A lock previously held by this client was broken by preemption.",
+                    )
+                });
         }
     }
     path
 }
 
 pub(crate) fn error_bad_request(op: TransformOperation) -> TransformOperation {
-    op.response_with::<400, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
+    op.response_with::<400, Json<ApiErrorResponse<VendorErrorCode>>, _>(|res| {
         res.description("Bad Request: The request was invalid or cannot be otherwise served.")
             .example(ApiErrorResponse {
                 message: "Bad Request".to_string(),
                 error_code: sovd_interfaces::error::ErrorCode::VendorSpecific,
-                vendor_code: Some(sovd::error::VendorErrorCode::BadRequest),
+                vendor_code: Some(VendorErrorCode::BadRequest),
                 parameters: None,
                 error_source: None,
                 schema: None,
@@ -389,23 +388,23 @@ pub(crate) fn error_bad_request(op: TransformOperation) -> TransformOperation {
 }
 
 pub(crate) fn comparam_execution_errors(op: TransformOperation) -> TransformOperation {
-    op.response_with::<400, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
+    op.response_with::<400, Json<ApiErrorResponse<VendorErrorCode>>, _>(|res| {
         res.description("Id does not exist or execution failed")
             .example(ApiErrorResponse {
                 message: "Bad Request".to_string(),
                 error_code: sovd_interfaces::error::ErrorCode::VendorSpecific,
-                vendor_code: Some(sovd::error::VendorErrorCode::BadRequest),
+                vendor_code: Some(VendorErrorCode::BadRequest),
                 parameters: None,
                 error_source: None,
                 schema: None,
             })
     })
-    .response_with::<404, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
+    .response_with::<404, Json<ApiErrorResponse<VendorErrorCode>>, _>(|res| {
         res.description("Id does not exist")
             .example(ApiErrorResponse {
                 message: "Not Found".to_string(),
                 error_code: sovd_interfaces::error::ErrorCode::VendorSpecific,
-                vendor_code: Some(sovd::error::VendorErrorCode::NotFound),
+                vendor_code: Some(VendorErrorCode::NotFound),
                 parameters: None,
                 error_source: None,
                 schema: None,

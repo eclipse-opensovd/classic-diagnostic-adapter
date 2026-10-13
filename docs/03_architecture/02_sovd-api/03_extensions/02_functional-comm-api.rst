@@ -51,9 +51,13 @@ API
 
     Locking a functional group will start sending functional Tester Presents to the functional DoIP addresses of all DoIP Entities, and stop sending non-functional Tester Presents.
 
-    **Lock Options**
+    **Component Lock Takeover**
 
-    There can be an option to restore the previous ECU locks (and their Tester Presents).
+    For every ECU covered by the functional group on which the same client already holds a component (ECU) lock, that component lock's physical Tester Present is stopped once the functional group lock's acquisition commits. The component lock itself is not released: it remains valid and renewable on its own, but it no longer runs its own Tester Present or responds independently to release; the functional group lock now owns both.
+
+    Releasing, expiring, or preempting the functional group lock also releases every component lock it replaced the Tester Present of, running each one's own cleanup (Tester Present stop, session and security access reset) as well as its own. Releasing or expiring one of those component locks on its own, while the functional group lock still covers that ECU, runs no cleanup at all; the functional group lock still owns the ECU until it is itself released.
+
+    A component lock acquired while the same client already holds a functional group lock covering that ECU starts no physical Tester Present of its own, for the same reason.
 
     .. uml:: /03_architecture/02_sovd-api/03_extensions/images/functional_comm_locks.puml
 

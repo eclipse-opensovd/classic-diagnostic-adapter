@@ -498,19 +498,21 @@ Categories
        of ``/data`` (see :need:`arch~sovd-api-configuration-resources`). This generalizes the previous single
        ``functional_class_varcoding`` name to a list, allowing multiple functional classes (e.g. varcoding,
        calibration, ...) to be routed to ``/configurations``.
-    2. **Category mapping table** -- for services *not* routed to ``/configurations``, a configurable table maps
-       functional class names to a standard or custom category (see :need:`arch~sovd-api-data-identifier-categories`).
-       A functional class may only appear in the configuration routing list, or in the category mapping table, but
-       not both. Functional class names are compared case-insensitively, and each functional class may appear at
+    2. **Category mapping table** -- a configurable table maps functional class names to a standard or custom
+       category for the ``/data`` resource (see :need:`arch~sovd-api-data-identifier-categories`).
+       A functional class may appear in both the configuration routing list and the category mapping table; its
+       services are then exposed under ``/configurations`` and, with the mapped category, under ``/data``.
+       Functional class names are compared case-insensitively, and each functional class may appear at
        most once in the category mapping table; duplicate entries are rejected at configuration load time.
 
     **Non-standard categories**: ISO 17978-3 only permits the standard categories and ``x-``-prefixed custom
     categories. To allow OEM-specific setups, the CDA accepts other category names in the category mapping table
     and as default category, but logs a warning at configuration load time for every such category.
 
-    **Precedence**: for each 22\ :sub:`16`/2E\ :sub:`16` service, the functional class is first checked against
-    the configuration routing list. If it matches, the service is exposed under ``/configurations``. Otherwise,
-    the category mapping table is consulted to determine the ``category`` attribute of the ``/data`` resource.
+    **Evaluation**: for each 22\ :sub:`16`/2E\ :sub:`16` service, the functional class is checked against
+    the configuration routing list; if it matches, the service is exposed under ``/configurations``.
+    Independently, the category mapping table is consulted to determine the ``category`` attribute of the
+    ``/data`` resource.
 
     **Fallback / default category**: if a service's functional class (or a service without any functional class)
     has no matching entry in the category mapping table, a configurable default category is used instead of

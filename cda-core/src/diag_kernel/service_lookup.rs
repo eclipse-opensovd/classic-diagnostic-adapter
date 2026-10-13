@@ -52,6 +52,20 @@ fn diag_comm_short_name_matches(service: &datatypes::DiagService<'_>, name: &str
     })
 }
 
+/// Whether `service` is the one `diag_comm` addresses: its short name equals
+/// `lookup_name`, or, when `diag_comm` sets no explicit lookup name, its plain
+/// name. The latter is needed for services that do not contain any configured
+/// affix.
+fn diag_comm_name_matches(
+    service: &datatypes::DiagService<'_>,
+    diag_comm: &cda_interfaces::DiagComm,
+    lookup_name: &str,
+) -> bool {
+    diag_comm_short_name_matches(service, lookup_name)
+        || (diag_comm.lookup_name.is_none()
+            && diag_comm_short_name_matches(service, &diag_comm.name))
+}
+
 impl<S: SecurityPlugin> EcuManager<S> {
     /// Lookup a diagnostic service by its diag comm definition.
     ///
@@ -170,7 +184,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         // (case-insensitive) match is required to avoid ambiguity with similarly named services.
         let prefixes = diag_comm.type_.service_prefixes();
         let predicate = |service: &datatypes::DiagService<'_>| {
-            diag_comm_short_name_matches(service, &lookup_name)
+            diag_comm_name_matches(service, diag_comm, &lookup_name)
                 && service
                     .request_id()
                     .is_some_and(|sid| prefixes.contains(&sid))

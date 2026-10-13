@@ -129,7 +129,8 @@ pub(crate) async fn delete_handler(
         };
         match store.state.delete(&active.id) {
             Ok(removed) => {
-                let cleanups = take_cleanups(&mut store.cleanups, &removed);
+                let store = &mut *store;
+                let cleanups = take_cleanups(&store.state, &mut store.cleanups, &removed);
                 (removed, cleanups)
             }
             Err(error) => {
@@ -241,7 +242,8 @@ pub(in crate::sovd::locks) async fn run_acquisition_transaction<T: UdsEcu>(
         let mut store = acquisition.reservation.write_store().await;
         commit_new_lock(&mut store.state, pending.as_ref(), &new_lock).map(|preempted_locks| {
             store.cleanups.insert(new_lock.id.clone(), cleanup);
-            let cleanups = take_cleanups(&mut store.cleanups, &preempted_locks);
+            let store = &mut *store;
+            let cleanups = take_cleanups(&store.state, &mut store.cleanups, &preempted_locks);
             (preempted_locks, cleanups)
         })
     };
@@ -265,6 +267,24 @@ pub(in crate::sovd::locks) async fn run_acquisition_transaction<T: UdsEcu>(
         pending.disarm();
     }
     run_cleanups(cleanups).await;
+    // A functional-group lock permanently replaces the physical tester
+    // present of the ECUs it covers. This runs only after the commit
+    // succeeded, so a failed commit leaves existing ECU tester present
+    // untouched.
+    if matches!(new_lock.scope, ScopeKey::FunctionalGroup(_)) {
+        for ecu in new_lock.coverage.covered_ecus() {
+            if let Err(error) = uds
+                .stop_tester_present(TesterPresentType::Ecu(ecu.clone()))
+                .await
+            {
+                tracing::error!(
+                    ecu,
+                    %error,
+                    "Failed to stop ECU tester present replaced by functional-group lock"
+                );
+            }
+        }
+    }
     for lock in &preempted_locks {
         if let Err(error) = locks.schedule_defunct_expiration(lock.expires_at) {
             tracing::error!(%error, lock_id = %lock.id, "Failed to schedule defunct lock expiration");

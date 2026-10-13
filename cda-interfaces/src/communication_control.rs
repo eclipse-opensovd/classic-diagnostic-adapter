@@ -280,13 +280,37 @@ pub trait CommunicationLifecycle: Send + Sync + 'static {
     fn name(&self) -> &str;
 
     /// Called after the transport is successfully enabled.
+    ///
+    /// The lifecycle state is still `Enabling` at this point: whole-vehicle
+    /// variant detection, and every other hook's `initialize`, may still run
+    /// after this returns, so [`CommunicationAccess::acquire`] fails here.
+    /// Work that needs the state to actually be `Enabled` belongs in
+    /// [`on_enabled`](Self::on_enabled) instead.
     async fn initialize(&self) -> Result<(), CommControlError>;
+
+    /// Called once the lifecycle state has been published as `Enabled`, after
+    /// every hook's [`initialize`](Self::initialize) and any variant
+    /// detection have completed successfully.
+    ///
+    /// Runs in registration order, on the lifecycle worker, so it must not
+    /// fail and should finish quickly: it delays every later lifecycle
+    /// command, including a disable requested while it runs. The framework
+    /// guarantees it completes before the next matching
+    /// [`deinitialize`](Self::deinitialize), so work started here safely
+    /// assumes communication stays enabled until then.
+    ///
+    /// Not called when a hook's `initialize`, or variant detection, fails; nor
+    /// for an explicit re-detection, which never deinitializes hooks in the
+    /// first place.
+    async fn on_enabled(&self);
 
     /// Called before the transport is disabled.
     ///
     /// Implementations should stop any work that requires an active transport
-    /// (e.g. tester-present keep-alive tasks) and snapshot enough state to
-    /// restart it in [`initialize`](Self::initialize).
+    /// (e.g. tester-present keep-alive tasks). Restarting that work once
+    /// communication is enabled again belongs in
+    /// [`on_enabled`](Self::on_enabled), not in
+    /// [`initialize`](Self::initialize), which runs too early for it.
     ///
     /// Defaults to a no-op.
     async fn deinitialize(&self) {}

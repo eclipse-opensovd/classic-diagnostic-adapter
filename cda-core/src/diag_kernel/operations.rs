@@ -35,6 +35,20 @@ pub(in crate::diag_kernel) fn uds_data_to_serializable(
     is_negative_response: bool,
     data: &[u8],
 ) -> Result<DiagDataValue, DiagServiceError> {
+    uds_data_to_physical(diag_type, None, compu_method, is_negative_response, data)
+}
+
+/// Like [`uds_data_to_serializable`], with the base type of the DOP's
+/// PHYSICAL-TYPE: values computed by LINEAR / SCALE-LINEAR compu methods are
+/// represented in it (e.g. `A_FLOAT64` for a factor of 0.1), instead of being
+/// truncated to the coded (internal) integer type.
+pub(in crate::diag_kernel) fn uds_data_to_physical(
+    diag_type: datatypes::DataType,
+    physical_type: Option<datatypes::DataType>,
+    compu_method: Option<&datatypes::CompuMethod>,
+    is_negative_response: bool,
+    data: &[u8],
+) -> Result<DiagDataValue, DiagServiceError> {
     if data.is_empty() {
         // if data is empty, return empty string
         return Ok(DiagDataValue::String(String::new()));
@@ -47,6 +61,7 @@ pub(in crate::diag_kernel) fn uds_data_to_serializable(
                 category => {
                     return compu_lookup(
                         diag_type,
+                        physical_type,
                         compu_method,
                         category,
                         is_negative_response,
@@ -131,6 +146,7 @@ fn apply_linear_conversion(
 
 fn compu_lookup(
     diag_type: DataType,
+    physical_type: Option<DataType>,
     compu_method: &datatypes::CompuMethod,
     category: datatypes::CompuCategory,
     is_negative_response: bool,
@@ -152,11 +168,14 @@ fn compu_lookup(
     }) {
         Some(scale) => match category {
             datatypes::CompuCategory::Identical => unreachable!("Already handled"),
-            datatypes::CompuCategory::Linear => {
-                compu_lookup_linear(diag_type, compu_method, lookup, scale)
-            }
+            datatypes::CompuCategory::Linear => compu_lookup_linear(
+                physical_type.unwrap_or(diag_type),
+                compu_method,
+                lookup,
+                scale,
+            ),
             datatypes::CompuCategory::ScaleLinear => {
-                compu_lookup_scale_linear(diag_type, lookup, scale)
+                compu_lookup_scale_linear(physical_type.unwrap_or(diag_type), lookup, scale)
             }
             datatypes::CompuCategory::TextTable => compu_lookup_text_table(scale),
             datatypes::CompuCategory::CompuCode => Err(DiagServiceError::RequestNotSupported(
@@ -202,7 +221,7 @@ fn compu_lookup(
 }
 
 fn compu_lookup_linear(
-    diag_type: DataType,
+    computed_type: DataType,
     compu_method: &CompuMethod,
     lookup: DiagDataValue,
     scale: &CompuScale,
@@ -231,11 +250,11 @@ fn compu_lookup_linear(
         lookup_val,
         &ConversionDirection::InternalToPhys,
     )?;
-    DiagDataValue::from_number(&val, diag_type)
+    DiagDataValue::from_number(&val, computed_type)
 }
 
 fn compu_lookup_scale_linear(
-    diag_type: DataType,
+    computed_type: DataType,
     lookup: DiagDataValue,
     scale: &CompuScale,
 ) -> Result<DiagDataValue, DiagServiceError> {
@@ -253,7 +272,7 @@ fn compu_lookup_scale_linear(
         lookup_val,
         &ConversionDirection::InternalToPhys,
     )?;
-    DiagDataValue::from_number(&val, diag_type)
+    DiagDataValue::from_number(&val, computed_type)
 }
 
 fn compu_lookup_text_table(scale: &CompuScale) -> Result<DiagDataValue, DiagServiceError> {
@@ -674,6 +693,7 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
     payload: &mut Payload,
     diag_type: &datatypes::DiagCodedType,
     compu_method: Option<datatypes::CompuMethod>,
+    physical_type: Option<datatypes::DataType>,
 ) -> Result<DiagDataTypeContainer, DiagServiceError> {
     let uds_payload = payload.data()?;
 
@@ -712,6 +732,7 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
             bit_len,
             data_type,
             compu_method,
+            physical_type,
         },
     ))
 }
@@ -1734,6 +1755,50 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "Test verifies exact float values by specification"
+    )]
+    fn test_compu_lookup_linear_uses_physical_type() {
+        // Temperature coded as sint16 in 0.1 degC: raw 245 -> 24.5, raw -35 -> -3.5.
+        let compu_method = CompuMethod {
+            category: CompuCategory::Linear,
+            internal_to_phys: CompuFunction {
+                scales: vec![CompuScale {
+                    rational_coefficients: Some(CompuRationalCoefficients {
+                        numerator: vec![0.0, 0.1],
+                        denominator: vec![1.0],
+                    }),
+                    consts: None,
+                    lower_limit: None,
+                    upper_limit: None,
+                    inverse_values: None,
+                }],
+            },
+        };
+        let decode = |physical_type, raw: i32| {
+            super::uds_data_to_physical(
+                DataType::Int32,
+                physical_type,
+                Some(&compu_method),
+                false,
+                &raw.to_be_bytes(),
+            )
+            .unwrap()
+        };
+
+        // A_FLOAT64 physical type: the fraction is kept
+        assert!(
+            matches!(decode(Some(DataType::Float64), 245), super::DiagDataValue::Float64(v) if v == 24.5)
+        );
+        assert!(
+            matches!(decode(Some(DataType::Float64), -35), super::DiagDataValue::Float64(v) if v == -3.5)
+        );
+        // Without a physical type: the coded type, as before (truncated)
+        assert!(matches!(decode(None, 245), super::DiagDataValue::Int32(24)));
+    }
+
+    #[test]
     fn test_compu_lookup_linear_zero_scales_error() {
         // LINEAR must have exactly one COMPU-SCALE, not zero
         let compu_method = CompuMethod {
@@ -2197,7 +2262,8 @@ mod tests {
 
         let data: [u8; 0] = [];
         let mut payload = Payload::new(&data);
-        let res = extract_diag_data_container(Some("test_param"), 0, 0, &mut payload, &dct, None);
+        let res =
+            extract_diag_data_container(Some("test_param"), 0, 0, &mut payload, &dct, None, None);
         assert!(
             res.is_ok(),
             "Expected an optional MinMaxLength parameter to accept empty data, got {res:?}"
@@ -2207,7 +2273,15 @@ mod tests {
             create_diag_coded_type_minmax(DataType::ByteField, 1, Some(1), Termination::EndOfPdu);
         let mut payload = Payload::new(&data);
         let res: Result<crate::DiagDataTypeContainer, cda_interfaces::DiagServiceError> =
-            extract_diag_data_container(Some("test_param"), 0, 0, &mut payload, &dct_min1, None);
+            extract_diag_data_container(
+                Some("test_param"),
+                0,
+                0,
+                &mut payload,
+                &dct_min1,
+                None,
+                None,
+            );
         assert!(
             matches!(
                 res,
@@ -2239,6 +2313,7 @@ mod tests {
             0,
             &mut payload,
             &status_record,
+            None,
             None,
         );
 

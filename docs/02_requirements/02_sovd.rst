@@ -759,7 +759,8 @@ three lock scopes.
     - A zero or negative ``lock_expiration`` value must be rejected with HTTP 400.
     - When the expiration elapses the CDA must automatically release the lock and execute
       its associated cleanup actions (stop Tester Present, reset ECU session and security
-      access).
+      access), unless a functional group lock of the same client still covers the ECU
+      (see :need:`req~uds-tester-present`), in which case no cleanup is executed.
     - The lock owner may extend the expiration at any time before it elapses by issuing a
       ``PUT`` on ``/locks/{id}``.
 
@@ -1008,7 +1009,8 @@ three lock scopes.
     **defunct** state. The following rules apply:
 
     - Cleanup (Tester Present stop, ECU session and security access reset) is executed
-      at preemption time.
+      at preemption time, unless a functional group lock of the same client still covers
+      the ECU (see :need:`req~uds-tester-present`), in which case no cleanup is executed.
     - The defunct lock must remain visible in ``GET /locks`` until its original expiration
       time elapses, or it is deleted.
     - The defunct lock response must include the standard lock fields (``id``, ``owned``,

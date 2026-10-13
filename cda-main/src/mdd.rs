@@ -44,10 +44,18 @@ pub(crate) const DB_HEALTH_COMPONENT_KEY: &str = "database";
 
 #[derive(Debug, thiserror::Error)]
 pub enum MddLoadingError {
-    #[error("Failed to load MDD {path}: {reason}")]
-    LoadFailed { path: String, reason: String },
+    #[error("Failed to load MDD {path} for ECU {ecu}: {reason}")]
+    LoadFailed {
+        path: String,
+        ecu: String,
+        reason: String,
+    },
     #[error("Failed to decompress MDD {path}: {reason}")]
     DecompressFailed { path: String, reason: String },
+    #[error("Invalid per-ECU com_params for ECU {ecu}")]
+    ComParamsInvalid { ecu: String },
+    #[error("Failed to create ECU manager for ECU {ecu}: {reason}")]
+    EcuManagerFailed { ecu: String, reason: String },
 }
 
 pub const PROTO_LOAD_CONFIG: &[ProtoLoadConfig; 4] = &[
@@ -368,23 +376,23 @@ async fn mark_duplicate_ecus_by_address<S: SecurityPlugin>(
 }
 
 /// Extract and build the diagnostic database from proto data.
+///
+/// # Errors
+/// Returns [`MddLoadingError::LoadFailed`] if the MDD has no diagnostic
+/// description or if the payload cannot be parsed.
 fn build_diagnostic_database(
     proto_data: &mut HashMap<ChunkType, Vec<Chunk>>,
     ctx: &EcuLoadContext<'_>,
-) -> Option<cda_database::datatypes::DiagnosticDatabase> {
-    let database_payload = proto_data
+) -> Result<cda_database::datatypes::DiagnosticDatabase, MddLoadingError> {
+    let payload = proto_data
         .remove(&ChunkType::DiagnosticDescription)
         .and_then(|mut chunks| chunks.pop())
-        .and_then(|c| c.payload);
-
-    let payload = database_payload.or_else(|| {
-        tracing::error!(
-            mdd_file = %ctx.mddfile.display(),
-            ecu_name = %ctx.ecu_name,
-            "No payload found in diagnostic description for ECU"
-        );
-        None
-    })?;
+        .and_then(|c| c.payload)
+        .ok_or_else(|| MddLoadingError::LoadFailed {
+            path: ctx.mddfile.display().to_string(),
+            ecu: ctx.ecu_name.clone(),
+            reason: "Empty MDD - no diagnostic description payload found".to_string(),
+        })?;
 
     let mut cfg = ctx.database_config.clone();
     if let Some(override_value) = ctx
@@ -401,25 +409,25 @@ fn build_diagnostic_database(
         ctx.flat_buf_settings.clone(),
         cfg,
     )
-    .map_err(|e| {
-        tracing::error!(
-            mdd_file = %ctx.mddfile.display(),
-            ecu_name = %ctx.ecu_name,
-            error = %e,
-            "Failed to create database from MDD payload"
-        );
+    .map_err(|e| MddLoadingError::LoadFailed {
+        path: ctx.mddfile.display().to_string(),
+        ecu: ctx.ecu_name.clone(),
+        reason: e.to_string(),
     })
-    .ok()
 }
 
 /// Create an ECU manager from diagnostic database and configuration.
+///
+/// # Errors
+/// Returns [`MddLoadingError::EcuManagerFailed`] if the manager cannot be
+/// created.
 fn create_ecu_manager<S: SecurityPlugin>(
     diag_database: cda_database::datatypes::DiagnosticDatabase,
     protocol: Protocol,
     ecu_type: EcuManagerType,
     effective_com_params: &ComParams,
     ctx: &EcuLoadContext<'_>,
-) -> Option<EcuManager<S>> {
+) -> Result<EcuManager<S>, MddLoadingError> {
     EcuManager::new(
         diag_database,
         protocol,
@@ -432,14 +440,10 @@ fn create_ecu_manager<S: SecurityPlugin>(
         },
         ctx.func_description_cfg,
     )
-    .map_err(|e| {
-        tracing::error!(
-            ecu_name = %ctx.ecu_name,
-            error = ?e,
-            "Failed to create DiagServiceManager"
-        );
+    .map_err(|e| MddLoadingError::EcuManagerFailed {
+        ecu: ctx.ecu_name.clone(),
+        reason: format!("{e:?}"),
     })
-    .ok()
 }
 
 /// Extract file chunks from proto data.
@@ -461,18 +465,25 @@ fn extract_file_chunks(mut proto_data: HashMap<ChunkType, Vec<Chunk>>) -> Vec<Ch
 }
 
 /// Load and process a single ECU from MDD file.
+///
+/// # Errors
+/// Returns the [`MddLoadingError`] of the step that failed.
 fn load_ecu_from_file<S: SecurityPlugin>(
     proto_data: HashMap<ChunkType, Vec<Chunk>>,
     ctx: &EcuLoadContext<'_>,
     per_ecu_cfg: Option<&EcuConfig>,
-) -> Option<EcuLoadResult<S>> {
+) -> Result<EcuLoadResult<S>, MddLoadingError> {
     let mut proto_data = proto_data;
     let diag_database = build_diagnostic_database(&mut proto_data, ctx)?;
+    // resolve_com_params logs the cause itself.
     let effective_com_params = crate::config::com_params::resolve_com_params(
         &ctx.ecu_name,
         ctx.com_params,
         per_ecu_cfg.and_then(|c| c.com_params.as_ref()),
-    )?;
+    )
+    .ok_or_else(|| MddLoadingError::ComParamsInvalid {
+        ecu: ctx.ecu_name.clone(),
+    })?;
     let protocol = per_ecu_cfg.and_then(|c| c.protocol.as_deref()).map_or_else(
         || ctx.protocol.clone(),
         |name| Protocol::new(name.to_owned()),
@@ -491,7 +502,7 @@ fn load_ecu_from_file<S: SecurityPlugin>(
     )?;
     let files = extract_file_chunks(proto_data);
 
-    Some(EcuLoadResult { manager, files })
+    Ok(EcuLoadResult { manager, files })
 }
 
 /// Loads a single MDD file and returns the ECU name, manager, and file manager.
@@ -510,6 +521,7 @@ fn load_single_mdd<S: SecurityPlugin>(
             .map(ToOwned::to_owned)
             .ok_or_else(|| MddLoadingError::LoadFailed {
                 path: path.display().to_string(),
+                ecu: "unknown".to_string(),
                 reason: "Failed to convert path to string".to_string(),
             })?;
 
@@ -527,6 +539,7 @@ fn load_single_mdd<S: SecurityPlugin>(
     let (ecu_name, proto_data) = cda_database::load_proto_data(&mdd_path, PROTO_LOAD_CONFIG)
         .map_err(|e| MddLoadingError::LoadFailed {
             path: mdd_path.clone(),
+            ecu: "unknown".to_string(),
             reason: e.to_string(),
         })?;
 
@@ -550,12 +563,7 @@ fn load_single_mdd<S: SecurityPlugin>(
     };
 
     let per_ecu_cfg = ecu_config_map.get(&ecu_name.to_lowercase());
-    let result = load_ecu_from_file(proto_data, &ctx, per_ecu_cfg).ok_or_else(|| {
-        MddLoadingError::LoadFailed {
-            path: mdd_path.clone(),
-            reason: format!("Failed to load ECU {ecu_name} from MDD"),
-        }
-    })?;
+    let result = load_ecu_from_file(proto_data, &ctx, per_ecu_cfg)?;
 
     let file_manager = FileManager::new(mdd_path, result.files);
     Ok((ecu_name, result.manager, file_manager))
@@ -704,6 +712,43 @@ mod tests {
             vec!["large.mdd", "small.mdd"],
             "storage and database.dir must load in the same order"
         );
+    }
+
+    #[test]
+    fn build_diagnostic_database_reports_empty_mdd() {
+        let mddfile = PathBuf::from("ECU.mdd");
+        let flat_buf = FlatbBufConfig::default();
+        let database_config = cda_database::DatabaseConfig::default();
+        let ecu_config_map = Arc::new(HashMap::new());
+        let func_description_cfg = FunctionalDescriptionConfig::default();
+        let protocol = Protocol::new("UDS_Ethernet_DoIP".to_owned());
+        let com_params = Arc::new(ComParams::default());
+        let ctx = EcuLoadContext {
+            mdd_path: mddfile.display().to_string(),
+            mddfile: &mddfile,
+            ecu_name: "ECU".to_owned(),
+            flat_buf_settings: &flat_buf,
+            database_config: &database_config,
+            ecu_config_map: &ecu_config_map,
+            database_naming_convention: DatabaseNamingConvention::default(),
+            func_description_cfg: &func_description_cfg,
+            protocol: &protocol,
+            com_params: &com_params,
+            fallback_to_base_variant: false,
+            strict_parameter_validation: false,
+        };
+
+        let result = build_diagnostic_database(&mut HashMap::new(), &ctx);
+
+        match result {
+            Err(MddLoadingError::LoadFailed { path, ecu, reason }) => {
+                assert_eq!(path, "ECU.mdd");
+                assert_eq!(ecu, "ECU");
+                assert!(reason.contains("Empty MDD"));
+            }
+            Err(other) => panic!("Expected LoadFailed, got {other}"),
+            Ok(_) => panic!("Expected LoadFailed, got a database"),
+        }
     }
 
     struct Fixture {

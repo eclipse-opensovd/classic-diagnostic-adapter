@@ -37,6 +37,7 @@ HANDLER -> LOCK : lock functional group
 activate LOCK
 
 LOCK -> LOCK : stop non-functional\nTester Presents
+LOCK -> LOCK : take over covered component\nlocks' physical Tester Present
 LOCK -> COMM : start functional Tester Presents\nto all DoIP entities
 activate COMM
 COMM -> ECUS : functional TesterPresent (3E)
@@ -68,7 +69,7 @@ HANDLER -> LOCK : unlock functional group
 activate LOCK
 
 LOCK -> LOCK : stop functional Tester Presents
-LOCK -> LOCK : restore previous ECU locks\n(optional)
+LOCK -> LOCK : release component locks replaced\n(with their own cleanup)
 
 LOCK -> HANDLER : lock released
 deactivate LOCK

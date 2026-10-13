@@ -49,7 +49,7 @@ use crate::{
 const RUNTIMEFILES_NEXTUPDATE: &str = "apps/sovd2uds/bulk-data/runtimefiles-nextupdate";
 const RUNTIMEFILES_CURRENT: &str = "apps/sovd2uds/bulk-data/runtimefiles-current";
 const RUNTIMEFILES_BACKUP: &str = "apps/sovd2uds/bulk-data/runtimefiles-backup";
-const RUNTIMEFILES_UPDATE_EXECUTIONS: &str =
+pub(crate) const RUNTIMEFILES_UPDATE_EXECUTIONS: &str =
     "apps/sovd2uds/operations/runtimefilesupdate/executions";
 
 /// Polls `GET /executions/{id}` until the execution reaches a terminal status
@@ -1468,7 +1468,7 @@ async fn get_file_list(
 }
 
 /// Serializes an `ExecutionMode` into the JSON body expected by execution endpoints.
-fn mode_json(mode: ExecutionMode) -> String {
+pub(crate) fn mode_json(mode: ExecutionMode) -> String {
     serde_json::json!({ "parameters": { "mode": mode } }).to_string()
 }
 

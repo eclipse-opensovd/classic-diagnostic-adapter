@@ -16,7 +16,10 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-use aide::{axum::ApiRouter, openapi::OpenApi};
+use aide::{
+    axum::ApiRouter,
+    openapi::{OpenApi, Paths},
+};
 use axum::middleware;
 use indexmap::IndexMap;
 use tokio::sync::RwLock;
@@ -25,7 +28,41 @@ use crate::{create_trace_layer, sovd};
 
 type RouteFinalizer = Arc<dyn Fn(axum::Router) -> axum::Router + Send + Sync>;
 /// Insertion order determines override precedence in the fallback chain.
-type RouteGroups = Arc<RwLock<IndexMap<u64, ApiRouter>>>;
+type RouteGroups = Arc<RwLock<IndexMap<u64, RouteGroup>>>;
+
+/// A route group split into its request-handling router and its `OpenAPI` paths.
+///
+/// The [`ApiRouter`] is split once on registration, so recompositions only clone the
+/// cheap axum router instead of the whole [`ApiRouter`] including its documentation.
+/// The paths are kept as serialized JSON, which is several times smaller than the
+/// in-memory [`Paths`] and only needs to be parsed when `openapi.json` is requested.
+struct RouteGroup {
+    router: axum::Router,
+    paths_json: Option<Box<[u8]>>,
+}
+
+impl RouteGroup {
+    fn paths(&self) -> Option<Paths> {
+        let json = self.paths_json.as_deref()?;
+        serde_json::from_slice(json)
+            .inspect_err(|e| tracing::error!(error = %e, "Failed to deserialize OpenAPI paths"))
+            .ok()
+    }
+}
+
+impl From<ApiRouter> for RouteGroup {
+    fn from(routes: ApiRouter) -> Self {
+        let mut api = OpenApi::default();
+        let router = routes.finish_api(&mut api);
+        let paths_json = api.paths.and_then(|paths| {
+            serde_json::to_vec(&paths)
+                .inspect_err(|e| tracing::error!(error = %e, "Failed to serialize OpenAPI paths"))
+                .ok()
+                .map(Vec::into_boxed_slice)
+        });
+        Self { router, paths_json }
+    }
+}
 
 /// An opaque handle to a route group registered with a [`DynamicRouter`].
 ///
@@ -69,7 +106,6 @@ pub struct DynamicRouter {
     route_groups: RouteGroups,
     finalizers: Arc<RwLock<Vec<RouteFinalizer>>>,
     router: Arc<RwLock<axum::Router>>,
-    openapi: Arc<RwLock<OpenApi>>,
     next_id: Arc<AtomicU64>,
 }
 
@@ -96,7 +132,6 @@ impl DynamicRouter {
             route_groups,
             finalizers,
             router: Arc::new(RwLock::new(initial_router)),
-            openapi: Arc::new(RwLock::new(OpenApi::default())),
             next_id: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -107,9 +142,27 @@ impl DynamicRouter {
         router.clone()
     }
 
-    /// Returns a clone of the current `OpenAPI` specification.
+    /// Builds the `OpenAPI` specification from the current route groups.
+    ///
+    /// The specification is generated on demand instead of being kept in memory,
+    /// as it is only needed when `openapi.json` is requested.
     pub async fn get_openapi(&self) -> Arc<OpenApi> {
-        Arc::new(self.openapi.read().await.clone())
+        let groups = self.route_groups.read().await;
+        // Latest-added group wins per path: iterating latest-first and only inserting
+        // paths not yet claimed lets later groups' docs override earlier ones.
+        let api = groups
+            .values()
+            .rev()
+            .fold(OpenApi::default(), |mut api, group| {
+                if let Some(paths) = group.paths() {
+                    let api_paths = api.paths.get_or_insert_with(Default::default);
+                    for (path, item) in paths.paths {
+                        api_paths.paths.entry(path).or_insert(item);
+                    }
+                }
+                api
+            });
+        Arc::new(api)
     }
 
     /// Registers a route group and recomposes the router.
@@ -126,7 +179,7 @@ impl DynamicRouter {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         {
             let mut groups = self.route_groups.write().await;
-            groups.insert(id, routes);
+            groups.insert(id, routes.into());
         }
         self.recompose().await;
         RouteHandle { id }
@@ -151,7 +204,7 @@ impl DynamicRouter {
             let mut groups = self.route_groups.write().await;
             match groups.entry(handle.id) {
                 indexmap::map::Entry::Occupied(mut entry) => {
-                    let _ = entry.insert(routes);
+                    let _ = entry.insert(routes.into());
                 }
                 indexmap::map::Entry::Vacant(_) => {
                     return Err(RouteGroupNotFound { id: handle.id });
@@ -193,38 +246,15 @@ impl DynamicRouter {
         // The not-found handler sits at the base so it only fires when no group matches.
         let composed = groups.iter().fold(
             axum::Router::new().fallback(sovd::error::sovd_not_found_handler),
-            |acc, (_id, group)| {
-                let group_router: axum::Router = group.clone().into();
-                group_router.fallback_service(acc)
-            },
+            |acc, (_id, group)| group.router.clone().fallback_service(acc),
         );
 
         let composed = Self::apply_base_layers(composed);
 
         let composed = finalizers.iter().fold(composed, |acc, f| f(acc));
 
-        // Build OpenAPI spec from groups (latest-added wins per path).
-        // aide's PathItem::merge_with favors self, so by iterating latest-first and
-        // only inserting paths not yet claimed, later groups' docs override earlier ones.
-        let api = groups
-            .iter()
-            .rev()
-            .fold(OpenApi::default(), |mut api, (_id, group)| {
-                let mut group_api = OpenApi::default();
-                let _router = group.clone().finish_api(&mut group_api);
-                if let Some(paths) = group_api.paths {
-                    let api_paths = api.paths.get_or_insert_with(Default::default);
-                    paths.paths.into_iter().for_each(|(path, item)| {
-                        api_paths.paths.entry(path).or_insert(item);
-                    });
-                }
-                api
-            });
-
         let mut router = self.router.write().await;
         *router = composed;
-        let mut openapi = self.openapi.write().await;
-        *openapi = api;
     }
 
     fn apply_base_layers(router: axum::Router) -> axum::Router {
