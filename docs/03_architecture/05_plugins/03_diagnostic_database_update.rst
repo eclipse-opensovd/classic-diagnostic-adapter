@@ -96,15 +96,24 @@ Diagnostic Database Update Plugin
     The runtime update plugin accepts MDD database files (``.mdd``). CDA configuration files cannot
     be updated through the runtime-files endpoints.
 
-    CDA can be started with MDD files provided in a directory (``database.dir``). Startup only reads it, so the
-    storage stays untouched. The storage is seeded from ``database.dir`` on the first update, by the first upload
-    or delete in ``runtimefiles-nextupdate``, so the update, its backup and the rollback start from the loaded
-    databases. Until then, ``runtimefiles-current`` and ``runtimefiles-nextupdate`` list the databases in
-    ``database.dir``. From then on the storage is used and the directory is ignored, even when an update removed
-    every database.
+    CDA can be started with MDD files provided in a directory (``database.dir``), which is always treated as
+    an immutable source. In ``always`` decompression mode, startup provisions the files into the
+    ``DiagnosticDatabase`` collection as described by :need:`arch~dt-database-loading`.
 
-    Custom update plugins must seed the storage the same way before their first write of an update, by calling
-    ``cda_database::storage::seed_if_nonexistent``.
+    In ``never`` mode, startup only reads ``database.dir`` and storage remains untouched until the first update
+    write. The first upload or delete in ``runtimefiles-nextupdate`` seeds storage from ``database.dir`` without
+    decompressing its files, so the update, its backup and the rollback start from the loaded databases. The
+    source directory remains untouched. In ``always`` mode, compressed MDDs introduced by subsequent runtime
+    updates are decompressed before the updated collection is reloaded; ``never`` keeps them compressed.
+
+    Seeding uses one storage transaction. The active collection becomes visible only when every source MDD has
+    been copied successfully. Until storage has been seeded, ``runtimefiles-current`` and
+    ``runtimefiles-nextupdate`` list the databases in ``database.dir``.
+
+    Once the ``DiagnosticDatabase`` collection exists, whether created during initial provisioning or seeded
+    by an update write, storage is authoritative and ``database.dir`` is ignored even when an update removed
+    every database. Custom update plugins must ensure storage is seeded before their first update write and
+    apply the configured decompression policy when the active collection does not already exist.
 
     **Limitations to bulk-data operations**
 
