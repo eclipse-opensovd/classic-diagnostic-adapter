@@ -202,9 +202,32 @@ Database Loading
        that the SOVD API can expose ECU metadata (names, capabilities) before communication
        is established. Only the DoIP gateway creation and variant detection are deferred.
 
+    **Initial Database Provisioning**
+
+    The active diagnostic database is resolved before loading. If the ``DiagnosticDatabase`` collection
+    exists in CDA storage, it is authoritative even when it is empty. Otherwise, the configured
+    ``database.dir`` provides the initial MDD files.
+
+    ``flat_buf.mdd_decompress`` controls when compressed MDD files are copied into writable storage and
+    decompressed:
+
+    - ``always`` provisions the initial MDD files into a new ``DiagnosticDatabase`` collection when none
+      exists. Already-uncompressed MDD files are copied as-is, while compressed MDD files are copied and
+      decompressed in writable storage.
+    - ``never`` does not create a collection at startup. Startup loads directly from ``database.dir`` and the
+      first runtime update write seeds the active collection without decompressing its files, as described by
+      :need:`arch~plugin-diagnostic-database-update`.
+
+    The configured database directory is an immutable source and is never rewritten. Startup provisioning in
+    ``always`` mode is performed in one storage transaction. The collection becomes visible only after every
+    selected MDD file has been copied and decompressed successfully where necessary. A failed or interrupted
+    transaction therefore leaves no active partial collection and can be retried on the next startup. After
+    the transaction commits, startup loads from the new active collection. Subsequent startups use that
+    collection and do not provision from ``database.dir`` again.
+
     **Parallel Loading Strategy**
 
-    The database loader discovers all ``.mdd`` files in the configured directory and sorts them
+    The database loader discovers all ``.mdd`` files in the resolved active location and sorts them
     by file size in descending order. Files are then distributed into chunks for parallel processing.
     The chunk size is calculated as:
 
