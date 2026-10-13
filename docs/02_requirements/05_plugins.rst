@@ -52,6 +52,12 @@ A SOVD security plugin must be able to:
 * Reject the incoming request
 * Enhance the SOVD-request-context with data, this context can then be used in other addons
 
+.. note::
+   The security plugin authenticates SOVD clients on the HTTP level (e.g. JWT). This is
+   independent of the UDS service Authentication (SID 29\ :sub:`16`), which authenticates a
+   client towards an ECU, see :need:`req~sovd-api-authentication-modes`. The plugin may
+   still allow or reject ``PUT /modes/authentication`` requests like any other request.
+
 Paths
 -----
 
