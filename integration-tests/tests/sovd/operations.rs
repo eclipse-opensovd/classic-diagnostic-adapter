@@ -882,6 +882,74 @@ async fn test_time_circuits_preset_destination_uds_frame() {
     release_ecu_lock(runtime, &auth, &lock_id).await;
 }
 
+/// Verify the correct error response when starting an operation with an invalid payload.
+#[tokio::test]
+async fn test_comparam_post_request_error_response_invalid_texttable_payload() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+
+    let lock_id = acquire_ecu_lock(runtime, &auth).await;
+
+    // Start with parameters as null - should be rejected with 400 Bad Request
+    let post_response = send_cda_request(
+        &runtime.config,
+        &format!("{ecu_endpoint}/operations/timecircuits/executions"),
+        StatusCode::BAD_REQUEST,
+        Method::POST,
+        Some(
+            r#"{"parameters":{"travelMethod":"PresetDestination","travelMethodData":{"PresetDestination":{"presetId":null}}}}"#,
+        ),
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Verify the contents of the JSON error response.
+    let json_response = response_to_json(&post_response).unwrap();
+    for (field, expected) in [
+        ("error_code", "vendor-specific"),
+        ("vendor_code", "bad-request"),
+    ] {
+        assert_eq!(
+            json_response.get(field).and_then(|v| v.as_str()),
+            Some(expected),
+            "Expected the rejection response to contain {field} as {expected}"
+        );
+    }
+
+    // Start with parameters as undefined value - should be rejected with 400 Bad Request
+    let post_response = send_cda_request(
+        &runtime.config,
+        &format!("{ecu_endpoint}/operations/timecircuits/executions"),
+        StatusCode::BAD_REQUEST,
+        Method::POST,
+        Some(
+            r#"{"parameters":{"travelMethod":"PresetDestination","travelMethodData":{"PresetDestination":{"presetId":"2022-10-21_UnknownValley"}}}}"#,
+        ),
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Verify the contents of the JSON error response.
+    let json_response = response_to_json(&post_response).unwrap();
+    for (field, expected) in [
+        ("error_code", "vendor-specific"),
+        ("vendor_code", "bad-request"),
+    ] {
+        assert_eq!(
+            json_response.get(field).and_then(|v| v.as_str()),
+            Some(expected),
+            "Expected the rejection response to contain {field} as {expected}"
+        );
+    }
+
+    release_ecu_lock(runtime, &auth, &lock_id).await;
+}
+
 async fn acquire_ecu_lock(
     runtime: &crate::util::runtime::TestRuntime,
     auth: &http::HeaderMap,

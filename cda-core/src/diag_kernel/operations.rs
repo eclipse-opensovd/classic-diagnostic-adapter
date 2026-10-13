@@ -639,7 +639,7 @@ fn compu_convert_text_table(
     }
 
     let Some(value) = value.as_str().map(|s| s.replace('"', "")) else {
-        return Err(DiagServiceError::UdsLookupError(
+        return Err(DiagServiceError::BadPayload(
             "Failed to convert value to string".to_owned(),
         ));
     };
@@ -681,7 +681,7 @@ fn compu_convert_text_table(
             _ => unreachable!(),
         };
     }
-    Err(DiagServiceError::UdsLookupError(
+    Err(DiagServiceError::BadPayload(
         "Failed to find matching TextTable value".to_owned(),
     ))
 }
@@ -1547,6 +1547,10 @@ mod tests {
             &value,
         );
         assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            cda_interfaces::DiagServiceError::BadPayload(_)
+        ));
     }
 
     #[test]
