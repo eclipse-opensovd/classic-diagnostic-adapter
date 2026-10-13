@@ -29,6 +29,130 @@ pub mod sovd2uds {
     }
 
     pub mod operations {
+        pub mod networkreset {
+            pub use cda_interfaces::topology::{
+                NetworkResetExecution, NetworkResetFlags, NetworkResetStatus,
+            };
+
+            /// The operation-specific parameters of a `networkreset` execution. Both
+            /// flags default to `true`.
+            #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+            pub struct ExecutionParameters {
+                /// Clear the persisted ECU topology.
+                #[serde(default)]
+                pub clear_persisted: Option<bool>,
+                /// Run a live detection (VIR/VAM discovery and variant detection).
+                #[serde(default)]
+                pub trigger_detection: Option<bool>,
+            }
+
+            impl ExecutionParameters {
+                /// The flags, with omitted values defaulting to `true`.
+                #[must_use]
+                pub fn flags(&self) -> NetworkResetFlags {
+                    NetworkResetFlags {
+                        clear_persisted: self.clear_persisted.unwrap_or(true),
+                        trigger_detection: self.trigger_detection.unwrap_or(true),
+                    }
+                }
+            }
+
+            /// Request body for an execution. The body and `parameters` are optional.
+            #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+            pub struct ExecutionRequest {
+                #[serde(default)]
+                pub parameters: ExecutionParameters,
+            }
+
+            /// The discriminant of an execution's status.
+            #[derive(
+                Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+            )]
+            #[serde(rename_all = "lowercase")]
+            pub enum ExecutionStatusKind {
+                Running,
+                Completed,
+                Failed,
+                Stopped,
+            }
+
+            /// Response body returned by `POST /executions`.
+            #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+            pub struct ExecutionCreatedResponse {
+                /// Unique execution identifier assigned by the server.
+                pub id: String,
+            }
+
+            /// Operation-specific values reported for an execution.
+            #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+            pub struct ExecutionResponseParameters {
+                pub clear_persisted: bool,
+                pub trigger_detection: bool,
+                /// Failure description, present only when `status` is `failed`.
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                pub reason: Option<String>,
+            }
+
+            /// Response body returned by `GET /executions/{id}`.
+            #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+            pub struct ExecutionResponse {
+                pub status: ExecutionStatusKind,
+                pub parameters: ExecutionResponseParameters,
+                #[schemars(skip)]
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                pub schema: Option<schemars::Schema>,
+            }
+
+            /// Response body returned by `GET /executions`.
+            #[derive(serde::Serialize, schemars::JsonSchema)]
+            pub struct ExecutionListResponse {
+                pub items: Vec<crate::common::operations::OperationIdItem>,
+            }
+
+            impl From<NetworkResetExecution> for ExecutionResponse {
+                fn from(exec: NetworkResetExecution) -> Self {
+                    let (status, reason) = match exec.status {
+                        NetworkResetStatus::Running => (ExecutionStatusKind::Running, None),
+                        NetworkResetStatus::Completed => (ExecutionStatusKind::Completed, None),
+                        NetworkResetStatus::Stopped => (ExecutionStatusKind::Stopped, None),
+                        NetworkResetStatus::Failed(reason) => {
+                            (ExecutionStatusKind::Failed, Some(reason))
+                        }
+                    };
+                    Self {
+                        status,
+                        parameters: ExecutionResponseParameters {
+                            clear_persisted: exec.flags.clear_persisted,
+                            trigger_detection: exec.flags.trigger_detection,
+                            reason,
+                        },
+                        schema: None,
+                    }
+                }
+            }
+
+            #[cfg(test)]
+            mod tests {
+                use super::*;
+
+                #[test]
+                fn omitted_flags_default_to_true() {
+                    let request: ExecutionRequest = serde_json::from_str("{}").unwrap();
+                    assert_eq!(request.parameters.flags(), NetworkResetFlags::default());
+                    let request: ExecutionRequest =
+                        serde_json::from_str(r#"{"parameters":{"trigger_detection":false}}"#)
+                            .unwrap();
+                    assert_eq!(
+                        request.parameters.flags(),
+                        NetworkResetFlags {
+                            clear_persisted: true,
+                            trigger_detection: false
+                        }
+                    );
+                }
+            }
+        }
+
         pub mod runtimefilesupdate {
             pub use cda_interfaces::runtime_update_api::{
                 ExecutionMode, ExecutionStatus, UpdateExecution,
@@ -158,6 +282,10 @@ pub mod sovd2uds {
                 pub logical_address: String,
                 /// ECU link '\<ecu>\_on\_\<protocol>'
                 pub logical_link: String,
+                /// Time of the last successful diagnostic contact (RFC 3339, UTC).
+                /// Absent if the ECU was never contacted.
+                #[serde(skip_serializing_if = "Option::is_none", default)]
+                pub last_seen: Option<String>,
             }
 
             #[derive(Serialize, Deserialize)]

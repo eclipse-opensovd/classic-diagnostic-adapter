@@ -177,6 +177,15 @@ where
             source_addr,
             netmask,
         } = doip_msg_ctx;
+        // `persisted-only`: ignored until a topology has been persisted, then
+        // handled without a restart.
+        if !state.topology.accepts_vams() {
+            tracing::debug!(
+                source_ip = %source_addr.ip(),
+                "Ignoring spontaneous VAM, no persisted topology (vam_handling_mode)"
+            );
+            return;
+        }
         match handle_vam::<T>(&state.ecus, doip_msg, source_addr, netmask).await {
             Ok(Some(doip_target)) => {
                 tracing::debug!(
@@ -199,8 +208,16 @@ where
                         doip_target.logical_address,
                     )
                     .await;
+                } else if state.lazy.update_pending(&doip_target).await {
+                    // Lazy start: the gateway connects on its first request, the
+                    // announcement only refreshes its address.
+                    tracing::debug!(
+                        ecu_name = %doip_target.ecu_name,
+                        "VAM from a pending gateway, updated its address"
+                    );
                 } else {
                     tracing::info!(ecu_name = %doip_target.ecu_name, "New Gateway ECU detected");
+                    let known_gateway = cda_interfaces::topology::KnownGateway::from(&doip_target);
 
                     match handle_gateway_connection::<T>(
                         doip_target,
@@ -216,6 +233,7 @@ where
                     .await
                     {
                         Ok(logical_address) => {
+                            state.topology.record_connected(known_gateway);
                             state.logical_address_to_connection.write().await.insert(
                                 logical_address,
                                 state.doip_connections.read().await.len().saturating_sub(1),
@@ -373,7 +391,7 @@ where
 {
     match source_addr {
         std::net::SocketAddr::V4(socket_addr_v4) => {
-            if socket_addr_v4.ip().to_bits() & netmask != netmask {
+            if !crate::reconnect::in_tester_subnet(*socket_addr_v4.ip(), netmask) {
                 tracing::warn!(
                     source_ip = %source_addr.ip(),
                     subnet_mask = ?netmask,

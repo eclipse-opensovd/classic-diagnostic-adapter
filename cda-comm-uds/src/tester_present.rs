@@ -13,10 +13,9 @@
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    Connectivity, DiagServiceError, EcuGateway, EcuManager, HashMap, HashSet,
-    SUPPRESS_POSITIVE_RESPONSE_BIT, ServicePayload, TesterPresentControlMessage, TesterPresentMode,
-    TesterPresentType, UdsEcuDb, UdsFunctionalGroup, UdsTesterPresent, VariantDetection, dlt_ctx,
-    service_ids, util::tokio_ext,
+    DiagServiceError, EcuGateway, EcuManager, HashMap, HashSet, SUPPRESS_POSITIVE_RESPONSE_BIT,
+    ServicePayload, TesterPresentControlMessage, TesterPresentMode, TesterPresentType, UdsEcuDb,
+    UdsFunctionalGroup, UdsTesterPresent, VariantDetection, dlt_ctx, service_ids, util::tokio_ext,
 };
 use tokio::{
     task::JoinHandle,
@@ -117,7 +116,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                     // naturally resume once the ECU is detected online again.
                     if let Ok(ecu) = uds.uds_ecu_db(&control_msg.ecu) {
                         let ecu_state = ecu.read().await.runtime_state().status().connectivity;
-                        if ecu_state != Connectivity::Online {
+                        if !ecu_state.is_online() {
                             tracing::debug!(
                                 ecu = %control_msg.ecu,
                                 ecu_state = %ecu_state,

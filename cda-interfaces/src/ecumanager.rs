@@ -136,8 +136,21 @@ pub struct MuxCaseInfo {
 pub enum Connectivity {
     /// ECU responded to the last communication attempt.
     Online,
+    /// ECU was registered from a persisted topology with a last known state of
+    /// Online, but has not been contacted in the current session yet. Reported
+    /// as Online externally.
+    AssumedOnline,
     /// ECU is currently unreachable (never connected, or lost connection).
     Offline,
+}
+
+impl Connectivity {
+    /// Returns `true` for [`Online`](Self::Online) and
+    /// [`AssumedOnline`](Self::AssumedOnline).
+    #[must_use]
+    pub fn is_online(self) -> bool {
+        matches!(self, Self::Online | Self::AssumedOnline)
+    }
 }
 
 /// ECU variant detection result.
@@ -226,11 +239,11 @@ impl EcuState {
         self.variant_state.is_fallback()
     }
 
-    /// Returns `true` if the ECU is online with a successfully detected variant.
+    /// Returns `true` if the ECU is (assumed) online with a successfully detected
+    /// variant.
     #[must_use]
     pub fn is_online_and_detected(&self) -> bool {
-        self.connectivity == Connectivity::Online
-            && matches!(self.variant_state, VariantState::Detected { .. })
+        self.connectivity.is_online() && matches!(self.variant_state, VariantState::Detected { .. })
     }
 }
 
@@ -262,6 +275,21 @@ pub struct EcuRuntimeState {
     /// variant detection's conclusion instead of polling. `Arc`-wrapped so that
     /// cloning `EcuRuntimeState` shares one channel, like `ecu_state` itself.
     variant_state_tx: std::sync::Arc<tokio::sync::watch::Sender<VariantState>>,
+    /// Time of the last successful diagnostic contact. See [`LastSeen`].
+    last_seen: std::sync::Arc<std::sync::Mutex<LastSeen>>,
+}
+
+/// Time of the last successful diagnostic contact with an ECU.
+///
+/// The newest write always wins, even if it is older than the previous value:
+/// vehicle clocks are often wrong at boot and corrected later, so keeping the
+/// maximum would pin a bogus future timestamp forever.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LastSeen {
+    /// The timestamp, `None` if the ECU was never contacted.
+    pub at: Option<std::time::SystemTime>,
+    /// Set on contact, cleared once the value has been persisted.
+    pub dirty: bool,
 }
 
 impl EcuRuntimeState {
@@ -273,7 +301,47 @@ impl EcuRuntimeState {
             ecu_state: std::sync::Arc::new(std::sync::RwLock::new(EcuState::default())),
             service_states: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
             variant_state_tx: std::sync::Arc::new(variant_state_tx),
+            last_seen: std::sync::Arc::new(std::sync::Mutex::new(LastSeen::default())),
         }
+    }
+
+    /// Records a successful diagnostic contact now.
+    pub fn touch_last_seen(&self) {
+        let mut last_seen = std_ext::lock_mutex(&self.last_seen);
+        last_seen.at = Some(std::time::SystemTime::now());
+        last_seen.dirty = true;
+    }
+
+    /// Restores a persisted timestamp. The value is not marked dirty, since it
+    /// is already persisted.
+    pub fn restore_last_seen(&self, at: std::time::SystemTime) {
+        let mut last_seen = std_ext::lock_mutex(&self.last_seen);
+        last_seen.at = Some(at);
+        last_seen.dirty = false;
+    }
+
+    /// Returns the time of the last successful diagnostic contact.
+    #[must_use]
+    pub fn last_seen(&self) -> Option<std::time::SystemTime> {
+        std_ext::lock_mutex(&self.last_seen).at
+    }
+
+    /// Returns the timestamp if it changed since it was last persisted, and
+    /// clears the dirty flag.
+    #[must_use]
+    pub fn take_dirty_last_seen(&self) -> Option<std::time::SystemTime> {
+        let mut last_seen = std_ext::lock_mutex(&self.last_seen);
+        if !last_seen.dirty {
+            return None;
+        }
+        last_seen.dirty = false;
+        last_seen.at
+    }
+
+    /// Clears the dirty flag after the current value has been persisted
+    /// together with the full topology.
+    pub fn mark_last_seen_persisted(&self) {
+        std_ext::lock_mutex(&self.last_seen).dirty = false;
     }
 
     /// Convenience: get an [`EcuState`] snapshot.
@@ -1413,5 +1481,46 @@ mod tests {
             ),
             request_lock_key_for(true, 0x1000, 0x0712, None, "ecu1")
         );
+    }
+}
+
+#[cfg(test)]
+mod last_seen_tests {
+    use std::time::{Duration, SystemTime};
+
+    use super::{Connectivity, EcuRuntimeState};
+
+    /// [[ test~ecu-last-seen, `last_seen` keeps the newest write and tracks persistence, test ]]
+    #[test]
+    fn last_seen_newest_write_wins_and_tracks_dirty() {
+        let state = EcuRuntimeState::new();
+        assert_eq!(state.last_seen(), None);
+        assert_eq!(state.take_dirty_last_seen(), None);
+
+        // A restored value is already persisted.
+        let future = SystemTime::now()
+            .checked_add(Duration::from_secs(3600))
+            .unwrap();
+        state.restore_last_seen(future);
+        assert_eq!(state.last_seen(), Some(future));
+        assert_eq!(state.take_dirty_last_seen(), None);
+
+        // A contact after a clock correction replaces the (future) value.
+        state.touch_last_seen();
+        let touched = state.last_seen().unwrap();
+        assert!(touched < future);
+        assert_eq!(state.take_dirty_last_seen(), Some(touched));
+        assert_eq!(state.take_dirty_last_seen(), None, "taking clears the flag");
+
+        state.touch_last_seen();
+        state.mark_last_seen_persisted();
+        assert_eq!(state.take_dirty_last_seen(), None);
+    }
+
+    #[test]
+    fn assumed_online_counts_as_online() {
+        assert!(Connectivity::Online.is_online());
+        assert!(Connectivity::AssumedOnline.is_online());
+        assert!(!Connectivity::Offline.is_online());
     }
 }

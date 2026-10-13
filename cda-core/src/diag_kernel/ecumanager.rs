@@ -23,6 +23,7 @@ use cda_interfaces::{
         RetryPolicy, SdSdg, TesterPresentSendType,
     },
     dlt_ctx,
+    topology::PersistedVariant,
     util::std_ext,
 };
 use cda_plugin_security::SecurityPlugin;
@@ -887,8 +888,44 @@ impl<S: SecurityPlugin> EcuManager<S> {
     }
 
     pub(crate) async fn set_variant(&self, variant: VariantData) -> Result<(), DiagServiceError> {
-        let variant_name = &variant.name;
-        let variant_index = self.diag_database.ecu_data().ok().and_then(|ecu_data| {
+        self.apply_variant(variant, Connectivity::Online).await
+    }
+
+    /// Restores a variant from a persisted topology, without contacting the ECU.
+    ///
+    /// The ECU is registered as [`Connectivity::AssumedOnline`]: reported Online,
+    /// but confirmed only by its first successful contact. Returns `false` (and
+    /// changes nothing) if the variant is not part of the loaded database, e.g.
+    /// after a database update, so the ECU gets a regular variant detection.
+    ///
+    /// # Errors
+    /// Returns an error if the database cannot be loaded or the default service
+    /// states cannot be set.
+    /// [[ dimpl~ecu-state-restore, Restore an ECU variant as assumed online, dimpl ]]
+    pub async fn restore_persisted_variant(
+        &mut self,
+        variant: &PersistedVariant,
+    ) -> Result<bool, DiagServiceError> {
+        if !self.diag_database.is_loaded() {
+            self.diag_database.load()?;
+        }
+        if self.variant_index(&variant.name).is_none() {
+            return Ok(false);
+        }
+        self.apply_variant(
+            VariantData {
+                name: variant.name.clone(),
+                is_base_variant: variant.is_base_variant,
+                is_fallback: variant.is_fallback,
+            },
+            Connectivity::AssumedOnline,
+        )
+        .await?;
+        Ok(true)
+    }
+
+    fn variant_index(&self, variant_name: &str) -> Option<usize> {
+        self.diag_database.ecu_data().ok().and_then(|ecu_data| {
             ecu_data.variants().and_then(|variants| {
                 variants.iter().position(|variant| {
                     variant
@@ -897,7 +934,16 @@ impl<S: SecurityPlugin> EcuManager<S> {
                         .is_some_and(|name| name == variant_name)
                 })
             })
-        });
+        })
+    }
+
+    async fn apply_variant(
+        &self,
+        variant: VariantData,
+        connectivity: Connectivity,
+    ) -> Result<(), DiagServiceError> {
+        let variant_name = &variant.name;
+        let variant_index = self.variant_index(variant_name);
 
         let current_variant_index = std_ext::lock_read(&self.runtime_state.ecu_state).variant_index;
         if current_variant_index != variant_index {
@@ -911,7 +957,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             let mut ecu_state = std_ext::lock_write(&self.runtime_state.ecu_state);
 
             if variant_index.is_some() {
-                ecu_state.connectivity = Connectivity::Online;
+                ecu_state.connectivity = connectivity;
                 ecu_state.variant_state = VariantState::Detected {
                     name: variant.name.clone(),
                     is_base_variant: variant.is_base_variant,
@@ -1013,6 +1059,43 @@ mod tests {
         );
         assert_eq!(rs.connectivity, connectivity_state);
         assert_eq!(rs.variant_state, variant_state);
+    }
+
+    /// [[ test~ecu-state-restore, A persisted variant is restored as assumed online, test ]]
+    #[tokio::test]
+    async fn restore_persisted_variant_registers_assumed_online() {
+        let mut ecu_manager = create_ecu_manager_variant_detection(true);
+        let restored = ecu_manager
+            .restore_persisted_variant(&PersistedVariant {
+                name: "SpecificVariant".to_owned(),
+                is_base_variant: false,
+                is_fallback: false,
+            })
+            .await
+            .unwrap();
+        assert!(restored);
+        let state = ecu_manager.runtime_state.status();
+        assert_eq!(state.connectivity, Connectivity::AssumedOnline);
+        assert_eq!(state.name(), Some("SpecificVariant"));
+        assert!(state.variant_index.is_some());
+    }
+
+    #[tokio::test]
+    async fn restore_unknown_variant_changes_nothing() {
+        let mut ecu_manager = create_ecu_manager_variant_detection(true);
+        let before = ecu_manager.runtime_state.status();
+        let restored = ecu_manager
+            .restore_persisted_variant(&PersistedVariant {
+                name: "RemovedVariant".to_owned(),
+                is_base_variant: false,
+                is_fallback: false,
+            })
+            .await
+            .unwrap();
+        assert!(!restored);
+        let state = ecu_manager.runtime_state.status();
+        assert_eq!(state.connectivity, before.connectivity);
+        assert_eq!(state.variant_state, before.variant_state);
     }
 
     #[tokio::test]

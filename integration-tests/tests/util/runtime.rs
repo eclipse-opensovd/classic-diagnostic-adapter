@@ -784,6 +784,52 @@ pub(crate) async fn restart_cda(config: &Configuration) -> Result<(), TestingErr
     Ok(())
 }
 
+/// Restarts the shared CDA with `config` but keeps its container, and therefore
+/// the CDA storage (e.g. the persisted ECU topology). The stop is graceful
+/// (SIGTERM), so the CDA runs its shutdown sequence.
+pub(crate) async fn restart_cda_keeping_storage(
+    config: &Configuration,
+) -> Result<(), TestingError> {
+    mark_cda_stopped().await;
+    write_config_toml(&test_container_dir()?, config.clone())?;
+    let status = std::process::Command::new("docker")
+        .args(["compose", "restart", "cda"])
+        .env("COMPOSE_PROFILES", compose_profiles())
+        .current_dir(test_container_dir()?)
+        .status()
+        .map_err(|e| TestingError::ProcessFailed(format!("Failed to restart CDA: {e}")))?;
+    check_command_success(status, "docker compose restart failed")?;
+    wait_for_cda_online(&config.server).await?;
+    mark_cda_started(config).await;
+    Ok(())
+}
+
+/// Runs `command` with `sh -c` inside the CDA container and returns its stdout.
+pub(crate) fn exec_in_cda(command: &str) -> Result<String, TestingError> {
+    let output = std::process::Command::new("docker")
+        .args(["compose", "exec", "-T", "cda", "sh", "-c", command])
+        .current_dir(test_container_dir()?)
+        .output()
+        .map_err(|e| TestingError::ProcessFailed(format!("Failed to exec in CDA: {e}")))?;
+    if !output.status.success() {
+        return Err(TestingError::ProcessFailed(format!(
+            "Command `{command}` failed in the CDA container: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Returns the CDA container logs since `since` (RFC 3339 or a duration like `10s`).
+pub(crate) fn cda_logs_since(since: &str) -> Result<String, TestingError> {
+    let output = std::process::Command::new("docker")
+        .args(["compose", "logs", "--no-color", "--since", since, "cda"])
+        .current_dir(test_container_dir()?)
+        .output()
+        .map_err(|e| TestingError::ProcessFailed(format!("Failed to read CDA logs: {e}")))?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 /// Restarts the shared CDA after applying a test-specific configuration change.
 pub(crate) async fn restart_cda_with_config<F>(
     config: &Configuration,

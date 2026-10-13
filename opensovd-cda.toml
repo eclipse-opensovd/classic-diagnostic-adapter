@@ -472,7 +472,10 @@
 # diagnostic request arrives while initialization is still pending.
 # deferred_retry_after_seconds = 30
 # Controls when diagnostic transport network activation begins:
-# - "Always": whole-vehicle communication initializes eagerly at startup (default).
+# - "Always": whole-vehicle communication initializes eagerly at startup,
+#   always with a full broadcast discovery (default).
+# - "WhenNotPersisted": like "Always", but a persisted topology (see
+#   `ecu_list_persistence`) is reused instead of a broadcast discovery.
 # - "OnDemand": HTTP/SOVD starts first. The first qualifying ECU diagnostic
 #   request, or an explicit `activate()` call, triggers initialization.
 # - "Disabled": HTTP/SOVD starts first. The default communication plugin
@@ -486,6 +489,12 @@
 # - "Deferred": leave communication deferred even if the update displaced
 #   an enabled runtime. The transport stays down until triggered.
 # post_update_mode = "Enabled"
+# Handling of spontaneous vehicle announcements (VAMs):
+# - "always": connect announced gateways and detect their ECUs (default).
+# - "persisted-only": only while a persisted topology exists; like "never"
+#   while `ecu_list_persistence` is disabled.
+# - "never": do not listen for spontaneous announcements.
+# vam_handling_mode = "always"
 # Controls whether enabling communication also runs whole-vehicle variant
 # detection:
 # - "Always": the registered detector runs as the last stage of every
@@ -494,6 +503,19 @@
 #   only, so variant-dependent surfaces report not-ready until detection is
 #   triggered explicitly.
 # variant_detection = "Always"
+
+# Persistence of the detected ECU/gateway topology.
+[communication.ecu_list_persistence]
+# Upper bound (in seconds) for waiting until gateway discovery and
+# variant detection have settled before the result is persisted.
+# detection_settle_timeout_seconds = 60
+# When `true`, the detected topology is persisted after every detection
+# run and `last_seen` timestamps are written back at shutdown. With
+# `init_mode = "WhenNotPersisted"` (or `OnDemand`/`Disabled` once
+# triggered), a persisted topology is reused instead of a full
+# VIR/VAM broadcast discovery. When `false` (default), the persisted
+# topology is never read or written.
+# enabled = false
 
 [components.additional_fields.x-sovd2uds-can-ecus.CAN]
 # ignore_case = true

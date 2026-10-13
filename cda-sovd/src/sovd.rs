@@ -92,9 +92,17 @@ impl IntoSovd for cda_interfaces::EcuState {
     fn into_sovd(self) -> Self::SovdType {
         match (&self.connectivity, &self.variant_state) {
             (_, VariantState::Duplicate) => sovd_ecu::State::Duplicate,
-            (Connectivity::Online, VariantState::Detected { .. }) => sovd_ecu::State::Online,
-            (Connectivity::Online, VariantState::NotDetected) => sovd_ecu::State::NoVariantDetected,
-            (Connectivity::Online, VariantState::NotTested) => sovd_ecu::State::NotTested,
+            // AssumedOnline is internal-only and reported like Online; `last_seen`
+            // tells clients how current that is.
+            (Connectivity::Online | Connectivity::AssumedOnline, VariantState::Detected { .. }) => {
+                sovd_ecu::State::Online
+            }
+            (Connectivity::Online | Connectivity::AssumedOnline, VariantState::NotDetected) => {
+                sovd_ecu::State::NoVariantDetected
+            }
+            (Connectivity::Online | Connectivity::AssumedOnline, VariantState::NotTested) => {
+                sovd_ecu::State::NotTested
+            }
             (Connectivity::Offline, VariantState::NotTested) => sovd_ecu::State::Offline,
             (Connectivity::Offline, VariantState::Detected { .. } | VariantState::NotDetected) => {
                 sovd_ecu::State::Disconnected
@@ -125,6 +133,11 @@ pub(crate) struct WebserverEcuState<T: UdsEcu + Clone, U: FileManager> {
     pub(crate) service_executions: Arc<ExecutionLock<ServiceExecution>>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
     mdd_embedded_files: Arc<U>,
+}
+
+/// Formats a timestamp for SOVD responses: RFC 3339, UTC, millisecond precision.
+pub(crate) fn format_sovd_timestamp(time: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 pub(crate) fn with_retry_after(mut response: Response, retry_after: Option<Duration>) -> Response {
@@ -1376,6 +1389,53 @@ pub(crate) mod tests {
     use sovd_interfaces::sovd2uds::FileList;
 
     use super::*;
+
+    /// `AssumedOnline` is internal-only and must be reported like Online.
+    #[test]
+    fn assumed_online_is_reported_as_online() {
+        let detected = VariantState::Detected {
+            name: "Variant".to_owned(),
+            is_base_variant: false,
+            is_fallback: false,
+        };
+        for (connectivity, variant_state, expected) in [
+            (
+                Connectivity::AssumedOnline,
+                detected.clone(),
+                sovd_ecu::State::Online,
+            ),
+            (
+                Connectivity::Online,
+                detected.clone(),
+                sovd_ecu::State::Online,
+            ),
+            (
+                Connectivity::Offline,
+                detected,
+                sovd_ecu::State::Disconnected,
+            ),
+            (
+                Connectivity::AssumedOnline,
+                VariantState::Duplicate,
+                sovd_ecu::State::Duplicate,
+            ),
+        ] {
+            let state = cda_interfaces::EcuState {
+                connectivity,
+                variant_state,
+                variant_index: None,
+            };
+            assert_eq!(state.into_sovd(), expected);
+        }
+    }
+
+    #[test]
+    fn sovd_timestamp_is_rfc3339_utc_millis() {
+        let time = std::time::SystemTime::UNIX_EPOCH
+            .checked_add(std::time::Duration::from_millis(1_700_000_000_123))
+            .unwrap();
+        assert_eq!(format_sovd_timestamp(time), "2023-11-14T22:13:20.123Z");
+    }
 
     struct DeferredCommunicationAccess {
         activation_requests: AtomicUsize,

@@ -91,6 +91,7 @@ impl<S: EcuGateway, T: UdsEcuDb + PayloadDecoder> UdsManager<S, T> {
                 for (ecu_name, uds_result) in uds_responses {
                     match uds_result {
                         Ok(msg) => {
+                            self.state_coordinator.handle_ecu_responded(&ecu_name).await;
                             // Process the response using the ECU's convert_from_uds
                             let ecu_read = fgl_ecu.read().await;
                             let response = ecu_read
@@ -580,6 +581,8 @@ mod tests {
             communication_retry_after: Duration::from_secs(1),
             variant_detection_receiver: Arc::new(Mutex::new(None)),
             variant_detection_listener: Arc::new(Mutex::new(None)),
+            detection_tracker: cda_interfaces::DetectionTracker::new(),
+            activation_detection_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 

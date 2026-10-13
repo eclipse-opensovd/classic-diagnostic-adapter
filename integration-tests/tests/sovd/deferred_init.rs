@@ -69,6 +69,7 @@ impl CdaMode {
             variant_detection: VariantDetectionMode::Always,
             post_update_mode,
             deferred_retry_after_seconds: 1,
+            ..CommunicationSettings::default()
         };
         config
     }
@@ -607,6 +608,7 @@ async fn variant_detection_never_requires_explicit_trigger() {
                 variant_detection: VariantDetectionMode::Never,
                 post_update_mode: PostUpdateCommunicationMode::Enabled,
                 deferred_retry_after_seconds: 1,
+                ..CommunicationSettings::default()
             };
         })
         .await

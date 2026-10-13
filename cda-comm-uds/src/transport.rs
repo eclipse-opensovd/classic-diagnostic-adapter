@@ -581,6 +581,12 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                 .await;
         }
 
+        // Any final response, positive or negative, proves the ECU is reachable
+        // (response-pending NRCs never get here).
+        if response.is_ok() {
+            self.state_coordinator.handle_ecu_responded(ecu_name).await;
+        }
+
         if let Ok(ref msg) = response
             && msg.is_positive_response_for_sid(sent_sid)
         {
@@ -1007,8 +1013,76 @@ pub(crate) mod send_tests {
                 communication_retry_after: TEST_COMMUNICATION_RETRY_AFTER,
                 variant_detection_receiver: Arc::new(Mutex::new(None)),
                 variant_detection_listener: Arc::new(Mutex::new(None)),
+                detection_tracker: cda_interfaces::DetectionTracker::new(),
+                activation_detection_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }
         }
+    }
+
+    /// Only the activation's detection skips ECUs restored as assumed online; an
+    /// explicit re-detection resets them to `NotTested` first (req~dt-ecu-states).
+    /// [[ test~ecu-state-explicit-redetection, Explicit re-detection resets assumed online ECUs, test ]]
+    #[tokio::test]
+    async fn explicit_redetection_resets_assumed_online_ecus() {
+        use cda_interfaces::{
+            Connectivity, VariantState,
+            communication_control::{CommunicationLifecycle, CommunicationVariantDetection},
+        };
+
+        struct NoAutoDetection;
+        impl CommunicationAccess for NoAutoDetection {
+            fn state(&self) -> CommunicationState {
+                CommunicationState::Enabled
+            }
+
+            fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+                Err(CommunicationError::Disabled)
+            }
+
+            fn request_activate(&self, _cause: ActivationCause) -> CommunicationState {
+                CommunicationState::Enabled
+            }
+
+            // Keeps the detection from spawning detection tasks.
+            fn variant_detection(&self) -> VariantDetectionMode {
+                VariantDetectionMode::Never
+            }
+        }
+
+        let ecu = TestEcuDb::new();
+        let state = cda_interfaces::EcuManager::runtime_state(&ecu);
+        {
+            let mut ecu_state = state.ecu_state.write().unwrap();
+            ecu_state.connectivity = Connectivity::AssumedOnline;
+            ecu_state.variant_state = VariantState::Detected {
+                name: "Restored".to_owned(),
+                is_base_variant: false,
+                is_fallback: false,
+            };
+        }
+        let mut ecus = HashMap::default();
+        ecus.insert("ecu".to_owned(), RwLock::new(ecu));
+        let manager = UdsManager::new_for_raw_payload_tests(
+            make_gateway(),
+            Arc::new(ecus),
+            FaultConfig::default(),
+            Arc::new(NoAutoDetection),
+        );
+
+        // The detection of an activation keeps the restored state.
+        CommunicationLifecycle::initialize(&manager).await.unwrap();
+        CommunicationVariantDetection::detect(&manager)
+            .await
+            .unwrap();
+        assert_eq!(state.status().connectivity, Connectivity::AssumedOnline);
+        CommunicationLifecycle::on_enabled(&manager).await;
+
+        // An explicit re-detection resets it.
+        CommunicationVariantDetection::detect(&manager)
+            .await
+            .unwrap();
+        assert_eq!(state.status().connectivity, Connectivity::Offline);
+        assert_eq!(state.status().variant_state, VariantState::NotTested);
     }
 
     fn disabled_communication_access() -> Arc<dyn CommunicationAccess> {

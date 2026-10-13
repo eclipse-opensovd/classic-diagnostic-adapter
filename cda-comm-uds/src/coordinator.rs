@@ -222,8 +222,9 @@ impl Message<ClearServiceStates> for EcuCoordinator {
 
 /// ECU disconnected event -> sets connectivity to Offline, preserving variant state.
 ///
-/// Only transitions from `Online` to `Offline`. If already `Offline`, this is a no-op.
-/// Variant state is preserved.
+/// Transitions from `Online` or `AssumedOnline` to `Offline`. If already `Offline`, this
+/// is a no-op. Variant state is preserved, so an ECU that was known to be reachable is
+/// reported as Disconnected.
 pub struct EcuDisconnected;
 
 impl Message<EcuDisconnected> for EcuCoordinator {
@@ -244,10 +245,11 @@ impl Message<EcuDisconnected> for EcuCoordinator {
 
         let mut ecu_state = std_ext::lock_write(&self.state.ecu_state);
 
-        if ecu_state.connectivity == Connectivity::Online {
+        if ecu_state.connectivity.is_online() {
             tracing::info!(
                 ecu = %self.ecu_name,
                 dlt_context = dlt_ctx!("UDS"),
+                previous = ?ecu_state.connectivity,
                 "ECU disconnected. Setting connectivity to Offline"
             );
             ecu_state.connectivity = Connectivity::Offline;
@@ -263,7 +265,9 @@ impl Message<EcuDisconnected> for EcuCoordinator {
 
 /// ECU connected event -> sets connectivity to Online and clears variant for re-detection.
 ///
-/// Only transitions from `Offline` to `Online`. If already `Online`, this is a no-op.
+/// Only transitions from `Offline` to `Online`. If already `Online` or `AssumedOnline`,
+/// this is a no-op: an `AssumedOnline` ECU keeps its restored variant until it is
+/// contacted, so connecting its gateway does not trigger a re-detection.
 /// Variant state is cleared to `NotTested` because the ECU may have rebooted while offline
 /// (e.g. into a different session/variant).
 ///
@@ -296,9 +300,35 @@ impl Message<EcuConnected> for EcuCoordinator {
             tracing::debug!(
                 ecu = %self.ecu_name,
                 current = ?ecu_state.connectivity,
-                "ECU connected received but already Online..skipping"
+                "ECU connected received but already (assumed) Online..skipping"
             );
             false
+        }
+    }
+}
+
+/// ECU responded to a diagnostic request -> confirms an `AssumedOnline` ECU as `Online`.
+///
+/// Any other connectivity is left unchanged: `Online` stays `Online`, and `Offline` is
+/// only left through a connect or variant detection.
+pub struct EcuResponded;
+
+impl Message<EcuResponded> for EcuCoordinator {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _msg: EcuResponded,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let mut ecu_state = std_ext::lock_write(&self.state.ecu_state);
+        if ecu_state.connectivity == Connectivity::AssumedOnline {
+            tracing::info!(
+                ecu = %self.ecu_name,
+                dlt_context = dlt_ctx!("UDS"),
+                "Assumed online ECU responded. Setting connectivity to Online"
+            );
+            ecu_state.connectivity = Connectivity::Online;
         }
     }
 }

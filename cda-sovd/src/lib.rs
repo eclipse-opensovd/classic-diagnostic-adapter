@@ -260,6 +260,28 @@ where
     handle
 }
 
+/// Mounts the vehicle topology (`networkreset`) routes and the
+/// `/apps/sovd2uds/operations` collection onto the dynamic router.
+pub async fn add_vehicle_topology_routes<S: SecurityPluginLoader>(
+    dynamic_router: &DynamicRouter,
+    plugin: Arc<dyn cda_interfaces::topology::VehicleTopologyPlugin>,
+    locks: Arc<dyn cda_interfaces::runtime_update_api::LockStateProvider>,
+    retry_after: Duration,
+    with_runtime_update: bool,
+) -> RouteHandle {
+    let state = sovd::apps::sovd2uds::operations::networkreset::VehicleTopologyRouteState {
+        plugin,
+        locks,
+        retry_after,
+    };
+    let router = sovd::apps::sovd2uds::operations::networkreset::routes::<S>(state).merge(
+        sovd::apps::sovd2uds::operations::collection::routes::<S>(with_runtime_update),
+    );
+    let handle = dynamic_router.add_routes(router.into()).await;
+    tracing::info!("Vehicle topology routes added to webserver");
+    handle
+}
+
 /// Routes that remain available while an update execution blocks other HTTP requests.
 #[must_use]
 pub fn routes_accessible_during_update() -> Vec<HttpRouteMatcher> {

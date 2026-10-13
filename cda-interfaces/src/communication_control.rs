@@ -122,9 +122,21 @@ impl<Operation: Default> GatewayLifecycle<Operation> {
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
 pub enum CommunicationInitMode {
-    /// Whole-vehicle communication is initialized immediately during startup.
+    /// Whole-vehicle communication is initialized immediately during startup,
+    /// always with a full VIR/VAM broadcast discovery. A persisted ECU topology
+    /// is never used to skip that discovery, but detection results are still
+    /// persisted when [`EcuListPersistenceSettings::enabled`] is set.
     #[default]
     Always,
+    /// Whole-vehicle communication is initialized immediately during startup.
+    /// A full VIR/VAM broadcast discovery only runs when no persisted ECU
+    /// topology exists. Otherwise the persisted gateways are reconnected
+    /// directly and their ECUs restored from the persisted state.
+    ///
+    /// Equivalent to [`Always`](Self::Always) while
+    /// [`EcuListPersistenceSettings::enabled`] is `false`, since no persisted
+    /// topology can exist then.
+    WhenNotPersisted,
     /// Communication stays uninitialized at startup. HTTP/SOVD start first, and
     /// the first qualifying ECU diagnostic request, or an explicit
     /// `CommunicationPlugin::activate()` call, triggers one whole-vehicle
@@ -184,14 +196,63 @@ pub enum PostUpdateCommunicationMode {
     Deferred,
 }
 
+/// Controls how spontaneous vehicle announcements (VAMs received outside of a
+/// VIR/VAM discovery) are handled once communication is enabled.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum VamHandlingMode {
+    /// Every announcement of a known gateway connects it and triggers variant
+    /// detection (default).
+    #[default]
+    Always,
+    /// Announcements are only handled while a persisted topology exists, then
+    /// like `always`. Behaves like `never` while ECU list persistence is disabled.
+    PersistedOnly,
+    /// The spontaneous VAM listener is not started.
+    Never,
+}
+
 /// Default retry hint for requests deferred while communication starts.
 pub const DEFAULT_DEFERRED_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+/// Default upper bound for waiting until a detection run has settled before
+/// its result is persisted.
+pub const DEFAULT_DETECTION_SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Persistence of the detected ECU/gateway topology across restarts.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
+pub struct EcuListPersistenceSettings {
+    /// When `true`, the detected topology is persisted after every detection
+    /// run and `last_seen` timestamps are written back at shutdown. With
+    /// `init_mode = "WhenNotPersisted"` (or `OnDemand`/`Disabled` once
+    /// triggered), a persisted topology is reused instead of a full
+    /// VIR/VAM broadcast discovery. When `false` (default), the persisted
+    /// topology is never read or written.
+    pub enabled: bool,
+    /// Upper bound (in seconds) for waiting until gateway discovery and
+    /// variant detection have settled before the result is persisted.
+    pub detection_settle_timeout_seconds: u64,
+}
+
+impl Default for EcuListPersistenceSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            detection_settle_timeout_seconds: DEFAULT_DETECTION_SETTLE_TIMEOUT.as_secs(),
+        }
+    }
+}
 
 /// Transport initialization and runtime settings.
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 pub struct CommunicationSettings {
     /// Controls when diagnostic transport network activation begins:
-    /// - "Always": whole-vehicle communication initializes eagerly at startup (default).
+    /// - "Always": whole-vehicle communication initializes eagerly at startup,
+    ///   always with a full broadcast discovery (default).
+    /// - "WhenNotPersisted": like "Always", but a persisted topology (see
+    ///   `ecu_list_persistence`) is reused instead of a broadcast discovery.
     /// - "OnDemand": HTTP/SOVD starts first. The first qualifying ECU diagnostic
     ///   request, or an explicit `activate()` call, triggers initialization.
     /// - "Disabled": HTTP/SOVD starts first. The default communication plugin
@@ -216,6 +277,14 @@ pub struct CommunicationSettings {
     /// The value (in seconds) for the HTTP `Retry-After` header returned when a
     /// diagnostic request arrives while initialization is still pending.
     pub deferred_retry_after_seconds: u64,
+    /// Persistence of the detected ECU/gateway topology.
+    pub ecu_list_persistence: EcuListPersistenceSettings,
+    /// Handling of spontaneous vehicle announcements (VAMs):
+    /// - "always": connect announced gateways and detect their ECUs (default).
+    /// - "persisted-only": only while a persisted topology exists; like "never"
+    ///   while `ecu_list_persistence` is disabled.
+    /// - "never": do not listen for spontaneous announcements.
+    pub vam_handling_mode: VamHandlingMode,
 }
 
 impl Default for CommunicationSettings {
@@ -225,6 +294,8 @@ impl Default for CommunicationSettings {
             variant_detection: VariantDetectionMode::default(),
             post_update_mode: PostUpdateCommunicationMode::default(),
             deferred_retry_after_seconds: DEFAULT_DEFERRED_RETRY_AFTER.as_secs(),
+            ecu_list_persistence: EcuListPersistenceSettings::default(),
+            vam_handling_mode: VamHandlingMode::default(),
         }
     }
 }
