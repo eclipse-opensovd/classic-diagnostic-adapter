@@ -160,6 +160,17 @@ pub trait AuthApi: Send + Sync + 'static {
 /// diagnostic services. It enables fine-grained control over which services
 /// can be executed based on the current security context.
 pub trait SecurityApi: Send + Sync + 'static {
+    /// Validates a fully resolved UDS request immediately before transmission.
+    ///
+    /// # Errors
+    /// Returns [`DiagServiceError::RequestNotAllowed`] when the request must not be transmitted.
+    fn validate_request_send(
+        &self,
+        _context: &cda_interfaces::request_authorization::UdsRequestSendContext<'_>,
+    ) -> Result<(), DiagServiceError> {
+        Ok(())
+    }
+
     /// Validates whether a diagnostic service can be executed.
     ///
     /// This method is called before executing diagnostic services to ensure

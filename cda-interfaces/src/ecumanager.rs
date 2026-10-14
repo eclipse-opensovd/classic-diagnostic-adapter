@@ -722,6 +722,22 @@ pub trait EcuSecurity: Send + Sync + 'static {
         service: &DiagComm,
         security_plugin: &DynamicPlugin,
     ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
+
+    /// Authorizes a fully resolved UDS request immediately before transmission.
+    ///
+    /// Unlike [`Self::is_service_allowed`], which validates the MDD service definition,
+    /// this runs at the transport boundary on the final request bytes. The default
+    /// implementation allows every request.
+    ///
+    /// # Errors
+    /// Returns [`DiagServiceError::RequestNotAllowed`] when the request must not be sent.
+    fn validate_request_send(
+        &self,
+        _security_plugin: &DynamicPlugin,
+        _context: &crate::request_authorization::UdsRequestSendContext<'_>,
+    ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
+        std::future::ready(Ok(()))
+    }
 }
 
 /// Provides component metadata: data identifiers, routines, configurations, and jobs.
