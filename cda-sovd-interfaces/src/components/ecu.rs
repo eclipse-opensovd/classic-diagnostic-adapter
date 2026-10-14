@@ -607,35 +607,39 @@ pub mod faults {
             }
 
             #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-            pub struct ExtendedSnapshots<T> {
+            pub struct ExtendedSnapshots {
                 #[serde(skip_serializing_if = "Option::is_none")]
                 pub data: Option<HashMap<String, Snapshot>>,
-                #[serde(skip_serializing_if = "Option::is_none")]
-                pub errors: Option<Vec<DataError<T>>>,
             }
 
             #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-            pub struct ExtendedDataRecords<T> {
+            pub struct ExtendedDataRecords {
                 #[serde(skip_serializing_if = "Option::is_none")]
                 pub data: Option<HashMap<String, serde_json::Value>>,
-                #[serde(skip_serializing_if = "Option::is_none")]
-                pub errors: Option<Vec<DataError<T>>>,
             }
 
             #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-            pub struct EnvironmentData<T> {
+            pub struct EnvironmentData {
                 #[serde(skip_serializing_if = "Option::is_none")]
-                pub extended_data_records: Option<ExtendedDataRecords<T>>,
+                pub extended_data_records: Option<ExtendedDataRecords>,
 
                 #[serde(skip_serializing_if = "Option::is_none")]
-                pub snapshots: Option<ExtendedSnapshots<T>>,
+                pub snapshots: Option<ExtendedSnapshots>,
             }
 
+            /// Spec Table 65: errors of the whole response are reported in the
+            /// top-level `errors` list, each pointing at the failing element via a
+            /// JSON pointer (Table 17).
             #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
             pub struct ExtendedFault<T> {
                 pub item: Fault,
                 #[serde(skip_serializing_if = "Option::is_none")]
-                pub environment_data: Option<EnvironmentData<T>>,
+                pub environment_data: Option<EnvironmentData>,
+                #[serde(
+                    default = "Vec::<DataError<T>>::new",
+                    skip_serializing_if = "Vec::is_empty"
+                )]
+                pub errors: Vec<DataError<T>>,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 pub schema: Option<schemars::Schema>,
             }

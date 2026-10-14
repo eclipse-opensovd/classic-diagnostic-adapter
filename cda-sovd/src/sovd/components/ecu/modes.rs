@@ -336,7 +336,7 @@ pub(crate) mod session {
             query.include_schema,
             |value, schema| sovd_modes::security_and_session::get::Response {
                 name: Some(SESSION_NAME.to_owned()),
-                value: Some(value),
+                value,
                 translation_id: None,
                 schema,
             },
@@ -351,7 +351,7 @@ pub(crate) mod session {
                     .example(sovd_modes::security_and_session::get::Response {
                         name: Some(SESSION_NAME.to_owned()),
                         translation_id: None,
-                        value: Some("default".to_owned()),
+                        value: "default".to_owned(),
                         schema: None,
                     })
             })
@@ -393,7 +393,7 @@ pub(crate) mod security {
             query.include_schema,
             |value, schema| sovd_modes::security_and_session::get::Response {
                 name: Some(SECURITY_NAME.to_owned()),
-                value: Some(value),
+                value,
                 translation_id: None,
                 schema,
             },
@@ -408,7 +408,7 @@ pub(crate) mod security {
                     .example(sovd_modes::security_and_session::get::Response {
                         name: Some(SECURITY_NAME.to_owned()),
                         translation_id: None,
-                        value: Some("locked".to_owned()),
+                        value: "locked".to_owned(),
                         schema: None,
                     })
             })
@@ -635,7 +635,7 @@ pub(crate) mod commctrl {
             query.include_schema,
             |value, schema| sovd_modes::commctrl::get::Response {
                 name: Some(COMM_CONTROL_NAME.to_owned()),
-                value: Some(value),
+                value,
                 translation_id: None,
                 schema,
             },
@@ -650,7 +650,7 @@ pub(crate) mod commctrl {
                     .example(sovd_modes::security_and_session::get::Response {
                         name: Some(COMM_CONTROL_NAME.to_owned()),
                         translation_id: None,
-                        value: Some("locked".to_owned()),
+                        value: "locked".to_owned(),
                         schema: None,
                     })
             })
@@ -748,7 +748,7 @@ pub(crate) mod dtcsetting {
             query.include_schema,
             |value, schema| sovd_modes::dtcsetting::get::Response {
                 name: Some(DTC_SETTING_NAME.to_owned()),
-                value: Some(value),
+                value,
                 translation_id: None,
                 schema,
             },
@@ -763,7 +763,7 @@ pub(crate) mod dtcsetting {
                     .example(sovd_modes::security_and_session::get::Response {
                         name: Some(DTC_SETTING_ID.to_owned()),
                         translation_id: None,
-                        value: Some("enablerxandenabletx".to_owned()),
+                        value: "enablerxandenabletx".to_owned(),
                         schema: None,
                     })
             })
