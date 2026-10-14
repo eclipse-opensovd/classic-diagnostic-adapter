@@ -137,7 +137,7 @@ impl DopType {
     pub const DTC: Self = Self(dataformat::DOPType::DTC);
 }
 
-#[allow(
+#[expect(
     non_upper_case_globals,
     reason = "Names follow FlatBuffers enum naming conventions"
 )]

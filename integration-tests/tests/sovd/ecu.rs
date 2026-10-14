@@ -225,7 +225,7 @@ async fn test_can_only_ecu_from_configuration() {
     );
 }
 
-#[allow(clippy::too_many_lines, reason = "Makes sense to keep test together")]
+#[expect(clippy::too_many_lines, reason = "Makes sense to keep test together")]
 #[tokio::test]
 async fn test_ecu_session_switching() {
     // TODO(can): SecurityAccess seed/key/lock sequencing is not yet reliable
@@ -792,7 +792,7 @@ async fn test_variant_detection_duplicates() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines, reason = "Keep the test together")]
+#[expect(clippy::too_many_lines, reason = "Keep the test together")]
 async fn test_communication_control() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();

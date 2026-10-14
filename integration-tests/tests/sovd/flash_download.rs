@@ -42,7 +42,7 @@ use crate::{
 /// - Session must be PROGRAMMING
 /// - `SecurityAccess` must be at least `LEVEL_05` (test uses `LEVEL_07`)
 #[tokio::test]
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "Test scenario is easier to understand kept together"
 )]
@@ -428,7 +428,7 @@ async fn test_flash_download_transfer_sequence() {
 /// This guards against a zero-length transfer silently staying in "running" status forever.
 /// Uses `SecurityAccess` `LEVEL_05` (minimum level accepted by the ECU simulator for flash operations).
 #[tokio::test]
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "Test scenario is easier to understand kept together"
 )]
@@ -677,7 +677,7 @@ async fn test_flash_transfer_zero_length_rejected() {
 /// - `RequestSeed`: `27 09`
 /// - `SendKey`:     `27 0A <key>` (seed 00..07, key = each byte + 13 = 0d..14)
 #[tokio::test]
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "Test scenario is easier to understand kept together"
 )]
@@ -850,17 +850,17 @@ async fn test_security_access_supplier_level() {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SimDataTransferDownload {
-    #[allow(
+    #[expect(
         dead_code,
         reason = "Fields deserialized from ECU simulator JSON responses"
     )]
     address_and_length_identifier: u8,
-    #[allow(
+    #[expect(
         dead_code,
         reason = "Fields deserialized from ECU simulator JSON responses"
     )]
     memory_address: String,
-    #[allow(
+    #[expect(
         dead_code,
         reason = "Fields deserialized from ECU simulator JSON responses"
     )]

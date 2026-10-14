@@ -271,7 +271,7 @@ pub trait UdsDtc: UdsTransport {
         memory_selection: Option<u8>,
     ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError>;
 
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "Combining parameters into a struct would not improve readability here"
     )]
@@ -583,7 +583,7 @@ pub trait UdsFunctionalGroup: UdsTransport {
     ///
     /// # Errors
     /// Returns error if the functional group doesn't exist or if the request cannot be sent
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "Passing a struct would not benefit readability here"
     )]
@@ -672,7 +672,7 @@ impl<T> UdsEcuDb for T where
 // `ref_option_ref`). Both are artefacts of the generated code that we cannot
 // change; the allow must be on the enclosing module because attributes on
 // macro invocations are ignored for lints that fire inside the expansion.
-#[allow(
+#[expect(
     clippy::struct_field_names,
     clippy::ref_option_ref,
     reason = "mockall macro generates struct field names and Option references that cannot be \

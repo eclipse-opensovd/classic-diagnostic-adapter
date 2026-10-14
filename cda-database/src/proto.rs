@@ -14,7 +14,7 @@
 // @generated
 
 #[rustfmt::skip]
-#[allow(
+#[expect(
     clippy::all,
     clippy::pedantic,
     dead_code,

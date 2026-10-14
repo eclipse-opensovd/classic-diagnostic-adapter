@@ -120,7 +120,7 @@ where
     Ok(gateways)
 }
 
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "Contains nested private functions that should remain in scope"
 )]

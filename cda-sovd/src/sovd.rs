@@ -820,7 +820,7 @@ async fn components_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + '
     router.with_state(state)
 }
 
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "Route creation kept together for structural clarity"
 )]

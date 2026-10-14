@@ -124,7 +124,7 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
         })
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "Struct would not improve readability here"
 )]

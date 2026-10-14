@@ -211,7 +211,7 @@ fn params_to_schema(
                     .find(|params| {
                         params.byte_position().is_some_and(|bp| {
                             let request_bp = matching.request_byte_pos();
-                            #[allow(
+                            #[expect(
                                 clippy::cast_sign_loss,
                                 reason = "Safe because sign is checked with >= 0 above"
                             )]

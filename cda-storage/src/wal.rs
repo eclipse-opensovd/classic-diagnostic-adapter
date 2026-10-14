@@ -147,7 +147,7 @@ pub fn open_wal(wal_path: &Path) -> Result<Option<(WalStatus, Vec<u8>)>, Storage
         return Ok(None);
     }
 
-    #[allow(
+    #[expect(
         clippy::indexing_slicing,
         reason = "Header length checked before. Index access is safe"
     )]

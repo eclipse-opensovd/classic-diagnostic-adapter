@@ -28,7 +28,7 @@ use cda_interfaces::{
 ///
 /// Tries integer parsing first; falls back to `f64` parsing with
 /// truncation for values like `"3.0"` that ODX databases occasionally use.
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     reason = "ODX limit values fit within u64. Fractional truncation is intentional by design"

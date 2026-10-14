@@ -475,7 +475,7 @@ impl DiagCodedType {
     }
 
     #[inline]
-    #[allow(
+    #[expect(
         clippy::indexing_slicing,
         reason = "Length is validated before accessing. Indexing is safe"
     )]
@@ -1019,7 +1019,7 @@ fn pack_data(
         if remainder != 0 {
             let last_byte_idx = bit_length / 8;
             if let Some(last_byte) = result.get_mut(last_byte_idx) {
-                #[allow(
+                #[expect(
                     clippy::arithmetic_side_effects,
                     reason = "Operation cannot underflow: shift is bounded by bit count"
                 )]

@@ -175,10 +175,6 @@ fn remove_stale_unix_socket(socket_path: &str) -> Result<(), DoipGatewaySetupErr
 ///
 /// # Errors
 /// Returns `Err` if routes cannot be added to the dynamic router.
-#[allow(
-    clippy::implicit_hasher,
-    reason = "Type alias doesn't allow specifying hasher"
-)]
 #[tracing::instrument(
     skip(dynamic_router, config, resources),
     fields(
@@ -203,10 +199,6 @@ where
     Ok(handle)
 }
 
-#[allow(
-    clippy::implicit_hasher,
-    reason = "Type alias doesn't allow specifying hasher"
-)]
 pub async fn build_vehicle_routes<T, M, S>(
     config: VehicleConfig,
     resources: VehicleResources<T, M>,

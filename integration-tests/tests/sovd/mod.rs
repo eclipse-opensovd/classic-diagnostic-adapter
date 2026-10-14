@@ -339,11 +339,11 @@ pub(crate) async fn delete_fault_with_scope(
 /// The CDA returns the raw UDS response in the seed, including service ID and
 /// prefix bytes which must be skipped. The ECU simulator expects each seed byte
 /// to be incremented by 13 (wrapping), matching its Kotlin implementation.
-#[allow(
+#[expect(
     clippy::cast_sign_loss,
     reason = "i8 cast to u8 for formatting; wrapping semantics intended"
 )]
-#[allow(
+#[expect(
     clippy::cast_possible_wrap,
     reason = "u8 wrapping_add result cast to i8 for formatting"
 )]
