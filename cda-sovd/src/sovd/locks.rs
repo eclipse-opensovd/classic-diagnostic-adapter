@@ -35,6 +35,7 @@ mod cleanup;
 mod handlers;
 mod lifecycle;
 mod policy;
+mod request_context;
 #[cfg(test)]
 mod tests;
 mod validation;

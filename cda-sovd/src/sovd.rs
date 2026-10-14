@@ -436,6 +436,19 @@ impl LockStateProvider for SovdLockStateProvider {
     }
 }
 
+#[async_trait]
+impl cda_interfaces::request_authorization::RequestLockProvider for SovdLockStateProvider {
+    async fn current_lock(
+        &self,
+        target: &cda_interfaces::request_authorization::UdsRequestTarget,
+    ) -> Option<cda_interfaces::request_authorization::RequestLockContext> {
+        // Resolve the current `Locks` per call so runtime reloads are observed, and release
+        // the provider guard before inspecting lock state.
+        let locks = self.locks.read().await.clone();
+        locks.request_lock_for(target).await
+    }
+}
+
 /// Resets an execution's request-level concurrency marker when processing ends or is cancelled.
 pub(crate) struct ExecutionRequestGuard<'a, T: ExecutionStatus> {
     executions: &'a ExecutionLock<T>,
