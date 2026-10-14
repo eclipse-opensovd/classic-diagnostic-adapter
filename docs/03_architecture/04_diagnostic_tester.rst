@@ -817,7 +817,7 @@ ECU States
     - **DoIP Events**: VAM reception, connection establishment/loss, routing activation
       success/failure
     - **Variant Detection**: Detection success, failure, or duplicate identification
-    - **API Requests**: Explicit re-detection requests via POST to ECU endpoint
+    - **API Requests**: Explicit re-detection requests via PUT to ECU endpoint
     - **Communication Errors**: Timeout, NACK, or connection closure during diagnostic requests
     - **Persisted Topology Load**: Registration of an ECU from a persisted topology with last known state
       Online transitions it directly to AssumedOnline instead of NotTested
