@@ -20,6 +20,7 @@ use cda_interfaces::{
     Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState,
     PayloadDecoder, PendingNrc, ServicePayload, TransmissionParameters, TransportResponse,
     UdsTransport, VariantDetection, VariantState,
+    communication_control::CommunicationGuardReason,
     datatypes::RetryPolicy,
     diagservices::{DiagServiceResponse, UdsPayloadData},
     dlt_ctx, service_ids,
@@ -102,7 +103,10 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         map_to_json: bool,
         timeout: Option<Duration>,
     ) -> Result<<T as PayloadDecoder>::Response, DiagServiceError> {
-        let _guard = self.require_communication_ready()?;
+        let _guard = self.require_communication_ready(CommunicationGuardReason::new(format!(
+            "UDS service '{}' on ECU '{ecu_name}'",
+            service.name
+        )))?;
         let ecu = self.uds_ecu_db(ecu_name)?;
 
         // Pre-send: gate on variant detection when the variant has never been
@@ -266,7 +270,9 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
         communication_readiness: CommunicationReadiness,
     ) -> Result<Option<ServicePayload>, DiagServiceError> {
         let _communication_guard = match communication_readiness {
-            CommunicationReadiness::Enforce => Some(self.require_communication_ready()?),
+            CommunicationReadiness::Enforce => Some(self.require_communication_ready(
+                CommunicationGuardReason::new(format!("Raw UDS request to ECU '{ecu_name}'")),
+            )?),
             CommunicationReadiness::AssumeReady => None,
         };
 
@@ -697,7 +703,9 @@ impl<S: EcuGateway, T: EcuManager> UdsTransport for UdsManager<S, T> {
     ) -> Result<Vec<u8>, DiagServiceError> {
         tracing::trace!(ecu_name = %ecu_name, payload = ?payload, "Sending raw UDS packet");
 
-        let _guard = self.require_communication_ready()?;
+        let _guard = self.require_communication_ready(CommunicationGuardReason::new(format!(
+            "Raw UDS request to ECU '{ecu_name}'"
+        )))?;
         let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
 
         let payload = ecu
@@ -950,8 +958,8 @@ pub(crate) mod send_tests {
         UdsSession, UdsTesterPresent, VariantDetection,
         communication_control::{
             ActivationCause, CommunicationAccess, CommunicationError, CommunicationGuard,
-            CommunicationLifecycle, CommunicationOperation, CommunicationState,
-            VariantDetectionMode,
+            CommunicationGuardReason, CommunicationLifecycle, CommunicationOperation,
+            CommunicationState, VariantDetectionMode,
         },
         datatypes::FaultConfig,
         service_ids,
@@ -1018,7 +1026,10 @@ pub(crate) mod send_tests {
                 CommunicationState::Disabled
             }
 
-            fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+            fn acquire(
+                &self,
+                _reason: CommunicationGuardReason,
+            ) -> Result<CommunicationGuard, CommunicationError> {
                 Err(CommunicationError::Disabled)
             }
 
@@ -1125,9 +1136,12 @@ pub(crate) mod send_tests {
             }
         }
 
-        fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+        fn acquire(
+            &self,
+            reason: CommunicationGuardReason,
+        ) -> Result<CommunicationGuard, CommunicationError> {
             match self.phase() {
-                CommunicationPhase::Enabled => self.real.acquire(),
+                CommunicationPhase::Enabled => self.real.acquire(reason),
                 CommunicationPhase::Enabling => Err(CommunicationError::Enabling),
                 CommunicationPhase::Off => Err(CommunicationError::Disabled),
                 CommunicationPhase::Disabling => Err(CommunicationError::Disabling),
@@ -2653,7 +2667,8 @@ pub(crate) mod send_tests {
         let access = FakeCommunicationAccess::new(true, true);
         let manager = make_manager_with_access(make_gateway(), Arc::clone(&access) as _);
 
-        let result = manager.require_communication_ready();
+        let result = manager
+            .require_communication_ready(CommunicationGuardReason::new("test diagnostic activity"));
 
         assert!(result.is_ok());
         assert_eq!(access.activate_call_count(), 0);
@@ -2668,7 +2683,8 @@ pub(crate) mod send_tests {
         let access = FakeCommunicationAccess::new(false, true);
         let manager = make_manager_with_access(make_gateway(), Arc::clone(&access) as _);
 
-        let first = manager.require_communication_ready();
+        let first = manager
+            .require_communication_ready(CommunicationGuardReason::new("test diagnostic activity"));
         assert!(matches!(
             first,
             Err(DiagServiceError::CommunicationNotReady {
@@ -2680,7 +2696,8 @@ pub(crate) mod send_tests {
 
         // The background trigger has taken effect by the time of a retry.
         assert_eq!(access.state(), CommunicationState::Enabled);
-        let retry = manager.require_communication_ready();
+        let retry = manager
+            .require_communication_ready(CommunicationGuardReason::new("test diagnostic activity"));
         assert!(retry.is_ok());
         // The retry found communication already enabled, so no second trigger.
         assert_eq!(access.activate_call_count(), 1);
@@ -2691,7 +2708,8 @@ pub(crate) mod send_tests {
         let access = FakeCommunicationAccess::new(false, false);
         let manager = make_manager_with_access(make_gateway(), Arc::clone(&access) as _);
 
-        let result = manager.require_communication_ready();
+        let result = manager
+            .require_communication_ready(CommunicationGuardReason::new("test diagnostic activity"));
 
         assert!(matches!(
             result,

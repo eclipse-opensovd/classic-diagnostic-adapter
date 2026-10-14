@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use cda_interfaces::{
     DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, ResetOutcome, UdsSecurity,
     UdsSession,
+    communication_control::CommunicationGuardReason,
     diagservices::{DiagServiceResponse, DiagServiceResponseType},
     dlt_ctx,
     util::tokio_ext,
@@ -208,7 +209,12 @@ impl<S: EcuGateway, T: EcuManager> UdsSession for UdsManager<S, T> {
 
         // Checked directly rather than through the send path, which would
         // request an activation: a reset must not switch communication on.
-        let Ok(_guard) = self.communication_access.acquire() else {
+        let Ok(_guard) = self
+            .communication_access
+            .acquire(CommunicationGuardReason::new(format!(
+                "Diagnostic-session reset for ECU '{ecu_name}'"
+            )))
+        else {
             self.defer_reset(ecu_name, ResetType::Session).await;
             return Ok(ResetOutcome::Deferred);
         };

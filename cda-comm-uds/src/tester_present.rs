@@ -15,8 +15,8 @@ use async_trait::async_trait;
 use cda_interfaces::{
     Connectivity, DiagServiceError, EcuGateway, EcuManager, HashMap, HashSet,
     SUPPRESS_POSITIVE_RESPONSE_BIT, ServicePayload, TesterPresentControlMessage, TesterPresentMode,
-    TesterPresentType, UdsEcuDb, UdsFunctionalGroup, UdsTesterPresent, VariantDetection, dlt_ctx,
-    service_ids, util::tokio_ext,
+    TesterPresentType, UdsEcuDb, UdsFunctionalGroup, UdsTesterPresent, VariantDetection,
+    communication_control::CommunicationGuardReason, dlt_ctx, service_ids, util::tokio_ext,
 };
 use tokio::{
     task::JoinHandle,
@@ -297,7 +297,9 @@ impl<S: EcuGateway, T: EcuManager> UdsTesterPresent for UdsManager<S, T> {
         fields(dlt_context = dlt_ctx!("UDS"))
     )]
     async fn start_tester_present(&self, type_: TesterPresentType) -> Result<(), DiagServiceError> {
-        let _guard = self.require_communication_ready()?;
+        let _guard = self.require_communication_ready(CommunicationGuardReason::new(format!(
+            "Tester-present control for {type_:?}"
+        )))?;
         self.activate_tester_present(type_, ActivateMode::Start)
             .await
     }
@@ -387,7 +389,11 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     ///
     /// [`acquire`]: cda_interfaces::communication_control::CommunicationAccess::acquire
     pub(crate) async fn resume_tester_present(&self) {
-        let guard = match self.communication_access.acquire() {
+        let guard = match self
+            .communication_access
+            .acquire(CommunicationGuardReason::new(
+                "Resuming tester-present tasks",
+            )) {
             Ok(guard) => guard,
             Err(e) => {
                 tracing::debug!(

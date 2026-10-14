@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use cda_interfaces::communication_control::CommunicationGuard;
+use cda_interfaces::communication_control::{CommunicationGuard, CommunicationGuardReason};
 
 use super::state::{CommunicationStateData, CommunicationStateStore};
 
@@ -35,7 +35,7 @@ pub(crate) struct ActiveGuard {
 }
 
 impl ActiveGuard {
-    /// Registers a new guard entry in `data` and returns its sole owner, wrapped
+    /// Registers a new guard reason in `data` and returns its sole owner, wrapped
     /// as an opaque [`CommunicationGuard`].
     ///
     /// Takes the caller's live borrow rather than the
@@ -46,9 +46,10 @@ impl ActiveGuard {
     pub(crate) fn register(
         data: &mut CommunicationStateData,
         state: Arc<CommunicationStateStore>,
+        reason: CommunicationGuardReason,
     ) -> CommunicationGuard {
         let id = CommunicationGuardId(uuid::Uuid::new_v4());
-        data.active_guards.insert(id);
+        data.active_guards.insert(id, reason);
         CommunicationGuard::new(Self {
             id: Some(id),
             state,
@@ -80,9 +81,26 @@ mod tests {
         ));
         let guards = || state.lock().active_guards.len();
 
-        let guard1 = ActiveGuard::register(&mut state.lock(), Arc::clone(&state));
+        let guard1 = ActiveGuard::register(
+            &mut state.lock(),
+            Arc::clone(&state),
+            CommunicationGuardReason::new("first test guard"),
+        );
         assert_eq!(guards(), 1);
-        let guard2 = ActiveGuard::register(&mut state.lock(), Arc::clone(&state));
+        assert_eq!(
+            state
+                .lock()
+                .active_guards
+                .values()
+                .map(CommunicationGuardReason::as_str)
+                .collect::<Vec<_>>(),
+            vec!["first test guard"]
+        );
+        let guard2 = ActiveGuard::register(
+            &mut state.lock(),
+            Arc::clone(&state),
+            CommunicationGuardReason::new("second test guard"),
+        );
         assert_eq!(guards(), 2, "a second guard must claim its own entry");
 
         drop(guard1);

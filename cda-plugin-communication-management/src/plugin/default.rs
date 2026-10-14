@@ -35,9 +35,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cda_interfaces::communication_control::{
-    ActivationCause, CommunicationError, CommunicationGuard, CommunicationInitMode,
-    CommunicationLifecycle, CommunicationOperation, CommunicationOperationFailure,
-    CommunicationState, CommunicationVariantDetection, DetectionCause, VariantDetectionMode,
+    ActivationCause, CommunicationError, CommunicationGuard, CommunicationGuardReason,
+    CommunicationInitMode, CommunicationLifecycle, CommunicationOperation,
+    CommunicationOperationFailure, CommunicationState, CommunicationVariantDetection,
+    DetectionCause, VariantDetectionMode,
 };
 
 use super::{CommunicationPlugin, CommunicationPluginBuilder};
@@ -69,8 +70,11 @@ impl CommunicationPlugin for DefaultCommunicationPlugin {
         self.handle.state()
     }
 
-    fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
-        self.handle.acquire()
+    fn acquire(
+        &self,
+        reason: CommunicationGuardReason,
+    ) -> Result<CommunicationGuard, CommunicationError> {
+        self.handle.acquire(reason)
     }
 
     async fn activate(
