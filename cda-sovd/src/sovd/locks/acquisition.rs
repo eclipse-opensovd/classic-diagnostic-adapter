@@ -14,10 +14,9 @@
 use std::sync::Arc;
 
 use cda_interfaces::{
-    DynamicPlugin, TesterPresentType, UdsEcu,
+    TesterPresentType, UdsEcu,
     lock_priority_api::{LockRequest, LockScope},
 };
-use cda_plugin_security::SecurityPlugin;
 use uuid::Uuid;
 
 use super::{
@@ -30,7 +29,6 @@ pub(super) async fn create_lock<T: UdsEcu + Clone>(
     request: LockRequest,
     locks: &Arc<Locks>,
     coverage: LockCoverage,
-    security_plugin: Box<dyn SecurityPlugin>,
 ) -> Result<(ActiveLock, LockCleanupFnHelper, Option<TesterPresentType>), ApiError> {
     let id = Uuid::new_v4().to_string();
     let principal = request.principal.clone();
@@ -72,13 +70,7 @@ pub(super) async fn create_lock<T: UdsEcu + Clone>(
             let locks = Arc::clone(locks);
             LockCleanupFnHelper::new(async move || {
                 stop_tester_present_unless_needed(&uds, &locks, tp_type).await;
-                reset_ecu_session_and_security(
-                    &uds,
-                    &ecu_name,
-                    "ECU lock cleanup",
-                    &(security_plugin as DynamicPlugin),
-                )
-                .await;
+                reset_ecu_session_and_security(&uds, &ecu_name, "ECU lock cleanup").await;
             })
         }
         ScopeKey::FunctionalGroup(group) => {
@@ -88,24 +80,17 @@ pub(super) async fn create_lock<T: UdsEcu + Clone>(
             let locks = Arc::clone(locks);
             LockCleanupFnHelper::new(async move || {
                 stop_tester_present_unless_needed(&uds, &locks, tp_type).await;
-                let sec = &(security_plugin as DynamicPlugin);
                 for ecu in covered_ecus {
-                    reset_ecu_session_and_security(
-                        &uds,
-                        &ecu,
-                        "functional group lock cleanup",
-                        sec,
-                    )
-                    .await;
+                    reset_ecu_session_and_security(&uds, &ecu, "functional group lock cleanup")
+                        .await;
                 }
             })
         }
         ScopeKey::Vehicle => {
             let uds = (*uds).clone();
             LockCleanupFnHelper::new(async move || {
-                let sec = &(security_plugin as DynamicPlugin);
                 for ecu in uds.get_ecus().await {
-                    reset_ecu_session_and_security(&uds, &ecu, "vehicle lock cleanup", sec).await;
+                    reset_ecu_session_and_security(&uds, &ecu, "vehicle lock cleanup").await;
                 }
             })
         }

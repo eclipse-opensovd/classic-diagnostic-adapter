@@ -16,7 +16,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, FlashTransferStartParams,
-    HashMap, UdsDataTransfer, UdsTransport,
+    HashMap, ServicePayload, UdsDataTransfer, UdsTransport,
     datatypes::{DataTransferError, DataTransferMetaData, DataTransferStatus},
     diagservices::UdsPayloadData,
     dlt_ctx, service_ids, spawn_named,
@@ -76,9 +76,9 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             )
         };
 
-        // we do not want to check the service on every execution, but it is checked before
-        // transfer_ecu_data is called
-        let skip_security_plugin_check: DynamicPlugin = Box::new(());
+        // we do not want to check the service or the pre-send authorization on every block,
+        // both are checked once before transfer_ecu_data is called
+        let void_plugin: DynamicPlugin = Box::new(());
         while remaining_bytes > 0 {
             let Some(remaining_as_usize) = remaining_bytes.try_into().ok() else {
                 set_transfer_aborted(
@@ -137,7 +137,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 .send(
                     ecu_name,
                     request.clone(),
-                    &skip_security_plugin_check,
+                    &void_plugin,
                     Some(uds_payload),
                     true,
                 )
@@ -179,6 +179,24 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 }
             }
         }
+    }
+}
+
+/// Representative `TransferData` frame used to authorize a whole flash transfer up front.
+///
+/// Every block of the transfer starts with the `TransferData` SID followed by the block sequence
+/// counter, so these bytes are a prefix of each real frame.
+fn transfer_data_probe(
+    source_address: u16,
+    target_address: u16,
+    block_sequence_counter: u8,
+) -> ServicePayload {
+    ServicePayload {
+        data: vec![service_ids::TRANSFER_DATA, block_sequence_counter],
+        source_address,
+        target_address,
+        new_session: None,
+        new_security: None,
     }
 }
 
@@ -239,6 +257,23 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
         ecu.read()
             .await
             .is_service_allowed(&request, security_plugin)
+            .await?;
+
+        // Like the service check above, the pre-send authorization runs once, with the
+        // caller's credentials, before the transfer task starts. The blocks themselves are
+        // sent with the void plugin as the credentials do not outlive this request.
+        // All blocks share the TransferData SID, so one representative frame decides for the
+        // whole transfer.
+        let (source_address, target_address) = {
+            let ecu = ecu.read().await;
+            (ecu.tester_address(), ecu.logical_address())
+        };
+        let first_block = transfer_data_probe(
+            source_address,
+            target_address,
+            transfer_meta_data.next_block_sequence_counter,
+        );
+        self.authorize_physical_send(ecu, ecu_name, security_plugin, &first_block)
             .await?;
 
         let ecu_name = ecu_name.to_owned();
@@ -348,5 +383,19 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
                     "Data transfer with id {id} not found for ECU {ecu_name}"
                 ))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_is_a_prefix_of_every_transfer_data_block() {
+        let probe = transfer_data_probe(0x0E00, 0x1234, 1);
+        assert_eq!(probe.data, [service_ids::TRANSFER_DATA, 1]);
+        assert_eq!(probe.source_address, 0x0E00);
+        assert_eq!(probe.target_address, 0x1234);
+        assert!(probe.new_session.is_none() && probe.new_security.is_none());
     }
 }

@@ -745,9 +745,10 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         };
 
         match self
-            .send_with_raw_payload(
+            .send_authorized_raw_payload(
                 ecu_name,
                 service_payload,
+                Some(security_plugin),
                 None,
                 true,
                 CommunicationReadiness::Enforce,

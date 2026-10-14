@@ -17,12 +17,14 @@ use std::{
 };
 
 use cda_interfaces::{
-    Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState,
-    PayloadDecoder, PendingNrc, ServicePayload, TransmissionParameters, TransportResponse,
-    UdsTransport, VariantDetection, VariantState,
+    Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuSecurity,
+    EcuState, PayloadDecoder, PendingNrc, ServicePayload, TransmissionParameters,
+    TransportResponse, UdsTransport, VariantDetection, VariantState,
     datatypes::RetryPolicy,
     diagservices::{DiagServiceResponse, UdsPayloadData},
-    dlt_ctx, service_ids,
+    dlt_ctx,
+    request_authorization::{UdsRequestSendContext, UdsRequestTarget},
+    service_ids,
 };
 use tokio::{
     sync::{OwnedSemaphorePermit, RwLock, mpsc},
@@ -81,6 +83,13 @@ fn log_gateway_task_result(result: Result<(), tokio::task::JoinError>) {
     {
         tracing::debug!(%error, "Gateway task ended abnormally");
     }
+}
+
+/// Reports whether `security_plugin` is the void plugin that CDA-internal traffic is sent with.
+///
+/// Requests originating from a caller always carry the plugin created from their token.
+pub(crate) fn is_void_plugin(security_plugin: &DynamicPlugin) -> bool {
+    security_plugin.downcast_ref::<()>().is_some()
 }
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
@@ -190,9 +199,10 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         let expect_response = !payload.is_suppress_positive_response();
 
         let response = self
-            .send_with_raw_payload(
+            .send_authorized_raw_payload(
                 ecu_name,
                 payload.clone(),
+                Some(security_plugin),
                 timeout,
                 expect_response,
                 communication_readiness,
@@ -239,7 +249,62 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     }
 }
 
-impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
+impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuSecurity> UdsManager<S, T> {
+    /// Authorizes a fully resolved UDS request for a physical ECU through the security plugin.
+    ///
+    /// Samples the lock relevant to the ECU immediately before consulting the plugin. The void
+    /// plugin marks CDA-internal traffic (variant detection, resets) and is never checked.
+    ///
+    /// # Errors
+    /// Returns [`DiagServiceError::RequestNotAllowed`] if the plugin rejects the request.
+    pub(crate) async fn authorize_physical_send(
+        &self,
+        ecu: &RwLock<T>,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+        payload: &ServicePayload,
+    ) -> Result<(), DiagServiceError> {
+        if is_void_plugin(security_plugin) {
+            return Ok(());
+        }
+        let target = UdsRequestTarget::Ecu {
+            name: ecu_name.to_owned(),
+            additional_fields: Vec::new(),
+        };
+        let context = UdsRequestSendContext {
+            lock: self.request_lock_provider.current_lock(&target).await,
+            target,
+            payload,
+        };
+        ecu.read()
+            .await
+            .validate_request_send(security_plugin, &context)
+            .await
+    }
+
+    /// Sends an internal raw payload to the ECU without caller authorization.
+    ///
+    /// Used for housekeeping traffic (tester present, session/security resets) that carries
+    /// no request-scoped credentials and therefore skips the pre-send authorization hook.
+    pub(crate) async fn send_with_raw_payload(
+        &self,
+        ecu_name: &str,
+        payload: ServicePayload,
+        timeout: Option<Duration>,
+        expect_response: bool,
+        communication_readiness: CommunicationReadiness,
+    ) -> Result<Option<ServicePayload>, DiagServiceError> {
+        self.send_authorized_raw_payload(
+            ecu_name,
+            payload,
+            None,
+            timeout,
+            expect_response,
+            communication_readiness,
+        )
+        .await
+    }
+
     #[allow(
         clippy::needless_continue,
         reason = "Explicit continue improves readability to make it clearer, which loop is being \
@@ -250,17 +315,21 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
         reason = "Splitting the send/receive flow would reduce readability"
     )]
     #[tracing::instrument(
-        skip(self, payload),
+        skip(self, payload, security_plugin),
         fields(ecu_name,
             expect_response,
             payload_size = payload.data.len(),
             dlt_context = dlt_ctx!("UDS"))
     )]
     /// Sends the raw payload to the ECU.
-    pub(crate) async fn send_with_raw_payload(
+    ///
+    /// When `security_plugin` is provided, the request is authorized immediately before every
+    /// transmission attempt (including retries), and nothing is sent if it is denied.
+    pub(crate) async fn send_authorized_raw_payload(
         &self,
         ecu_name: &str,
         payload: ServicePayload,
+        security_plugin: Option<&DynamicPlugin>,
         timeout: Option<Duration>,
         expect_response: bool,
         communication_readiness: CommunicationReadiness,
@@ -334,6 +403,11 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
             // aborted and joined, so retries never overlap the stale task.
             if let Some(task) = gateway_task.take() {
                 await_gateway_task(task, ecu_name).await;
+            }
+
+            if let Some(security_plugin) = security_plugin {
+                self.authorize_physical_send(ecu, ecu_name, security_plugin, &payload)
+                    .await?;
             }
 
             match self
@@ -710,9 +784,10 @@ impl<S: EcuGateway, T: EcuManager> UdsTransport for UdsManager<S, T> {
         let expect_response = !payload.is_suppress_positive_response();
 
         match self
-            .send_with_raw_payload(
+            .send_authorized_raw_payload(
                 ecu_name,
                 payload,
+                Some(security_plugin),
                 timeout,
                 expect_response,
                 CommunicationReadiness::Enforce,
@@ -943,7 +1018,7 @@ pub(crate) mod send_tests {
     };
 
     use cda_interfaces::{
-        DiagServiceError, DynamicPlugin, EcuAddresses, EcuGateway, EcuRuntimeState,
+        DiagServiceError, DynamicPlugin, EcuAddresses, EcuGateway, EcuRuntimeState, EcuSecurity,
         EcuStateManager, FunctionalTransport, HashMap, HashMapExtensions, NetworkTopology,
         PendingNrc, PhysicalTransport, ResetOutcome, ServicePayload, TesterPresentType,
         TransmissionParameters, TransportResponse, UDS_ID_RESPONSE_BITMASK, UdsSecurity,
@@ -973,7 +1048,7 @@ pub(crate) mod send_tests {
 
     const TEST_COMMUNICATION_RETRY_AFTER: Duration = Duration::from_secs(2);
 
-    impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuAddresses> UdsManager<S, T> {
+    impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuSecurity + EcuAddresses> UdsManager<S, T> {
         /// Test-only constructor that creates a `UdsManager` without spawning
         /// background tasks (variant detection, etc.), so `T` only needs the
         /// narrower trait bounds required by `send_with_raw_payload`.
@@ -1003,6 +1078,9 @@ pub(crate) mod send_tests {
                 state_coordinator,
                 functional_description_database: String::new(),
                 fault_config,
+                request_lock_provider: Arc::new(
+                    cda_interfaces::request_authorization::NoRequestLockProvider,
+                ),
                 communication_access,
                 communication_retry_after: TEST_COMMUNICATION_RETRY_AFTER,
                 variant_detection_receiver: Arc::new(Mutex::new(None)),
@@ -3079,10 +3157,7 @@ pub(crate) mod send_tests {
         set_tracked_state(&manager, service_ids::SESSION_CONTROL, "extended").await;
         disable_communication(&manager, &access).await;
 
-        let outcome = manager
-            .reset_ecu_session("TestECU", &(Box::new(()) as DynamicPlugin))
-            .await
-            .unwrap();
+        let outcome = manager.reset_ecu_session("TestECU").await.unwrap();
 
         assert_eq!(outcome, ResetOutcome::Deferred);
         assert_eq!(sends.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -3184,10 +3259,7 @@ pub(crate) mod send_tests {
         set_tracked_state(&manager, service_ids::SECURITY_ACCESS, "level_01").await;
         disable_communication(&manager, &access).await;
 
-        let outcome = manager
-            .reset_ecu_security_access("TestECU", &(Box::new(()) as DynamicPlugin))
-            .await
-            .unwrap();
+        let outcome = manager.reset_ecu_security_access("TestECU").await.unwrap();
 
         assert_eq!(outcome, ResetOutcome::Deferred);
         assert_eq!(sends.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -3204,10 +3276,7 @@ pub(crate) mod send_tests {
         let manager = make_manager_with_ecu_and_access(make_gateway(), Arc::clone(&access) as _);
         set_tracked_state(&manager, service_ids::SESSION_CONTROL, "extended").await;
         disable_communication(&manager, &access).await;
-        manager
-            .reset_ecu_session("TestECU", &(Box::new(()) as DynamicPlugin))
-            .await
-            .unwrap();
+        manager.reset_ecu_session("TestECU").await.unwrap();
 
         access.begin_enabling();
         manager.initialize().await.unwrap();
@@ -3239,10 +3308,7 @@ pub(crate) mod send_tests {
         );
         set_tracked_state(&manager, service_ids::SESSION_CONTROL, "extended").await;
         disable_communication(&manager, &access).await;
-        manager
-            .reset_ecu_session("TestECU", &(Box::new(()) as DynamicPlugin))
-            .await
-            .unwrap();
+        manager.reset_ecu_session("TestECU").await.unwrap();
 
         cda_interfaces::Shutdown::shutdown(&manager).await;
         access.begin_enabling();
@@ -3338,5 +3404,374 @@ pub(crate) mod send_tests {
             "the ECU's own tester-present entry must survive the functional stop"
         );
         assert!(!tasks.keys().any(|id| id.type_ == group_type));
+    }
+}
+
+#[cfg(test)]
+mod pre_send_authorization_tests {
+    use std::{
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicU32, Ordering},
+        },
+        time::Duration,
+    };
+
+    use async_trait::async_trait;
+    use cda_interfaces::{
+        DiagServiceError, DynamicPlugin, EcuStateManager, HashMap, ResetOutcome, ServicePayload,
+        TransportResponse, UDS_ID_RESPONSE_BITMASK, UdsSession,
+        datatypes::FaultConfig,
+        request_authorization::{RequestLockContext, RequestLockProvider, UdsRequestTarget},
+        service_ids,
+    };
+    use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
+    use tokio::sync::RwLock;
+
+    use super::CommunicationReadiness;
+    use crate::{
+        UdsManager,
+        test_helpers::{RequestSendPolicy, TestEcuDb, TestGateway},
+    };
+
+    type SentContext = (UdsRequestTarget, ServicePayload, Option<RequestLockContext>);
+
+    struct FixedLock(Option<RequestLockContext>);
+
+    #[async_trait]
+    impl RequestLockProvider for FixedLock {
+        async fn current_lock(&self, _target: &UdsRequestTarget) -> Option<RequestLockContext> {
+            self.0.clone()
+        }
+    }
+
+    /// Plugin of a caller. The void plugin `()` marks internal traffic and is never checked.
+    fn caller_plugin() -> DynamicPlugin {
+        Box::new("caller".to_owned())
+    }
+
+    fn payload() -> ServicePayload {
+        ServicePayload {
+            data: vec![service_ids::SESSION_CONTROL, 0x03],
+            source_address: 0x0E00,
+            target_address: 0x0001,
+            new_session: Some("extended".to_owned()),
+            new_security: None,
+        }
+    }
+
+    fn lock() -> RequestLockContext {
+        RequestLockContext {
+            holder: "holder-sub".to_owned(),
+            claims: serde_json::Map::from_iter([("scope".to_owned(), "x".into())]),
+            metadata: serde_json::Map::from_iter([("use_case".to_owned(), "sw_update".into())]),
+        }
+    }
+
+    /// Gateway counting transmissions. It answers positively unless `silent` is set,
+    /// in which case every attempt times out.
+    fn counting_gateway(silent: bool) -> (TestGateway, Arc<AtomicU32>) {
+        let sends = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&sends);
+        let gateway = TestGateway {
+            send_fn: Arc::new(move |response_tx, _| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                if silent {
+                    // Keep the channel open so the caller's receive timeout fires.
+                    tokio::spawn(async move {
+                        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(60)).await;
+                        drop(response_tx);
+                    });
+                } else {
+                    let message = TransportResponse::UdsResponse(ServicePayload {
+                        data: vec![service_ids::SESSION_CONTROL | UDS_ID_RESPONSE_BITMASK, 0x03],
+                        source_address: 0x0001,
+                        target_address: 0x0E00,
+                        new_session: None,
+                        new_security: None,
+                    });
+                    response_tx.try_send(Ok(Some(message))).ok();
+                }
+                Ok(())
+            }),
+        };
+        (gateway, sends)
+    }
+
+    fn manager(
+        gateway: TestGateway,
+        policy: Arc<RequestSendPolicy>,
+        lock: Option<RequestLockContext>,
+    ) -> UdsManager<TestGateway, TestEcuDb> {
+        let ecu =
+            TestEcuDb::with_timeout_default_and_repeat_req_count_app(Duration::from_millis(20), 2)
+                .with_request_send_policy(policy);
+        let ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_owned(),
+            RwLock::new(ecu),
+        )]));
+        let mut manager = UdsManager::new_for_raw_payload_tests(
+            gateway,
+            ecus,
+            FaultConfig::default(),
+            enabled_communication_access_for_test(),
+        );
+        manager.request_lock_provider = Arc::new(FixedLock(lock));
+        manager
+    }
+
+    async fn send(
+        manager: &UdsManager<TestGateway, TestEcuDb>,
+        plugin: Option<&DynamicPlugin>,
+    ) -> Result<Option<ServicePayload>, DiagServiceError> {
+        manager
+            .send_authorized_raw_payload(
+                "TestECU",
+                payload(),
+                plugin,
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn allowed_request_is_sent_once_with_exact_context() {
+        let seen: Arc<Mutex<Vec<SentContext>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+        let (gateway, sends) = counting_gateway(false);
+        let manager = manager(
+            gateway,
+            Arc::new(move |context| {
+                recorder.lock().unwrap().push((
+                    context.target.clone(),
+                    context.payload.clone(),
+                    context.lock.clone(),
+                ));
+                Ok(())
+            }),
+            Some(lock()),
+        );
+        let plugin = caller_plugin();
+
+        send(&manager, Some(&plugin)).await.expect("send allowed");
+
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
+        let seen = seen.lock().unwrap();
+        let [(target, sent, lock_context)] = seen.as_slice() else {
+            panic!(
+                "expected exactly one authorization call, got {}",
+                seen.len()
+            );
+        };
+        assert_eq!(
+            *target,
+            UdsRequestTarget::Ecu {
+                name: "TestECU".to_owned(),
+                additional_fields: Vec::new(),
+            }
+        );
+        assert_eq!(sent.data, payload().data);
+        assert_eq!(sent.source_address, 0x0E00);
+        assert_eq!(sent.target_address, 0x0001);
+        assert_eq!(sent.new_session.as_deref(), Some("extended"));
+        assert_eq!(lock_context.as_ref(), Some(&lock()));
+    }
+
+    #[tokio::test]
+    async fn denied_request_sends_nothing_and_reports_request_not_allowed() {
+        let (gateway, sends) = counting_gateway(false);
+        let manager = manager(
+            gateway,
+            Arc::new(|_| Err(DiagServiceError::RequestNotAllowed("denied".to_owned()))),
+            None,
+        );
+        let plugin = caller_plugin();
+
+        let result = send(&manager, Some(&plugin)).await;
+
+        assert!(
+            matches!(result, Err(DiagServiceError::RequestNotAllowed(_))),
+            "unexpected result: {result:?}"
+        );
+        assert_eq!(sends.load(Ordering::SeqCst), 0, "no bytes may be sent");
+    }
+
+    #[tokio::test]
+    async fn every_retry_is_authorized_before_it_is_sent() {
+        let checks = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&checks);
+        let (gateway, sends) = counting_gateway(true);
+        let manager = manager(
+            gateway,
+            Arc::new(move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+            None,
+        );
+        let plugin = caller_plugin();
+
+        let result = send(&manager, Some(&plugin)).await;
+
+        assert!(
+            matches!(result, Err(DiagServiceError::Timeout)),
+            "{result:?}"
+        );
+        // One original transmission plus two application-level repeats.
+        assert_eq!(sends.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            checks.load(Ordering::SeqCst),
+            sends.load(Ordering::SeqCst),
+            "each transmission needs its own authorization"
+        );
+    }
+
+    #[tokio::test]
+    async fn denial_on_a_retry_prevents_the_next_frame() {
+        let checks = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&checks);
+        let (gateway, sends) = counting_gateway(true);
+        let manager = manager(
+            gateway,
+            Arc::new(move |_| {
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok(())
+                } else {
+                    Err(DiagServiceError::RequestNotAllowed("revoked".to_owned()))
+                }
+            }),
+            None,
+        );
+        let plugin = caller_plugin();
+
+        let result = send(&manager, Some(&plugin)).await;
+
+        assert!(
+            matches!(result, Err(DiagServiceError::RequestNotAllowed(_))),
+            "{result:?}"
+        );
+        assert_eq!(
+            sends.load(Ordering::SeqCst),
+            1,
+            "only the first frame is sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn physical_authorization_alone_never_touches_the_gateway() {
+        let (gateway, sends) = counting_gateway(false);
+        let manager = manager(
+            gateway,
+            Arc::new(|context| {
+                // A flash transfer is authorized with its TransferData probe frame.
+                assert_eq!(context.payload.data, [service_ids::TRANSFER_DATA, 1]);
+                Err(DiagServiceError::RequestNotAllowed("no 0x36".to_owned()))
+            }),
+            Some(lock()),
+        );
+        let plugin = caller_plugin();
+        let ecu = manager.ecus.get("TestECU").expect("test ECU exists");
+        let probe = ServicePayload {
+            data: vec![service_ids::TRANSFER_DATA, 1],
+            source_address: 0x0E00,
+            target_address: 0x0001,
+            new_session: None,
+            new_security: None,
+        };
+
+        let result = manager
+            .authorize_physical_send(ecu, "TestECU", &plugin, &probe)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DiagServiceError::RequestNotAllowed(_))
+        ));
+        assert_eq!(sends.load(Ordering::SeqCst), 0);
+    }
+
+    /// Resets, including those run by lock cleanup, must always reach the ECU, even if the
+    /// pre-send authorization would deny every request.
+    #[tokio::test]
+    async fn session_reset_is_sent_even_if_authorization_would_deny() {
+        let checks = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&checks);
+        let sends = Arc::new(AtomicU32::new(0));
+        let send_counter = Arc::clone(&sends);
+        let gateway = TestGateway {
+            send_fn: Arc::new(move |response_tx, _| {
+                send_counter.fetch_add(1, Ordering::SeqCst);
+                let message = TransportResponse::UdsResponse(ServicePayload {
+                    data: crate::test_helpers::positive_session_response(),
+                    source_address: 0x0001,
+                    target_address: 0x0E00,
+                    new_session: None,
+                    new_security: None,
+                });
+                response_tx.try_send(Ok(Some(message))).ok();
+                Ok(())
+            }),
+        };
+        let manager = manager(
+            gateway,
+            Arc::new(move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err(DiagServiceError::RequestNotAllowed("denied".to_owned()))
+            }),
+            None,
+        );
+        manager
+            .uds_ecu_db("TestECU")
+            .expect("test ECU exists")
+            .read()
+            .await
+            .set_service_state(service_ids::SESSION_CONTROL, "extended".to_owned())
+            .await;
+
+        let outcome = manager
+            .reset_ecu_session("TestECU")
+            .await
+            .expect("reset must not be blocked");
+
+        assert_eq!(outcome, ResetOutcome::Completed);
+        assert_eq!(sends.load(Ordering::SeqCst), 1, "the reset frame is sent");
+        assert_eq!(
+            checks.load(Ordering::SeqCst),
+            0,
+            "resets must not be subject to the pre-send authorization"
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_traffic_without_plugin_skips_authorization() {
+        let checks = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&checks);
+        let (gateway, sends) = counting_gateway(false);
+        let manager = manager(
+            gateway,
+            Arc::new(move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err(DiagServiceError::RequestNotAllowed(
+                    "must not run".to_owned(),
+                ))
+            }),
+            None,
+        );
+
+        manager
+            .send_with_raw_payload(
+                "TestECU",
+                payload(),
+                None,
+                true,
+                CommunicationReadiness::AssumeReady,
+            )
+            .await
+            .expect("internal send is not subject to caller authorization");
+
+        assert_eq!(checks.load(Ordering::SeqCst), 0);
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
     }
 }
