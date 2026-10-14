@@ -66,6 +66,7 @@ impl From<DiagServiceError> for AppError {
             | DiagServiceError::UdsLookupError(_)
             | DiagServiceError::VariantDetectionError(_)
             | DiagServiceError::AccessDenied(_)
+            | DiagServiceError::RequestNotAllowed(_)
             | DiagServiceError::InvalidState(_)
             | DiagServiceError::Nack(_) => Self::RuntimeError(value.to_string()),
 

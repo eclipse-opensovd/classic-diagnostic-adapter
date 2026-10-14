@@ -20,6 +20,7 @@ use cda_interfaces::{
     HashMap,
     communication_control::CommunicationAccess,
     health::HealthProvider,
+    request_authorization::RequestLockProvider,
     runtime_update_api::{ReloadError, VehicleComponentFactory, VehicleComponents},
 };
 use cda_plugin_security::SecurityPlugin;
@@ -37,6 +38,7 @@ where
     SP: SecurityPlugin,
 {
     health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
+    request_lock_provider: Arc<dyn RequestLockProvider>,
     communication_access: Arc<dyn CommunicationAccess>,
     _phantom: std::marker::PhantomData<SP>,
 }
@@ -48,10 +50,12 @@ where
     #[must_use]
     pub fn new(
         health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
+        request_lock_provider: Arc<dyn RequestLockProvider>,
         communication_access: Arc<dyn CommunicationAccess>,
     ) -> Self {
         Self {
             health_providers,
+            request_lock_provider,
             communication_access,
             _phantom: std::marker::PhantomData,
         }
@@ -86,6 +90,7 @@ where
             config,
             mdd_paths,
             self.health_providers.as_ref(),
+            Arc::clone(&self.request_lock_provider),
             Arc::clone(&self.communication_access),
         )
         .await

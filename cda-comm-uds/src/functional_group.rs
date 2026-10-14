@@ -15,11 +15,13 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, HashMapExtensions,
-    PayloadDecoder, ServicePayload, TransmissionParameters, UdsFunctionalGroup, UdsTransport,
+    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuSecurity, HashMap,
+    HashMapExtensions, PayloadDecoder, ServicePayload, TransmissionParameters, UdsFunctionalGroup,
+    UdsTransport,
     datatypes::{ComponentDataInfo, ComponentOperationsInfo, RoutineSubfunctions},
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     dlt_ctx,
+    request_authorization::{UdsRequestSendContext, UdsRequestTarget},
 };
 use tokio::sync::Mutex;
 
@@ -33,7 +35,7 @@ struct PendingEcuInfo {
     request_lock_key: String,
 }
 
-impl<S: EcuGateway, T: UdsEcuDb + PayloadDecoder> UdsManager<S, T> {
+impl<S: EcuGateway, T: UdsEcuDb + PayloadDecoder + EcuSecurity> UdsManager<S, T> {
     /// Send a functional request to a single gateway and collect responses from all expected ECUs
     #[allow(
         clippy::too_many_arguments,
@@ -50,6 +52,7 @@ impl<S: EcuGateway, T: UdsEcuDb + PayloadDecoder> UdsManager<S, T> {
         timeout: Duration,
         functional_group_name: &str,
         request_lock_keys: Vec<String>,
+        security_plugin: Option<&DynamicPlugin>,
     ) -> HashMap<String, Result<<T as PayloadDecoder>::Response, DiagServiceError>> {
         // Inspect the subfunction byte for `suppressPosRspMsgIndicationBit` (bit 7).
         // When set, ECUs are not expected to send a positive response.
@@ -65,6 +68,28 @@ impl<S: EcuGateway, T: UdsEcuDb + PayloadDecoder> UdsManager<S, T> {
                     .collect();
             }
         };
+
+        // Authorize the fully resolved request immediately before it is put on the wire.
+        if let Some(security_plugin) = security_plugin
+            && let Err(error) = self
+                .authorize_functional_send(
+                    security_plugin,
+                    functional_group_name,
+                    &expected_ecus,
+                    &payload,
+                )
+                .await
+        {
+            tracing::warn!(
+                functional_group = %functional_group_name,
+                %error,
+                "Functional request not allowed, nothing sent"
+            );
+            return expected_ecus
+                .into_values()
+                .map(|ecu_name| (ecu_name, Err(error.clone())))
+                .collect();
+        }
 
         // Send functional request via gateway
         match self
@@ -120,6 +145,48 @@ impl<S: EcuGateway, T: UdsEcuDb + PayloadDecoder> UdsManager<S, T> {
                 result_map
             }
         }
+    }
+}
+
+impl<S: EcuGateway, T: UdsEcuDb + EcuSecurity> UdsManager<S, T> {
+    /// Runs the security plugin's pre-send authorization for a functional request.
+    ///
+    /// The functional description database ECU acts as bridge to the concrete plugin type.
+    async fn authorize_functional_send(
+        &self,
+        security_plugin: &DynamicPlugin,
+        functional_group_name: &str,
+        expected_ecus: &HashMap<u16, String>,
+        payload: &ServicePayload,
+    ) -> Result<(), DiagServiceError> {
+        if crate::transport::is_void_plugin(security_plugin) {
+            return Ok(());
+        }
+        let bridge = self
+            .ecus
+            .get(&self.functional_description_database)
+            .ok_or_else(|| {
+                DiagServiceError::NotFound(format!(
+                    "Functional description database {} not found",
+                    self.functional_description_database
+                ))
+            })?;
+        let mut ecus: Vec<String> = expected_ecus.values().cloned().collect();
+        ecus.sort_unstable();
+        let target = UdsRequestTarget::FunctionalGroup {
+            name: functional_group_name.to_owned(),
+            ecus,
+        };
+        let context = UdsRequestSendContext {
+            lock: self.request_lock_provider.current_lock(&target).await,
+            target,
+            payload,
+        };
+        bridge
+            .read()
+            .await
+            .validate_request_send(security_plugin, &context)
+            .await
     }
 }
 
@@ -373,6 +440,7 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
                         gw_infos.uds_params.timeout_default,
                         &fg_name,
                         gw_infos.request_lock_keys,
+                        Some(security_plugin),
                     )
                     .await;
 
@@ -485,7 +553,9 @@ mod tests {
     use cda_interfaces::{
         DiagCommType, DiagServiceError, EcuAddresses, EcuRuntimeState, FunctionalTransport,
         HashMap, HashMapExtensions, NetworkTopology, PhysicalTransport, ServicePayload,
-        TransmissionParameters, TransportResponse, VariantDetectionSender, datatypes::FaultConfig,
+        TransmissionParameters, TransportResponse, VariantDetectionSender,
+        datatypes::FaultConfig,
+        request_authorization::{RequestLockContext, RequestLockProvider, UdsRequestTarget},
     };
     use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
     use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
@@ -555,9 +625,19 @@ mod tests {
     }
 
     fn manager() -> UdsManager<RecordingGateway, TestEcuDb> {
+        manager_with(
+            TestEcuDb::new(),
+            Arc::new(cda_interfaces::request_authorization::NoRequestLockProvider),
+        )
+    }
+
+    fn manager_with(
+        functional_ecu: TestEcuDb,
+        request_lock_provider: Arc<dyn RequestLockProvider>,
+    ) -> UdsManager<RecordingGateway, TestEcuDb> {
         let ecus = Arc::new(HashMap::from_iter([(
             "functional".to_owned(),
-            RwLock::new(TestEcuDb::new()),
+            RwLock::new(functional_ecu),
         )]));
         let (redetect_tx, _redetect_rx) = mpsc::channel(1);
         UdsManager {
@@ -576,6 +656,7 @@ mod tests {
             ),
             functional_description_database: "functional".to_owned(),
             fault_config: FaultConfig::default(),
+            request_lock_provider,
             communication_access: enabled_communication_access_for_test(),
             communication_retry_after: Duration::from_secs(1),
             variant_detection_receiver: Arc::new(Mutex::new(None)),
@@ -624,6 +705,7 @@ mod tests {
                 Duration::from_millis(10),
                 "group",
                 vec![GATEWAY_KEY.to_owned(), CHILD_KEY.to_owned()],
+                None,
             )
             .await;
     }
@@ -697,6 +779,7 @@ mod tests {
                 Duration::from_millis(10),
                 "group",
                 vec![GATEWAY_KEY.to_owned(), CHILD_KEY.to_owned()],
+                None,
             )
             .await;
 
@@ -709,5 +792,99 @@ mod tests {
                     if message == "Request gate was closed"
             ));
         }
+    }
+
+    /// Target, request bytes and lock holder observed by a pre-send check.
+    type SeenRequest = (UdsRequestTarget, Vec<u8>, Option<String>);
+
+    struct FixedLock(Option<RequestLockContext>);
+
+    #[async_trait]
+    impl RequestLockProvider for FixedLock {
+        async fn current_lock(&self, _target: &UdsRequestTarget) -> Option<RequestLockContext> {
+            self.0.clone()
+        }
+    }
+
+    async fn send_authorized(
+        manager: &UdsManager<RecordingGateway, TestEcuDb>,
+    ) -> HashMap<String, Result<<TestEcuDb as PayloadDecoder>::Response, DiagServiceError>> {
+        let plugin: DynamicPlugin = Box::new("caller".to_owned());
+        manager
+            .send_functional_to_gateway(
+                transmission_params(),
+                HashMap::from_iter([(1, "gateway".to_owned()), (2, "child".to_owned())]),
+                DiagComm::new("read", DiagCommType::Data),
+                payload(),
+                false,
+                Duration::from_millis(10),
+                "Group",
+                vec![GATEWAY_KEY.to_owned(), CHILD_KEY.to_owned()],
+                Some(&plugin),
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn authorized_functional_send_passes_group_target_and_lock() {
+        let seen: Arc<std::sync::Mutex<Vec<SeenRequest>>> = Arc::default();
+        let recorder = Arc::clone(&seen);
+        let lock = RequestLockContext {
+            holder: "holder".to_owned(),
+            claims: serde_json::Map::new(),
+            metadata: serde_json::Map::new(),
+        };
+        let manager = manager_with(
+            TestEcuDb::new().with_request_send_policy(Arc::new(move |context| {
+                recorder.lock().unwrap().push((
+                    context.target.clone(),
+                    context.payload.data.clone(),
+                    context.lock.as_ref().map(|lock| lock.holder.clone()),
+                ));
+                Ok(())
+            })),
+            Arc::new(FixedLock(Some(lock))),
+        );
+        let sends = Arc::clone(&manager.gateway.functional_sends);
+
+        send_authorized(&manager).await;
+
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
+        let seen = seen.lock().unwrap();
+        let [(target, data, holder)] = seen.as_slice() else {
+            panic!("expected one authorization call, got {}", seen.len());
+        };
+        assert_eq!(
+            *target,
+            UdsRequestTarget::FunctionalGroup {
+                name: "Group".to_owned(),
+                ecus: vec!["child".to_owned(), "gateway".to_owned()],
+            }
+        );
+        assert_eq!(*data, payload().data);
+        assert_eq!(holder.as_deref(), Some("holder"));
+    }
+
+    #[tokio::test]
+    async fn denied_functional_send_emits_no_frame_and_fails_every_ecu() {
+        let manager = manager_with(
+            TestEcuDb::new().with_request_send_policy(Arc::new(|_| {
+                Err(DiagServiceError::RequestNotAllowed("denied".to_owned()))
+            })),
+            Arc::new(cda_interfaces::request_authorization::NoRequestLockProvider),
+        );
+        let sends = Arc::clone(&manager.gateway.functional_sends);
+
+        let results = send_authorized(&manager).await;
+
+        assert_eq!(sends.load(Ordering::SeqCst), 0, "no frame may be emitted");
+        let mut ecus: Vec<_> = results.keys().cloned().collect();
+        ecus.sort();
+        assert_eq!(ecus, ["child", "gateway"]);
+        assert!(
+            results
+                .values()
+                .all(|result| matches!(result, Err(DiagServiceError::RequestNotAllowed(_))))
+        );
     }
 }

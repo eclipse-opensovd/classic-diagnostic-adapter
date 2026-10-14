@@ -380,7 +380,7 @@ pub(crate) async fn post_handler<T: UdsEcu + Clone>(
     // Own transaction guards in a detached task so request cancellation cannot
     // interrupt commit, rollback, or reservation release.
     cda_interfaces::spawn_named!("lock-acquisition", async move {
-        let result = match create_lock(&uds, request, &locks, coverage, security_plugin).await {
+        let result = match create_lock(&uds, request, &locks, coverage).await {
             Ok((new_lock, cleanup, tester_present)) => {
                 let expiration_target = match Locks::expiration_target(&new_lock) {
                     Ok(target) => target,

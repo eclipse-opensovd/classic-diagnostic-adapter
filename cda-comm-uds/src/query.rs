@@ -20,13 +20,13 @@ use cda_interfaces::{
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
         ComponentOperationsInfo, Ecu, FunctionalGroup, Gateway, NetworkStructure,
-        RoutineSubfunctions, SdBoolMappings, SdSdg, single_ecu,
+        RoutineSubfunctions, SdBoolMappings, SdSdg, check_sd_sdg_recursive, single_ecu,
     },
     diagservices::UdsPayloadData,
     dlt_ctx, service_ids,
 };
 
-use crate::{UdsManager, util::check_sd_sdg_recursive};
+use crate::UdsManager;
 
 /// Grouping key for the network structure.
 ///

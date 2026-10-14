@@ -500,6 +500,8 @@ where
     let components = crate::vehicle::finish_vehicle_components(
         vehicle_data.prepared,
         &config,
+        Arc::clone(&lock_provider)
+            as Arc<dyn cda_interfaces::request_authorization::RequestLockProvider>,
         Arc::clone(&communication_access),
     );
     let uds_manager = ComponentSlot::new(components.uds_manager);

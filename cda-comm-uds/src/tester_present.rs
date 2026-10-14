@@ -13,7 +13,7 @@
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    Connectivity, DiagServiceError, EcuGateway, EcuManager, HashMap, HashSet,
+    Connectivity, DiagServiceError, EcuGateway, EcuManager, EcuSecurity, HashMap, HashSet,
     SUPPRESS_POSITIVE_RESPONSE_BIT, ServicePayload, TesterPresentControlMessage, TesterPresentMode,
     TesterPresentType, UdsEcuDb, UdsFunctionalGroup, UdsTesterPresent, VariantDetection, dlt_ctx,
     service_ids, util::tokio_ext,
@@ -226,7 +226,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     }
 }
 
-impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
+impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuSecurity> UdsManager<S, T> {
     /// Send a single tester present message to the ECU.
     async fn send_tester_present(
         &self,

@@ -46,6 +46,7 @@ pub use schema::*;
 pub mod communication_control;
 pub mod component_slot;
 pub mod config;
+pub mod request_authorization;
 pub mod runtime_update_api;
 pub mod storage_api;
 mod transport;
@@ -380,6 +381,8 @@ pub enum DiagServiceError {
     Timeout,
     #[error("Access denied: {0}")]
     AccessDenied(String),
+    #[error("Request not allowed: {0}")]
+    RequestNotAllowed(String),
     /// Returned in case a resource can be found but returns an error
     #[error("Resource error: {0}")]
     ResourceError(String),
