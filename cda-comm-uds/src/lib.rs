@@ -38,7 +38,6 @@ pub mod state_coordinator;
 mod tester_present;
 mod transport;
 mod types;
-mod util;
 mod variant;
 
 #[cfg(test)]
