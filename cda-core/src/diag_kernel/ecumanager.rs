@@ -111,6 +111,12 @@ pub struct EcuManager<S: SecurityPlugin> {
     pub(in crate::diag_kernel) fallback_to_base_variant: bool,
     pub(in crate::diag_kernel) strict_parameter_validation: bool,
     pub(in crate::diag_kernel) duplicating_ecu_names: Option<HashSet<String>>,
+    /// Filters of the configured `/components` additional fields; see [`super::additional_fields`].
+    pub(in crate::diag_kernel) additional_field_filters:
+        super::additional_fields::AdditionalFieldFilters,
+    /// Matched additional fields for the currently detected variant, shared across tasks.
+    pub(in crate::diag_kernel) additional_fields_cache:
+        std::sync::Mutex<Option<super::additional_fields::AdditionalFieldsCache>>,
 
     pub(in crate::diag_kernel) protocol: Protocol,
     // functional group: protocol prefixed or postfixed
@@ -718,6 +724,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
             fallback_to_base_variant: config.fallback_to_base_variant,
             strict_parameter_validation: config.strict_parameter_validation,
             duplicating_ecu_names: None,
+            additional_field_filters: std::sync::Arc::new(HashMap::new()),
+            additional_fields_cache: std::sync::Mutex::new(None),
             protocol,
             fg_protocol_position: func_description_config.protocol_position.clone(),
             runtime_state: EcuRuntimeState::new(),
@@ -836,6 +844,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
             fallback_to_base_variant: config.fallback_to_base_variant,
             strict_parameter_validation: config.strict_parameter_validation,
             duplicating_ecu_names: None,
+            additional_field_filters: std::sync::Arc::new(HashMap::new()),
+            additional_fields_cache: std::sync::Mutex::new(None),
             protocol,
             fg_protocol_position: func_description_config.protocol_position.clone(),
             runtime_state: EcuRuntimeState::new(),
