@@ -14,7 +14,7 @@
 use std::{pin::Pin, sync::Arc, time::SystemTime};
 
 use cda_interfaces::{
-    DynamicPlugin, HashMap, ResetOutcome, UdsEcu,
+    HashMap, ResetOutcome, UdsEcu,
     lock_priority_api::{LockId, LockLifecycleEvent},
 };
 use futures::FutureExt;
@@ -202,9 +202,8 @@ pub(super) async fn reset_ecu_session_and_security<T: UdsEcu>(
     uds: &T,
     ecu_name: &str,
     context: &str,
-    security_plugin: &DynamicPlugin,
 ) {
-    match uds.reset_ecu_session(ecu_name, security_plugin).await {
+    match uds.reset_ecu_session(ecu_name).await {
         Ok(ResetOutcome::Completed) => {
             tracing::info!("ECU session reset for ECU {ecu_name} during {context}");
         }
@@ -217,10 +216,7 @@ pub(super) async fn reset_ecu_session_and_security<T: UdsEcu>(
         }
     }
 
-    match uds
-        .reset_ecu_security_access(ecu_name, security_plugin)
-        .await
-    {
+    match uds.reset_ecu_security_access(ecu_name).await {
         Ok(ResetOutcome::Completed) => {
             tracing::info!("ECU security access reset for ECU {ecu_name} during {context}");
         }

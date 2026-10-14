@@ -28,6 +28,7 @@ use cda_interfaces::{
     HashMapExtensions, TransportType, VariantDetectionReceiver, VariantDetectionSender,
     communication_control::CommunicationAccess, component_slot::ComponentSlot,
     datatypes::FaultConfig, dlt_ctx, health::HealthProvider, lock_priority_api::LockPriorityPolicy,
+    request_authorization::RequestLockProvider,
 };
 use cda_plugin_security::SecurityPlugin;
 use cda_sovd::Locks;
@@ -179,6 +180,7 @@ pub fn create_uds_manager<S: SecurityPlugin>(
     state_coordinator: EcuStateCoordinator,
     functional_description_config: &FunctionalDescriptionConfig,
     fault_config: FaultConfig,
+    request_lock_provider: Arc<dyn RequestLockProvider>,
     communication_access: Arc<dyn CommunicationAccess>,
     communication_retry_after: Duration,
 ) -> UdsManagerType<S> {
@@ -189,6 +191,7 @@ pub fn create_uds_manager<S: SecurityPlugin>(
         state_coordinator,
         functional_description_config,
         fault_config,
+        request_lock_provider,
         communication_access,
         communication_retry_after,
     )
@@ -206,12 +209,14 @@ pub async fn create_vehicle_components<S: SecurityPlugin>(
     config: &Configuration,
     mdd_paths: &[PathBuf],
     health_providers: Option<&HashMap<String, Arc<dyn HealthProvider>>>,
+    request_lock_provider: Arc<dyn RequestLockProvider>,
     communication_access: Arc<dyn CommunicationAccess>,
 ) -> Result<VehicleComponents<S>, AppError> {
     let prepared = prepare_vehicle_components(config, mdd_paths, health_providers).await?;
     Ok(finish_vehicle_components(
         prepared,
         config,
+        request_lock_provider,
         communication_access,
     ))
 }
@@ -276,6 +281,7 @@ async fn build_runtime_states<S: SecurityPlugin>(
 pub(crate) fn finish_vehicle_components<S: SecurityPlugin>(
     prepared: PreparedVehicleComponents<S>,
     config: &Configuration,
+    request_lock_provider: Arc<dyn RequestLockProvider>,
     communication_access: Arc<dyn CommunicationAccess>,
 ) -> VehicleComponents<S> {
     let uds_manager = create_uds_manager(
@@ -285,6 +291,7 @@ pub(crate) fn finish_vehicle_components<S: SecurityPlugin>(
         prepared.state_coordinator,
         &config.functional_description,
         config.faults.clone(),
+        request_lock_provider,
         communication_access,
         Duration::from_secs(config.communication.deferred_retry_after_seconds),
     );

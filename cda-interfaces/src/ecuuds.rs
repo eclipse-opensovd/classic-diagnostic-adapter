@@ -120,6 +120,9 @@ pub trait UdsSession: UdsTransport {
     /// While diagnostic communication is not enabled, nothing is sent and no
     /// activation is requested; the reset is deferred until communication is
     /// enabled again (see [`ResetOutcome::Deferred`]).
+    ///
+    /// A reset is housekeeping that must always be able to complete, so it is sent without
+    /// service validation or pre-send authorization.
     /// # Errors
     /// * `DiagServiceError::NotFound` if the ECU does not
     ///     exist or the state chart/default session cannot be found.
@@ -128,11 +131,7 @@ pub trait UdsSession: UdsTransport {
     ///     response when resetting the session.
     ///
     /// Forwards errors from the `set_ecu_session` and `send` functions.
-    async fn reset_ecu_session(
-        &self,
-        ecu_name: &str,
-        security_plugin: &DynamicPlugin,
-    ) -> Result<ResetOutcome, DiagServiceError>;
+    async fn reset_ecu_session(&self, ecu_name: &str) -> Result<ResetOutcome, DiagServiceError>;
 }
 
 /// UDS security access interface.
@@ -164,6 +163,9 @@ pub trait UdsSecurity: UdsTransport {
     /// While diagnostic communication is not enabled, nothing is sent and no
     /// activation is requested; the reset is deferred until communication is
     /// enabled again (see [`ResetOutcome::Deferred`]).
+    ///
+    /// A reset is housekeeping that must always be able to complete, so it is sent without
+    /// service validation or pre-send authorization.
     /// # Errors
     /// * `DiagServiceError::NotFound` if the ECU does not exist or
     ///     the state chart/default session cannot be found.
@@ -175,7 +177,6 @@ pub trait UdsSecurity: UdsTransport {
     async fn reset_ecu_security_access(
         &self,
         ecu_name: &str,
-        security_plugin: &DynamicPlugin,
     ) -> Result<ResetOutcome, DiagServiceError>;
 
     /// Get the name of the parameter used to send the key for the given ECU and security level.
@@ -762,7 +763,6 @@ pub mod mock {
             async fn reset_ecu_session(
                 &self,
                 ecu_name: &str,
-                security_plugin: &DynamicPlugin,
             ) ->  Result<ResetOutcome, DiagServiceError>;
         }
 
@@ -771,7 +771,6 @@ pub mod mock {
             async fn reset_ecu_security_access(
                 &self,
                 ecu_name: &str,
-                security_plugin: &DynamicPlugin,
             ) ->  Result<ResetOutcome, DiagServiceError>;
             #[mockall::concretize]
             async fn set_ecu_security_access(

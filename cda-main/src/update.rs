@@ -136,6 +136,8 @@ where
     let health_for_factory = infra.health.clone();
     let factory = Arc::new(CdaMainVehicleFactory::<SP>::new(
         health_for_factory,
+        Arc::clone(&infra.lock_provider)
+            as Arc<dyn cda_interfaces::request_authorization::RequestLockProvider>,
         Arc::clone(&infra.communication_access),
     ));
 

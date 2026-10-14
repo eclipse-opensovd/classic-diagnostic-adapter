@@ -27,7 +27,6 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
     async fn reset_ecu_security_access(
         &self,
         ecu_name: &str,
-        security_plugin: &DynamicPlugin,
     ) -> Result<ResetOutcome, DiagServiceError> {
         // Cancel any existing security access reset task to prevent double resetting
         self.cancel_reset(ecu_name, ResetType::SecurityAccess).await;
@@ -48,13 +47,16 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
             return Ok(ResetOutcome::Deferred);
         };
 
+        // A reset is housekeeping and must never be blocked by service validation or the
+        // pre-send authorization.
+        let void_plugin: DynamicPlugin = Box::new(());
         let (_, response) = self
             .set_ecu_security_access(
                 ecu_name,
                 &default_security_access,
                 None,
                 None,
-                security_plugin,
+                &void_plugin,
                 None,
             )
             .await?;
