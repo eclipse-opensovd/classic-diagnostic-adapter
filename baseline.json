@@ -3981,15 +3981,6 @@
       "crate": "cda-plugin-security"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/variant.rs",
-      "function": "UdsManager::start_variant_detection_for_ecus",
-      "line": 195,
-      "cyclomatic": 5.0,
-      "coverage": 70.83333333333334,
-      "crap": 5.6202980324074066,
-      "crate": "cda-comm-uds"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::validate_and_parse_write_request",
       "line": 1025,
@@ -4249,6 +4240,15 @@
       "coverage": 90.9090909090909,
       "crap": 5.018782870022539,
       "crate": "cda-transport-router"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/variant.rs",
+      "function": "UdsManager::start_variant_detection_for_ecus",
+      "line": 195,
+      "cyclomatic": 5.0,
+      "coverage": 91.66666666666666,
+      "crap": 5.014467592592593,
+      "crate": "cda-comm-uds"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-plugin-runtime-update/src/storage.rs",
@@ -6033,6 +6033,15 @@
       "crate": "cda-database"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/coordinator.rs",
+      "function": "EcuCoordinator::handle",
+      "line": 232,
+      "cyclomatic": 3.0,
+      "coverage": 89.47368421052632,
+      "crap": 3.010497157019974,
+      "crate": "cda-comm-uds"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/state.rs",
       "function": "EcuManager::lookup_state_transition_for_active",
       "line": 239,
@@ -6765,15 +6774,6 @@
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/query.rs",
       "function": "UdsManager::ecu_exec_service_from_function_class",
       "line": 345,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "cda-comm-uds"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/coordinator.rs",
-      "function": "EcuCoordinator::handle",
-      "line": 232,
       "cyclomatic": 3.0,
       "coverage": 100.0,
       "crap": 3.0,
