@@ -187,7 +187,9 @@ impl From<DiagServiceError> for ApiError {
                 error_code: ErrorCode::VendorSpecific,
                 vendor_code: Some(VendorErrorCode::CommunicationNotReady),
             },
-            DiagServiceError::AccessDenied(_) => ApiError::Forbidden(Some(value.to_string())),
+            DiagServiceError::AccessDenied(_) | DiagServiceError::RequestNotAllowed(_) => {
+                ApiError::Forbidden(Some(value.to_string()))
+            }
         }
     }
 }
@@ -576,6 +578,30 @@ pub(crate) async fn sovd_not_found_handler(uri: Uri) -> impl IntoResponse {
 mod tests {
     use super::*;
     use crate::test_utils::axum_response_into;
+
+    async fn forbidden_message(error: DiagServiceError) -> String {
+        let response = ErrorWrapper {
+            error: error.into(),
+            include_schema: false,
+        }
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body: sovd_interfaces::error::ApiErrorResponse<VendorErrorCode> =
+            axum_response_into(response).await.expect("Valid body");
+        assert_eq!(body.error_code, ErrorCode::InsufficientAccessRights);
+        body.message
+    }
+
+    #[tokio::test]
+    async fn request_not_allowed_maps_to_forbidden_distinct_from_access_denied() {
+        let not_allowed =
+            forbidden_message(DiagServiceError::RequestNotAllowed("no grant".to_owned())).await;
+        let denied = forbidden_message(DiagServiceError::AccessDenied("no grant".to_owned())).await;
+
+        assert!(not_allowed.contains("Request not allowed"), "{not_allowed}");
+        assert!(denied.contains("Access denied"), "{denied}");
+        assert_ne!(not_allowed, denied);
+    }
 
     #[tokio::test]
     async fn lock_priority_denial_includes_schema_when_requested() {
