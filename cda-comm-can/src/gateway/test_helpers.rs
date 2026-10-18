@@ -19,8 +19,8 @@ pub(super) struct ControlledProbe {
 }
 
 impl TransportProbe for ControlledProbe {
-    async fn route_status(&self, _ecu_name: &str) -> RouteStatus {
-        RouteStatus::ProbeRequired
+    fn route_status(&self, _ecu_name: &str) -> impl Future<Output = RouteStatus> {
+        std::future::ready(RouteStatus::ProbeRequired)
     }
 
     async fn probe_ecu(&self, ecu_name: &str) -> bool {
