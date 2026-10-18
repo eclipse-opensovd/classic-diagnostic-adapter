@@ -143,107 +143,76 @@ impl CanDiagGateway {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "can-socketcand")]
-    use cda_interfaces::CanId;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, oneshot};
 
-    use super::*;
-    #[cfg(feature = "can-socketcand")]
-    use crate::{config::CanAddressingMode, gateway::connection::CanEcuConnection};
+    use super::{super::test_helpers::ControlledProbe, *};
 
-    // Builds three nonresponding ECU connections on an isolated local endpoint.
-    #[cfg(feature = "can-socketcand")]
-    fn undiscovered_gateway(
-        probe_timeout: Duration,
-    ) -> (CanDiagGateway, Vec<String>, std::net::TcpListener) {
-        // Reserve a unique endpoint: socketcand caches connections across test runtimes.
-        // Keeping the listener open without serving responses makes every probe time out.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve endpoint");
-        let interface = format!(
-            "socketcand:127.0.0.1:{}:vcan0",
-            listener.local_addr().expect("endpoint address").port()
-        );
-        let connections = [
-            ("missing-1", 0x600, 0x608),
-            ("missing-2", 0x610, 0x618),
-            ("missing-3", 0x620, 0x628),
-        ]
-        .into_iter()
-        .map(|(name, request_id, response_id)| {
-            (
-                name,
-                CanEcuConnection::new(
-                    name.to_owned(),
-                    interface.clone(),
-                    CanId::try_from(request_id).expect("valid request ID"),
-                    CanId::try_from(response_id).expect("valid response ID"),
-                    CanAddressingMode::Standard,
-                ),
-            )
-        })
-        .collect();
-        let mut gateway = CanDiagGateway::test_instance(connections, vec![]);
-        gateway.probe_timeout = probe_timeout;
-        let names = gateway.connections.keys().cloned().collect();
-        (gateway, names, listener)
-    }
-
-    #[cfg(feature = "can-socketcand")]
     #[tokio::test]
     async fn rediscovery_probes_unresponsive_ecus_concurrently() {
-        const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
-        let (gateway, names, _listener) = undiscovered_gateway(PROBE_TIMEOUT);
-        let start = std::time::Instant::now();
-
-        assert_eq!(
-            probe_undiscovered(&gateway, names, &CancellationToken::new()).await,
-            Some(vec![])
-        );
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed >= PROBE_TIMEOUT,
-            "probes must wait for a response timeout"
-        );
-        assert!(
-            elapsed < PROBE_TIMEOUT * 2,
-            "three probes should complete near one timeout, not three: {elapsed:?}"
-        );
-    }
-
-    #[cfg(feature = "can-socketcand")]
-    #[tokio::test]
-    async fn rediscovery_cancellation_interrupts_pending_probes() {
-        let (gateway, names, _listener) = undiscovered_gateway(Duration::from_secs(60));
+        let names = ["missing-1", "missing-2", "missing-3"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let (started, mut receiver) = mpsc::unbounded_channel();
+        let probe = ControlledProbe { started };
         let cancel = CancellationToken::new();
-        let batch = probe_undiscovered(&gateway, names, &cancel);
+        let batch = probe_undiscovered(&probe, names, &cancel);
         tokio::pin!(batch);
         assert!(futures::poll!(&mut batch).is_pending());
 
-        cancel.cancel();
+        // Every probe must start before any is allowed to complete.
+        let mut pending = std::collections::HashMap::new();
+        while let Ok((name, complete)) = receiver.try_recv() {
+            pending.insert(name, complete);
+        }
+        assert_eq!(pending.len(), 3);
+        for name in ["missing-1", "missing-2", "missing-3"] {
+            pending
+                .remove(name)
+                .expect("probe started concurrently")
+                .send(false)
+                .expect("finish unresponsive probe");
+        }
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), batch)
-                .await
-                .expect("cancellation interrupts pending probes"),
-            None
+            futures::poll!(&mut batch),
+            std::task::Poll::Ready(Some(vec![]))
         );
     }
 
-    #[cfg(feature = "can-socketcand")]
+    #[tokio::test]
+    async fn rediscovery_cancellation_interrupts_pending_probes() {
+        let names = ["missing-1", "missing-2", "missing-3"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let (started, mut receiver) = mpsc::unbounded_channel();
+        let probe = ControlledProbe { started };
+        let cancel = CancellationToken::new();
+        let batch = probe_undiscovered(&probe, names, &cancel);
+        tokio::pin!(batch);
+        assert!(futures::poll!(&mut batch).is_pending());
+        let mut pending = Vec::new();
+        while let Ok((_, complete)) = receiver.try_recv() {
+            pending.push(complete);
+        }
+        assert_eq!(pending.len(), 3);
+
+        cancel.cancel();
+        assert_eq!(futures::poll!(&mut batch), std::task::Poll::Ready(None));
+        assert!(pending.iter().all(oneshot::Sender::is_closed));
+    }
+
     #[tokio::test]
     async fn cancelled_rediscovery_returns_none() {
-        let (gateway, names, _listener) = undiscovered_gateway(Duration::from_secs(60));
+        let (started, mut receiver) = mpsc::unbounded_channel();
+        let probe = ControlledProbe { started };
         let cancel = CancellationToken::new();
         cancel.cancel();
+        let batch = probe_undiscovered(&probe, vec!["missing".to_owned()], &cancel);
+        tokio::pin!(batch);
 
-        assert_eq!(
-            tokio::time::timeout(
-                Duration::from_secs(1),
-                probe_undiscovered(&gateway, names, &cancel),
-            )
-            .await
-            .expect("already-cancelled batch completes immediately"),
-            None
-        );
+        assert_eq!(futures::poll!(&mut batch), std::task::Poll::Ready(None));
+        assert!(receiver.try_recv().is_err(), "no probe should start");
     }
 
     #[tokio::test]
