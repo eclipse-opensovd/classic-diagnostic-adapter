@@ -33,7 +33,42 @@ use crate::sovd::{
     resource_response,
 };
 
-const FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS: &str = "flash_download_upload";
+/// Selects the functional class used to resolve a flash service.
+///
+/// Uses the class provided by the client, or `default` if none is provided.
+/// An empty (or whitespace only) class provided by the client is rejected.
+pub(crate) fn resolve_flash_class<'a>(
+    requested: Option<&'a str>,
+    default: &'a str,
+) -> Result<&'a str, ApiError> {
+    match requested {
+        None => Ok(default),
+        Some(class) if class.trim().is_empty() => Err(ApiError::BadRequest(
+            "flashClass must not be empty".to_owned(),
+        )),
+        Some(class) => Ok(class),
+    }
+}
+
+/// Resolves the functional class of a flash request body via [`resolve_flash_class`]
+/// and returns the error response from the calling handler on failure.
+macro_rules! flash_class_or_return {
+    ($body:expr, $default:expr, $include_schema:expr) => {
+        match $crate::sovd::components::ecu::x_sovd2uds_download::resolve_flash_class(
+            $body.flash_class.as_deref(),
+            &$default,
+        ) {
+            Ok(class) => class,
+            Err(error) => {
+                return $crate::sovd::error::ErrorWrapper {
+                    error,
+                    include_schema: $include_schema,
+                }
+                .into_response();
+            }
+        }
+    };
+}
 
 async fn sovd_to_func_class_service_exec<T: UdsEcu + Clone>(
     uds: &T,
@@ -138,9 +173,7 @@ pub(crate) mod request_download {
             error::{ApiError, ErrorWrapper, VendorErrorCode},
             field_parse_errors_to_json,
             locks::require_ecu_access,
-            x_sovd2uds_download::{
-                FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS, sovd_to_func_class_service_exec,
-            },
+            x_sovd2uds_download::sovd_to_func_class_service_exec,
         },
     };
 
@@ -154,18 +187,24 @@ pub(crate) mod request_download {
             ecu_name,
             uds,
             locks,
+            flash_functional_class_default,
             ..
         }): State<WebserverEcuState<T, U>>,
-        body: Json<sovd2uds::download::request_download::put::Request>,
+        WithRejection(Json(body), _): WithRejection<
+            Json<sovd2uds::download::request_download::put::Request>,
+            ApiError,
+        >,
     ) -> Response {
         let include_schema = query.include_schema;
         require_ecu_access!(write, security_plugin, &ecu_name, &locks, include_schema);
+        let func_class =
+            flash_class_or_return!(body, flash_functional_class_default, include_schema);
         let schema = if include_schema {
             'schema: {
                 let Ok(service) = uds
                     .ecu_lookup_service_through_func_class(
                         &ecu_name,
-                        FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS,
+                        func_class,
                         service_ids::REQUEST_DOWNLOAD,
                     )
                     .await
@@ -192,10 +231,10 @@ pub(crate) mod request_download {
         };
         match sovd_to_func_class_service_exec::<T>(
             &uds,
-            FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS,
+            func_class,
             &ecu_name,
             service_ids::REQUEST_DOWNLOAD,
-            body.parameters.clone(),
+            body.parameters,
             security_plugin,
             include_schema,
         )
@@ -243,7 +282,10 @@ pub(crate) mod request_download {
     }
 
     pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
-        op.description("Execute the request download service on the component")
+        op.description(
+            "Execute the request download service on the component. The service is resolved \
+             through the functional class given in `flashClass`, or the configured default.",
+        )
             .response_with::<
                 200,
                 Json<sovd2uds::download::request_download::put::Response<VendorErrorCode>>,
@@ -292,7 +334,6 @@ pub(crate) mod flash_transfer {
             IntoSovd, WebserverEcuState, create_schema,
             error::{ApiError, ErrorWrapper},
             locks::require_ecu_access,
-            x_sovd2uds_download::FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS,
         },
     };
 
@@ -307,12 +348,18 @@ pub(crate) mod flash_transfer {
             uds,
             locks,
             flash_data,
+            flash_functional_class_default,
             ..
         }): State<WebserverEcuState<T, U>>,
-        body: Json<sovd2uds::download::flash_transfer::post::Request>,
+        WithRejection(Json(body), _): WithRejection<
+            Json<sovd2uds::download::flash_transfer::post::Request>,
+            ApiError,
+        >,
     ) -> Response {
         let include_schema = query.include_schema;
         require_ecu_access!(write, security_plugin, &ecu_name, &locks, include_schema);
+        let func_class =
+            flash_class_or_return!(body, flash_functional_class_default, include_schema);
         match flash_data
             .read()
             .await
@@ -342,7 +389,7 @@ pub(crate) mod flash_transfer {
                 match uds
                     .ecu_flash_transfer_start(
                         &ecu_name,
-                        FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS,
+                        func_class,
                         &(security_plugin as DynamicPlugin),
                         FlashTransferStartParams {
                             file_path: &flash_data
@@ -390,18 +437,19 @@ pub(crate) mod flash_transfer {
     }
 
     pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
-        op.description("Start a flash transfer for a file")
-            .input::<Json<sovd2uds::download::flash_transfer::post::Request>>()
-            .response_with::<200, Json<sovd2uds::download::flash_transfer::post::Response>, _>(
-                |res| {
-                    res.example(sovd2uds::download::flash_transfer::post::Response {
-                        id: "123e4567-e89b-12d3-a456-426614174000".to_owned(),
-                        schema: None,
-                    })
-                },
-            )
-            .with(openapi::error_bad_request)
-            .with(openapi::error_not_found)
+        op.description(
+            "Start a flash transfer for a file. The TransferData service is resolved through the \
+             functional class given in `flashClass`, or the configured default.",
+        )
+        .input::<Json<sovd2uds::download::flash_transfer::post::Request>>()
+        .response_with::<200, Json<sovd2uds::download::flash_transfer::post::Response>, _>(|res| {
+            res.example(sovd2uds::download::flash_transfer::post::Response {
+                id: "123e4567-e89b-12d3-a456-426614174000".to_owned(),
+                schema: None,
+            })
+        })
+        .with(openapi::error_bad_request)
+        .with(openapi::error_not_found)
     }
 
     pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
@@ -615,6 +663,8 @@ pub(crate) mod flash_transfer {
 pub(crate) mod transferexit {
     use aide::{UseApi, transform::TransformOperation};
     use axum::{
+        Json,
+        body::Bytes,
         extract::State,
         response::{IntoResponse, Response},
     };
@@ -623,17 +673,25 @@ pub(crate) mod transferexit {
     };
     use cda_plugin_security::Secured;
     use http::StatusCode;
+    use sovd_interfaces::components::ecu::x::sovd2uds::download::transfer_exit;
 
     use crate::{
         openapi,
         sovd::{
-            WebserverEcuState,
-            locks::require_ecu_access,
-            x_sovd2uds_download::{
-                FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS, sovd_to_func_class_service_exec,
-            },
+            WebserverEcuState, error::ApiError, locks::require_ecu_access,
+            x_sovd2uds_download::sovd_to_func_class_service_exec,
         },
     };
+
+    /// Parses the optional request body. An empty (or whitespace only) body is accepted
+    /// and results in the default request.
+    pub(super) fn parse_body(body: &[u8]) -> Result<transfer_exit::put::Request, ApiError> {
+        if body.iter().all(u8::is_ascii_whitespace) {
+            return Ok(transfer_exit::put::Request::default());
+        }
+        serde_json::from_slice(body)
+            .map_err(|e| ApiError::BadRequest(format!("Invalid request body: {e}")))
+    }
 
     pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
@@ -641,13 +699,20 @@ pub(crate) mod transferexit {
             ecu_name,
             uds,
             locks,
+            flash_functional_class_default,
             ..
         }): State<WebserverEcuState<T, U>>,
+        body: Bytes,
     ) -> Response {
         require_ecu_access!(write, security_plugin, &ecu_name, &locks, false);
+        let request = match parse_body(&body) {
+            Ok(request) => request,
+            Err(e) => return e.into_response(),
+        };
+        let func_class = flash_class_or_return!(request, flash_functional_class_default, false);
         match sovd_to_func_class_service_exec::<T>(
             &uds,
-            FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS,
+            func_class,
             &ecu_name,
             service_ids::REQUEST_TRANSFER_EXIT,
             HashMap::new(),
@@ -662,10 +727,62 @@ pub(crate) mod transferexit {
     }
 
     pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
-        op.description("Exit a transfer session")
-            .response_with::<204, (), _>(|res| res)
-            .with(openapi::error_bad_request)
-            .with(openapi::error_not_found)
-            .with(openapi::error_bad_gateway)
+        op.description(
+            "Exit a transfer session. The optional body can select the functional class used to \
+             resolve the RequestTransferExit service via `flashClass`; without it the configured \
+             default is used.",
+        )
+        .input::<Json<transfer_exit::put::Request>>()
+        .response_with::<204, (), _>(|res| res)
+        .with(openapi::error_bad_request)
+        .with(openapi::error_not_found)
+        .with(openapi::error_bad_gateway)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_flash_class;
+    use crate::sovd::error::ApiError;
+
+    #[test]
+    fn resolve_flash_class_uses_default_when_absent() {
+        assert!(matches!(
+            resolve_flash_class(None, "flash_download_upload"),
+            Ok("flash_download_upload")
+        ));
+    }
+
+    #[test]
+    fn resolve_flash_class_prefers_requested_class() {
+        assert!(matches!(
+            resolve_flash_class(Some("Bootloader"), "flash_download_upload"),
+            Ok("Bootloader")
+        ));
+    }
+
+    #[test]
+    fn resolve_flash_class_rejects_empty_class() {
+        assert!(matches!(
+            resolve_flash_class(Some(""), "flash_download_upload"),
+            Err(ApiError::BadRequest(_))
+        ));
+        assert!(matches!(
+            resolve_flash_class(Some("  "), "flash_download_upload"),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn transfer_exit_body_parsing() {
+        assert!(super::transferexit::parse_body(b"").is_ok_and(|r| r.flash_class.is_none()));
+        assert!(
+            super::transferexit::parse_body(br#"{"FlashClass":"x"}"#)
+                .is_ok_and(|r| r.flash_class.as_deref() == Some("x"))
+        );
+        assert!(matches!(
+            super::transferexit::parse_body(b"{not json"),
+            Err(ApiError::BadRequest(_))
+        ));
     }
 }

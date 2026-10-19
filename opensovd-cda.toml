@@ -11,6 +11,9 @@
 
 # Path to the directory containing flash files.
 # flash_files_path = "."
+# Default functional class used to resolve the flash services (0x34, 0x36, 0x37)
+# when the client does not provide `flashClass`. Compared case-insensitively.
+# flash_functional_class_default = "flash_download_upload"
 
 # Optional CAN bus transport configuration.
 # When enabled, the adapter can communicate with ECUs over CAN bus.

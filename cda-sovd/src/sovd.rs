@@ -124,6 +124,7 @@ pub(crate) struct WebserverEcuState<T: UdsEcu + Clone, U: FileManager> {
     // Map of Service Name -> (Execution Id -> ServiceExecution) for ECU routine operations
     pub(crate) service_executions: Arc<ExecutionLock<ServiceExecution>>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
+    flash_functional_class_default: Arc<str>,
     mdd_embedded_files: Arc<U>,
 }
 
@@ -618,6 +619,7 @@ pub(crate) struct WebserverState<T: UdsEcu + Clone> {
     uds: T,
     locks: Arc<Locks>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
+    flash_functional_class_default: Arc<str>,
     components_config: Arc<RwLock<ComponentsConfig>>,
     communication_access: Arc<dyn CommunicationAccess>,
 }
@@ -648,24 +650,33 @@ pub(crate) fn resource_response(
     (StatusCode::OK, Json(components)).into_response()
 }
 
+/// Flash API related configuration.
+pub struct FlashConfig {
+    /// Folder that contains the flash files.
+    pub files_path: String,
+    /// Functional class used to resolve the flash services when the client provides none.
+    pub functional_class_default: String,
+}
+
 pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: SecurityPluginLoader>(
     functional_group_config: FunctionalDescriptionConfig,
     components_config: ComponentsConfig,
     uds: &T,
-    flash_files_path: String,
+    flash_config: FlashConfig,
     mut file_manager: HashMap<String, U>,
     locks: Arc<Locks>,
     communication_access: Arc<dyn CommunicationAccess>,
 ) -> Router {
     let flash_data = Arc::new(RwLock::new(sovd_interfaces::sovd2uds::FileList {
         files: Vec::new(),
-        path: Some(PathBuf::from(flash_files_path)),
+        path: Some(PathBuf::from(flash_config.files_path)),
         schema: None,
     }));
     let state = WebserverState {
         uds: uds.clone(),
         locks,
         flash_data: Arc::clone(&flash_data),
+        flash_functional_class_default: Arc::from(flash_config.functional_class_default),
         components_config: Arc::new(RwLock::new(components_config)),
         communication_access,
     };
@@ -838,6 +849,7 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
         communication_access: Arc::clone(&state.communication_access),
         service_executions: Arc::new(StdRwLock::new(HashMap::default())),
         flash_data: Arc::clone(&state.flash_data),
+        flash_functional_class_default: Arc::clone(&state.flash_functional_class_default),
         mdd_embedded_files: Arc::new(file_manager.remove(&ecu_lower).ok_or_else(|| {
             SovdError::RouteError(format!(
                 "FileManager for ECU '{ecu_name}' not found in provided FileManager map"
@@ -1644,6 +1656,7 @@ pub(crate) mod tests {
                 path: Some(PathBuf::new()),
                 schema: None,
             })),
+            flash_functional_class_default: Arc::from("flash_download_upload"),
             mdd_embedded_files: Arc::new(file_manager),
         }
     }

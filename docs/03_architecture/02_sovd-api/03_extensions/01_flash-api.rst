@@ -265,11 +265,11 @@ Configuration
 
     The following configuration parameter must be available in the CDA configuration, next to ``flash_files_path``:
 
-    - ``flash_functional_class``: Default functional class used to resolve the services 0x34, 0x36 and 0x37
+    - ``flash_functional_class_default``: Default functional class used to resolve the services 0x34, 0x36 and 0x37
       when no ``flashClass`` is provided in the request. Defaults to ``flash_download_upload``. Compared
       case-insensitively.
 
     .. code-block:: toml
 
        flash_files_path = "/app/flash"
-       flash_functional_class = "flash_download_upload"
+       flash_functional_class_default = "flash_download_upload"
