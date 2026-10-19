@@ -232,10 +232,6 @@ async fn handle_connection_error(
     }
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "Contains receiver loop that should remain in scope"
-)]
 #[tracing::instrument(
     skip_all,
     fields(

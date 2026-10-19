@@ -232,7 +232,7 @@ async fn register_execution(
     execution_id
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "Spawned task inputs must be owned"
 )]

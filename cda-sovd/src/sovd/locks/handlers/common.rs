@@ -205,7 +205,7 @@ fn commit_new_lock(
     }
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "Each argument transfers distinct transaction state into this async task. A \
               parameter struct would add indirection without creating a reusable abstraction"

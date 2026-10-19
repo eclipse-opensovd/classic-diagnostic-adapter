@@ -182,7 +182,7 @@ impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     /// Create a new [`UdsManager`].
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "Combining parameters into a struct is not preferred here, to keep constructor \
                   call semantics explicit"

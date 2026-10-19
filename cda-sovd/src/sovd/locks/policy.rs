@@ -160,7 +160,7 @@ pub(crate) async fn rollback_preemption(pending: Option<PendingPreemption>, _loc
 }
 
 impl Locks {
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "Snapshot capture, external policy evaluation, stale-state detection, and retry \
                   must remain one visible transaction. Splitting them would obscure the \

@@ -30,7 +30,7 @@ use crate::sovd::{
 };
 
 fn file_name_to_id(file_name: &str) -> String {
-    #[allow(
+    #[expect(
         clippy::unwrap_used,
         reason = "Regex literal is valid; checked by clippy::invalid_regex"
     )]

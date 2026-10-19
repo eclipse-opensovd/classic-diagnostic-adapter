@@ -127,7 +127,7 @@ pub struct DtcField {
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
-#[allow(
+#[expect(
     clippy::struct_excessive_bools,
     reason = "Bools represent individual DTC status bits. A bitfield-like struct is appropriate \
               here"
