@@ -24,7 +24,10 @@ use std::time::Duration;
 
 pub mod disable;
 
-pub use access::{CommunicationAccess, CommunicationError, CommunicationGuard, CommunicationState};
+pub use access::{
+    CommunicationAccess, CommunicationError, CommunicationGuard, CommunicationGuardReason,
+    CommunicationState,
+};
 use async_trait::async_trait;
 pub use disable::{DisableCommunication, DisableError, DisableGuard, DisableReason};
 pub use error::CommControlError;

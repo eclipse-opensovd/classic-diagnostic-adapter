@@ -16,10 +16,10 @@
 use std::sync::Arc;
 
 use cda_interfaces::{
-    HashSet,
+    HashMap,
     communication_control::{
-        CommunicationOperation, CommunicationOperationFailure, CommunicationState,
-        CommunicationVariantDetection, VariantDetectionMode,
+        CommunicationGuardReason, CommunicationOperation, CommunicationOperationFailure,
+        CommunicationState, CommunicationVariantDetection, VariantDetectionMode,
     },
     util::std_ext,
 };
@@ -50,7 +50,7 @@ pub(crate) fn detection_mode(
 /// State that must change atomically during communication lifecycle transitions.
 pub(crate) struct CommunicationStateData {
     pub(crate) state: CommunicationState,
-    pub(crate) active_guards: HashSet<CommunicationGuardId>,
+    pub(crate) active_guards: HashMap<CommunicationGuardId, CommunicationGuardReason>,
     /// The current exclusive disable owner, carrying both its identity and
     /// whether releasing it re-enables the transport (see [`DisableOwner`]).
     pub(crate) disable_owner: Option<DisableOwner>,
@@ -164,7 +164,7 @@ impl CommunicationStateStore {
         Self {
             state: std::sync::Mutex::new(CommunicationStateData {
                 state: initial,
-                active_guards: HashSet::default(),
+                active_guards: HashMap::default(),
                 disable_owner: None,
                 enabling_result: None,
                 detection_in_flight: None,

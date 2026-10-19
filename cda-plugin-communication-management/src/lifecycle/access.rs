@@ -15,7 +15,7 @@ use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::communication_control::{
     ActivationCause, CommunicationAccess, CommunicationError, CommunicationGuard,
-    CommunicationState, VariantDetectionMode,
+    CommunicationGuardReason, CommunicationState, VariantDetectionMode,
 };
 
 use crate::plugin::CommunicationPlugin;
@@ -45,8 +45,11 @@ impl CommunicationAccess for CommunicationAccessView {
         self.plugin.state()
     }
 
-    fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
-        self.plugin.acquire()
+    fn acquire(
+        &self,
+        reason: CommunicationGuardReason,
+    ) -> Result<CommunicationGuard, CommunicationError> {
+        self.plugin.acquire(reason)
     }
 
     fn request_activate(&self, cause: ActivationCause) -> CommunicationState {

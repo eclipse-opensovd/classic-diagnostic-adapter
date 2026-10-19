@@ -239,8 +239,10 @@ pub(crate) fn guard_admission(state: &CommunicationState) -> Result<(), Communic
 #[cfg(test)]
 mod tests {
     use cda_interfaces::{
-        HashSet,
-        communication_control::{CommunicationOperationFailure, VariantDetectionMode},
+        HashMap,
+        communication_control::{
+            CommunicationGuardReason, CommunicationOperationFailure, VariantDetectionMode,
+        },
     };
 
     use super::{super::guard::CommunicationGuardId, *};
@@ -249,7 +251,7 @@ mod tests {
     fn data(state: CommunicationState) -> CommunicationStateData {
         CommunicationStateData {
             state,
-            active_guards: HashSet::default(),
+            active_guards: HashMap::default(),
             disable_owner: None,
             enabling_result: None,
             detection_in_flight: None,
@@ -277,9 +279,10 @@ mod tests {
 
         for state in states {
             let mut guarded = data(state.clone());
-            guarded
-                .active_guards
-                .insert(CommunicationGuardId(uuid::Uuid::new_v4()));
+            guarded.active_guards.insert(
+                CommunicationGuardId(uuid::Uuid::new_v4()),
+                CommunicationGuardReason::new("test diagnostic activity"),
+            );
             assert_eq!(
                 decide(&guarded, false, LifecycleRequest::Disable),
                 LifecycleDecision::GuardsHeld,
@@ -335,8 +338,10 @@ mod tests {
     #[test]
     fn a_sweep_in_flight_still_admits_guards() {
         let mut held = data(CommunicationState::Enabled);
-        held.active_guards
-            .insert(CommunicationGuardId(uuid::Uuid::new_v4()));
+        held.active_guards.insert(
+            CommunicationGuardId(uuid::Uuid::new_v4()),
+            CommunicationGuardReason::new("test diagnostic activity"),
+        );
         assert_eq!(
             decide(&held, false, LifecycleRequest::Detect),
             LifecycleDecision::GuardsHeld,

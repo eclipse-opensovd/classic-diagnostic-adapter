@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, FlashTransferStartParams,
     HashMap, UdsDataTransfer, UdsTransport,
+    communication_control::CommunicationGuardReason,
     datatypes::{DataTransferError, DataTransferMetaData, DataTransferStatus},
     diagservices::UdsPayloadData,
     dlt_ctx, service_ids, spawn_named,
@@ -191,7 +192,9 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         parameters: FlashTransferStartParams<'_>,
     ) -> Result<(), DiagServiceError> {
-        let communication_guard = self.require_communication_ready()?;
+        let communication_guard = self.require_communication_ready(
+            CommunicationGuardReason::new(format!("Flash transfer for ECU '{ecu_name}'")),
+        )?;
         let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
 
         let FlashTransferStartParams {

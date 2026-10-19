@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use cda_interfaces::{
     DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, HashMapExtensions, HashSet,
     PayloadDecoder, SchemaDescription, SchemaProvider, ServicePayload, UdsDtc, UdsTransport,
+    communication_control::CommunicationGuardReason,
     datatypes::{
         self, DTC_CODE_BIT_LEN, DtcCode, DtcExtendedInfo, DtcMask, DtcReadInformationFunction,
         DtcRecordAndStatus, DtcSnapshot, ExtendedDataRecords, ExtendedSnapshots,
@@ -231,7 +232,10 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         ),
         DiagServiceError,
     > {
-        let _communication_guard = self.require_communication_ready()?;
+        let _communication_guard =
+            self.require_communication_ready(CommunicationGuardReason::new(format!(
+                "DTC extended-data request for ECU '{ecu_name}'"
+            )))?;
         let ecu = self.uds_ecu_db(ecu_name)?;
         let (read_func, extended_data_lookup) = ecu
             .read()
@@ -473,7 +477,9 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         dtc_code: DtcCode,
         memory_selection: Option<u8>,
     ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError> {
-        let _communication_guard = self.require_communication_ready()?;
+        let _communication_guard = self.require_communication_ready(
+            CommunicationGuardReason::new(format!("DTC snapshot request for ECU '{ecu_name}'")),
+        )?;
         let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
         let scoped_services: Vec<_> = ecu
             .read()
@@ -606,7 +612,9 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         scope: Option<String>,
         memory_selection: Option<u8>,
     ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError> {
-        let _communication_guard = self.require_communication_ready()?;
+        let _communication_guard = self.require_communication_ready(
+            CommunicationGuardReason::new(format!("DTC request for ECU '{ecu_name}'")),
+        )?;
         let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
         let scoped_services: Vec<_> = ecu
             .read()
@@ -707,7 +715,9 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         fault_code: Option<String>,
     ) -> Result<Self::Response, DiagServiceError> {
-        let _communication_guard = self.require_communication_ready()?;
+        let _communication_guard = self.require_communication_ready(
+            CommunicationGuardReason::new(format!("DTC request for ECU '{ecu_name}'")),
+        )?;
         let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
 
         let delete_dtc_service = ecu.read().await.lookup_service_through_func_class(
@@ -767,7 +777,9 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         scope: &str,
     ) -> Result<Self::Response, DiagServiceError> {
-        let _communication_guard = self.require_communication_ready()?;
+        let _communication_guard = self.require_communication_ready(
+            CommunicationGuardReason::new(format!("DTC request for ECU '{ecu_name}'")),
+        )?;
         let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
         let fault_config = &self.fault_config;
 

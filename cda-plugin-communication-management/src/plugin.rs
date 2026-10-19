@@ -19,9 +19,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cda_interfaces::communication_control::{
-    ActivationCause, CommunicationError, CommunicationGuard, CommunicationInitMode,
-    CommunicationLifecycle, CommunicationOperationFailure, CommunicationState,
-    CommunicationVariantDetection, DetectionCause, VariantDetectionMode,
+    ActivationCause, CommunicationError, CommunicationGuard, CommunicationGuardReason,
+    CommunicationInitMode, CommunicationLifecycle, CommunicationOperationFailure,
+    CommunicationState, CommunicationVariantDetection, DetectionCause, VariantDetectionMode,
 };
 
 // Re-export CommunicationHandle for plugin builders
@@ -52,7 +52,10 @@ pub trait CommunicationPlugin: cda_interfaces::Shutdown {
     /// # Errors
     ///
     /// Returns an error when communication is not enabled.
-    fn acquire(&self) -> Result<CommunicationGuard, CommunicationError>;
+    fn acquire(
+        &self,
+        reason: CommunicationGuardReason,
+    ) -> Result<CommunicationGuard, CommunicationError>;
 
     /// Activates communication or attempts recovery from an error.
     ///

@@ -17,7 +17,9 @@ use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, FunctionalDescriptionConfig,
     HashMap, HashMapExtensions, SchemaDescription, SchemaProvider, UdsEcu, UdsEcuDb, UdsTransport,
     VariantDetectionReceiver,
-    communication_control::{ActivationCause, CommunicationAccess, CommunicationGuard},
+    communication_control::{
+        ActivationCause, CommunicationAccess, CommunicationGuard, CommunicationGuardReason,
+    },
     datatypes::FaultConfig,
     diagservices::UdsPayloadData,
 };
@@ -158,8 +160,9 @@ impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
     /// is not currently enabled.
     pub(crate) fn require_communication_ready(
         &self,
+        reason: CommunicationGuardReason,
     ) -> Result<CommunicationGuard, DiagServiceError> {
-        if let Ok(guard) = self.communication_access.acquire() {
+        if let Ok(guard) = self.communication_access.acquire(reason) {
             return Ok(guard);
         }
         self.communication_access
@@ -282,7 +285,10 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         params: HashMap<String, serde_json::Value>,
         map_to_json: bool,
     ) -> Result<<T as cda_interfaces::PayloadDecoder>::Response, DiagServiceError> {
-        let _communication_guard = self.require_communication_ready()?;
+        let _communication_guard =
+            self.require_communication_ready(CommunicationGuardReason::new(format!(
+                "UDS service {service_bytes:02X?} on ECU '{ecu_name}'"
+            )))?;
         // Look up the service definition in the MDD database using the same
         // approach as lookup_diagcomms_by_request_prefix - matches against
         // coded constant parameter values in the database.
@@ -343,7 +349,9 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         params: HashMap<String, serde_json::Value>,
         map_to_json: bool,
     ) -> Result<<T as cda_interfaces::PayloadDecoder>::Response, DiagServiceError> {
-        let _communication_guard = self.require_communication_ready()?;
+        let _communication_guard = self.require_communication_ready(
+            CommunicationGuardReason::new(format!("UDS service '{name}' on ECU '{ecu_name}'")),
+        )?;
         let ecu = self.uds_ecu_db(ecu_name)?;
         let diag_comm = ecu
             .read()

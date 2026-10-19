@@ -82,6 +82,27 @@ pub enum CommunicationError {
     Failed(CommunicationOperationFailure),
 }
 
+/// Describes the diagnostic activity that needs communication to remain enabled.
+///
+/// The communication manager retains this value for the lifetime of the guard.
+/// It uses it to report the operations that prevent an exclusive disable lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommunicationGuardReason(String);
+
+impl CommunicationGuardReason {
+    /// Creates a reason describing the guarded diagnostic activity.
+    #[must_use]
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self(reason.into())
+    }
+
+    /// Returns the description of the guarded diagnostic activity.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Opaque RAII guard marking communication as in use, so exclusive disable
 /// cannot begin while diagnostic activity is ongoing.
 ///
@@ -120,7 +141,10 @@ pub trait CommunicationAccess: Send + Sync + 'static {
     /// # Errors
     ///
     /// Returns an error when communication is not enabled.
-    fn acquire(&self) -> Result<CommunicationGuard, CommunicationError>;
+    fn acquire(
+        &self,
+        reason: CommunicationGuardReason,
+    ) -> Result<CommunicationGuard, CommunicationError>;
 
     /// Requests activation without blocking.
     ///
