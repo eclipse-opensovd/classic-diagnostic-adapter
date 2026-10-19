@@ -12,6 +12,7 @@
  */
 
 use std::{
+    net::IpAddr,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -23,7 +24,7 @@ use cda_interfaces::{
     TransmissionParameters, TransportProbe, TransportResponse, VariantDetectionRequest,
     VariantDetectionSender,
     communication_control::{
-        GatewayLifecycle, TransportControl, TransportState, error::CommControlError,
+        DoipEndpoint, GatewayLifecycle, TransportControl, TransportState, error::CommControlError,
     },
     dlt_ctx, pending_nrc_from_raw, uds_response_from_raw,
     util::{self, tokio_ext},
@@ -366,6 +367,37 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         })
     }
 
+    fn transport_config(&self) -> DoipTransportConfig {
+        let config = &self.config;
+        DoipTransportConfig {
+            tester_ip: config.tester_address.clone(),
+            port: config.gateway_port,
+            tls_port: config.tls_port,
+            send_diagnostic_message_ack: config.send_diagnostic_message_ack,
+            send_timeout: Duration::from_millis(config.send_timeout_ms),
+            alive_check_interval: Duration::from_secs(config.alive_check_interval_secs),
+        }
+    }
+
+    /// Maps each gateway logical address to the logical addresses and names of
+    /// the ECUs behind it.
+    async fn gateway_ecu_maps(&self) -> (HashMap<u16, Vec<u16>>, HashMap<u16, Vec<String>>) {
+        let mut gateway_ecu_map: HashMap<u16, Vec<u16>> = HashMap::new();
+        let mut gateway_ecu_name_map: HashMap<u16, Vec<String>> = HashMap::new();
+        for (ecu_name, ecu_lock) in self.state.ecus.iter() {
+            let ecu = ecu_lock.read().await;
+            gateway_ecu_map
+                .entry(ecu.logical_gateway_address())
+                .or_default()
+                .push(ecu.logical_address());
+            gateway_ecu_name_map
+                .entry(ecu.logical_gateway_address())
+                .or_default()
+                .push(ecu_name.clone());
+        }
+        (gateway_ecu_map, gateway_ecu_name_map)
+    }
+
     async fn start(
         &self,
         operation: &mut DoipGatewayOperation,
@@ -382,14 +414,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         }
 
         let config = &self.config;
-        let transport_config = DoipTransportConfig {
-            tester_ip: config.tester_address.clone(),
-            port: config.gateway_port,
-            tls_port: config.tls_port,
-            send_diagnostic_message_ack: config.send_diagnostic_message_ack,
-            send_timeout: Duration::from_millis(config.send_timeout_ms),
-            alive_check_interval: Duration::from_secs(config.alive_check_interval_secs),
-        };
+        let transport_config = self.transport_config();
         let mask = self.state.netmask;
         let cancel = CancellationToken::new();
         let shutdown = cancel.child_token().cancelled_owned().shared();
@@ -397,35 +422,37 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         operation.cancel = Some(cancel.clone());
         operation.connection_tasks = Some(Arc::clone(&connection_tasks));
 
+        let (gateway_ecu_map, gateway_ecu_name_map) = self.gateway_ecu_maps().await;
+
+        if !config.discovery.listens_for_vams() {
+            tracing::info!(
+                "DoIP discovery is disabled, no VIR is sent and VAMs are ignored. ECUs have to be \
+                 connected directly."
+            );
+            return Ok(());
+        }
+
         // TODO(persistence-init-mode): Implement as described in req~dt-ecu-list-persistence
         let socket = socket_guard.insert(create_udp_vir_socket(
             &config.tester_address,
             config.gateway_port,
         )?);
-        let gateways = vir_vam::get_vehicle_identification::<T, _>(
-            socket,
-            mask,
-            config.gateway_port,
-            &self.state.ecus,
-            shutdown.clone(),
-        )
-        .await
-        .map_err(|error| DoipGatewaySetupError::ResourceError(error.to_string()))?;
+        let gateways = if config.discovery.sends_vir() {
+            vir_vam::get_vehicle_identification::<T, _>(
+                socket,
+                mask,
+                config.gateway_port,
+                &self.state.ecus,
+                shutdown.clone(),
+            )
+            .await
+            .map_err(|error| DoipGatewaySetupError::ResourceError(error.to_string()))?
+        } else {
+            tracing::info!("DoIP discovery is VAM only, not broadcasting a VIR");
+            Vec::new()
+        };
         drop(socket_guard);
 
-        let mut gateway_ecu_map: HashMap<u16, Vec<u16>> = HashMap::new();
-        let mut gateway_ecu_name_map: HashMap<u16, Vec<String>> = HashMap::new();
-        for (ecu_name, ecu_lock) in self.state.ecus.iter() {
-            let ecu = ecu_lock.read().await;
-            gateway_ecu_map
-                .entry(ecu.logical_gateway_address())
-                .or_default()
-                .push(ecu.logical_address());
-            gateway_ecu_name_map
-                .entry(ecu.logical_gateway_address())
-                .or_default()
-                .push(ecu_name.clone());
-        }
         for gateway in gateways {
             let gateway_name = gateway.ecu_name.clone();
             let gateway_ecu_names = gateway_ecu_name_map
@@ -857,6 +884,118 @@ impl<T: EcuAddresses + DoipComParams> NetworkTopology for DoipDiagGateway<T> {
             .iter()
             .find(|conn| conn.ecus.contains_key(&logical_address))
             .map(|conn| conn.ip.clone())
+    }
+}
+
+impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
+    /// Connects `ecu_name` to `address` without VIR/VAM discovery, then continues
+    /// like a discovered gateway: routing activation, TLS upgrade, ECU identification.
+    async fn connect_direct(
+        &self,
+        ecu_name: &str,
+        address: IpAddr,
+        protocol_version: u8,
+    ) -> Result<(), DiagServiceError> {
+        let ecu_name = ecu_name.to_lowercase();
+        let protocol_version = ProtocolVersion::try_from(&protocol_version).map_err(|_| {
+            DiagServiceError::InvalidRequest(format!(
+                "Unsupported DoIP protocol version {protocol_version:#04x}"
+            ))
+        })?;
+        let ecu_lock = self
+            .state
+            .ecus
+            .get(&ecu_name)
+            .ok_or_else(|| DiagServiceError::NotFound(format!("ECU {ecu_name} not found")))?;
+        let logical_address = ecu_lock.read().await.logical_address();
+
+        // Serializes direct connects and keeps the lifecycle from tearing
+        // down while the connection is being established.
+        let operation = self.lifecycle.operation.lock().await;
+        let Some(connection_tasks) = operation.connection_tasks.as_ref().map(Arc::clone) else {
+            return Err(DiagServiceError::CommunicationDisabled(
+                "DoIP communication is not enabled".to_owned(),
+            ));
+        };
+
+        if self
+            .state
+            .logical_address_to_connection
+            .read()
+            .await
+            .contains_key(&logical_address)
+        {
+            let connected_ip = self
+                .get_gateway_network_address(logical_address)
+                .await
+                .unwrap_or_else(|| "an unknown address".to_owned());
+            return Err(DiagServiceError::Conflict(format!(
+                "ECU '{ecu_name}' is already connected on {connected_ip}"
+            )));
+        }
+
+        let (gateway_ecu_map, gateway_ecu_name_map) = self.gateway_ecu_maps().await;
+        let gateway_state = GatewayState {
+            doip_connections: Arc::clone(&self.state.doip_connections),
+            ecus: Arc::clone(&self.state.ecus),
+            gateway_ecu_map,
+            connection_tasks,
+        };
+        tracing::info!(
+            ecu_name = %ecu_name,
+            %address,
+            ?protocol_version,
+            "Connecting ECU directly"
+        );
+        let logical_address = connections::handle_gateway_connection::<T>(
+            DiscoveredGateway {
+                ip: address.to_string(),
+                ecu_name: ecu_name.clone(),
+                logical_address,
+                doip_protocol_version: protocol_version,
+            },
+            &self.transport_config(),
+            &gateway_state,
+            Arc::clone(&self.connectivity_handler),
+        )
+        .await
+        .inspect_err(|error| {
+            tracing::warn!(ecu_name = %ecu_name, %address, %error, "Direct connection failed");
+        })
+        .map_err(DiagServiceError::from)?;
+
+        let connection_index = self
+            .state
+            .doip_connections
+            .read()
+            .await
+            .iter()
+            .position(|connection| connection.ecus.contains_key(&logical_address));
+        if let Some(connection_index) = connection_index {
+            self.state
+                .logical_address_to_connection
+                .write()
+                .await
+                .insert(logical_address, connection_index);
+        }
+        drop(operation);
+
+        let ecu_names = gateway_ecu_name_map
+            .get(&logical_address)
+            .cloned()
+            .unwrap_or_default();
+        if let Err(error) = self
+            .variant_detection
+            .send(VariantDetectionRequest::new(ecu_names))
+            .await
+        {
+            tracing::warn!(
+                ecu_name = %ecu_name,
+                error = ?error,
+                "Failed to trigger variant detection after direct connection"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -1320,6 +1459,15 @@ impl<T: EcuAddresses + DoipComParams> TransportControl for DoipDiagGateway<T> {
     async fn state(&self) -> TransportState {
         self.lifecycle.coordinator.state().await
     }
+
+    async fn connect_ecu_direct(
+        &self,
+        ecu_name: &str,
+        endpoint: DoipEndpoint,
+    ) -> Result<(), DiagServiceError> {
+        self.connect_direct(ecu_name, endpoint.address, endpoint.protocol_version)
+            .await
+    }
 }
 
 async fn send_with_retries(
@@ -1364,7 +1512,7 @@ mod tests {
         DiagServiceError, EcuConnectivityHandler, HashMap, HashMapExtensions, PendingNrc,
         PhysicalTransport, ServicePayload, TransmissionParameters, TransportResponse,
         UDS_ID_RESPONSE_BITMASK, VariantDetectionSender,
-        communication_control::{GatewayLifecycle, TransportState},
+        communication_control::{DoipEndpoint, GatewayLifecycle, TransportControl, TransportState},
         nrc, service_ids,
     };
     use doip_definitions::{
@@ -1375,8 +1523,8 @@ mod tests {
 
     use crate::{
         ConnectionTasks, DiagnosticResponse, DoIPUdpSocket, DoipConfig, DoipConnection,
-        DoipDiagGateway, DoipEcu, DoipGatewayState, read_ecu_responses, spawn_connection_task,
-        test_helpers::TestEcu, wait_for_ack_or_response_until_timeout,
+        DoipDiagGateway, DoipEcu, DoipGatewayState, config::DiscoveryMode, read_ecu_responses,
+        spawn_connection_task, test_helpers::TestEcu, wait_for_ack_or_response_until_timeout,
     };
 
     const ECU_ADDR: u16 = 0x0E80;
@@ -1489,6 +1637,200 @@ mod tests {
             cda_interfaces::communication_control::TransportControl::state(&gateway).await,
             TransportState::Disabled
         );
+    }
+
+    const DIRECT_ECU_ADDR: u16 = 0x1234;
+
+    /// Gateway with one known ECU `ecu_a` that is already connected on `10.0.0.5`.
+    async fn make_connected_direct_gateway(enabled: bool) -> DoipDiagGateway<TestEcu> {
+        let mut ecus = HashMap::new();
+        ecus.insert(
+            "ecu_a".to_owned(),
+            RwLock::new(TestEcu::new(DIRECT_ECU_ADDR, DIRECT_ECU_ADDR)),
+        );
+        let gateway = DoipDiagGateway::<TestEcu>::new(
+            &DoipConfig::default(),
+            Arc::new(ecus),
+            VariantDetectionSender::new(mpsc::channel(1).0),
+            Arc::new(TestConnectivityHandler),
+        )
+        .await
+        .unwrap();
+
+        let (doip_tx, _doip_rx) = mpsc::channel(1);
+        let (_tx, rx) = broadcast::channel(1);
+        let mut conn_ecus = HashMap::new();
+        conn_ecus.insert(
+            DIRECT_ECU_ADDR,
+            Arc::new(Mutex::new(DoipEcu {
+                sender: doip_tx,
+                receiver: rx,
+            })),
+        );
+        gateway
+            .state
+            .doip_connections
+            .write()
+            .await
+            .push(Arc::new(DoipConnection {
+                ecus: conn_ecus,
+                ip: "10.0.0.5".to_owned(),
+            }));
+        gateway
+            .state
+            .logical_address_to_connection
+            .write()
+            .await
+            .insert(DIRECT_ECU_ADDR, 0);
+        if enabled {
+            gateway.lifecycle.operation.lock().await.connection_tasks =
+                Some(Arc::new(ConnectionTasks::new()));
+        }
+        gateway
+    }
+
+    #[tokio::test]
+    async fn direct_connect_rejects_already_connected_ecu() {
+        let gateway = make_connected_direct_gateway(true).await;
+
+        let result = gateway
+            .connect_ecu_direct(
+                "ecu_a",
+                DoipEndpoint {
+                    address: "10.0.0.9".parse().unwrap(),
+                    protocol_version: 0x02,
+                },
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            Err(DiagServiceError::Conflict(
+                "ECU 'ecu_a' is already connected on 10.0.0.5".to_owned()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_connect_rejects_unknown_ecu() {
+        let gateway = make_connected_direct_gateway(true).await;
+
+        let result = gateway
+            .connect_ecu_direct(
+                "missing",
+                DoipEndpoint {
+                    address: "10.0.0.9".parse().unwrap(),
+                    protocol_version: 0x02,
+                },
+            )
+            .await;
+
+        assert!(matches!(result, Err(DiagServiceError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn direct_connect_requires_enabled_communication() {
+        let gateway = make_connected_direct_gateway(false).await;
+
+        let result = gateway
+            .connect_ecu_direct(
+                "ecu_a",
+                DoipEndpoint {
+                    address: "10.0.0.9".parse().unwrap(),
+                    protocol_version: 0x02,
+                },
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DiagServiceError::CommunicationDisabled(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn direct_connect_rejects_unknown_protocol_version() {
+        let gateway = make_connected_direct_gateway(true).await;
+
+        let result = gateway
+            .connect_ecu_direct(
+                "ecu_a",
+                DoipEndpoint {
+                    address: "10.0.0.9".parse().unwrap(),
+                    protocol_version: 0x42,
+                },
+            )
+            .await;
+
+        assert!(matches!(result, Err(DiagServiceError::InvalidRequest(_))));
+    }
+
+    async fn enabled_gateway_with_discovery(
+        discovery: DiscoveryMode,
+    ) -> (DoipDiagGateway<TestEcu>, Duration) {
+        let gateway = DoipDiagGateway::<TestEcu>::new(
+            &DoipConfig {
+                discovery,
+                gateway_port: 0,
+                ..DoipConfig::default()
+            },
+            Arc::new(HashMap::new()),
+            VariantDetectionSender::new(mpsc::channel(1).0),
+            Arc::new(TestConnectivityHandler),
+        )
+        .await
+        .unwrap();
+
+        let start = std::time::Instant::now();
+        cda_interfaces::communication_control::TransportControl::enable(&gateway)
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(
+            cda_interfaces::communication_control::TransportControl::state(&gateway).await,
+            TransportState::Enabled
+        );
+        (gateway, elapsed)
+    }
+
+    #[tokio::test]
+    async fn disabled_discovery_starts_without_binding_a_socket() {
+        let (gateway, _) = enabled_gateway_with_discovery(DiscoveryMode::Disabled).await;
+
+        assert!(gateway.state.socket.lock().await.is_none());
+        assert!(
+            gateway
+                .lifecycle
+                .operation
+                .lock()
+                .await
+                .vam_listener
+                .is_none()
+        );
+        cda_interfaces::communication_control::TransportControl::disable(&gateway)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn vam_only_discovery_listens_without_waiting_for_a_vir_round() {
+        let (gateway, elapsed) = enabled_gateway_with_discovery(DiscoveryMode::VamOnly).await;
+
+        assert!(gateway.state.socket.lock().await.is_some());
+        assert!(
+            gateway
+                .lifecycle
+                .operation
+                .lock()
+                .await
+                .vam_listener
+                .is_some()
+        );
+        // The VIR round waits one second for VAMs, VAM only mode must skip it.
+        assert!(elapsed < Duration::from_millis(500), "took {elapsed:?}");
+        cda_interfaces::communication_control::TransportControl::disable(&gateway)
+            .await
+            .unwrap();
     }
 
     fn transmission_params() -> TransmissionParameters {

@@ -188,6 +188,7 @@ impl From<DiagServiceError> for ApiError {
                 vendor_code: Some(VendorErrorCode::CommunicationNotReady),
             },
             DiagServiceError::AccessDenied(_) => ApiError::Forbidden(Some(value.to_string())),
+            DiagServiceError::Conflict(message) => ApiError::Conflict(message),
         }
     }
 }
