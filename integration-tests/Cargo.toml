@@ -83,9 +83,6 @@ tempfile = { workspace = true }
 # temp containers for testing
 testcontainers = { workspace = true }
 
-[build-dependencies]
-cda-build = { workspace = true }
-
 [dev-dependencies]
 cargo_metadata = { workspace = true }
 
