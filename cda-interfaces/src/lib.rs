@@ -380,6 +380,9 @@ pub enum DiagServiceError {
     Timeout,
     #[error("Access denied: {0}")]
     AccessDenied(String),
+    /// The request conflicts with the current state, e.g. an ECU is already connected.
+    #[error("Conflict: {0}")]
+    Conflict(String),
     /// Returned in case a resource can be found but returns an error
     #[error("Resource error: {0}")]
     ResourceError(String),

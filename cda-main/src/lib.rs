@@ -90,6 +90,27 @@ pub enum Command {
     },
 }
 
+/// Command line representation of [`cda_comm_doip::config::DiscoveryMode`].
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DoipDiscoveryArg {
+    /// No discovery of any kind, ECUs are connected directly.
+    Disabled,
+    /// Only react to spontaneous VAMs, no VIR is broadcast.
+    VamOnly,
+    /// Broadcast a VIR and react to VAMs.
+    Full,
+}
+
+impl From<DoipDiscoveryArg> for cda_comm_doip::config::DiscoveryMode {
+    fn from(value: DoipDiscoveryArg) -> Self {
+        match value {
+            DoipDiscoveryArg::Disabled => Self::Disabled,
+            DoipDiscoveryArg::VamOnly => Self::VamOnly,
+            DoipDiscoveryArg::Full => Self::Full,
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 pub struct AppArgs {
@@ -112,6 +133,11 @@ pub struct AppArgs {
 
     #[arg(long)]
     pub gateway_port: Option<u16>,
+
+    /// How `DoIP` gateways are discovered: `disabled` (no discovery, connect ECUs
+    /// directly), `vam-only` (react to spontaneous VAMs, no VIR) or `full`.
+    #[arg(long, value_enum)]
+    pub doip_discovery: Option<DoipDiscoveryArg>,
 
     /// Protocol name used for com-param lookups
     /// in the diagnostic database (matched case-insensitively).
@@ -183,6 +209,9 @@ impl AppArgs {
         }
         if let Some(gateway_port) = self.gateway_port {
             config.doip.gateway_port = gateway_port;
+        }
+        if let Some(doip_discovery) = self.doip_discovery {
+            config.doip.discovery = doip_discovery.into();
         }
         if let Some(protocol_name) = self.protocol_name {
             config.doip.protocol_name = protocol_name;
@@ -779,6 +808,34 @@ mod cli_args_tests {
     use clap::Parser;
 
     use super::*;
+
+    #[test]
+    fn doip_discovery_flag_updates_config() {
+        use cda_comm_doip::config::DiscoveryMode;
+
+        for (arg, expected) in [
+            ("disabled", DiscoveryMode::Disabled),
+            ("vam-only", DiscoveryMode::VamOnly),
+            ("full", DiscoveryMode::Full),
+        ] {
+            let args = AppArgs::parse_from(["cda", "--doip-discovery", arg]);
+            let mut config = crate::config::configfile::Configuration::default();
+            args.update_config(&mut config);
+            assert_eq!(config.doip.discovery, expected);
+        }
+    }
+
+    #[test]
+    fn without_doip_discovery_flag_config_is_untouched() {
+        let args = AppArgs::parse_from(["cda"]);
+        let mut config = crate::config::configfile::Configuration::default();
+        config.doip.discovery = cda_comm_doip::config::DiscoveryMode::VamOnly;
+        args.update_config(&mut config);
+        assert_eq!(
+            config.doip.discovery,
+            cda_comm_doip::config::DiscoveryMode::VamOnly
+        );
+    }
 
     #[test]
     fn unix_socket_flag_updates_server_config() {

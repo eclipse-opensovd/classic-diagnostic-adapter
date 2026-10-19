@@ -321,3 +321,31 @@ Vehicle Topology Plugin
     Decoupling the clearing of persisted data from triggering live detection allows clients to, for
     example, force the CDA back into a quiet state without any vehicle communication (clear only), or
     refresh persisted data incrementally without discarding previously known entries (detect only).
+
+
+.. req:: Vehicle Topology Plugin - Connect ECU
+    :id: req~plugin-vehicle-topology-connect-ecu
+    :links: arch~plugin-vehicle-topology-connect-ecu
+    :status: draft
+
+    The ``doip-connect-ecu`` operation, following
+    the standard SOVD operations semantics, shall be available at
+    ``POST /apps/sovd2uds/operations/doip-connect-ecu/executions``.
+    It must accept the parameters for `ecu`, `ip` and `protocol-version` and shall provide
+    a mechanism to establish a connection to a doip ecu without utilizing VIR/VAM.
+
+    A configuration entry must exist to enable or disable the operation.
+    The endpoint shall only be available if the corresponding configuration entry enabling the operation is set to true.
+
+    The operation must only ever establish a connection for an ECU that has none. An existing connection
+    must never be changed or replaced by this operation, even if that connection is currently not active
+    (e.g. because the gateway is offline). In that case the request must be rejected with
+    ``409 Conflict``.
+
+    After the connection has been established, routing activation, TLS upgrade and ECU identification
+    must behave exactly as for a gateway that was discovered via VIR/VAM.
+
+    **Rationale**
+
+    For cases where VIR/VAM discovery is not possible or unreliable, a mechanism has to exist
+    to connect an ECU directly on a given IP address.

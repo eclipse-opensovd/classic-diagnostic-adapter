@@ -21,8 +21,11 @@ use axum::{
 use cda_comm_doip::DoipGatewaySetupError;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
-    communication_control::CommunicationAccess, datatypes::ComponentsConfig, dlt_ctx,
-    file_manager::FileManager, http_protection::registry::HttpRouteMatcher,
+    communication_control::{CommunicationAccess, DoipConnect},
+    datatypes::ComponentsConfig,
+    dlt_ctx,
+    file_manager::FileManager,
+    http_protection::registry::HttpRouteMatcher,
 };
 use cda_plugin_security::SecurityPluginLoader;
 use dynamic_router::DynamicRouter;
@@ -70,6 +73,9 @@ pub struct VehicleResources<T, M> {
     pub locks: Arc<Locks>,
     /// Access-only view used to admit diagnostic communication activities.
     pub communication_access: Arc<dyn CommunicationAccess>,
+    /// Connect-only view of the transport, for connecting an ECU directly to an IP.
+    /// `None` disables the `doip-connect-ecu` operation.
+    pub doip_connect: Option<Arc<dyn DoipConnect>>,
 }
 
 /// [[ dimpl~sovd-api-http-server, Starts HTTP Server (TCP or Unix domain socket) ]]
@@ -224,6 +230,7 @@ where
         resources.file_managers,
         resources.locks,
         resources.communication_access,
+        resources.doip_connect,
     )
     .await
 }

@@ -148,6 +148,7 @@ where
         lock_provider: Arc::clone(&infra.lock_provider),
         shutdown_signal: infra.shutdown_signal,
         communication_access: Arc::clone(&infra.communication_access),
+        doip_connect: infra.doip_connect.clone(),
         uds_manager: infra.uds_manager_replacer,
         diagnostic_gateway: infra.gateway_replacer,
         health: infra.health,

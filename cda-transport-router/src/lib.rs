@@ -48,7 +48,8 @@ use cda_interfaces::{
     PhysicalTransport, RouteStatus, ServicePayload, Shutdown, TransmissionParameters,
     TransportProbe, TransportResponse,
     communication_control::{
-        TransportControl, TransportState, TransportStateTracker, error::CommControlError,
+        DoipEndpoint, TransportControl, TransportState, TransportStateTracker,
+        error::CommControlError,
     },
 };
 use tokio::sync::{Mutex, RwLock, mpsc};
@@ -534,6 +535,24 @@ impl<
     async fn state(&self) -> TransportState {
         self.transport_state.state().await
     }
+
+    async fn connect_ecu_direct(
+        &self,
+        ecu_name: &str,
+        endpoint: DoipEndpoint,
+    ) -> Result<(), DiagServiceError> {
+        if self.transport_overrides.get(&ecu_name.to_lowercase()) == Some(&TransportType::Can) {
+            return Err(DiagServiceError::RequestNotSupported(format!(
+                "ECU {ecu_name} is configured for CAN, direct DoIP connection is not possible"
+            )));
+        }
+        let Some(ref doip) = self.doip_gateway else {
+            return Err(DiagServiceError::RequestNotSupported(
+                "DoIP is not enabled".to_owned(),
+            ));
+        };
+        doip.connect_ecu_direct(ecu_name, endpoint).await
+    }
 }
 
 #[cfg(test)]
@@ -543,7 +562,9 @@ mod tests {
         time::Duration,
     };
 
-    use cda_interfaces::{EcuAddresses, RouteStatus, uds::TransportResponse};
+    use cda_interfaces::{
+        EcuAddresses, RouteStatus, communication_control::DoipEndpoint, uds::TransportResponse,
+    };
 
     use super::*;
 
@@ -677,6 +698,59 @@ mod tests {
         async fn state(&self) -> TransportState {
             *self.state.read().await
         }
+
+        async fn connect_ecu_direct(
+            &self,
+            _ecu_name: &str,
+            _endpoint: DoipEndpoint,
+        ) -> Result<(), DiagServiceError> {
+            Ok(())
+        }
+    }
+
+    fn test_endpoint() -> DoipEndpoint {
+        DoipEndpoint {
+            address: "10.0.0.5".parse().unwrap(),
+            protocol_version: 0x02,
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_connect_is_delegated_to_the_doip_gateway() {
+        let router = DiagnosticTransportRouter::new(HashMap::default())
+            .with_doip(FakeGateway::new(false))
+            .with_can(FakeGateway::new(false));
+
+        assert_eq!(
+            router.connect_ecu_direct("ecu_a", test_endpoint()).await,
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_connect_is_unsupported_without_a_doip_gateway() {
+        let router = DiagnosticTransportRouter::<FakeGateway, FakeGateway>::new(HashMap::default())
+            .with_can(FakeGateway::new(false));
+
+        assert!(matches!(
+            router.connect_ecu_direct("ecu_a", test_endpoint()).await,
+            Err(DiagServiceError::RequestNotSupported(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn direct_connect_is_unsupported_for_can_pinned_ecus() {
+        let router = DiagnosticTransportRouter::new(HashMap::from_iter([(
+            "ecu_a".to_owned(),
+            TransportType::Can,
+        )]))
+        .with_doip(FakeGateway::new(false))
+        .with_can(FakeGateway::new(false));
+
+        assert!(matches!(
+            router.connect_ecu_direct("ECU_A", test_endpoint()).await,
+            Err(DiagServiceError::RequestNotSupported(_))
+        ));
     }
 
     /// A runtime update disables the transport before replacing the ECU data.

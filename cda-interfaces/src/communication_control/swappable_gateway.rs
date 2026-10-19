@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use super::{CommControlError, TransportControl, TransportState};
-use crate::{Shutdown, component_slot::ComponentSlot};
+use super::{CommControlError, DoipConnect, DoipEndpoint, TransportControl, TransportState};
+use crate::{DiagServiceError, Shutdown, component_slot::ComponentSlot};
 
 /// [`TransportControl`] proxy over a hot-swappable gateway slot, delegating every
 /// call to whatever gateway [`ComponentSlot`] currently holds.
@@ -57,6 +57,38 @@ impl<G: TransportControl + Shutdown> TransportControl for SwappableGateway<G> {
 
     async fn state(&self) -> TransportState {
         self.slot.read().await.state().await
+    }
+
+    async fn connect_ecu_direct(
+        &self,
+        ecu_name: &str,
+        endpoint: DoipEndpoint,
+    ) -> Result<(), DiagServiceError> {
+        self.slot
+            .read()
+            .await
+            .connect_ecu_direct(ecu_name, endpoint)
+            .await
+    }
+}
+
+impl<G: TransportControl + Shutdown> ComponentSlot<G> {
+    /// Mints a connect-only [`DoipConnect`] view over this slot, following gateway
+    /// replacement like [`Self::transport_control`] does.
+    #[must_use]
+    pub fn doip_connect(&self) -> Arc<dyn DoipConnect> {
+        Arc::new(SwappableGateway { slot: self.clone() })
+    }
+}
+
+#[async_trait]
+impl<G: TransportControl + Shutdown> DoipConnect for SwappableGateway<G> {
+    async fn connect_ecu(
+        &self,
+        ecu_name: &str,
+        endpoint: DoipEndpoint,
+    ) -> Result<(), DiagServiceError> {
+        TransportControl::connect_ecu_direct(self, ecu_name, endpoint).await
     }
 }
 
@@ -97,6 +129,60 @@ mod tests {
         async fn state(&self) -> TransportState {
             TransportState::Enabled
         }
+    }
+
+    #[tokio::test]
+    async fn doip_connect_view_delegates_to_the_current_gateway() {
+        struct ConnectingGateway;
+
+        #[async_trait]
+        impl Shutdown for ConnectingGateway {
+            async fn shutdown(&self) {}
+        }
+
+        #[async_trait]
+        impl TransportControl for ConnectingGateway {
+            async fn enable(&self) -> Result<(), CommControlError> {
+                Ok(())
+            }
+
+            async fn disable(&self) -> Result<(), CommControlError> {
+                Ok(())
+            }
+
+            async fn state(&self) -> TransportState {
+                TransportState::Enabled
+            }
+
+            async fn connect_ecu_direct(
+                &self,
+                ecu_name: &str,
+                _endpoint: DoipEndpoint,
+            ) -> Result<(), DiagServiceError> {
+                Err(DiagServiceError::Conflict(format!("{ecu_name} connected")))
+            }
+        }
+
+        let endpoint = DoipEndpoint {
+            address: "10.0.0.5".parse().unwrap(),
+            protocol_version: 0x02,
+        };
+
+        let slot = ComponentSlot::new(ConnectingGateway);
+        assert_eq!(
+            slot.doip_connect().connect_ecu("ecu_a", endpoint).await,
+            Err(DiagServiceError::Conflict("ecu_a connected".to_owned()))
+        );
+
+        // A transport without direct connect support keeps the trait default.
+        let slot = ComponentSlot::new(BlockingGateway {
+            release_enable: Arc::new(Notify::new()),
+            entered_enable: Arc::new(Notify::new()),
+        });
+        assert!(matches!(
+            slot.doip_connect().connect_ecu("ecu_a", endpoint).await,
+            Err(DiagServiceError::RequestNotSupported(_))
+        ));
     }
 
     #[tokio::test]

@@ -390,6 +390,12 @@ async fn init_doip_gateway<S: SecurityPlugin>(
         return Ok(None);
     }
 
+    // Fail startup with a clear message instead of an obscure bind error on
+    // the first connection attempt.
+    doip_config
+        .check_tester_address_available()
+        .map_err(AppError::from)?;
+
     if let Some(provider) = doip_health_provider {
         provider.set_status(cda_health::Status::Starting).await;
     }

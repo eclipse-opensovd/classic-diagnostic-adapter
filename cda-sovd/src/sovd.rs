@@ -39,7 +39,9 @@ use axum_extra::extract::WithRejection;
 use cda_interfaces::{
     Connectivity, FunctionalDescriptionConfig, HashMap, HashMapExtensions as _, SchemaProvider,
     UdsEcu, VariantState,
-    communication_control::{ActivationCause, CommunicationAccess, CommunicationGuard},
+    communication_control::{
+        ActivationCause, CommunicationAccess, CommunicationGuard, DoipConnect,
+    },
     datatypes::ComponentsConfig,
     diagservices::{FieldParseError, UdsPayloadData},
     file_manager::FileManager,
@@ -620,6 +622,7 @@ pub(crate) struct WebserverState<T: UdsEcu + Clone> {
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
     components_config: Arc<RwLock<ComponentsConfig>>,
     communication_access: Arc<dyn CommunicationAccess>,
+    doip_connect: Option<Arc<dyn DoipConnect>>,
 }
 
 pub(crate) fn resource_response(
@@ -648,6 +651,11 @@ pub(crate) fn resource_response(
     (StatusCode::OK, Json(components)).into_response()
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Combining parameters into a struct is not preferred here, to keep route setup \
+              explicit"
+)]
 pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: SecurityPluginLoader>(
     functional_group_config: FunctionalDescriptionConfig,
     components_config: ComponentsConfig,
@@ -656,6 +664,7 @@ pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: Securi
     mut file_manager: HashMap<String, U>,
     locks: Arc<Locks>,
     communication_access: Arc<dyn CommunicationAccess>,
+    doip_connect: Option<Arc<dyn DoipConnect>>,
 ) -> Router {
     let flash_data = Arc::new(RwLock::new(sovd_interfaces::sovd2uds::FileList {
         files: Vec::new(),
@@ -668,6 +677,7 @@ pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: Securi
         flash_data: Arc::clone(&flash_data),
         components_config: Arc::new(RwLock::new(components_config)),
         communication_access,
+        doip_connect,
     };
 
     let router = components_route::<T, U>(state.clone(), &mut file_manager).await;
@@ -691,6 +701,19 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
         )
         .await,
     );
+    // Preliminary: ECU connection management is expected to move into the topology
+    // plugin. Only offered when direct connect is enabled in the configuration.
+    let router = if state.doip_connect.is_some() {
+        router.api_route(
+            apps::sovd2uds::operations::doip_connect_ecu::EXECUTIONS_ROUTE,
+            routing::post_with(
+                apps::sovd2uds::operations::doip_connect_ecu::post::<T>,
+                apps::sovd2uds::operations::doip_connect_ecu::docs_post,
+            ),
+        )
+    } else {
+        router
+    };
     router
         .api_route(
             "/vehicle/v15/locks",
@@ -1069,7 +1092,9 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
             "/faults/{id}",
             routing::get_with(faults::id::get, faults::id::docs_get)
                 .delete_with(faults::id::delete, faults::id::docs_delete),
-        )
+        );
+
+    let router = router
         .with_state(ecu_state)
         .with_path_items(crate::openapi::defunct_lock_path)
         .with_path_items(|op| op.tag(ecu_name));
