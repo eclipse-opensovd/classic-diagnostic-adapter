@@ -64,6 +64,9 @@ where
     /// Path for flash files
     pub flash_files_path: String,
 
+    /// Default functional class for the flash services
+    pub flash_functional_class_default: String,
+
     /// Component configuration
     pub components_config: ComponentsConfig,
 
@@ -98,6 +101,7 @@ where
     dynamic_router: DynamicRouter,
     vehicle_route_handle: cda_sovd::RouteHandle,
     flash_files_path: String,
+    flash_functional_class_default: String,
     components_config: ComponentsConfig,
     communication_access: Arc<dyn CommunicationAccess>,
     uds_manager: Arc<dyn ReplaceComponent<Uds>>,
@@ -138,6 +142,7 @@ where
         let vehicle_router = cda_sovd::build_vehicle_routes::<_, _, SecurityLoader>(
             cda_sovd::VehicleConfig {
                 flash_files_path: self.flash_files_path.clone(),
+                flash_functional_class_default: self.flash_functional_class_default.clone(),
                 functional_group_config,
                 components_config: self.components_config.clone(),
             },
@@ -257,6 +262,7 @@ where
             dynamic_router: config.infrastructure.dynamic_router,
             vehicle_route_handle: config.infrastructure.vehicle_route_handle,
             flash_files_path: config.infrastructure.flash_files_path,
+            flash_functional_class_default: config.infrastructure.flash_functional_class_default,
             components_config: config.infrastructure.components_config,
             communication_access: config.infrastructure.communication_access,
             uds_manager: config.infrastructure.uds_manager,

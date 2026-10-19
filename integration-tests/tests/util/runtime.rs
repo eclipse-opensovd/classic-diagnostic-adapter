@@ -302,6 +302,7 @@ fn base_test_config(
         },
         logging: LoggingConfig::default(),
         flash_files_path: flash_files_path()?,
+        flash_functional_class_default: "flash_download_upload".to_owned(),
         com_params: {
             // logical_functional_address is set globally so that ECUs whose MDD omits
             // this comparam (e.g. TMCC3000) receive it via the global fallback path.

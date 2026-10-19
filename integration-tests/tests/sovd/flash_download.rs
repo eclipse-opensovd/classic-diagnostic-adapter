@@ -850,15 +850,7 @@ async fn test_security_access_supplier_level() {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SimDataTransferDownload {
-    #[allow(
-        dead_code,
-        reason = "Fields deserialized from ECU simulator JSON responses"
-    )]
     address_and_length_identifier: u8,
-    #[allow(
-        dead_code,
-        reason = "Fields deserialized from ECU simulator JSON responses"
-    )]
     memory_address: String,
     #[allow(
         dead_code,
@@ -888,4 +880,401 @@ async fn get_sim_data_transfers(
     let response =
         crate::util::http::send_request(StatusCode::OK, Method::GET, None, None, url).await?;
     response_to_t(&response)
+}
+
+const FLASH_CLASS_BOOTLOADER: &str = "flash_download_upload_bootloader";
+
+/// Acquires an ECU lock and brings FLXC1000 into the state required for flashing
+/// (BOOT variant, programming session, `SecurityAccess` `LEVEL_07`).
+/// Returns the lock id.
+async fn prepare_flxc1000_for_flashing(
+    runtime: &crate::util::runtime::TestRuntime,
+    auth: &http::HeaderMap,
+) -> String {
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let ecu_lock = create_lock(
+        Duration::from_secs(120),
+        locks::ECU_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        auth,
+    )
+    .await;
+    let lock_id = extract_field_from_json::<String>(
+        &response_to_json(&ecu_lock).expect("Flash test preparation failed"),
+        "id",
+    )
+    .expect("Flash test preparation failed");
+
+    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "BOOT")
+        .await
+        .expect("Flash test preparation failed");
+    send_cda_request(
+        &runtime.config,
+        ecu_endpoint,
+        StatusCode::CREATED,
+        Method::PUT,
+        None,
+        Some(auth),
+        None,
+    )
+    .await
+    .expect("Flash test preparation failed");
+
+    switch_session(
+        "programming",
+        &runtime.config,
+        auth,
+        ecu_endpoint,
+        StatusCode::OK,
+    )
+    .await
+    .expect("Flash test preparation failed")
+    .expect("Flash test preparation failed");
+
+    let seed_response: RequestSeedResponse = put_mode(
+        &runtime.config,
+        auth,
+        ecu_endpoint,
+        "security",
+        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
+            value: "Level_7_RequestSeed".to_owned(),
+            mode_expiration: None,
+            key: None,
+            parameters: None,
+        },
+        StatusCode::OK,
+    )
+    .await
+    .expect("Flash test preparation failed")
+    .expect("Flash test preparation failed");
+    let key = compute_security_key(&seed_response.seed.request_seed);
+    let _: sovd_interfaces::components::ecu::modes::security_and_session::put::Response<String> =
+        put_mode(
+            &runtime.config,
+            auth,
+            ecu_endpoint,
+            "security",
+            sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
+                value: "Level_7".to_owned(),
+                mode_expiration: None,
+                key: Some(
+                    sovd_interfaces::components::ecu::modes::security_and_session::put::ModeKey {
+                        send_key: key,
+                    },
+                ),
+                parameters: None,
+            },
+            StatusCode::OK,
+        )
+        .await
+        .expect("Flash test preparation failed")
+        .expect("Flash test preparation failed");
+
+    lock_id
+}
+
+/// Returns `(id, size)` of `test_flash.bin` from the flash file list.
+async fn find_test_flash_file(
+    runtime: &crate::util::runtime::TestRuntime,
+    auth: &http::HeaderMap,
+) -> (String, u64) {
+    let flash_files_response = send_cda_request(
+        &runtime.config,
+        "apps/sovd2uds/bulk-data/flashfiles",
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(auth),
+        None,
+    )
+    .await
+    .expect("Flash test preparation failed");
+    let flash_files_json =
+        response_to_json(&flash_files_response).expect("Flash test preparation failed");
+    let flash_file = flash_files_json
+        .get("items")
+        .and_then(|v| v.as_array())
+        .and_then(|files| {
+            files.iter().find(|f| {
+                f.get("x-sovd2uds-OrigPath")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|p| p.contains("test_flash"))
+            })
+        })
+        .expect("Expected to find test_flash.bin in flash files list");
+    let file_id = flash_file
+        .get("id")
+        .and_then(|v| v.as_str())
+        .expect("Expected 'id' in flash file")
+        .to_owned();
+    let file_size = flash_file
+        .get("size")
+        .and_then(serde_json::Value::as_u64)
+        .expect("Expected 'size' in flash file");
+    (file_id, file_size)
+}
+
+/// Verifies that the functional class used to resolve the flash services can be selected
+/// per request via `flashClass` (case-insensitive field name and value), and that invalid
+/// selections are rejected.
+///
+/// The test database contains a second set of flash services with the functional class
+/// `flash_download_upload_bootloader`, whose `RequestDownload` uses a 2-byte memory address
+/// and size (the default one uses 4 bytes). The memory address recorded by the ECU simulator
+/// therefore shows which service was used.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Test scenario is easier to understand kept together"
+)]
+async fn test_flash_download_functional_class_selection() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let request_download_url = format!("{ecu_endpoint}/x-sovd2uds-download/requestdownload");
+    let flash_transfer_url = format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer");
+    let transfer_exit_url = format!("{ecu_endpoint}/x-sovd2uds-download/transferexit");
+
+    let lock_id = prepare_flxc1000_for_flashing(runtime, &auth).await;
+    let (file_id, file_size) = find_test_flash_file(runtime, &auth).await;
+    assert!(
+        file_size <= 0xFFFF,
+        "Test flash file must fit a 2-byte size"
+    );
+
+    let request_download_params = serde_json::json!({
+        "DataFormatIdentifier": 0,
+        "AddressAndLengthFormatIdentifier": 0x22,
+        "MemoryAddress": "0x12 0x34",
+        "MemorySize": format!("0x{:02x} 0x{:02x}", (file_size >> 8) & 0xFF, file_size & 0xFF),
+    });
+
+    // Invalid selections for RequestDownload
+    for (body, status) in [
+        (
+            serde_json::json!({"requestdownload": request_download_params, "flashClass": ""}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            serde_json::json!({
+                "requestdownload": request_download_params,
+                "flashClass": "does_not_exist"
+            }),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        send_cda_request(
+            &runtime.config,
+            &request_download_url,
+            status,
+            Method::PUT,
+            Some(&body.to_string()),
+            Some(&auth),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    // Malformed body is reported as bad request
+    send_cda_request(
+        &runtime.config,
+        &request_download_url,
+        StatusCode::BAD_REQUEST,
+        Method::PUT,
+        Some("{\"requestdownload\": "),
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // RequestDownload via the bootloader functional class, field name and value in other casing
+    let request_download_body = serde_json::json!({
+        "RequestDownload": request_download_params,
+        "FlashClass": FLASH_CLASS_BOOTLOADER.to_uppercase(),
+    });
+    send_cda_request(
+        &runtime.config,
+        &request_download_url,
+        StatusCode::OK,
+        Method::PUT,
+        Some(&request_download_body.to_string()),
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let sim_transfers = get_sim_data_transfers(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("Failed to get data transfers from ECU sim");
+    let last_transfer = sim_transfers
+        .transfers
+        .last()
+        .expect("ECU sim should have recorded the request download");
+    assert_eq!(last_transfer.address_and_length_identifier, 0x22);
+    assert!(
+        last_transfer
+            .memory_address
+            .replace(' ', "")
+            .eq_ignore_ascii_case("1234"),
+        "Expected 2-byte memory address of the bootloader service, got {}",
+        last_transfer.memory_address
+    );
+
+    // TransferData with an unknown functional class must not start a transfer
+    send_cda_request(
+        &runtime.config,
+        &flash_transfer_url,
+        StatusCode::NOT_FOUND,
+        Method::POST,
+        Some(
+            &serde_json::json!({
+                "blocksequencecounter": 1,
+                "blocksize": 128,
+                "offset": 0,
+                "length": file_size,
+                "id": file_id,
+                "flashClass": "does_not_exist"
+            })
+            .to_string(),
+        ),
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let flash_transfer_response = send_cda_request(
+        &runtime.config,
+        &flash_transfer_url,
+        StatusCode::OK,
+        Method::POST,
+        Some(
+            &serde_json::json!({
+                "BlockSequenceCounter": 1,
+                "BlockSize": 128,
+                "Offset": 0,
+                "Length": file_size,
+                "Id": file_id,
+                "FLASHCLASS": FLASH_CLASS_BOOTLOADER
+            })
+            .to_string(),
+        ),
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+    let transfer_id = response_to_json(&flash_transfer_response)
+        .unwrap()
+        .get("id")
+        .and_then(|v| v.as_str())
+        .expect("Expected 'id' in flash transfer response")
+        .to_owned();
+
+    let mut transfer_finished = false;
+    for _ in 0..20 {
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(500)).await;
+        let status_response = send_cda_request(
+            &runtime.config,
+            &format!("{flash_transfer_url}/{transfer_id}"),
+            StatusCode::OK,
+            Method::GET,
+            None,
+            Some(&auth),
+            None,
+        )
+        .await
+        .unwrap();
+        let status_json = response_to_json(&status_response).unwrap();
+        let status = status_json
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        assert!(
+            status != "aborted",
+            "Flash transfer was aborted. Status: {status_json:#?}"
+        );
+        if status == "finished" {
+            transfer_finished = true;
+            break;
+        }
+    }
+    assert!(
+        transfer_finished,
+        "Flash transfer did not finish within the timeout"
+    );
+
+    send_cda_request(
+        &runtime.config,
+        &format!("{flash_transfer_url}/{transfer_id}"),
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // TransferExit: invalid selections and malformed body are rejected
+    for (body, status) in [
+        (
+            serde_json::json!({"flashClass": "does_not_exist"}).to_string(),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            serde_json::json!({"flashClass": " "}).to_string(),
+            StatusCode::BAD_REQUEST,
+        ),
+        ("{not json".to_owned(), StatusCode::BAD_REQUEST),
+    ] {
+        send_cda_request(
+            &runtime.config,
+            &transfer_exit_url,
+            status,
+            Method::PUT,
+            Some(&body),
+            Some(&auth),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    send_cda_request(
+        &runtime.config,
+        &transfer_exit_url,
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        Some(&serde_json::json!({"flashclass": FLASH_CLASS_BOOTLOADER}).to_string()),
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let sim_transfers = get_sim_data_transfers(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("Failed to get data transfers from ECU sim");
+    let last_transfer = sim_transfers.transfers.last().unwrap();
+    assert!(!last_transfer.is_active, "Transfer should be finished");
+    assert!(last_transfer.data_transfer_count > 0);
+    assert!(last_transfer.checksum.is_some());
+
+    lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
+        .await
+        .unwrap();
 }

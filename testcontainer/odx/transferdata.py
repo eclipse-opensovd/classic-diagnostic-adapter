@@ -33,13 +33,22 @@ from odxtools.response import Response, ResponseType
 from odxtools.standardlengthtype import StandardLengthType
 from odxtools.termination import Termination
 
+FLASH_FUNCTIONAL_CLASS_DEFAULT = "flash_download_upload"
+FLASH_FUNCTIONAL_CLASS_BOOTLOADER = "flash_download_upload_bootloader"
 
-def add_requestdownload_service(dlr: DiagLayerRaw, address_length: int, size_length: int):
+
+def add_requestdownload_service(
+    dlr: DiagLayerRaw,
+    address_length: int,
+    size_length: int,
+    functional_class: str = FLASH_FUNCTIONAL_CLASS_DEFAULT,
+    suffix: str = "",
+):
     # switch to limited dop for format and identifier?
     data_format_identifier_dop = find_dop_by_shortname(dlr, "IDENTICAL_UINT_8")
     memory_address_dop = DataObjectProperty(
-        odx_id=derived_id(dlr, "DOP.MemoryAddressArray"),
-        short_name="MemoryAddressArray",
+        odx_id=derived_id(dlr, f"DOP.MemoryAddressArray{suffix}"),
+        short_name=f"MemoryAddressArray{suffix}",
         compu_method=CompuMethod(
             category=CompuCategory.IDENTICAL,
             physical_type=DataType.A_BYTEFIELD,
@@ -53,8 +62,8 @@ def add_requestdownload_service(dlr: DiagLayerRaw, address_length: int, size_len
     )
     dlr.diag_data_dictionary_spec.data_object_props.append(memory_address_dop)
     memory_size_dop = DataObjectProperty(
-        odx_id=derived_id(dlr, "DOP.MemorySizeArray"),
-        short_name="MemorySizeArray",
+        odx_id=derived_id(dlr, f"DOP.MemorySizeArray{suffix}"),
+        short_name=f"MemorySizeArray{suffix}",
         compu_method=CompuMethod(
             category=CompuCategory.IDENTICAL,
             physical_type=DataType.A_BYTEFIELD,
@@ -69,8 +78,8 @@ def add_requestdownload_service(dlr: DiagLayerRaw, address_length: int, size_len
     dlr.diag_data_dictionary_spec.data_object_props.append(memory_size_dop)
 
     requestdownload_request = Request(
-        odx_id=derived_id(dlr, "RQ.RQ_RequestDownload"),
-        short_name="RQ_RequestDownload",
+        odx_id=derived_id(dlr, f"RQ.RQ_RequestDownload{suffix}"),
+        short_name=f"RQ_RequestDownload{suffix}",
         parameters=NamedItemList(
             [
                 sid_parameter_rq(0x34),
@@ -105,8 +114,8 @@ def add_requestdownload_service(dlr: DiagLayerRaw, address_length: int, size_len
 
     max_number_of_blocklength_dop = find_dop_by_shortname(dlr, "IDENTICAL_UINT_32")
     requestdownload_response = Response(
-        odx_id=derived_id(dlr, "PR.PR_RequestDownload"),
-        short_name="PR_RequestDownload",
+        odx_id=derived_id(dlr, f"PR.PR_RequestDownload{suffix}"),
+        short_name=f"PR_RequestDownload{suffix}",
         response_type=ResponseType.POSITIVE,
         parameters=NamedItemList(
             [
@@ -129,10 +138,10 @@ def add_requestdownload_service(dlr: DiagLayerRaw, address_length: int, size_len
     dlr.positive_responses.append(requestdownload_response)
 
     requestdownload_service = DiagService(
-        odx_id=derived_id(dlr, "DC.RequestDownload"),
-        short_name="RequestDownload",
+        odx_id=derived_id(dlr, f"DC.RequestDownload{suffix}"),
+        short_name=f"RequestDownload{suffix}",
         semantic="DATA",
-        functional_class_refs=[functional_class_ref(dlr, "flash_download_upload")],
+        functional_class_refs=[functional_class_ref(dlr, functional_class)],
         request_ref=ref(requestdownload_request),
         pos_response_refs=[ref(requestdownload_response)],
     )
@@ -140,10 +149,14 @@ def add_requestdownload_service(dlr: DiagLayerRaw, address_length: int, size_len
     dlr.diag_comms_raw.append(requestdownload_service)
 
 
-def add_transferdata_service(dlr: DiagLayerRaw):
+def add_transferdata_service(
+    dlr: DiagLayerRaw,
+    functional_class: str = FLASH_FUNCTIONAL_CLASS_DEFAULT,
+    suffix: str = "",
+):
     data_array_dop = DataObjectProperty(
-        odx_id=derived_id(dlr, "DOP.TransferData_Data"),
-        short_name="TransferData",
+        odx_id=derived_id(dlr, f"DOP.TransferData_Data{suffix}"),
+        short_name=f"TransferData{suffix}",
         compu_method=CompuMethod(
             category=CompuCategory.IDENTICAL,
             physical_type=DataType.A_BYTEFIELD,
@@ -162,8 +175,8 @@ def add_transferdata_service(dlr: DiagLayerRaw):
     single_byte_dop = find_dop_by_shortname(dlr, "IDENTICAL_UINT_8")
 
     transferdata_request = Request(
-        odx_id=derived_id(dlr, "RQ.RQ_TransferData"),
-        short_name="RQ_TransferData",
+        odx_id=derived_id(dlr, f"RQ.RQ_TransferData{suffix}"),
+        short_name=f"RQ_TransferData{suffix}",
         parameters=NamedItemList(
             [
                 sid_parameter_rq(0x36),
@@ -185,8 +198,8 @@ def add_transferdata_service(dlr: DiagLayerRaw):
     dlr.requests.append(transferdata_request)
 
     transferdata_response = Response(
-        odx_id=derived_id(dlr, "PR.PR_TransferData"),
-        short_name="PR_TransferData",
+        odx_id=derived_id(dlr, f"PR.PR_TransferData{suffix}"),
+        short_name=f"PR_TransferData{suffix}",
         response_type=ResponseType.POSITIVE,
         parameters=NamedItemList(
             [
@@ -206,19 +219,23 @@ def add_transferdata_service(dlr: DiagLayerRaw):
     dlr.positive_responses.append(transferdata_response)
 
     transferdata_service = DiagService(
-        odx_id=derived_id(dlr, "DC.TransferData"),
-        short_name="TransferData",
-        functional_class_refs=[functional_class_ref(dlr, "flash_download_upload")],
+        odx_id=derived_id(dlr, f"DC.TransferData{suffix}"),
+        short_name=f"TransferData{suffix}",
+        functional_class_refs=[functional_class_ref(dlr, functional_class)],
         request_ref=ref(transferdata_request),
         pos_response_refs=[ref(transferdata_response)],
     )
     dlr.diag_comms_raw.append(transferdata_service)
 
 
-def add_transferexit(dlr: DiagLayerRaw):
+def add_transferexit(
+    dlr: DiagLayerRaw,
+    functional_class: str = FLASH_FUNCTIONAL_CLASS_DEFAULT,
+    suffix: str = "",
+):
     transferexit_request = Request(
-        odx_id=derived_id(dlr, "RQ.RQ_TransferExit"),
-        short_name="RQ_TransferExit",
+        odx_id=derived_id(dlr, f"RQ.RQ_TransferExit{suffix}"),
+        short_name=f"RQ_TransferExit{suffix}",
         parameters=NamedItemList(
             [
                 sid_parameter_rq(0x37),
@@ -228,8 +245,8 @@ def add_transferexit(dlr: DiagLayerRaw):
     dlr.requests.append(transferexit_request)
 
     transferexit_response = Response(
-        odx_id=derived_id(dlr, "PR.PR_TransferExit"),
-        short_name="PR_TransferData",
+        odx_id=derived_id(dlr, f"PR.PR_TransferExit{suffix}"),
+        short_name=f"PR_TransferData{suffix}",
         response_type=ResponseType.POSITIVE,
         parameters=NamedItemList(
             [
@@ -240,9 +257,9 @@ def add_transferexit(dlr: DiagLayerRaw):
     dlr.positive_responses.append(transferexit_response)
 
     transferexit_service = DiagService(
-        odx_id=derived_id(dlr, "DC.TransferExit"),
-        short_name="TransferExit",
-        functional_class_refs=[functional_class_ref(dlr, "flash_download_upload")],
+        odx_id=derived_id(dlr, f"DC.TransferExit{suffix}"),
+        short_name=f"TransferExit{suffix}",
+        functional_class_refs=[functional_class_ref(dlr, functional_class)],
         request_ref=ref(transferexit_request),
         pos_response_refs=[ref(transferexit_response)],
     )
@@ -256,3 +273,10 @@ def add_transfer_services(dlr: DiagLayerRaw):
     add_transferdata_service(dlr)
     # 37
     add_transferexit(dlr)
+
+    # Second set of flash services that only differ in the functional class
+    # (and the RequestDownload address/size format), used to test the functional
+    # class selection of the flash API.
+    add_requestdownload_service(dlr, 2, 2, FLASH_FUNCTIONAL_CLASS_BOOTLOADER, "_Bootloader")
+    add_transferdata_service(dlr, FLASH_FUNCTIONAL_CLASS_BOOTLOADER, "_Bootloader")
+    add_transferexit(dlr, FLASH_FUNCTIONAL_CLASS_BOOTLOADER, "_Bootloader")

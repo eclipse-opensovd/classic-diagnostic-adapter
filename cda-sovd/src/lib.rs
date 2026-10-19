@@ -59,6 +59,8 @@ pub enum WebServerConfig {
 /// Static configuration for vehicle SOVD routes.
 pub struct VehicleConfig {
     pub flash_files_path: String,
+    /// Default functional class used to resolve the flash services 0x34, 0x36 and 0x37.
+    pub flash_functional_class_default: String,
     pub functional_group_config: FunctionalDescriptionConfig,
     pub components_config: ComponentsConfig,
 }
@@ -220,7 +222,10 @@ where
         config.functional_group_config,
         config.components_config,
         &resources.ecu_uds,
-        config.flash_files_path,
+        sovd::FlashConfig {
+            files_path: config.flash_files_path,
+            functional_class_default: config.flash_functional_class_default,
+        },
         resources.file_managers,
         resources.locks,
         resources.communication_access,

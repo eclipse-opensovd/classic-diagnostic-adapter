@@ -77,6 +77,7 @@ def add_functional_classes(dlr: DiagLayerRaw):
         "CommCtrl",
         "Ident",
         "flash_download_upload",
+        "flash_download_upload_bootloader",
         "SecurityAccess",
         "Authentication",
         "DtcSetting",
