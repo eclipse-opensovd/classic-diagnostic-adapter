@@ -68,6 +68,7 @@ impl From<DiagServiceError> for AppError {
             | DiagServiceError::AccessDenied(_)
             | DiagServiceError::RequestNotAllowed(_)
             | DiagServiceError::InvalidState(_)
+            | DiagServiceError::Conflict(_)
             | DiagServiceError::Nack(_) => Self::RuntimeError(value.to_string()),
 
             DiagServiceError::InvalidConfiguration(_) | DiagServiceError::InvalidSecurityPlugin => {

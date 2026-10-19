@@ -17,6 +17,35 @@ use cda_interfaces::{
 };
 use serde::{Deserialize, Serialize};
 
+/// How gateways are discovered on the network.
+#[derive(
+    Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema,
+)]
+pub enum DiscoveryMode {
+    /// No discovery of any kind: no VIR is broadcast and VAMs are ignored.
+    /// ECUs are only connected through an explicit direct-connect request.
+    Disabled,
+    /// Only react to spontaneous VAMs. No VIR is broadcast.
+    VamOnly,
+    /// Broadcast a VIR on startup and react to the resulting and later VAMs.
+    #[default]
+    Full,
+}
+
+impl DiscoveryMode {
+    /// Whether a VIR is broadcast when the transport starts.
+    #[must_use]
+    pub fn sends_vir(self) -> bool {
+        matches!(self, Self::Full)
+    }
+
+    /// Whether VAMs are listened for (and the discovery socket is bound).
+    #[must_use]
+    pub fn listens_for_vams(self) -> bool {
+        matches!(self, Self::Full | Self::VamOnly)
+    }
+}
+
 /// `DoIP` (Diagnostics over IP) transport layer configuration.
 #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct DoipConfig {
@@ -41,12 +70,53 @@ pub struct DoipConfig {
     /// The alive check is only sent when no diagnostic communication has occurred
     /// for this duration. Set to 0 to disable the alive check.
     pub alive_check_interval_secs: u64,
+    /// Whether the SOVD operation `/apps/sovd2uds/operations/doip-connect-ecu` is offered,
+    /// which connects an ECU directly to a given IP address instead of discovering it
+    /// via VIR/VAM. Intended for ECU development, disabled by default.
+    pub direct_connect_enabled: bool,
+    /// How gateways are discovered on the network:
+    /// - `Disabled`: no discovery of any kind, ECUs are only connected through an
+    ///   explicit direct-connect request.
+    /// - `VamOnly`: only react to spontaneous VAMs, no VIR is broadcast.
+    /// - `Full`: broadcast a VIR on startup and react to the resulting and later VAMs.
+    pub discovery: DiscoveryMode,
     /// The name of the protocol to use.
     /// Matched case-insensitive against the database.
     /// The special value `"auto-can"` defers the choice to the MDD-driven
     /// CAN protocol auto-detection (see `into_db_protocol`; the markers are
     /// configurable via `database.naming_convention.can_protocol_markers`).
     pub protocol_name: String,
+}
+
+impl DoipConfig {
+    /// Checks that `tester_address` is assigned to a local network interface.
+    ///
+    /// The tester address is used as the source address of every `DoIP`
+    /// connection. A stale address only shows up as an obscure bind error once
+    /// the first connection is attempted, so this is meant to be checked at startup.
+    ///
+    /// # Errors
+    /// Returns [`ConfigSanityError::InvalidValue`] if the address cannot be
+    /// parsed or no local interface has it.
+    pub fn check_tester_address_available(&self) -> Result<(), ConfigSanityError> {
+        let ip = self
+            .tester_address
+            .parse::<std::net::IpAddr>()
+            .map_err(|e| ConfigSanityError::InvalidValue {
+                field: "tester_address".to_owned(),
+                reason: format!("{} is not a valid IP address: {e}", self.tester_address),
+            })?;
+        // Binding only succeeds for addresses that belong to a local interface.
+        std::net::UdpSocket::bind((ip, 0)).map(|_| ()).map_err(|e| {
+            ConfigSanityError::InvalidValue {
+                field: "tester_address".to_owned(),
+                reason: format!(
+                    "{ip} is not available on this host ({e}). Set doip.tester_address to the \
+                     address of the network interface connected to the vehicle."
+                ),
+            }
+        })
+    }
 }
 
 impl Default for DoipConfig {
@@ -60,6 +130,8 @@ impl Default for DoipConfig {
             send_timeout_ms: 1000,
             send_diagnostic_message_ack: true,
             alive_check_interval_secs: 1800, // 30 minutes
+            direct_connect_enabled: false,
+            discovery: DiscoveryMode::default(),
             protocol_name: Protocol::default().to_string(),
         }
     }
@@ -125,7 +197,7 @@ mod tests {
     use cda_interfaces::config::ConfigSanity;
     use doip_definitions::header::ProtocolVersion;
 
-    use super::DoipConfig;
+    use super::{DiscoveryMode, DoipConfig};
 
     #[test]
     fn disabled_doip_skips_field_validation() {
@@ -152,6 +224,69 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate_sanity().is_err());
+    }
+
+    #[test]
+    fn tester_address_check_accepts_a_local_address() {
+        let config = DoipConfig {
+            tester_address: "127.0.0.1".to_owned(),
+            ..Default::default()
+        };
+        assert!(config.check_tester_address_available().is_ok());
+    }
+
+    #[test]
+    fn tester_address_check_rejects_an_address_no_interface_has() {
+        // TEST-NET-1 (RFC 5737) is never assigned to a host interface.
+        let config = DoipConfig {
+            tester_address: "192.0.2.1".to_owned(),
+            ..Default::default()
+        };
+        let error = config.check_tester_address_available().unwrap_err();
+        assert!(
+            error.to_string().contains("192.0.2.1"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn tester_address_check_rejects_an_invalid_address() {
+        let config = DoipConfig {
+            tester_address: "not-an-ip".to_owned(),
+            ..Default::default()
+        };
+        assert!(config.check_tester_address_available().is_err());
+    }
+
+    #[test]
+    fn direct_connect_is_disabled_by_default() {
+        assert!(!DoipConfig::default().direct_connect_enabled);
+    }
+
+    #[test]
+    fn discovery_defaults_to_full() {
+        assert_eq!(DoipConfig::default().discovery, DiscoveryMode::Full);
+    }
+
+    #[test]
+    fn discovery_mode_behaviour() {
+        assert!(DiscoveryMode::Full.sends_vir());
+        assert!(DiscoveryMode::Full.listens_for_vams());
+        assert!(!DiscoveryMode::VamOnly.sends_vir());
+        assert!(DiscoveryMode::VamOnly.listens_for_vams());
+        assert!(!DiscoveryMode::Disabled.sends_vir());
+        assert!(!DiscoveryMode::Disabled.listens_for_vams());
+    }
+
+    #[test]
+    fn non_default_discovery_passes_sanity() {
+        for discovery in [DiscoveryMode::Disabled, DiscoveryMode::VamOnly] {
+            let config = DoipConfig {
+                discovery,
+                ..Default::default()
+            };
+            assert!(config.validate_sanity().is_ok());
+        }
     }
 
     #[test]

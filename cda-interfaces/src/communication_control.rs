@@ -15,6 +15,7 @@
 //!
 //! [[ dimpl~communication-control-contracts, Communication lifecycle contracts, dimpl ]]
 pub mod access;
+pub mod doip_connect;
 pub mod error;
 pub mod operation;
 // Private: `SwappableGateway` is minted only via `ComponentSlot::transport_control`.
@@ -27,6 +28,7 @@ pub mod disable;
 pub use access::{CommunicationAccess, CommunicationError, CommunicationGuard, CommunicationState};
 use async_trait::async_trait;
 pub use disable::{DisableCommunication, DisableError, DisableGuard, DisableReason};
+pub use doip_connect::{DoipConnect, DoipEndpoint};
 pub use error::CommControlError;
 pub use operation::{
     ActivationCause, CommunicationOperation, CommunicationOperationFailure, DetectionCause,
@@ -264,6 +266,24 @@ pub trait TransportControl: Send + Sync + 'static {
     /// When called on the router, this reflects the router-level lifecycle state.
     /// Individual gateway states are not visible through this method.
     async fn state(&self) -> TransportState;
+
+    /// Connects the given ECU directly to `endpoint`, bypassing discovery.
+    ///
+    /// Only transports with a notion of a network endpoint for an ECU (`DoIP`)
+    /// implement this. The default reports it as unsupported. Exposed to the
+    /// SOVD layer only through the narrower [`DoipConnect`].
+    ///
+    /// # Errors
+    /// See [`DoipConnect::connect_ecu`].
+    async fn connect_ecu_direct(
+        &self,
+        _ecu_name: &str,
+        _endpoint: DoipEndpoint,
+    ) -> Result<(), crate::DiagServiceError> {
+        Err(crate::DiagServiceError::RequestNotSupported(
+            "Direct connection is not supported by this transport".to_owned(),
+        ))
+    }
 }
 
 /// Application-level hook into the communication transport lifecycle.

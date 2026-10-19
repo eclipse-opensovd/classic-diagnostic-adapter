@@ -190,6 +190,7 @@ impl From<DiagServiceError> for ApiError {
             DiagServiceError::AccessDenied(_) | DiagServiceError::RequestNotAllowed(_) => {
                 ApiError::Forbidden(Some(value.to_string()))
             }
+            DiagServiceError::Conflict(message) => ApiError::Conflict(message),
         }
     }
 }
