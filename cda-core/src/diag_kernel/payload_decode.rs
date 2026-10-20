@@ -157,15 +157,7 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             }
 
             let raw_uds_payload = {
-                let base_offset = params
-                    .iter()
-                    .filter(|p| {
-                        p.semantic()
-                            .is_some_and(|s| s == self.database_naming_convention.semantics.data)
-                    })
-                    .map(datatypes::Parameter::byte_position)
-                    .min()
-                    .unwrap_or(0);
+                let base_offset = self.raw_payload_offset(&params);
                 uds_payload.data()?.get(base_offset as usize..).ok_or(
                     DiagServiceError::BadPayload("Payload offset out of bounds".to_owned()),
                 )?
@@ -358,6 +350,24 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
 }
 
 impl<S: SecurityPlugin> EcuManager<S> {
+    /// Offset at which the raw payload of a positive response starts
+    /// ([`cda_interfaces::diagservices::DiagServiceResponse::get_raw`]): the lowest byte position of the
+    /// parameters with DATA semantic, i.e. the SID and sub-function are cut off.
+    pub(in crate::diag_kernel) fn raw_payload_offset(
+        &self,
+        params: &[datatypes::Parameter],
+    ) -> u32 {
+        params
+            .iter()
+            .filter(|p| {
+                p.semantic()
+                    .is_some_and(|s| s == self.database_naming_convention.semantics.data)
+            })
+            .map(datatypes::Parameter::byte_position)
+            .min()
+            .unwrap_or(0)
+    }
+
     #[tracing::instrument(skip_all,
         fields(
             dlt_context = dlt_ctx!("CORE"),
@@ -2213,13 +2223,16 @@ mod tests {
         data.push(0);
         data.push(42);
 
+        // The second structure has a leading length of zero and thus empty data,
+        // the trailing byte 42 cannot form another structure and is ignored.
         assert_uds_converts_to_json(
             &ecu_manager,
             &service,
             data,
             json!({
                 "end_pdu_param": [
-                    { "data": "0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA" }
+                    { "data": "0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA" },
+                    { "data": "" }
                 ],
                 "test_service_pos_sid": sid
             }),
