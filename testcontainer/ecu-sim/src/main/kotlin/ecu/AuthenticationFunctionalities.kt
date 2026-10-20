@@ -43,7 +43,7 @@ fun RequestsData.addAuthenticationRequests() {
             else -> success
         }
 
-    request("29 00", "Authentication_Deauthenticate") {
+    request("29 00", "Authentication_DeAuthenticate") {
         val ecuState = ecu.ecuState()
         ecuState.authentication = Authentication.UNAUTHENTICATED
         val response = DeauthenticateResponse(AuthenticationReturnParameter.DEAUTHENTICATION_SUCCESSFUL)
@@ -135,7 +135,7 @@ fun RequestsData.addAuthenticationRequests() {
         ack(response.asByteArray)
     }
 
-    request("29 08", "Authentication_Configuration") {
+    request("29 08", "Authentication_AuthenticationConfiguration") {
         val response =
             AuthenticationConfigurationResponse(AuthenticationReturnParameter.AUTHENTICATION_CONFIGURATION_APCE)
         ack(response.asByteArray)
