@@ -762,7 +762,8 @@ pub trait EcuSecurity: Send + Sync + 'static {
     ) -> Result<DiagComm, DiagServiceError>;
 
     /// Extracts the `authenticationReturnParameter` from a raw positive response of the
-    /// Authentication service for `sub_function`. The parameter is located via the positive response
+    /// Authentication service for `sub_function`. `raw_response` is the payload as returned
+    /// by `DiagServiceResponse::get_raw`, which starts at the first DATA parameter. The parameter is located via the positive response
     /// of the service in the diagnostic description: it is the first value parameter
     /// following the response SID and sub-function.
     /// Returns `None` if the description defines no such parameter.

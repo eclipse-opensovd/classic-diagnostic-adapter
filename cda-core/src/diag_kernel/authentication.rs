@@ -51,18 +51,28 @@ impl<S: SecurityPlugin> EcuManager<S> {
     ) -> Result<Option<u64>, DiagServiceError> {
         let service = self.find_authentication_service(sub_function)?;
 
-        let Some(param) = service
+        let Some((param, offset)) = service
             .pos_responses()
             .into_iter()
             .flatten()
             .filter_map(|r| r.params())
-            .flat_map(|params| params.iter().map(datatypes::Parameter))
-            .filter(|p| {
-                p.has_byte_position()
-                    && p.byte_position() >= FIRST_DATA_BYTE
-                    && p.specific_data_as_value().is_some()
+            .filter_map(|params| {
+                let params: Vec<_> = params.iter().map(datatypes::Parameter).collect();
+                // The raw response starts at the first DATA parameter, see
+                // `raw_payload_offset`.
+                let offset = self.raw_payload_offset(&params);
+                params
+                    .into_iter()
+                    .filter(|p| {
+                        p.has_byte_position()
+                            && p.byte_position() >= FIRST_DATA_BYTE
+                            && p.byte_position() >= offset
+                            && p.specific_data_as_value().is_some()
+                    })
+                    .min_by_key(datatypes::Parameter::byte_position)
+                    .map(|p| (p, offset))
             })
-            .min_by_key(datatypes::Parameter::byte_position)
+            .min_by_key(|(p, _)| p.byte_position())
         else {
             return Ok(None);
         };
@@ -81,7 +91,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let coded_type = dop.diag_coded_type()?;
         let (bytes, _) = coded_type.decode(
             raw_response,
-            param.byte_position() as usize,
+            param.byte_position().saturating_sub(offset) as usize,
             param.bit_position() as usize,
         )?;
 
@@ -101,8 +111,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
 mod tests {
     use cda_database::datatypes::{self, DataType, ResponseType, database_builder::EcuDataBuilder};
     use cda_interfaces::{
-        DiagServiceError, EcuSecurity, PayloadEncoder, Protocol,
-        authentication::AuthenticationSubFunction, service_ids,
+        DiagServiceError, EcuSecurity, PayloadDecoder, PayloadEncoder, Protocol, ServicePayload,
+        authentication::AuthenticationSubFunction, diagservices::DiagServiceResponse, service_ids,
     };
     use cda_plugin_security::DefaultSecurityPluginData;
 
@@ -117,11 +127,14 @@ mod tests {
 
     const VERIFY_NAME: &str = "Authentication_VerifyPOWN_Bidirectional";
     const DEAUTH_NAME: &str = "Authentication_DeAuthenticate";
+    const POWN_NAME: &str = "Authentication_ProofOfOwnership";
 
     /// Builds an ECU with two Authentication services whose short names do not
     /// follow any convention:
     /// * sub-function 0x07, positive response `69 07 <returnParameter> <proofOfOwnershipServer>`
     /// * sub-function 0x00, positive response `69 00` without return parameter
+    /// * sub-function 0x03, positive response `69 03 <returnParameter> <sessionKeyInfo>`
+    ///   with DATA semantic, so the raw response starts at the return parameter
     fn ecu_manager() -> EcuManager<DefaultSecurityPluginData> {
         let default_protocol = Protocol::default();
         let mut b = EcuDataBuilder::new();
@@ -137,8 +150,11 @@ mod tests {
         let proof_dop = b.create_regular_normal_dop("proof_dop", u16_type, compu2);
 
         let mut services = Vec::new();
-        for (name, sub_function, with_return) in [(VERIFY_NAME, 7u8, true), (DEAUTH_NAME, 0, false)]
-        {
+        for (name, sub_function, with_return) in [
+            (VERIFY_NAME, 7u8, true),
+            (DEAUTH_NAME, 0, false),
+            (POWN_NAME, 3, true),
+        ] {
             let req_sid = create_sid_param!(b, "sid", sid);
             let req_sf = b.create_coded_const_param(
                 "sub_function",
@@ -160,7 +176,22 @@ mod tests {
                 DataType::UInt32,
             );
             let mut params = vec![resp_sid, resp_sf];
-            if with_return {
+            if sub_function == 3 {
+                // Default semantic of `DatabaseNamingConvention`
+                let data = "DATA";
+                params.push(b.create_value_param_with_semantic(
+                    "authenticationReturnParameter",
+                    data,
+                    return_dop,
+                    2,
+                ));
+                params.push(b.create_value_param_with_semantic(
+                    "sessionKeyInfo",
+                    data,
+                    proof_dop,
+                    3,
+                ));
+            } else if with_return {
                 // Declared out of order to verify the lowest byte position is used.
                 params.push(b.create_value_param("proofOfOwnershipServer", proof_dop, 3, 0));
                 params.push(b.create_value_param(
@@ -253,5 +284,38 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// The raw response returned by the decoder starts at the first DATA
+    /// parameter, the return parameter must be read relative to it.
+    #[tokio::test]
+    async fn return_value_is_read_from_decoded_raw_response() {
+        let ecu = ecu_manager();
+        let dc = ecu
+            .lookup_authentication_service(AuthenticationSubFunction::ProofOfOwnership)
+            .unwrap();
+        let response = ecu
+            .convert_from_uds(
+                &dc,
+                &ServicePayload {
+                    data: vec![0x69, 0x03, 0x12, 0x00, 0x10],
+                    source_address: 0,
+                    target_address: 0,
+                    new_session: None,
+                    new_security: None,
+                },
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.get_raw(), &[0x12, 0x00, 0x10]);
+        let value = ecu
+            .authentication_return_value(
+                AuthenticationSubFunction::ProofOfOwnership,
+                response.get_raw(),
+            )
+            .unwrap();
+        assert_eq!(value, Some(0x12));
     }
 }

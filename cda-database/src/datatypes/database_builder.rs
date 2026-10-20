@@ -845,6 +845,38 @@ impl<'a> EcuDataBuilder<'a> {
         })
     }
 
+    /// Like [`create_value_param`] but sets the SEMANTIC, e.g. `DATA`.
+    pub fn create_value_param_with_semantic(
+        &mut self,
+        name: &'a str,
+        semantic: &'a str,
+        dop: WIPOffset<dataformat::DOP>,
+        byte_pos: u32,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let specific_data = Some(
+            dataformat::ParamSpecificData::tag_as_value(dataformat::Value::create(
+                &mut self.fbb,
+                &dataformat::ValueArgs {
+                    physical_default_value: None,
+                    dop: Some(dop),
+                },
+            ))
+            .value_offset(),
+        );
+
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::VALUE,
+            short_name: Some(name),
+            semantic: Some(semantic),
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: Some(byte_pos),
+            bit_position: Some(0),
+            specific_data_type: dataformat::ParamSpecificData::Value,
+            specific_data,
+        })
+    }
+
     /// Creates a VALUE param whose BYTE-POSITION is omitted (`None`).
     ///
     /// Per ISO 22901-1 §7.4.8 a parameter that follows a
