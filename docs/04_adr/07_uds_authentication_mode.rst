@@ -78,5 +78,8 @@ Consequences
 * The tracked state is informational: authentication timeouts or ECU internal events may end
   the authenticated state without the CDA noticing it immediately.
 * The deviation from ISO 17978-3 Table 343 must be documented for clients.
+* ISO 17978-3 defines only ``value`` and ``mode_expiration`` for mode requests (Table 237). The
+  request and response attribute ``parameters``, which carries the parameters of the UDS
+  request and the decoded response, is an extension.
 * ``GET`` reports ``offline`` for unreachable ECUs. Extension fields use the ``x-sovd2uds-``
   prefix.

@@ -48,7 +48,7 @@ pub(crate) enum SecurityAccess {
     Level09,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum Authentication {
     Unauthenticated,
