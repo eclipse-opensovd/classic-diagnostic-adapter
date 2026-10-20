@@ -852,12 +852,8 @@ Authentication -- SID 29\ :sub:`16`
 
 .. arch:: Authentication Endpoints
     :id: arch~sovd-api-authentication-modes
-    :links: req~sovd-api-authentication-modes
+    :links: req~sovd-api-authentication-modes, itest~sovd-api-authentication-modes-pki, itest~sovd-api-authentication-modes-pki-bidirectional, itest~sovd-api-authentication-modes-challenge-response, itest~sovd-api-authentication-modes-rejected, itest~sovd-api-authentication-modes-expiration, itest~sovd-api-authentication-modes-nrc, itest~sovd-api-authentication-modes-invalid
     :status: draft
-
-    .. note::
-       Implemented. Integration tests against the ECU simulator are pending, since the
-       test diagnostic description does not yet contain sub-functions 01\ :sub:`16` -- 07\ :sub:`16`.
 
     .. note::
        This is technically a deviation from Table 343 in the ISO API. The table in the ISO is misleading, since 8.3.2
