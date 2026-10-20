@@ -436,6 +436,49 @@ pub(crate) fn create_ecu_manager_with_struct_service(
     )
 }
 
+/// Creates an ECU manager with a request containing a structure at byte 1:
+/// - `marker`: 8 bit CODED-CONST 0xAB at struct byte 0
+/// - `value`: u16 VALUE at struct byte 1
+pub(crate) fn create_ecu_manager_with_coded_const_in_struct_service() -> (
+    crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
+    cda_interfaces::DiagComm,
+    u8,
+) {
+    let mut db_builder = EcuDataBuilder::new();
+    let protocol_name = Protocol::default().to_string();
+    let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
+    let compu_identical =
+        db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
+
+    let structure_dop = {
+        let u16_dct = db_builder.create_diag_coded_type_standard_length(16, DataType::UInt32);
+        let value_dop = db_builder.create_regular_normal_dop("value_dop", u16_dct, compu_identical);
+        let marker =
+            db_builder.create_coded_const_param("marker", "171", 0, 0, 8, DataType::UInt32);
+        let value = db_builder.create_value_param("value", value_dop, 1, 0);
+        let structure = db_builder.create_structure(Some(vec![marker, value]), Some(3), true);
+        db_builder.create_structure_dop("const_struct_dop", structure)
+    };
+
+    let sid = service_ids::WRITE_DATA_BY_IDENTIFIER;
+    let dc_name = "TestCodedConstInStruct";
+    let diag_comm = new_diag_comm!(db_builder, dc_name, protocol);
+
+    let request = {
+        let sid_param = create_sid_param!(db_builder, sid);
+        let main_param = db_builder.create_value_param("main_param", structure_dop, 1, 0);
+        db_builder.create_request(Some(vec![sid_param, main_param]), None)
+    };
+
+    let diag_service = new_diag_service!(db_builder, diag_comm, request, vec![], vec![]);
+    let db = finish_db!(db_builder, protocol, vec![diag_service]);
+    (
+        new_ecu_manager(db),
+        cda_interfaces::DiagComm::new(dc_name, DiagCommType::Configurations),
+        sid,
+    )
+}
+
 /// Creates an ECU manager with a MUX service that includes a default case.
 ///
 /// # Database contents:
@@ -2350,6 +2393,120 @@ pub(crate) fn create_ecu_manager_with_trailing_param_after_param_length_info_ser
     (
         new_ecu_manager(db),
         cda_interfaces::DiagComm::new(dc_name, DiagCommType::Configurations),
+        sid,
+    )
+}
+
+/// Creates an ECU manager with a UDS 0x29 01 like request:
+/// - SID 0x29 @0, sub-function 0x01 @1, communication configuration 0x00 @2
+/// - `cert`: byte field with 16 bit LEADING-LENGTH-INFO @3
+/// - `trailer`: 16 bit CODED-CONST `trailer_value` without BYTE-POSITION
+///
+/// With `sid_without_byte_pos` the SID omits its BYTE-POSITION, as databases
+/// commonly do for params at byte 0.
+pub(crate) fn create_ecu_manager_with_trailing_coded_const_after_leading_length_service(
+    trailer_value: &str,
+    sid_without_byte_pos: bool,
+) -> (
+    crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
+    cda_interfaces::DiagComm,
+    u8,
+) {
+    let mut db_builder = EcuDataBuilder::new();
+    let protocol_name = Protocol::default().to_string();
+    let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
+    let compu_identical = db_builder.create_compu_method(CompuCategory::Identical, None, None);
+
+    let cert_dct = db_builder.create_diag_coded_type(
+        None,
+        DataType::ByteField,
+        true,
+        DiagCodedTypeVariant::LeadingLengthInfo(16),
+    );
+    let cert_dop = db_builder.create_regular_normal_dop("cert_dop", cert_dct, compu_identical);
+
+    let sid = service_ids::AUTHENTICATION;
+    let dc_name = "TestTrailingCodedConstAfterLeadingLength";
+    let diag_comm = new_diag_comm!(db_builder, dc_name, protocol);
+
+    let request = {
+        let sid_param = if sid_without_byte_pos {
+            db_builder.create_coded_const_param_no_byte_pos(
+                "sid",
+                &sid.to_string(),
+                8,
+                DataType::UInt32,
+            )
+        } else {
+            create_sid_param!(db_builder, sid)
+        };
+        let sub_func =
+            db_builder.create_coded_const_param("sub_func", "1", 1, 0, 8, DataType::UInt32);
+        let comm_config =
+            db_builder.create_coded_const_param("comm_config", "0", 2, 0, 8, DataType::UInt32);
+        let cert_param = db_builder.create_value_param("cert", cert_dop, 3, 0);
+        let trailer = db_builder.create_coded_const_param_no_byte_pos(
+            "trailer",
+            trailer_value,
+            16,
+            DataType::UInt32,
+        );
+        db_builder.create_request(
+            Some(vec![sid_param, sub_func, comm_config, cert_param, trailer]),
+            None,
+        )
+    };
+    // Positive response: SID @0, sub-function 0x01 @1, `challenge` with 16 bit
+    // LEADING-LENGTH-INFO @2, `trailer` CODED-CONST without BYTE-POSITION.
+    let pos_response = {
+        let pos_sid = sid.saturating_add(UDS_ID_RESPONSE_BITMASK);
+        let sid_param = if sid_without_byte_pos {
+            db_builder.create_coded_const_param_no_byte_pos(
+                "pos_sid",
+                &pos_sid.to_string(),
+                8,
+                DataType::UInt32,
+            )
+        } else {
+            create_sid_param!(db_builder, "pos_sid", pos_sid)
+        };
+        let sub_func =
+            db_builder.create_coded_const_param("sub_func", "1", 1, 0, 8, DataType::UInt32);
+        let challenge = db_builder.create_value_param("challenge", cert_dop, 2, 0);
+        let trailer = db_builder.create_coded_const_param_no_byte_pos(
+            "trailer",
+            trailer_value,
+            16,
+            DataType::UInt32,
+        );
+        db_builder.create_response(
+            ResponseType::Positive,
+            Some(vec![sid_param, sub_func, challenge, trailer]),
+            None,
+        )
+    };
+
+    // Negative response: 0x7F @0, SIDRQ_NR matching the request SID @1, NRC @2.
+    let neg_response = {
+        let u8_dct = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
+        let nrc_dop = db_builder.create_regular_normal_dop("nrc_dop", u8_dct, compu_identical);
+        let nack = db_builder.create_coded_const_param("SID_NR", "127", 0, 0, 8, DataType::UInt32);
+        let sid_rq = db_builder.create_matching_request_param("SIDRQ_NR", 0, 1, 1);
+        let nrc = db_builder.create_value_param("NRC", nrc_dop, 2, 0);
+        db_builder.create_response(ResponseType::Negative, Some(vec![nack, sid_rq, nrc]), None)
+    };
+
+    let diag_service = new_diag_service!(
+        db_builder,
+        diag_comm,
+        request,
+        vec![pos_response],
+        vec![neg_response]
+    );
+    let db = finish_db!(db_builder, protocol, vec![diag_service]);
+    (
+        new_ecu_manager(db),
+        cda_interfaces::DiagComm::new(dc_name, DiagCommType::Modes),
         sid,
     )
 }
