@@ -40,6 +40,10 @@ struct ParamContext<'a> {
     parameter: &'a datatypes::Parameter<'a>,
     base_offset: usize,
     outer_context: Option<&'a MappedDiagServiceResponsePayload>,
+    /// When `true`, a missing BYTE-POSITION means byte 0 relative to
+    /// `base_offset` instead of "follows the previous param". Used when a
+    /// request param is decoded from a response slice (MATCHING-REQUEST-PARAM).
+    relative_position: bool,
 }
 
 impl<'a> ParamContext<'a> {
@@ -48,6 +52,24 @@ impl<'a> ParamContext<'a> {
             parameter,
             base_offset,
             outer_context: None,
+            relative_position: false,
+        }
+    }
+
+    fn with_relative_position(self) -> Self {
+        Self {
+            relative_position: true,
+            ..self
+        }
+    }
+
+    /// Byte position to read from. Params without BYTE-POSITION start where
+    /// the previous param ended, unless `relative_position` is set.
+    fn read_byte_pos(self, uds_payload: &Payload) -> usize {
+        if self.parameter.has_byte_position() || self.relative_position {
+            self.abs_byte_pos()
+        } else {
+            uds_payload.last_read_byte_pos()
         }
     }
 
@@ -173,9 +195,11 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
                 });
             }
             let mut mapping_errors = Vec::new();
-            let mut sorted_params = params;
-            sorted_params.sort_by(param_position_order);
-            for param in sorted_params {
+            // Params are decoded in database order. A param without
+            // BYTE-POSITION (ISO 22901-1 §7.4.8) starts where the preceding
+            // param ended. This covers both a leading param at byte 0 whose
+            // position was omitted and a param following a variable-length field.
+            for param in params {
                 let semantic = param.semantic();
                 if semantic.is_some_and(|semantic| {
                     semantic != self.database_naming_convention.semantics.data
@@ -542,7 +566,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             param_name,
             uds_payload,
             data,
-            ParamContext::new(&matching_request_param, 0),
+            ParamContext::new(&matching_request_param, 0).with_relative_position(),
         )?;
 
         if pop {
@@ -1061,11 +1085,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             return Ok(());
         }
 
-        let byte_pos = if param_ctx.parameter.has_byte_position() {
-            param_ctx.abs_byte_pos()
-        } else {
-            uds_payload.last_read_byte_pos()
-        };
+        let byte_pos = param_ctx.read_byte_pos(uds_payload);
         let uds_bytes = uds_payload.data()?;
         let (decoded_bytes, bit_len) =
             diag_coded_type.decode_with_runtime_byte_length(uds_bytes, byte_pos, byte_count)?;
@@ -1779,9 +1799,10 @@ fn map_param_coded_const_from_uds(
             "Expected DiagCodedType in CodedConst specific data".to_owned(),
         ))?;
 
+    let byte_pos = param_ctx.read_byte_pos(uds_payload);
     let value = operations::extract_diag_data_container(
         param_ctx.parameter.short_name(),
-        param_ctx.abs_byte_pos(),
+        byte_pos,
         param_ctx.parameter.bit_position() as usize,
         uds_payload,
         &diag_type,
@@ -1835,6 +1856,9 @@ fn map_param_coded_const_from_uds(
             expected,
             value.data
         )));
+    }
+    if !param_ctx.relative_position {
+        uds_payload.set_last_read_byte_pos(byte_pos.saturating_add(value.data.len()));
     }
 
     data.insert(
@@ -1927,22 +1951,6 @@ fn extract_struct_dop_from_field(
         .ok_or(DiagServiceError::InvalidDatabase(
             "Field none or does not contain a struct".to_owned(),
         ))
-}
-
-fn param_position_order(a: &datatypes::Parameter, b: &datatypes::Parameter) -> std::cmp::Ordering {
-    match (a.has_byte_position(), b.has_byte_position()) {
-        // Both have a position -> normal comparison
-        (true, true) => a
-            .byte_position()
-            .cmp(&b.byte_position())
-            .then(a.bit_position().cmp(&b.bit_position())),
-        // Only a has no position -> a goes after b
-        (false, true) => std::cmp::Ordering::Greater,
-        // Only b has no position -> b goes after a
-        (true, false) => std::cmp::Ordering::Less,
-        // Neither has a position -> preserve order
-        (false, false) => std::cmp::Ordering::Equal,
-    }
 }
 
 fn create_diag_service_response(

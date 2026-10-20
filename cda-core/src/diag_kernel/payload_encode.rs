@@ -117,7 +117,12 @@ impl<S: SecurityPlugin> PayloadEncoder for EcuManager<S> {
                 .await?;
         }
 
-        let mut mapped_params = request
+        // Params are encoded in database order. A param without BYTE-POSITION
+        // (ISO 22901-1 §7.4.8) is placed at the current end of the payload,
+        // i.e. after the preceding param. This covers both a leading param at
+        // byte 0 whose position was omitted and a param following a
+        // variable-length field.
+        let mapped_params = request
             .params()
             .map(|params| {
                 params
@@ -127,24 +132,6 @@ impl<S: SecurityPlugin> PayloadEncoder for EcuManager<S> {
             })
             .unwrap_or_default();
 
-        mapped_params.sort_by(|a, b| {
-            match (a.has_byte_position(), b.has_byte_position()) {
-                // Both have a position -> normal comparison
-                (true, true) => a
-                    .byte_position()
-                    .cmp(&b.byte_position())
-                    .then(a.bit_position().cmp(&b.bit_position())),
-                // Only a has no position -> a goes after b
-                (false, true) => std::cmp::Ordering::Greater,
-                // Only b has no position -> b goes after a
-                (true, false) => std::cmp::Ordering::Less,
-                // Neither has a position -> preserve order
-                (false, false) => std::cmp::Ordering::Equal,
-            }
-        });
-
-        let mut uds = process_coded_constants(&mapped_params)?;
-
         // If no input data was provided, fall back to an empty parameter map
         // this allows for a streamlined handling where some values might
         // have defaults that can be used when no data is provided, while returning
@@ -153,8 +140,9 @@ impl<S: SecurityPlugin> PayloadEncoder for EcuManager<S> {
             Some(d) => d,
             None => UdsPayloadData::ParameterMap(HashMap::default()),
         };
+        let mut uds = Vec::new();
         match data {
-            UdsPayloadData::Raw(bytes) => uds.extend(bytes),
+            UdsPayloadData::Raw(bytes) => encode_raw_payload(&mapped_params, bytes, &mut uds)?,
             UdsPayloadData::ParameterMap(json_values) => {
                 self.process_parameter_map(&mapped_params, &json_values, &mut uds)?;
             }
@@ -185,7 +173,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         //  ISO_22901-1:2008-11 7.3.5.4
         //  MATCHING-REQUEST-PARAM, DYNAMIC and NRC-CONST are only allowed in responses
         match param.param_type()? {
-            datatypes::ParamType::CodedConst => Ok(()),
+            datatypes::ParamType::CodedConst => encode_coded_const(param, payload, parent_byte_pos),
             datatypes::ParamType::MatchingRequestParam => Err(DiagServiceError::InvalidRequest(
                 "MatchingRequestParam only supported for responses".to_owned(),
             )),
@@ -879,14 +867,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
         )?;
 
         for param in mapped_params {
-            // When BYTE-POSITION is omitted (ISO 22901-1 §7.4.8) the
-            // parameter follows a variable-length PARAM-LENGTH-INFO field
-            // and must be appended at the current end of the payload.
-            let effective_byte_pos = if param.has_byte_position() {
-                param.byte_position() as usize
-            } else {
-                uds.len()
-            };
+            // When BYTE-POSITION is omitted (ISO 22901-1 §7.4.8) the parameter
+            // is appended at the current end of the payload.
+            let effective_byte_pos = effective_byte_pos(param, uds);
 
             if uds.len() < effective_byte_pos {
                 uds.extend(vec![0x0; effective_byte_pos.saturating_sub(uds.len())]);
@@ -906,6 +889,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             } else {
                 effective_byte_pos
             };
+
             self.map_param_to_uds(
                 param,
                 json_values.get(short_name),
@@ -978,57 +962,104 @@ fn try_parse_str_as_json_number(value: &str) -> Result<serde_json::Value, DiagSe
     }
 }
 
-fn process_coded_constants(
-    mapped_params: &[datatypes::Parameter],
-) -> Result<Vec<u8>, DiagServiceError> {
-    let mut uds: Vec<u8> = Vec::new();
-
-    for param in mapped_params {
-        if let Some(coded_const) = param.specific_data_as_coded_const() {
-            let diag_type: datatypes::DiagCodedType = coded_const
-                .diag_coded_type()
-                .and_then(|t| {
-                    let type_: Option<datatypes::DiagCodedType> = t.try_into().ok();
-                    type_
-                })
-                .ok_or(DiagServiceError::InvalidDatabase(format!(
-                    "Param '{}' is missing DiagCodedType",
-                    param.short_name().unwrap_or_default()
-                )))?;
-            let coded_const_value =
-                coded_const
-                    .coded_value()
-                    .ok_or(DiagServiceError::InvalidDatabase(format!(
-                        "Param '{}' is missing coded value",
-                        param.short_name().unwrap_or_default()
-                    )))?;
-
-            let const_json_value =
-                if let Ok(number) = try_parse_str_as_json_number(coded_const_value) {
-                    number
-                } else {
-                    str_to_json_value(coded_const_value, diag_type.base_datatype())?
-                };
-
-            let uds_val = json_value_to_uds_data(&diag_type, None, None, &const_json_value)
-                .inspect_err(|e| {
-                    tracing::error!(
-                        error = ?e,
-                        "Failed to convert CodedConst coded value to UDS data for parameter '{}'",
-                        param.short_name().unwrap_or_default()
-                    );
-                })?;
-
-            diag_type.encode(
-                uds_val,
-                &mut uds,
-                param.byte_position() as usize,
-                param.bit_position() as usize,
-            )?;
-        }
+/// Absolute byte position of a top-level request param. Without
+/// BYTE-POSITION the param follows the data encoded so far.
+fn effective_byte_pos(param: &datatypes::Parameter, uds: &[u8]) -> usize {
+    if param.has_byte_position() {
+        param.byte_position() as usize
+    } else {
+        uds.len()
     }
+}
 
-    Ok(uds)
+/// Builds a request from caller-provided raw bytes.
+///
+/// The raw bytes replace all non-constant params. CODED-CONSTs before the
+/// first non-constant param (in database order) and all positioned
+/// CODED-CONSTs form the header in front of the raw bytes. CODED-CONSTs
+/// without BYTE-POSITION after it follow the raw bytes.
+fn encode_raw_payload(
+    mapped_params: &[datatypes::Parameter],
+    raw: Vec<u8>,
+    uds: &mut Vec<u8>,
+) -> Result<(), DiagServiceError> {
+    let first_non_const = mapped_params
+        .iter()
+        .position(|p| p.specific_data_as_coded_const().is_none())
+        .unwrap_or(mapped_params.len());
+
+    let (trailing, header): (Vec<_>, Vec<_>) = mapped_params
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.specific_data_as_coded_const().is_some())
+        .partition(|(i, p)| *i > first_non_const && !p.has_byte_position());
+
+    for (_, param) in header {
+        let base = if param.has_byte_position() {
+            0
+        } else {
+            uds.len()
+        };
+        encode_coded_const(param, uds, base)?;
+    }
+    uds.extend(raw);
+    for (_, param) in trailing {
+        let pos = uds.len();
+        encode_coded_const(param, uds, pos)?;
+    }
+    Ok(())
+}
+
+/// Encodes a CODED-CONST param at `base_byte_pos + BYTE-POSITION`.
+fn encode_coded_const(
+    param: &datatypes::Parameter,
+    uds: &mut Vec<u8>,
+    base_byte_pos: usize,
+) -> Result<(), DiagServiceError> {
+    let coded_const = param.specific_data_as_coded_const().ok_or_else(|| {
+        DiagServiceError::InvalidDatabase(format!(
+            "Param '{}' is not a CodedConst",
+            param.short_name().unwrap_or_default()
+        ))
+    })?;
+    let diag_type: datatypes::DiagCodedType = coded_const
+        .diag_coded_type()
+        .and_then(|t| {
+            let type_: Option<datatypes::DiagCodedType> = t.try_into().ok();
+            type_
+        })
+        .ok_or(DiagServiceError::InvalidDatabase(format!(
+            "Param '{}' is missing DiagCodedType",
+            param.short_name().unwrap_or_default()
+        )))?;
+    let coded_const_value = coded_const
+        .coded_value()
+        .ok_or(DiagServiceError::InvalidDatabase(format!(
+            "Param '{}' is missing coded value",
+            param.short_name().unwrap_or_default()
+        )))?;
+
+    let const_json_value = if let Ok(number) = try_parse_str_as_json_number(coded_const_value) {
+        number
+    } else {
+        str_to_json_value(coded_const_value, diag_type.base_datatype())?
+    };
+
+    let uds_val =
+        json_value_to_uds_data(&diag_type, None, None, &const_json_value).inspect_err(|e| {
+            tracing::error!(
+                error = ?e,
+                "Failed to convert CodedConst coded value to UDS data for parameter '{}'",
+                param.short_name().unwrap_or_default()
+            );
+        })?;
+
+    diag_type.encode(
+        uds_val,
+        uds,
+        base_byte_pos.saturating_add(param.byte_position() as usize),
+        param.bit_position() as usize,
+    )
 }
 
 #[cfg(test)]
@@ -1041,6 +1072,7 @@ mod tests {
 
     use super::*;
     use crate::diag_kernel::test_utils::ecu_manager_builder::{
+        create_ecu_manager_with_coded_const_in_struct_service,
         create_ecu_manager_with_end_pdu_request_service,
         create_ecu_manager_with_length_key_request_service,
         create_ecu_manager_with_multiple_routine_control_services,
@@ -1051,6 +1083,7 @@ mod tests {
         create_ecu_manager_with_phys_const_structure_dop_service,
         create_ecu_manager_with_phys_const_text_table_service,
         create_ecu_manager_with_struct_service,
+        create_ecu_manager_with_trailing_coded_const_after_leading_length_service,
         create_ecu_manager_with_trailing_param_after_param_length_info_service,
         create_ecu_manager_with_value_default_text_table_service,
     };
@@ -1696,6 +1729,98 @@ mod tests {
             "suffix must be decoded from bytes after var_data, not from the (absent) static byte \
              position"
         );
+    }
+
+    #[tokio::test]
+    async fn test_coded_const_in_struct_is_encoded() {
+        let (ecu_manager, dc, sid) = create_ecu_manager_with_coded_const_in_struct_service();
+        let payload_data = UdsPayloadData::ParameterMap(
+            serde_json::from_value(json!({ "main_param": { "value": 0x1234 } })).unwrap(),
+        );
+        let encoded = ecu_manager
+            .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data), None)
+            .await
+            .unwrap();
+        assert_eq!(encoded.data, vec![sid, 0xAB, 0x12, 0x34]);
+    }
+
+    #[tokio::test]
+    async fn test_trailing_coded_const_after_leading_length_param() {
+        // 0x1234 instead of 0x0000 ensures the constant is not ORed into bytes 0..2.
+        // A SID without BYTE-POSITION must still be encoded at byte 0.
+        for (trailer, trailer_bytes, sid_without_byte_pos) in [
+            ("0", [0x00, 0x00], false),
+            ("4660", [0x12, 0x34], false),
+            ("0", [0x00, 0x00], true),
+            ("4660", [0x12, 0x34], true),
+        ] {
+            let (ecu_manager, dc, sid) =
+                create_ecu_manager_with_trailing_coded_const_after_leading_length_service(
+                    trailer,
+                    sid_without_byte_pos,
+                );
+            let mut expected = vec![sid, 0x01, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC];
+            expected.extend(trailer_bytes);
+
+            let payload_data = UdsPayloadData::ParameterMap(
+                serde_json::from_value(json!({ "cert": "0xAA 0xBB 0xCC" })).unwrap(),
+            );
+            let encoded = ecu_manager
+                .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data), None)
+                .await
+                .unwrap();
+            assert_eq!(
+                encoded.data, expected,
+                "trailing coded const must follow the leading-length param \
+                 (sid_without_byte_pos={sid_without_byte_pos})"
+            );
+
+            let raw = UdsPayloadData::Raw(vec![0x00, 0x03, 0xAA, 0xBB, 0xCC]);
+            let encoded = ecu_manager
+                .create_uds_payload(&dc, &skip_sec_plugin!(), Some(raw), None)
+                .await
+                .unwrap();
+            assert_eq!(
+                encoded.data, expected,
+                "trailing coded const must follow raw payload data \
+                 (sid_without_byte_pos={sid_without_byte_pos})"
+            );
+
+            let mut response = vec![
+                sid.saturating_add(cda_interfaces::UDS_ID_RESPONSE_BITMASK),
+                0x01,
+                0x00,
+                0x03,
+                0xAA,
+                0xBB,
+                0xCC,
+            ];
+            response.extend(trailer_bytes);
+            let decoded = ecu_manager
+                .convert_from_uds(&dc, &create_payload(response), true, None)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("decode failed (sid_without_byte_pos={sid_without_byte_pos}): {e}")
+                });
+            let json_out = decoded.serialize_to_json().unwrap().data;
+            assert_eq!(json_out.get("challenge"), Some(&json!("0xAA 0xBB 0xCC")));
+
+            // MATCHING-REQUEST-PARAM: the request SID is read from response byte 1,
+            // also when it has no BYTE-POSITION in the request.
+            let decoded = ecu_manager
+                .convert_from_uds(&dc, &create_payload(vec![0x7F, sid, 0x34]), true, None)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "negative response decode failed \
+                         (sid_without_byte_pos={sid_without_byte_pos}): {e}"
+                    )
+                });
+            assert_eq!(
+                decoded.response_type,
+                cda_interfaces::diagservices::DiagServiceResponseType::Negative
+            );
+        }
     }
 
     #[tokio::test]
