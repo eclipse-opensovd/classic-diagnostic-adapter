@@ -252,16 +252,29 @@ async fn tester_present_sent_after_doip_reconnection() -> Result<(), TestingErro
 
     // Send UDS ECU Reset (0x11 0x01) via genericservice - this triggers the ECU sim
     // to close the TCP connection for 5 seconds (simulating a real ECU reboot)
-    let _ = send_cda_request(
+    let mut reset_headers = auth.clone();
+    reset_headers.insert(
+        http::header::ACCEPT,
+        http::HeaderValue::from_static("application/octet-stream"),
+    );
+    reset_headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/octet-stream"),
+    );
+    let reset_result = send_cda_request(
         &runtime.config,
         &format!("{}/genericservice", sovd::ECU_FLXC1000_ENDPOINT),
         StatusCode::OK,
         Method::PUT,
-        Some(&serde_json::json!({"request": "0x11 0x01"}).to_string()),
-        Some(&auth),
+        Some("\x11\x01"),
+        Some(&reset_headers),
         None,
     )
     .await;
+    assert!(
+        reset_result.is_ok(),
+        "Hard reset request failed: {reset_result:?}"
+    );
 
     // Wait for the ECU to come back online after the hard reset (5s reset + reconnection time)
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(10)).await;
