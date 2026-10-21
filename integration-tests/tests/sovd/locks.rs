@@ -11,9 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::time::Duration;
+use std::{panic::AssertUnwindSafe, time::Duration};
 
 use chrono::{DateTime, Utc};
+use futures::FutureExt;
 use http::{HeaderMap, Method, StatusCode};
 use opensovd_cda_lib::config::configfile::Configuration;
 use serde::{self, Deserialize};
@@ -28,7 +29,10 @@ use crate::{
             Response, auth_header, extract_field_from_json, response_to_json,
             response_to_json_to_field, send_cda_json_request, send_cda_request,
         },
-        runtime::{TestRuntime, setup_integration_test},
+        runtime::{
+            TestRuntime, setup_integration_test, skip_for_can, wait_for_ecu_offline,
+            wait_for_ecus_online,
+        },
     },
 };
 
@@ -667,6 +671,127 @@ async fn vehicle_lock_exclusivity_controls_foreign_communication() -> Result<(),
     )
     .await;
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_lock_when_ecu_offline() -> Result<(), TestingError> {
+    if skip_for_can(
+        "test_lock_when_ecu_offline",
+        "Hard reset exercises DoIP disconnection",
+    ) {
+        return Ok(());
+    }
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth_owner = auth_header(&runtime.config, None).await?;
+
+    // Create a lock on the vehicle endpoint to request hard reset of the ECU.
+    let reset_lock = create_lock(
+        Duration::from_secs(60),
+        VEHICLE_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth_owner,
+    )
+    .await;
+    let reset_lock_id: String = response_to_json_to_field(&reset_lock, "id")?;
+
+    // Keep the network interface alive while the DoIP entity reboots.
+    // This will simulate the ECU going offline.
+    ecusim::set_hard_reset_duration(&runtime.ecu_sim, "FLXC1000", 20).await?;
+    let outcome = AssertUnwindSafe(async {
+        // The reset may close the connection before its response reaches CDA.
+        let mut reset_headers = auth_owner.clone();
+        reset_headers.insert(
+            http::header::ACCEPT,
+            http::HeaderValue::from_static("application/octet-stream"),
+        );
+        reset_headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/octet-stream"),
+        );
+        let reset_result = send_cda_request(
+            &runtime.config,
+            &format!("{}/genericservice", sovd::ECU_FLXC1000_ENDPOINT),
+            StatusCode::OK,
+            Method::PUT,
+            Some("\x11\x01"),
+            Some(&reset_headers),
+            None,
+        )
+        .await;
+        assert!(
+            reset_result.is_ok(),
+            "Hard reset request failed: {reset_result:?}"
+        );
+
+        // Cleanup Vehicle lock to test the ECU lock creation when the ECU is offline.
+        lock_operation(
+            VEHICLE_ENDPOINT,
+            Some(&reset_lock_id),
+            &runtime.config,
+            &auth_owner,
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+        )
+        .await;
+
+        wait_for_ecu_offline(&runtime.config, "FLXC1000").await?;
+
+        // Now that the ECU is offline, attempt to create a lock on the ECU endpoint.
+        // This should fail with a NOT_FOUND status code, indicating that the ECU is not reachable.
+        let response = create_lock(
+            Duration::from_secs(30),
+            ECU_ENDPOINT,
+            StatusCode::NOT_FOUND,
+            &runtime.config,
+            &auth_owner,
+        )
+        .await;
+        assert_eq!(
+            response_to_json(&response)?
+                .get("message")
+                .and_then(Value::as_str),
+            Some("ecu is offline"),
+        );
+        Ok::<(), TestingError>(())
+    })
+    .catch_unwind()
+    .await;
+
+    let cleanup = ecusim::reset_sim(&runtime.ecu_sim).await;
+    let recovery = wait_for_ecus_online(&runtime.config).await;
+    match outcome {
+        Ok(result) => result?,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+    cleanup?;
+    recovery?;
+
+    // Create the ECU lock once CDA reports the ECUs online.
+    let expiration_timeout = Duration::from_secs(30);
+    let ecu_lock = create_lock(
+        expiration_timeout,
+        ECU_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth_owner,
+    )
+    .await;
+
+    // Check that the lock was created successfully.
+    let lock_id = extract_field_from_json::<String>(&response_to_json(&ecu_lock)?, "id")?;
+
+    // Cleanup: delete the lock as owner
+    lock_operation(
+        ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth_owner,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
     Ok(())
 }
 

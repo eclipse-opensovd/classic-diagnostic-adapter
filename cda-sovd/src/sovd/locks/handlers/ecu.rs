@@ -18,7 +18,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
-use cda_interfaces::{UdsEcu, file_manager::FileManager, lock_priority_api::LockScope};
+use cda_interfaces::{
+    Connectivity, UdsEcu, file_manager::FileManager, lock_priority_api::LockScope,
+};
 use cda_plugin_security::{Claims, Secured};
 
 use super::super::{
@@ -186,6 +188,21 @@ pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
         .into_response();
     }
 
+    let state_error = match uds.get_ecu_state(&ecu_name).await {
+        Ok(state) if state.connectivity == Connectivity::Online => None,
+        Ok(_) => Some(ApiError::NotFound(Some("ecu is offline".to_owned()))),
+        Err(error) => Some(ApiError::from(error)),
+    };
+    if let Some(error) = state_error {
+        rollback_preemption(pending, &locks).await;
+        acquisition.finish();
+        return ErrorWrapper {
+            error,
+            include_schema: query.include_schema,
+        }
+        .into_response();
+    }
+
     post_handler(
         &uds,
         LockContext {
@@ -212,24 +229,30 @@ fn functional_lock_blocks_ecu(open_locks: &[ActiveLock], ecu_name: &str, subject
 
 pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
     op.description("Create a lock for an ECU")
-            .response_with::<200, Json<sovd_interfaces::locking::post_put::Response>, _>(|res| {
-                res.example(openapi::lock_created_example()).description(
-                    "Existing caller-owned lock renewed for compatibility. Use PUT on the lock \
-                     resource to modify its expiration.",
-                )
-            })
-            .response_with::<201, Json<sovd_interfaces::locking::post_put::Response>, _>(|res| {
-                res.example(openapi::lock_created_example())
+        .response_with::<200, Json<sovd_interfaces::locking::post_put::Response>, _>(|res| {
+            res.example(openapi::lock_created_example()).description(
+                "Existing caller-owned lock renewed for compatibility. Use PUT on the lock \
+                 resource to modify its expiration.",
+            )
+        })
+        .response_with::<201, Json<sovd_interfaces::locking::post_put::Response>, _>(|res| {
+            res.example(openapi::lock_created_example())
                 .description("Lock created successfully.")
                 .with(openapi::lock_created_response)
-            })
-            .response_with::<
-                403,
+        })
+        .response_with::<
+            403,
                 Json<sovd_interfaces::error::ApiErrorResponse::<sovd::error::VendorErrorCode>>,
                  _>(|res| {
                 res.description("Lock is already owned by someone else.")
             })
-            .response_with::<
+        .response_with::<
+            404,
+                Json<sovd_interfaces::error::ApiErrorResponse::<sovd::error::VendorErrorCode>>,
+                 _>(|res| {
+                res.description("ECU is offline or not found.")
+            })
+        .response_with::<
             409,
             Json<sovd_interfaces::error::ApiErrorResponse::<sovd::error::VendorErrorCode>>,
             _>(|res| {
