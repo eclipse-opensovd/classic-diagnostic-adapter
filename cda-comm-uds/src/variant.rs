@@ -50,9 +50,18 @@ enum DetectionPermit {
     Run(Option<tokio::sync::OwnedMutexGuard<()>>),
 }
 
+/// Acquires the detection lock and decides whether the detection still has
+/// to run.
+///
+/// `state_handles` are the members of the duplicate group the detection
+/// covers. An automatic (`IfNeeded`) trigger only runs if at least one member
+/// still needs detection. Checking just the lock holder (the group
+/// representative) is not enough: a reconnect resets each member separately,
+/// so a non-representative member can be left `NotTested` while the
+/// representative is already detected.
 async fn claim_detection(
     lock_handle: Option<&EcuCoordinatorHandle>,
-    state_handle: Option<&EcuCoordinatorHandle>,
+    state_handles: &[&EcuCoordinatorHandle],
     trigger: DetectionTrigger,
 ) -> DetectionPermit {
     let Some(lock_handle) = lock_handle else {
@@ -62,11 +71,27 @@ async fn claim_detection(
         return DetectionPermit::Skip;
     };
     if matches!(trigger, DetectionTrigger::IfNeeded)
-        && state_handle.is_some_and(|handle| !needs_variant_detection(&handle.ecu_status()))
+        && !state_handles.is_empty()
+        && !state_handles
+            .iter()
+            .any(|handle| needs_variant_detection(&handle.ecu_status()))
     {
         return DetectionPermit::Skip;
     }
     DetectionPermit::Run(Some(guard))
+}
+
+/// Whether an automatic detection that just concluded should be retried.
+///
+/// Retrying only helps if some member is offline *and* would pass the
+/// [`claim_detection`] gate again. An offline `Duplicate` member does not
+/// need detection, so every retry would be skipped and only add delay.
+fn needs_offline_retry(state_handles: &[&EcuCoordinatorHandle]) -> bool {
+    state_handles.iter().any(|handle| {
+        let status = handle.ecu_status();
+        status.connectivity == cda_interfaces::Connectivity::Offline
+            && needs_variant_detection(&status)
+    })
 }
 
 /// Result of evaluating every member of a duplicate group against one set of
@@ -99,9 +124,14 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     ) -> Result<(), DiagServiceError> {
         let ecu = self.uds_ecu_db(ecu_name)?;
         let group_representative = self.duplicate_group_representative(ecu_name).await;
+        let group_members = self.duplicate_group_members(ecu_name).await;
+        let state_handles: Vec<_> = group_members
+            .iter()
+            .filter_map(|name| self.state_coordinator.get_handle(name))
+            .collect();
         let DetectionPermit::Run(_detection_guard) = claim_detection(
             self.state_coordinator.get_handle(&group_representative),
-            self.state_coordinator.get_handle(ecu_name),
+            &state_handles,
             trigger,
         )
         .await
@@ -241,13 +271,17 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                             tracing::info!(error = %e, "Variant detection failed");
                         }
                     }
-                    let offline =
-                        vd.state_coordinator
-                            .get_handle(&ecu_name)
-                            .is_some_and(|handle| {
-                                handle.connectivity() == cda_interfaces::Connectivity::Offline
-                            });
-                    if !offline {
+                    // Any member counts: a member whose disconnect was not
+                    // suppressed can conclude offline while the
+                    // representative itself stays online. Members that no
+                    // longer need detection (e.g. Duplicate) are ignored,
+                    // the next attempt would skip them anyway.
+                    let group_members = vd.duplicate_group_members(&ecu_name).await;
+                    let state_handles: Vec<_> = group_members
+                        .iter()
+                        .filter_map(|name| vd.state_coordinator.get_handle(name))
+                        .collect();
+                    if !needs_offline_retry(&state_handles) {
                         break;
                     }
                     tracing::debug!(
@@ -328,6 +362,25 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             .to_owned()
     }
 
+    /// All members of the ECU's duplicate group (including the ECU itself)
+    /// that are present in the loaded ECU map, sorted by name.
+    async fn duplicate_group_members(&self, ecu_name: &str) -> Vec<String> {
+        let mut members = std::collections::BTreeSet::new();
+        members.insert(ecu_name.to_owned());
+        if let Some(db) = self.ecus.get(ecu_name) {
+            members.extend(
+                db.read()
+                    .await
+                    .duplicating_ecu_names()
+                    .into_iter()
+                    .flatten()
+                    .filter(|name| self.ecus.contains_key(*name))
+                    .cloned(),
+            );
+        }
+        members.into_iter().collect()
+    }
+
     /// Sends the ECU's variant-detection requests and returns the responses
     /// that arrived. Disconnect events are suppressed while the requests are
     /// in flight to prevent a timeout from re-triggering variant detection
@@ -363,9 +416,15 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         }
 
         let mut service_responses = HashMap::new();
-        self.state_coordinator
-            .suppress_disconnect_handling(ecu_name)
-            .await;
+        // Suppress for every group member: the members share one transport,
+        // so a timeout would otherwise mark the non-representative members
+        // offline and no later reconnect event would bring them back.
+        let group_members = self.duplicate_group_members(ecu_name).await;
+        for member in &group_members {
+            self.state_coordinator
+                .suppress_disconnect_handling(member)
+                .await;
+        }
         for (name, service) in requests {
             match self
                 .send_without_variant_guard(
@@ -397,9 +456,11 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 }
             }
         }
-        self.state_coordinator
-            .restore_disconnect_handling(ecu_name)
-            .await;
+        for member in &group_members {
+            self.state_coordinator
+                .restore_disconnect_handling(member)
+                .await;
+        }
 
         Ok(service_responses)
     }
@@ -649,7 +710,7 @@ impl<S: EcuGateway, T: EcuManager> CommunicationVariantDetection for UdsManager<
 mod tests {
     use cda_interfaces::{Connectivity, VariantState};
 
-    use super::{DetectionPermit, DetectionTrigger, claim_detection};
+    use super::{DetectionPermit, DetectionTrigger, claim_detection, needs_offline_retry};
     use crate::coordinator::EcuCoordinatorHandle;
 
     #[tokio::test]
@@ -661,7 +722,7 @@ mod tests {
         let queued = tokio::spawn(async move {
             claim_detection(
                 Some(&queued_handle),
-                Some(&queued_handle),
+                &[&queued_handle],
                 DetectionTrigger::IfNeeded,
             )
             .await
@@ -694,7 +755,7 @@ mod tests {
         let queued = tokio::spawn(async move {
             claim_detection(
                 Some(&queued_handle),
-                Some(&queued_handle),
+                &[&queued_handle],
                 DetectionTrigger::IfNeeded,
             )
             .await
@@ -726,7 +787,7 @@ mod tests {
 
         assert!(
             matches!(
-                claim_detection(Some(&handle), Some(&handle), DetectionTrigger::Forced).await,
+                claim_detection(Some(&handle), &[&handle], DetectionTrigger::Forced).await,
                 DetectionPermit::Run(Some(_))
             ),
             "explicit detection must not be suppressed by healthy state"
@@ -751,13 +812,143 @@ mod tests {
             matches!(
                 claim_detection(
                     Some(&representative),
-                    Some(&duplicate),
+                    &[&representative, &duplicate],
                     DetectionTrigger::IfNeeded
                 )
                 .await,
                 DetectionPermit::Run(Some(_))
             ),
             "triggering duplicate still needs detection"
+        );
+    }
+
+    fn set_detected(handle: &EcuCoordinatorHandle) {
+        let mut state = handle.state.ecu_state.write().unwrap();
+        state.connectivity = Connectivity::Online;
+        state.variant_state = VariantState::Detected {
+            name: "MyVariant".to_owned(),
+            is_base_variant: false,
+            is_fallback: false,
+        };
+    }
+
+    // Regression: after a reconnect reset a non-representative member to
+    // NotTested, an automatic trigger is mapped to the (detected)
+    // representative. It must still run, otherwise the member stays stuck.
+    #[tokio::test]
+    async fn automatic_detection_runs_when_non_representative_member_reset() {
+        let representative = EcuCoordinatorHandle::spawn("Representative".to_owned());
+        let member = EcuCoordinatorHandle::spawn("Member".to_owned());
+        set_detected(&representative);
+        {
+            let mut state = member.state.ecu_state.write().unwrap();
+            state.connectivity = Connectivity::Online;
+            state.variant_state = VariantState::NotTested;
+        }
+
+        assert!(
+            matches!(
+                claim_detection(
+                    Some(&representative),
+                    &[&representative, &member],
+                    DetectionTrigger::IfNeeded
+                )
+                .await,
+                DetectionPermit::Run(Some(_))
+            ),
+            "reset group member must permit automatic detection"
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_detection_skipped_when_whole_group_resolved() {
+        let representative = EcuCoordinatorHandle::spawn("Representative".to_owned());
+        let member = EcuCoordinatorHandle::spawn("Member".to_owned());
+        set_detected(&representative);
+        {
+            let mut state = member.state.ecu_state.write().unwrap();
+            state.connectivity = Connectivity::Online;
+            state.variant_state = VariantState::Duplicate;
+        }
+
+        assert!(
+            matches!(
+                claim_detection(
+                    Some(&representative),
+                    &[&representative, &member],
+                    DetectionTrigger::IfNeeded
+                )
+                .await,
+                DetectionPermit::Skip
+            ),
+            "resolved group must skip automatic detection"
+        );
+    }
+
+    fn set_state(handle: &EcuCoordinatorHandle, connectivity: Connectivity, variant: VariantState) {
+        let mut state = handle.state.ecu_state.write().unwrap();
+        state.connectivity = connectivity;
+        state.variant_state = variant;
+    }
+
+    // An offline Duplicate member is skipped by the detection gate, so
+    // retrying would only burn the retry delays without any effect.
+    #[tokio::test]
+    async fn offline_duplicate_member_does_not_trigger_retry() {
+        let representative = EcuCoordinatorHandle::spawn("Representative".to_owned());
+        let member = EcuCoordinatorHandle::spawn("Member".to_owned());
+        set_detected(&representative);
+        set_state(&member, Connectivity::Offline, VariantState::Duplicate);
+
+        assert!(
+            !needs_offline_retry(&[&representative, &member]),
+            "offline duplicate must not trigger a retry"
+        );
+        assert!(
+            matches!(
+                claim_detection(
+                    Some(&representative),
+                    &[&representative, &member],
+                    DetectionTrigger::IfNeeded
+                )
+                .await,
+                DetectionPermit::Skip
+            ),
+            "retry decision must agree with the detection gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn offline_member_needing_detection_triggers_retry() {
+        let representative = EcuCoordinatorHandle::spawn("Representative".to_owned());
+        let member = EcuCoordinatorHandle::spawn("Member".to_owned());
+        set_detected(&representative);
+        set_state(
+            &member,
+            Connectivity::Offline,
+            VariantState::Detected {
+                name: "MyVariant".to_owned(),
+                is_base_variant: false,
+                is_fallback: false,
+            },
+        );
+
+        assert!(
+            needs_offline_retry(&[&representative, &member]),
+            "offline member with known variant must trigger a retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn online_group_does_not_trigger_retry() {
+        let representative = EcuCoordinatorHandle::spawn("Representative".to_owned());
+        let member = EcuCoordinatorHandle::spawn("Member".to_owned());
+        set_detected(&representative);
+        set_state(&member, Connectivity::Online, VariantState::NotTested);
+
+        assert!(
+            !needs_offline_retry(&[&representative, &member]),
+            "online members must not trigger an offline retry"
         );
     }
 }
