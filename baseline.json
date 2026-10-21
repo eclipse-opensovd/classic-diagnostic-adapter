@@ -1857,6 +1857,15 @@
       "crate": "opensovd-cda"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/vir_vam.rs",
+      "function": "listen_for_vams",
+      "line": 127,
+      "cyclomatic": 10.0,
+      "coverage": 84.26966292134831,
+      "crap": 10.389236973540681,
+      "crate": "cda-comm-doip"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/recovery.rs",
       "function": "restore_bak_files_in_dir",
       "line": 354,
@@ -1882,15 +1891,6 @@
       "coverage": 85.55555555555556,
       "crap": 10.301371742112483,
       "crate": "cda-sovd"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/vir_vam.rs",
-      "function": "listen_for_vams",
-      "line": 127,
-      "cyclomatic": 10.0,
-      "coverage": 86.51685393258427,
-      "crap": 10.245117161180136,
-      "crate": "cda-comm-doip"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/lib.rs",
@@ -2262,15 +2262,6 @@
       "crate": "cda-comm-can"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/recovery.rs",
-      "function": "has_backup_files",
-      "line": 238,
-      "cyclomatic": 7.0,
-      "coverage": 69.23076923076923,
-      "crap": 8.4274010013655,
-      "crate": "cda-storage"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_decode.rs",
       "function": "EcuManager::map_env_data_desc_item_from_uds",
       "line": 1373,
@@ -2521,6 +2512,15 @@
       "coverage": 100.0,
       "crap": 8.0,
       "crate": "opensovd-cda"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/recovery.rs",
+      "function": "has_backup_files",
+      "line": 238,
+      "cyclomatic": 7.0,
+      "coverage": 73.07692307692307,
+      "crap": 7.956247155211654,
+      "crate": "cda-storage"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/file_manager.rs",
@@ -15998,7 +15998,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd-interfaces/src/components/ecu.rs",
       "function": "x::single_ecu_job::skip_long_name_if_none_or_empty",
-      "line": 558,
+      "line": 563,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
