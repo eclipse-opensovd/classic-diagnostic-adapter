@@ -115,7 +115,7 @@ API
          - Required
          - Description
        * - requestdownload
-         - ``requestdownload``
+         - ``requestDownload``
          - object
          - yes
          - Request parameters of the RequestDownload service, keyed by parameter name
@@ -140,12 +140,12 @@ API
          - yes
          - Number of bytes to transfer
        * - flashtransfer
-         - ``blocksize``
+         - ``blockSize``
          - integer
          - yes
          - Size of the individual TransferData blocks
        * - flashtransfer
-         - ``blocksequencecounter``
+         - ``blockSequenceCounter``
          - integer (0-255)
          - yes
          - Block sequence counter of the first TransferData request
@@ -208,7 +208,7 @@ API
        PUT /components/{ecu-name}/x-sovd2uds-download/requestdownload
        {
          "flashClass": "flash_download_upload_bootloader",
-         "requestdownload": { "<parameter>": "<value>" }
+         "requestDownload": { "<parameter>": "<value>" }
        }
 
     .. code-block:: text
@@ -218,8 +218,8 @@ API
          "id": "<file-id>",
          "offset": 0,
          "length": 4096,
-         "blocksize": 1024,
-         "blocksequencecounter": 1,
+         "blockSize": 1024,
+         "blockSequenceCounter": 1,
          "flashClass": "flash_download_upload_bootloader"
        }
 

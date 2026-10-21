@@ -308,6 +308,10 @@ pub mod x {
             /// The type must derive `Deserialize` with `#[serde(remote = "Self")]` and use
             /// lowercase serde field names. The generated impl lowercases the keys of the
             /// input object and then runs the derived deserializer on it.
+            ///
+            /// Because serde only sees lowercase keys, the public (documented) field names
+            /// are set separately via `#[schemars(rename = "...")]` in camelCase. Both differ
+            /// only in casing, so any casing of the documented name is accepted.
             macro_rules! case_insensitive_deserialize {
                 ($ty:ty) => {
                     impl<'de> serde::Deserialize<'de> for $ty {
@@ -369,8 +373,9 @@ pub mod x {
                     #[schemars(rename = "FlashTransferRequest")]
                     pub struct Request {
                         #[serde(rename = "blocksequencecounter")]
-                        #[schemars(rename = "blocksequencecounter")]
+                        #[schemars(rename = "blockSequenceCounter")]
                         pub block_sequence_counter: u8,
+                        #[schemars(rename = "blockSize")]
                         pub blocksize: usize,
                         pub offset: u64,
                         pub length: u64,
@@ -457,7 +462,7 @@ pub mod x {
                     #[schemars(rename = "RequestDownloadRequest")]
                     pub struct Request {
                         #[serde(rename = "requestdownload")]
-                        #[schemars(rename = "requestdownload")]
+                        #[schemars(rename = "requestDownload")]
                         pub parameters: HashMap<String, serde_json::Value>,
                         /// Functional class used to resolve the `RequestDownload` service.
                         /// Falls back to the configured default when absent.
