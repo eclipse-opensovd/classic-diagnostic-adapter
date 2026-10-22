@@ -28,7 +28,7 @@ use crate::{
             Response, auth_header, extract_field_from_json, response_to_json,
             response_to_json_to_field, send_cda_json_request, send_cda_request,
         },
-        runtime::{TestRuntime, setup_integration_test},
+        runtime::{TestRuntime, setup_integration_test, with_temporary_cda},
     },
 };
 
@@ -668,6 +668,108 @@ async fn vehicle_lock_exclusivity_controls_foreign_communication() -> Result<(),
     .await;
 
     Ok(())
+}
+
+/// With `lock_acquisition_policy = "vehicle_lock_required"`, ECU and functional-group
+/// locks can only be acquired while a vehicle lock exists.
+/// [[ itest~sovd-api-lock-acquisition-policy, Child locks require a vehicle lock, itest ]]
+#[tokio::test]
+async fn vehicle_lock_required_acquisition_policy() {
+    let (runtime, _lock) = setup_integration_test(true)
+        .await
+        .expect("Failed to setup runtime");
+    let mut temporary_config = runtime.config.clone();
+    temporary_config.locks.lock_acquisition_policy =
+        cda_interfaces::lock_config::LockAcquisitionPolicy::VehicleLockRequired;
+
+    with_temporary_cda(
+        &runtime.config,
+        temporary_config.clone(),
+        || async {},
+        || async {
+            let config = &temporary_config;
+            let auth = auth_header(config, None)
+                .await
+                .expect("Failed to authenticate");
+            let other = bearer_token_header(NON_OWNER_BEARER_TOKEN);
+
+            for endpoint in [ECU_ENDPOINT, FUNCTIONAL_GROUP_ENDPOINT] {
+                create_lock(
+                    default_timeout(),
+                    endpoint,
+                    StatusCode::CONFLICT,
+                    config,
+                    &auth,
+                )
+                .await;
+            }
+
+            let vehicle_lock = create_lock(
+                default_timeout(),
+                VEHICLE_ENDPOINT,
+                StatusCode::CREATED,
+                config,
+                &auth,
+            )
+            .await;
+            let vehicle_lock_id: String = response_to_json_to_field(&vehicle_lock, "id")
+                .expect("Vehicle lock response must contain an id");
+
+            // A vehicle lock of another client satisfies the policy, but still blocks
+            // foreign child locks.
+            create_lock(
+                default_timeout(),
+                ECU_ENDPOINT,
+                StatusCode::CONFLICT,
+                config,
+                &other,
+            )
+            .await;
+
+            for endpoint in [ECU_ENDPOINT, FUNCTIONAL_GROUP_ENDPOINT] {
+                let child = create_lock(
+                    default_timeout(),
+                    endpoint,
+                    StatusCode::CREATED,
+                    config,
+                    &auth,
+                )
+                .await;
+                let child_id: String = response_to_json_to_field(&child, "id")
+                    .expect("Child lock response must contain an id");
+                lock_operation(
+                    endpoint,
+                    Some(&child_id),
+                    config,
+                    &auth,
+                    StatusCode::NO_CONTENT,
+                    Method::DELETE,
+                )
+                .await;
+            }
+
+            lock_operation(
+                VEHICLE_ENDPOINT,
+                Some(&vehicle_lock_id),
+                config,
+                &auth,
+                StatusCode::NO_CONTENT,
+                Method::DELETE,
+            )
+            .await;
+
+            // Releasing the vehicle lock makes child locks unavailable again.
+            create_lock(
+                default_timeout(),
+                ECU_ENDPOINT,
+                StatusCode::CONFLICT,
+                config,
+                &auth,
+            )
+            .await;
+        },
+    )
+    .await;
 }
 
 pub(crate) const FUNCTIONAL_GROUP_ENDPOINT: &str =
