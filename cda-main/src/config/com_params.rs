@@ -133,7 +133,13 @@ impl<'de> Deserialize<'de> for EcuComParams {
     }
 }
 
-fn find_unknown_keys(input: &toml::Table, reference: &toml::Table, prefix: &str) -> Vec<String> {
+/// Also reused by `config::generate`'s example-config tests to detect stale/
+/// renamed keys in standalone example `.toml` files (see #544).
+pub(crate) fn find_unknown_keys(
+    input: &toml::Table,
+    reference: &toml::Table,
+    prefix: &str,
+) -> Vec<String> {
     let mut unknown = Vec::new();
     for (key, value) in input {
         let full_path = if prefix.is_empty() {
