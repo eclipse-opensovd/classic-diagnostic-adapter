@@ -345,11 +345,8 @@ fn format_data_response<R: cda_interfaces::diagservices::DiagServiceResponse>(
     }
 
     if map_to_json {
+        // Spec Table 85: `data` is `AnyValue`, so scalars and arrays are passed through.
         let (mapped_data, errors) = match response.into_json() {
-            Ok(DiagServiceJsonResponse {
-                data: serde_json::Value::Object(mapped_data),
-                errors,
-            }) => (mapped_data, errors),
             Ok(DiagServiceJsonResponse {
                 data: serde_json::Value::Null,
                 errors,
@@ -357,18 +354,9 @@ fn format_data_response<R: cda_interfaces::diagservices::DiagServiceResponse>(
                 if errors.is_empty() {
                     return StatusCode::NO_CONTENT.into_response();
                 }
-                (serde_json::Map::new(), errors)
+                (serde_json::Value::Object(serde_json::Map::new()), errors)
             }
-            Ok(v) => {
-                return ErrorWrapper {
-                    error: ApiError::InternalServerError(Some(format!(
-                        "Expected JSON object but got: {}",
-                        v.data
-                    ))),
-                    include_schema,
-                }
-                .into_response();
-            }
+            Ok(DiagServiceJsonResponse { data, errors }) => (data, errors),
             Err(e) => {
                 return ErrorWrapper {
                     error: ApiError::InternalServerError(Some(format!("{e:?}"))),
@@ -566,7 +554,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn map_to_json_non_object_data_returns_500() {
+    async fn map_to_json_non_object_data_returns_200_with_array() {
         let mut mock = MockDiagServiceResponse::new();
         mock.expect_response_type()
             .returning(|| DiagServiceResponseType::Positive);
@@ -581,7 +569,10 @@ mod tests {
         let service = DiagComm::new("ReadRPM", DiagCommType::Data);
         let response = format_data_response(mock, &service, true, false, None);
 
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_bytes(response).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.get("data"), Some(&serde_json::json!([1, 2, 3])));
     }
 
     #[tokio::test]
