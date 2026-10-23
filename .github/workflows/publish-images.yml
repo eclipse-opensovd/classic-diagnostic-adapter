@@ -22,6 +22,8 @@ on:
   push:
     branches:
       - main
+      # TODO: remove before merge, only for testing the workflow
+      - feat/ghcr-multiarch-images
     tags:
       - "**"
   workflow_dispatch:
@@ -137,6 +139,8 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,enable={{is_default_branch}}
             type=ref,event=tag
+            # TODO: remove before merge, only for testing the workflow
+            type=ref,event=branch,enable=${{ github.ref_name != 'main' }}
       - name: Create and push manifest list
         working-directory: ${{ runner.temp }}/digests
         run: |
