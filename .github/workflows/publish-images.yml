@@ -33,7 +33,8 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  # Superseded branch runs are cancelled; main and tag runs always finish.
+  cancel-in-progress: ${{ github.ref_type == 'branch' && github.ref_name != 'main' }}
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}/opensovd-cda
@@ -90,8 +91,11 @@ jobs:
             SOURCE_GIT_SHA=${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          # amd64 can additionally reuse the release build cache of build.yml
+          # (same Dockerfile, Rust version and profile).
           cache-from: |
             type=gha,scope=cda-publish-${{ matrix.arch }}
+            ${{ matrix.arch == 'amd64' && 'type=gha,scope=cda-cargo-main' || '' }}
           cache-to: |
             type=gha,mode=max,scope=cda-publish-${{ matrix.arch }}
       - name: Export digest
