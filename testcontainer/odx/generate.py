@@ -20,6 +20,7 @@ from dtc_services import (
     add_dtc_read_services,
     add_dtc_setting_services,
 )
+from dynamic_length_fields import add_timeline_service
 from functional_groups import generate_functional_groups
 from helper import ref
 from metadata import (
@@ -256,6 +257,8 @@ def add_base_variant(
     # FLXC1000-specific services
     if ecu_name == "FLXC1000":
         add_power_consumption_service(base_variant, sdgs=data_sdgs)
+        # 22 / 2E F300 - chained DYNAMIC-LENGTH-FIELDs
+        add_timeline_service(base_variant)
 
     dlc.base_variants.append(BaseVariant(diag_layer_raw=base_variant))
 
