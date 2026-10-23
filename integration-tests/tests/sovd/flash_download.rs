@@ -912,7 +912,7 @@ async fn prepare_flxc1000_for_flashing(
     send_cda_request(
         &runtime.config,
         ecu_endpoint,
-        StatusCode::CREATED,
+        StatusCode::OK,
         Method::PUT,
         None,
         Some(auth),
