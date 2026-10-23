@@ -15,6 +15,7 @@ use std::{option::Option, time::SystemTime};
 
 use cda_interfaces::{
     UdsEcu,
+    lock_config::LockAcquisitionPolicy,
     lock_priority_api::{LockId, LockScope},
 };
 use cda_plugin_security::Claims;
@@ -288,11 +289,22 @@ pub(super) fn validate_claim(
     Ok(())
 }
 
+/// Validates that an ECU or functional-group lock may be acquired with respect to the
+/// vehicle lock: the configured acquisition policy and blocking by a foreign vehicle lock.
+///
+/// [[ dimpl~sovd-api-lock-acquisition-policy, Child lock acquisition checks the configured vehicle lock precondition, dimpl ]]
 pub(crate) async fn validate_vehicle_owner(
     locks: &Locks,
     claims: &impl Claims,
 ) -> Result<(), ApiError> {
     let vehicle = locks.active_for_scope(&LockScope::Vehicle).await;
+    if vehicle.is_none()
+        && locks.config.lock_acquisition_policy == LockAcquisitionPolicy::VehicleLockRequired
+    {
+        return Err(ApiError::Conflict(
+            "An active vehicle lock is required to acquire this lock".to_owned(),
+        ));
+    }
     if vehicle
         .as_ref()
         .is_some_and(|lock| lock.principal.subject != claims.sub())
