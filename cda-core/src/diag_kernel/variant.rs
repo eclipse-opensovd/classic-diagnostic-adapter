@@ -134,4 +134,13 @@ impl<S: SecurityPlugin> VariantDetection for EcuManager<S> {
         self.clear_variant_and_unload(VariantState::NotDetected, None)
             .await;
     }
+
+    async fn set_base_variant_online(&mut self) -> Result<(), DiagServiceError> {
+        if !self.diag_database.is_loaded() {
+            self.load()?;
+        }
+        let base_variant = self.diag_database.base_variant()?;
+        let variant_data = VariantData::from_variant_and_fallback(&base_variant, false);
+        self.set_variant(variant_data).await
+    }
 }
