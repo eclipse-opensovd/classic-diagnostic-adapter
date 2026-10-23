@@ -21,6 +21,7 @@ use futures::{FutureExt, future::BoxFuture};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod authentication;
 mod can_id;
 pub use can_id::*;
 mod com_param_handling;
@@ -286,7 +287,8 @@ impl DiagCommType {
     ///  - `0x11` -> `<entity>/modes/ecureset`
     ///  - `0x28` -> `<entity>/modes/commctrl`
     ///  - `0x85` -> `<entity>/modes/dtcsetting`
-    ///  - `0x27 | 0x29` -> `<entity>/modes/security`
+    ///  - `0x27` -> `<entity>/modes/security`
+    ///  - `0x29` -> `<entity>/modes/authentication` (deviates from ASAM, see ADR-007)
     ///  - `0x14 | 0x19` -> `<entity>/faults`
     ///  - `0x2F | 0x31` -> `<entity>/operations`
     pub fn service_prefixes(&self) -> &'static [u8] {

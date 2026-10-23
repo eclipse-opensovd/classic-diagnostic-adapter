@@ -650,6 +650,7 @@ mod tests {
             tester_present_tasks: Arc::new(RwLock::new(HashMap::new())),
             session_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
             security_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
+            authentication_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
             state_coordinator: EcuStateCoordinator::new(
                 HashMap::<String, EcuRuntimeState>::new(),
                 VariantDetectionSender::new(redetect_tx),

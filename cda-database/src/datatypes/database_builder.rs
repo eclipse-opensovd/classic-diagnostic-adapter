@@ -797,6 +797,77 @@ impl<'a> EcuDataBuilder<'a> {
         })
     }
 
+    /// Like [`Self::create_coded_const_param`], but without BYTE-POSITION, i.e.
+    /// the param directly follows the preceding (variable-length) param.
+    pub fn create_coded_const_param_no_byte_pos(
+        &mut self,
+        name: &'a str,
+        value: &str,
+        bit_len: u32,
+        coded_type: DataType,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let coded_value = Some(self.fbb.create_string(value));
+        let diag_coded_type =
+            Some(self.create_diag_coded_type_standard_length(bit_len, coded_type));
+        let specific_data = Some(
+            dataformat::ParamSpecificData::tag_as_coded_const(dataformat::CodedConst::create(
+                &mut self.fbb,
+                &dataformat::CodedConstArgs {
+                    coded_value,
+                    diag_coded_type,
+                },
+            ))
+            .value_offset(),
+        );
+
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::CODED_CONST,
+            short_name: Some(name),
+            semantic: None,
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: None,
+            bit_position: None,
+            specific_data_type: dataformat::ParamSpecificData::CodedConst,
+            specific_data,
+        })
+    }
+
+    /// Creates a MATCHING-REQUEST-PARAM at `byte_pos` referencing the request
+    /// param at `request_byte_pos`.
+    pub fn create_matching_request_param(
+        &mut self,
+        name: &'a str,
+        request_byte_pos: i32,
+        byte_length: u32,
+        byte_pos: u32,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let specific_data = Some(
+            dataformat::ParamSpecificData::tag_as_matching_request_param(
+                dataformat::MatchingRequestParam::create(
+                    &mut self.fbb,
+                    &dataformat::MatchingRequestParamArgs {
+                        request_byte_pos,
+                        byte_length,
+                    },
+                ),
+            )
+            .value_offset(),
+        );
+
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::MATCHING_REQUEST_PARAM,
+            short_name: Some(name),
+            semantic: None,
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: Some(byte_pos),
+            bit_position: Some(0),
+            specific_data_type: dataformat::ParamSpecificData::MatchingRequestParam,
+            specific_data,
+        })
+    }
+
     pub fn create_value_param(
         &mut self,
         name: &'a str,
@@ -840,6 +911,38 @@ impl<'a> EcuDataBuilder<'a> {
             physical_default_value: None,
             byte_position: Some(byte_pos),
             bit_position: Some(bit_pos),
+            specific_data_type: dataformat::ParamSpecificData::Value,
+            specific_data,
+        })
+    }
+
+    /// Like [`create_value_param`] but sets the SEMANTIC, e.g. `DATA`.
+    pub fn create_value_param_with_semantic(
+        &mut self,
+        name: &'a str,
+        semantic: &'a str,
+        dop: WIPOffset<dataformat::DOP>,
+        byte_pos: u32,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let specific_data = Some(
+            dataformat::ParamSpecificData::tag_as_value(dataformat::Value::create(
+                &mut self.fbb,
+                &dataformat::ValueArgs {
+                    physical_default_value: None,
+                    dop: Some(dop),
+                },
+            ))
+            .value_offset(),
+        );
+
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::VALUE,
+            short_name: Some(name),
+            semantic: Some(semantic),
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: Some(byte_pos),
+            bit_position: Some(0),
             specific_data_type: dataformat::ParamSpecificData::Value,
             specific_data,
         })

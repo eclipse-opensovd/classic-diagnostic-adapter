@@ -29,8 +29,8 @@ use schemars::Schema;
 use serde::Serialize;
 use sovd_interfaces::{
     common::modes::{
-        COMM_CONTROL_ID, COMM_CONTROL_NAME, DTC_SETTING_ID, DTC_SETTING_NAME, SECURITY_ID,
-        SECURITY_NAME, SESSION_ID, SESSION_NAME,
+        AUTHENTICATION_ID, AUTHENTICATION_NAME, COMM_CONTROL_ID, COMM_CONTROL_NAME, DTC_SETTING_ID,
+        DTC_SETTING_NAME, SECURITY_ID, SECURITY_NAME, SESSION_ID, SESSION_NAME,
     },
     components::ecu::modes as sovd_modes,
 };
@@ -51,7 +51,10 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
     >,
     WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
     State(WebserverEcuState {
-        ecu_name, locks, ..
+        ecu_name,
+        uds,
+        locks,
+        ..
     }): State<WebserverEcuState<T, U>>,
 ) -> Response {
     require_ecu_access!(
@@ -66,33 +69,38 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
     } else {
         None
     };
+    let mut items = vec![
+        sovd_modes::get::ResponseItem {
+            id: SESSION_ID.to_owned(),
+            name: Some(SESSION_NAME.to_owned()),
+            translation_id: None,
+        },
+        sovd_modes::get::ResponseItem {
+            id: SECURITY_ID.to_owned(),
+            name: Some(SECURITY_NAME.to_owned()),
+            translation_id: None,
+        },
+        sovd_modes::get::ResponseItem {
+            id: COMM_CONTROL_ID.to_owned(),
+            name: Some(COMM_CONTROL_NAME.to_owned()),
+            translation_id: None,
+        },
+        sovd_modes::get::ResponseItem {
+            id: DTC_SETTING_ID.to_owned(),
+            name: Some(DTC_SETTING_NAME.to_owned()),
+            translation_id: None,
+        },
+    ];
+    if uds.has_authentication_services(&ecu_name).await {
+        items.push(sovd_modes::get::ResponseItem {
+            id: AUTHENTICATION_ID.to_owned(),
+            name: Some(AUTHENTICATION_NAME.to_owned()),
+            translation_id: None,
+        });
+    }
     (
         StatusCode::OK,
-        Json(sovd_modes::get::Response {
-            items: vec![
-                sovd_modes::get::ResponseItem {
-                    id: SESSION_ID.to_owned(),
-                    name: Some(SESSION_NAME.to_owned()),
-                    translation_id: None,
-                },
-                sovd_modes::get::ResponseItem {
-                    id: SECURITY_ID.to_owned(),
-                    name: Some(SECURITY_NAME.to_owned()),
-                    translation_id: None,
-                },
-                sovd_modes::get::ResponseItem {
-                    id: COMM_CONTROL_ID.to_owned(),
-                    name: Some(COMM_CONTROL_NAME.to_owned()),
-                    translation_id: None,
-                },
-                sovd_modes::get::ResponseItem {
-                    id: DTC_SETTING_ID.to_owned(),
-                    name: Some(DTC_SETTING_NAME.to_owned()),
-                    translation_id: None,
-                },
-            ],
-            schema,
-        }),
+        Json(sovd_modes::get::Response { items, schema }),
     )
         .into_response()
 }
@@ -286,7 +294,9 @@ pub(crate) mod session {
                     )
                         .into_response()
                 }
-                DiagServiceResponseType::Negative => api_error_from_diag_response(&response, false),
+                DiagServiceResponseType::Negative => {
+                    api_error_from_diag_response(&response, include_schema)
+                }
             },
             Err(e) => ErrorWrapper {
                 error: ApiError::from(e),
@@ -592,6 +602,259 @@ pub(crate) mod security {
     }
 }
 
+pub(crate) mod authentication {
+    use std::time::SystemTime;
+
+    use aide::UseApi;
+    use cda_interfaces::{
+        Connectivity, DynamicPlugin,
+        authentication::{AuthenticationState, AuthenticationSubFunction},
+        diagservices::{DiagServiceJsonResponse, UdsPayloadData},
+    };
+    use cda_plugin_security::Secured;
+    use chrono::{DateTime, SecondsFormat, Utc};
+
+    use super::*;
+    use crate::{openapi, sovd::error::ErrorWrapper};
+
+    const OFFLINE: &str = "offline";
+
+    fn error_response(error: ApiError, include_schema: bool) -> Response {
+        ErrorWrapper {
+            error,
+            include_schema,
+        }
+        .into_response()
+    }
+
+    fn format_time(time: SystemTime) -> String {
+        DateTime::<Utc>::from(time).to_rfc3339_opts(SecondsFormat::Secs, true)
+    }
+
+    /// Builds the GET response from the tracked state.
+    pub(crate) fn get_response(
+        state: &AuthenticationState,
+        offline: bool,
+        schema: Option<Schema>,
+    ) -> sovd_modes::authentication::get::Response {
+        sovd_modes::authentication::get::Response {
+            id: AUTHENTICATION_ID.to_owned(),
+            name: Some(AUTHENTICATION_NAME.to_owned()),
+            value: if offline {
+                OFFLINE.to_owned()
+            } else {
+                state.status.name().to_owned()
+            },
+            last_subfunction: state.last_subfunction.map(|sf| sf.name().to_owned()),
+            expires_at: state.expires_at.map(format_time),
+            schema,
+        }
+    }
+
+    pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
+        WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
+        State(WebserverEcuState {
+            ecu_name,
+            uds,
+            locks,
+            ..
+        }): State<WebserverEcuState<T, U>>,
+    ) -> Response {
+        let include_schema = query.include_schema;
+        require_ecu_access!(read, security_plugin, &ecu_name, &locks, include_schema);
+
+        let offline = match uds.get_ecu_state(&ecu_name).await {
+            Ok(state) => state.connectivity == Connectivity::Offline,
+            Err(e) => return error_response(ApiError::from(e), include_schema),
+        };
+        let state = match uds.get_ecu_authentication_state(&ecu_name).await {
+            Ok(state) => state,
+            Err(e) => return error_response(ApiError::from(e), include_schema),
+        };
+        let schema = if include_schema {
+            Some(create_schema!(sovd_modes::authentication::get::Response))
+        } else {
+            None
+        };
+        (StatusCode::OK, Json(get_response(&state, offline, schema))).into_response()
+    }
+
+    pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+        op.description(
+            "Retrieve the authentication state (UDS 0x29) of the ECU as tracked by the CDA: \
+             `authenticated`, `deAuthenticated` or `offline`.",
+        )
+        .response_with::<200, Json<sovd_modes::authentication::get::Response>, _>(|res| {
+            res.description("Authentication state of the ECU").example(
+                sovd_modes::authentication::get::Response {
+                    id: AUTHENTICATION_ID.to_owned(),
+                    name: Some(AUTHENTICATION_NAME.to_owned()),
+                    value: "authenticated".to_owned(),
+                    last_subfunction: Some(
+                        AuthenticationSubFunction::VerifyProofOfOwnershipBidirectional
+                            .name()
+                            .to_owned(),
+                    ),
+                    expires_at: Some("2026-10-09T12:00:00Z".to_owned()),
+                    schema: None,
+                },
+            )
+        })
+        .with(openapi::error_not_found)
+    }
+
+    /// Extracts the decoded response parameters.
+    fn response_parameters<R: DiagServiceResponse>(
+        response: R,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, ApiError> {
+        if response.is_empty() {
+            return Ok(serde_json::Map::new());
+        }
+        match response.into_json() {
+            Ok(DiagServiceJsonResponse { data, errors }) => {
+                if !errors.is_empty() {
+                    tracing::warn!(
+                        ?errors,
+                        "Failed to decode some authentication response fields"
+                    );
+                }
+                match data {
+                    serde_json::Value::Object(map) => Ok(map),
+                    serde_json::Value::Null => Ok(serde_json::Map::new()),
+                    other => Err(ApiError::InternalServerError(Some(format!(
+                        "Expected JSON object but got: {other}"
+                    )))),
+                }
+            }
+            Err(e) => Err(ApiError::from(e)),
+        }
+    }
+
+    #[tracing::instrument(
+        skip(locks, uds, security_plugin, request_body),
+        fields(
+            ecu_name = %ecu_name,
+            value = %request_body.value,
+            mode_expiration = ?request_body.mode_expiration
+        )
+    )]
+    pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
+        WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
+        State(WebserverEcuState {
+            ecu_name,
+            uds,
+            locks,
+            ..
+        }): State<WebserverEcuState<T, U>>,
+        WithRejection(Json(request_body), _): WithRejection<
+            Json<sovd_modes::authentication::put::Request>,
+            ApiError,
+        >,
+    ) -> Response {
+        let include_schema = query.include_schema;
+        require_ecu_access!(write, security_plugin, &ecu_name, &locks, include_schema);
+        execute_put(
+            &uds,
+            &ecu_name,
+            security_plugin as DynamicPlugin,
+            request_body,
+            include_schema,
+        )
+        .await
+    }
+
+    /// Executes an authorized `PUT /modes/authentication`.
+    pub(crate) async fn execute_put<T: UdsEcu>(
+        uds: &T,
+        ecu_name: &str,
+        security_plugin: DynamicPlugin,
+        request_body: sovd_modes::authentication::put::Request,
+        include_schema: bool,
+    ) -> Response {
+        let sub_function = match request_body.value.parse::<AuthenticationSubFunction>() {
+            Ok(sf) => sf,
+            Err(e) => return error_response(ApiError::from(e), include_schema),
+        };
+        if sub_function == AuthenticationSubFunction::DeAuthenticate
+            && request_body.mode_expiration.is_some()
+        {
+            return error_response(
+                ApiError::BadRequest("mode_expiration must not be set for deAuthenticate".into()),
+                include_schema,
+            );
+        }
+
+        let parameters = request_body
+            .parameters
+            .map(|p| UdsPayloadData::ParameterMap(p.into_iter().collect()));
+
+        let response = match uds
+            .authenticate(
+                ecu_name,
+                sub_function,
+                parameters,
+                &security_plugin,
+                request_body.mode_expiration.map(Duration::from_secs),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(e) => return error_response(ApiError::from(e), include_schema),
+        };
+
+        if response.response_type() == DiagServiceResponseType::Negative {
+            return api_error_from_diag_response(&response, include_schema);
+        }
+
+        let parameters = match response_parameters(response) {
+            Ok(p) => p,
+            Err(e) => return error_response(e, include_schema),
+        };
+        let schema = if include_schema {
+            Some(create_schema!(sovd_modes::authentication::put::Response))
+        } else {
+            None
+        };
+        (
+            StatusCode::OK,
+            Json(sovd_modes::authentication::put::Response {
+                id: AUTHENTICATION_ID.to_owned(),
+                value: sub_function.name().to_owned(),
+                parameters,
+                schema,
+            }),
+        )
+            .into_response()
+    }
+
+    pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
+        op.description(
+            "Send one UDS Authentication (0x29) request. `value` is the sub-function name of ISO \
+             14229-1 Table 74, `parameters` the request parameters. Multi-step procedures are \
+             orchestrated by the client.",
+        )
+        .input::<Json<sovd_modes::authentication::put::Request>>()
+        .response_with::<200, Json<sovd_modes::authentication::put::Response>, _>(|res| {
+            res.description("Positive response of the ECU with decoded parameters")
+                .example(sovd_modes::authentication::put::Response {
+                    id: AUTHENTICATION_ID.to_owned(),
+                    value: AuthenticationSubFunction::RequestChallengeForAuthentication
+                        .name()
+                        .to_owned(),
+                    parameters: serde_json::Map::new(),
+                    schema: None,
+                })
+        })
+        .with(openapi::error_not_found)
+        .with(openapi::error_forbidden)
+        .with(openapi::error_bad_request)
+        .with(openapi::error_internal_server)
+        .with(openapi::error_bad_gateway)
+    }
+}
+
 pub(crate) mod commctrl {
     use aide::{UseApi, transform::TransformOperation};
     use axum::{
@@ -815,5 +1078,265 @@ pub(crate) mod dtcsetting {
             .with(openapi::error_bad_request)
             .with(openapi::error_internal_server)
             .with(openapi::error_bad_gateway)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime};
+
+    use aide::UseApi;
+    use axum::{
+        Json,
+        extract::{Query, State},
+        http::StatusCode,
+    };
+    use axum_extra::extract::WithRejection;
+    use cda_interfaces::{
+        Connectivity, DiagServiceError, EcuState,
+        authentication::{AuthenticationState, AuthenticationStatus, AuthenticationSubFunction},
+        diagservices::{
+            DiagServiceJsonResponse, DiagServiceResponseType, mock::MockDiagServiceResponse,
+        },
+        file_manager::mock::MockFileManager,
+        mock::{MockUdsEcu, mock_ecu_state_online_variant_detected},
+    };
+    use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
+    use sovd_interfaces::components::ecu::modes as sovd_modes;
+
+    use super::authentication;
+    use crate::sovd::tests::create_test_webserver_state;
+
+    const ECU: &str = "TestECU";
+
+    fn request(
+        value: &str,
+        mode_expiration: Option<u64>,
+    ) -> sovd_modes::authentication::put::Request {
+        sovd_modes::authentication::put::Request {
+            value: value.to_owned(),
+            mode_expiration,
+            parameters: None,
+        }
+    }
+
+    async fn body_json(response: axum::response::Response) -> serde_json::Value {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    async fn put(
+        uds: &MockUdsEcu,
+        body: sovd_modes::authentication::put::Request,
+    ) -> axum::response::Response {
+        authentication::execute_put(uds, ECU, Box::new(()), body, false).await
+    }
+
+    fn positive_response() -> MockDiagServiceResponse {
+        let mut response = MockDiagServiceResponse::new();
+        response
+            .expect_response_type()
+            .returning(|| DiagServiceResponseType::Positive);
+        response.expect_is_empty().returning(|| false);
+        response.expect_into_json().returning(|| {
+            Ok(DiagServiceJsonResponse {
+                data: serde_json::json!({"challengeServer": "0x01 0x02"}),
+                errors: vec![],
+            })
+        });
+        response
+    }
+
+    #[tokio::test]
+    async fn put_unknown_subfunction_is_bad_request() {
+        let uds = MockUdsEcu::new();
+        let response = put(&uds, request("foo", None)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn put_deauthenticate_with_expiration_is_bad_request() {
+        let uds = MockUdsEcu::new();
+        let response = put(&uds, request("deAuthenticate", Some(10))).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn put_missing_service_is_not_found() {
+        let mut uds = MockUdsEcu::new();
+        uds.expect_authenticate()
+            .returning(|_, _, _, _, _| Err(DiagServiceError::NotFound("none".to_owned())));
+        let response = put(&uds, request("transmitCertificate", None)).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn put_negative_response_is_bad_gateway() {
+        let mut uds = MockUdsEcu::new();
+        uds.expect_authenticate().returning(|_, _, _, _, _| {
+            let mut response = MockDiagServiceResponse::new();
+            response
+                .expect_response_type()
+                .returning(|| DiagServiceResponseType::Negative);
+            response.expect_as_nrc().returning(|| {
+                Ok(cda_interfaces::diagservices::MappedNRC {
+                    code: Some(0x58),
+                    description: Some("invalidSignature".to_owned()),
+                    sid: Some(0x29),
+                })
+            });
+            Ok(response)
+        });
+        let response = put(&uds, request("verifyProofOfOwnershipBidirectional", None)).await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn put_positive_returns_parameters_and_passes_expiration() {
+        let mut uds = MockUdsEcu::new();
+        uds.expect_authenticate()
+            .withf(|ecu, sf, _, _, expiration| {
+                ecu == ECU
+                    && *sf == AuthenticationSubFunction::RequestChallengeForAuthentication
+                    && *expiration == Some(Duration::from_secs(30))
+            })
+            .times(1)
+            .returning(|_, _, _, _, _| Ok(positive_response()));
+
+        let response = put(&uds, request("REQUESTCHALLENGEFORAUTHENTICATION", Some(30))).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert_eq!(
+            body.pointer("/id").and_then(serde_json::Value::as_str),
+            Some("authentication")
+        );
+        assert_eq!(
+            body.pointer("/value").and_then(serde_json::Value::as_str),
+            Some("requestChallengeForAuthentication")
+        );
+        assert_eq!(
+            body.pointer("/parameters/challengeServer")
+                .and_then(serde_json::Value::as_str),
+            Some("0x01 0x02")
+        );
+    }
+
+    #[test]
+    fn get_response_reports_state_and_extensions() {
+        let state = AuthenticationState {
+            status: AuthenticationStatus::Authenticated,
+            last_subfunction: Some(AuthenticationSubFunction::ProofOfOwnership),
+            expires_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(60)),
+        };
+        let value =
+            serde_json::to_value(authentication::get_response(&state, false, None)).unwrap();
+        assert_eq!(
+            value.pointer("/value").and_then(serde_json::Value::as_str),
+            Some("authenticated")
+        );
+        assert_eq!(
+            value
+                .pointer("/x-sovd2uds-last-subfunction")
+                .and_then(serde_json::Value::as_str),
+            Some("proofOfOwnership")
+        );
+        assert_eq!(
+            value
+                .pointer("/x-sovd2uds-expires-at")
+                .and_then(serde_json::Value::as_str),
+            Some("1970-01-01T00:01:00Z")
+        );
+
+        let value = serde_json::to_value(authentication::get_response(
+            &AuthenticationState::default(),
+            true,
+            None,
+        ))
+        .unwrap();
+        assert_eq!(
+            value.pointer("/value").and_then(serde_json::Value::as_str),
+            Some("offline")
+        );
+        assert!(value.get("x-sovd2uds-last-subfunction").is_none());
+        assert!(value.get("x-sovd2uds-expires-at").is_none());
+    }
+
+    #[tokio::test]
+    async fn get_handler_reports_offline() {
+        let mut uds = MockUdsEcu::new();
+        uds.expect_get_ecu_state().returning(|_| {
+            Ok(EcuState {
+                connectivity: Connectivity::Offline,
+                ..mock_ecu_state_online_variant_detected()
+            })
+        });
+        uds.expect_get_ecu_authentication_state()
+            .returning(|_| Ok(AuthenticationState::default()));
+        let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
+            ECU.to_owned(),
+            uds,
+            MockFileManager::new(),
+        );
+
+        let response = authentication::get::<MockUdsEcu, MockFileManager>(
+            UseApi(
+                Secured(Box::new(TestSecurityPlugin)),
+                std::marker::PhantomData,
+            ),
+            WithRejection(
+                Query(sovd_modes::Query {
+                    include_schema: false,
+                }),
+                std::marker::PhantomData,
+            ),
+            State(state),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(response)
+                .await
+                .pointer("/value")
+                .and_then(serde_json::Value::as_str),
+            Some("offline")
+        );
+    }
+
+    #[tokio::test]
+    async fn put_handler_requires_lock() {
+        let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
+            ECU.to_owned(),
+            MockUdsEcu::new(),
+            MockFileManager::new(),
+        );
+
+        let response = authentication::put::<MockUdsEcu, MockFileManager>(
+            UseApi(
+                Secured(Box::new(TestSecurityPlugin)),
+                std::marker::PhantomData,
+            ),
+            WithRejection(
+                Query(sovd_modes::Query {
+                    include_schema: false,
+                }),
+                std::marker::PhantomData,
+            ),
+            State(state),
+            WithRejection(
+                Json(request("deAuthenticate", None)),
+                std::marker::PhantomData,
+            ),
+        )
+        .await;
+
+        assert!(
+            response.status() == StatusCode::CONFLICT || response.status() == StatusCode::LOCKED,
+            "unexpected status {}",
+            response.status()
+        );
     }
 }
