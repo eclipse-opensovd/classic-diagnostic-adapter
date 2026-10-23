@@ -23,6 +23,8 @@ pub mod error;
 pub mod keepalive;
 mod probe;
 mod rediscovery;
+#[cfg(test)]
+mod test_helpers;
 
 use std::{sync::Arc, time::Duration};
 
