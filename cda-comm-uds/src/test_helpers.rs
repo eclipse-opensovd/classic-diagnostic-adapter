@@ -13,7 +13,13 @@
 
 //! Shared test doubles for `cda-comm-uds` tests.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use cda_interfaces::{
@@ -189,6 +195,27 @@ pub(crate) struct TestEcuDb {
     repeat_req_count_app: u32,
     tester_present_message: Vec<u8>,
     tester_present_response_expected: bool,
+    /// Set once [`VariantDetection::set_base_variant_online`] was called.
+    pub(crate) base_variant_selected: AtomicBool,
+    duplicates: Option<HashSet<String>>,
+    status: std::sync::Mutex<EcuState>,
+    /// State applied by `detect_variant` for non-empty responses. `None`
+    /// keeps the current state.
+    detection_outcome: Option<EcuState>,
+}
+
+fn default_test_status() -> EcuState {
+    // Online with a detected variant, so senders skip the pre-send variant
+    // detection guard (see `transport::needs_variant_detection`).
+    EcuState {
+        connectivity: Connectivity::Online,
+        variant_state: VariantState::Detected {
+            name: "TestVariant".to_owned(),
+            is_base_variant: false,
+            is_fallback: false,
+        },
+        variant_index: Some(0),
+    }
 }
 
 impl TestEcuDb {
@@ -207,6 +234,10 @@ impl TestEcuDb {
             repeat_req_count_app: 2,
             tester_present_message: vec![0x3E, 0x00],
             tester_present_response_expected: true,
+            base_variant_selected: AtomicBool::new(false),
+            duplicates: None,
+            status: std::sync::Mutex::new(default_test_status()),
+            detection_outcome: None,
         }
     }
 
@@ -220,6 +251,10 @@ impl TestEcuDb {
             repeat_req_count_app: 2,
             tester_present_message: vec![0x3E, 0x00],
             tester_present_response_expected: true,
+            base_variant_selected: AtomicBool::new(false),
+            duplicates: None,
+            status: std::sync::Mutex::new(default_test_status()),
+            detection_outcome: None,
         }
     }
 
@@ -237,6 +272,10 @@ impl TestEcuDb {
             repeat_req_count_app,
             tester_present_message: vec![0x3E, 0x00],
             tester_present_response_expected: true,
+            base_variant_selected: AtomicBool::new(false),
+            duplicates: None,
+            status: std::sync::Mutex::new(default_test_status()),
+            detection_outcome: None,
         }
     }
 
@@ -253,30 +292,56 @@ impl TestEcuDb {
             repeat_req_count_app: 2,
             tester_present_message,
             tester_present_response_expected,
+            base_variant_selected: AtomicBool::new(false),
+            duplicates: None,
+            status: std::sync::Mutex::new(default_test_status()),
+            detection_outcome: None,
         }
     }
 
     /// Create a test double with one session-control request used for variant detection.
     pub fn with_variant_detection_request(timeout_default: Duration) -> Self {
-        let request = DiagComm {
-            name: "variant-detection-session".to_owned(),
-            type_: DiagCommType::Modes,
-            lookup_name: Some("variant-detection-session".to_owned()),
-            subfunction_id: Some(SESSION_SUBFUNCTION),
-        };
+        Self::with_variant_detection_session(timeout_default, SESSION_SUBFUNCTION)
+    }
+
+    /// Create a detection request with a distinct service name and subfunction.
+    pub fn with_variant_detection_session(timeout_default: Duration, subfunction: u8) -> Self {
+        let (name, request) = detection_session(subfunction);
         Self {
             request_send_policy: None,
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-            variant_detection_requests: HashMap::from_iter([(
-                "variant-detection-session".to_owned(),
-                request,
-            )]),
+            variant_detection_requests: HashMap::from_iter([(name, request)]),
             timeout_default,
             repeat_req_count_app: 0,
             tester_present_message: vec![0x3E, 0x00],
             tester_present_response_expected: true,
+            base_variant_selected: AtomicBool::new(false),
+            duplicates: None,
+            status: std::sync::Mutex::new(default_test_status()),
+            detection_outcome: None,
         }
     }
+
+    pub fn with_additional_detection_session(mut self, subfunction: u8) -> Self {
+        let (name, request) = detection_session(subfunction);
+        self.variant_detection_requests.insert(name, request);
+        self
+    }
+}
+
+fn detection_session(subfunction: u8) -> (String, DiagComm) {
+    let name = if subfunction == SESSION_SUBFUNCTION {
+        "variant-detection-session".to_owned()
+    } else {
+        format!("variant-detection-session-{subfunction:02x}")
+    };
+    let request = DiagComm {
+        name: name.clone(),
+        type_: DiagCommType::Modes,
+        lookup_name: Some(name.clone()),
+        subfunction_id: Some(subfunction),
+    };
+    (name, request)
 }
 
 impl Default for TestEcuDb {
@@ -455,23 +520,27 @@ impl EcuStateManager for TestEcuDb {
 #[async_trait]
 impl VariantDetection for TestEcuDb {
     fn ecu_status(&self) -> EcuState {
-        // Online with a detected variant, so senders skip the pre-send variant
-        // detection guard (see `transport::needs_variant_detection`).
-        EcuState {
-            connectivity: Connectivity::Online,
-            variant_state: VariantState::Detected {
-                name: "TestVariant".to_owned(),
-                is_base_variant: false,
-                is_fallback: false,
-            },
-            variant_index: Some(0),
-        }
+        std::sync::Mutex::lock(&self.status)
+            .expect("test status lock")
+            .clone()
     }
 
     async fn detect_variant<T: DiagServiceResponse + Sized>(
         &mut self,
-        _service_responses: HashMap<String, T>,
+        service_responses: HashMap<String, T>,
     ) -> Result<(), DiagServiceError> {
+        if service_responses.is_empty() {
+            self.set_status(|status| status.connectivity = Connectivity::Offline);
+        } else if let Some(outcome) = self.detection_outcome.clone() {
+            if service_responses
+                .keys()
+                .any(|name| self.variant_detection_requests.contains_key(name))
+            {
+                self.set_status(|status| *status = outcome);
+            } else {
+                self.set_status(|status| status.variant_state = VariantState::NotDetected);
+            }
+        }
         Ok(())
     }
 
@@ -480,11 +549,42 @@ impl VariantDetection for TestEcuDb {
     }
 
     async fn mark_as_duplicate(&mut self) {
-        unimplemented!()
+        self.set_status(|status| status.variant_state = VariantState::Duplicate);
     }
 
     async fn mark_as_no_variant_detected(&mut self) {
-        unimplemented!()
+        self.set_status(|status| status.variant_state = VariantState::NotDetected);
+    }
+
+    async fn set_base_variant_online(&mut self) -> Result<(), DiagServiceError> {
+        self.base_variant_selected.store(true, Ordering::SeqCst);
+        self.set_status(|status| {
+            status.connectivity = Connectivity::Online;
+            status.variant_state = VariantState::Detected {
+                name: "BaseVariant".to_owned(),
+                is_base_variant: true,
+                is_fallback: false,
+            };
+        });
+        Ok(())
+    }
+}
+
+impl TestEcuDb {
+    fn set_status(&self, update: impl FnOnce(&mut EcuState)) {
+        update(&mut std::sync::Mutex::lock(&self.status).expect("test status lock"));
+    }
+
+    /// Makes this ECU part of a duplicate group with the given members.
+    pub fn with_duplicates(mut self, names: &[&str]) -> Self {
+        self.duplicates = Some(names.iter().map(|name| (*name).to_owned()).collect());
+        self
+    }
+
+    /// Sets the state `detect_variant` applies for non-empty responses.
+    pub fn with_detection_outcome(mut self, outcome: EcuState) -> Self {
+        self.detection_outcome = Some(outcome);
+        self
     }
 }
 
@@ -790,7 +890,7 @@ impl cda_interfaces::EcuManager for TestEcuDb {
     }
 
     fn duplicating_ecu_names(&self) -> Option<&HashSet<String>> {
-        None
+        self.duplicates.as_ref()
     }
 
     fn revision(&self) -> String {

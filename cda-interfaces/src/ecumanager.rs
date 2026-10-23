@@ -898,6 +898,13 @@ pub trait VariantDetection: Send + Sync + 'static {
     /// Mark this ECU as having no variant detected. Sets the variant state to
     /// [`VariantState::NotDetected`] and unloads the database.
     async fn mark_as_no_variant_detected(&mut self);
+
+    /// Select the base variant without evaluating detection patterns and mark
+    /// the ECU online. Used for ECUs that define no variant detection services
+    /// once an online probe got a response.
+    /// # Errors
+    /// Returns `DiagServiceError` if the database has no base variant.
+    async fn set_base_variant_online(&mut self) -> Result<(), DiagServiceError>;
 }
 
 /// Callback interface for connectivity changes for ECUs behind a `DoIP` gateway.
