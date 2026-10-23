@@ -603,8 +603,9 @@ Locks
 
 Locks allow clients to claim exclusive or non-exclusive access to a diagnostic entity
 (vehicle, ECU, or functional group) and to coordinate diagnostic communication across
-multiple concurrent clients. The same CRUD API and enforcement semantics apply to all
-three lock scopes.
+multiple concurrent clients. All three lock scopes share the same CRUD API shape;
+ECU-lock POST requests additionally check stored ECU connectivity as specified in
+:need:`req~sovd-api-lock-ecu-connectivity`.
 
 .. req:: Lock API
     :id: req~sovd-api-lock-api
@@ -678,6 +679,34 @@ three lock scopes.
 
     A unified lock API across all three scopes reduces client implementation complexity and
     ensures consistent lock management regardless of the diagnostic entity type.
+
+
+.. req:: ECU Lock Connectivity Check
+  :id: req~sovd-api-lock-ecu-connectivity
+  :links: arch~sovd-api-lock-ecu-connectivity
+  :status: draft
+
+  Before creating or renewing a lock through ``POST /components/{ecu-name}/locks``,
+  the CDA must check the ECU's stored connectivity. If it is ``Offline``, the request
+  must be rejected with HTTP 404, message ``ecu is offline``, ``error_code`` set to
+  ``vendor-specific``, and ``vendor_code`` set to ``not-found``. No lock may be created
+  or renewed, and pending preemption must be rolled back.
+
+  Errors reading the ECU state must retain their corresponding API error classification
+  and diagnostic message rather than being reported as an offline ECU. Lookup failures
+  must return HTTP 404; internal failures must return HTTP 500.
+
+  The connectivity check must not require an active ECU probe. It observes asynchronously
+  maintained state and therefore does not guarantee reachability after acquisition.
+
+  This requirement applies only to ECU-lock POST requests. It does not require all ECUs
+  to be online for vehicle or functional-group locks, change GET, PUT, or DELETE behavior
+  for existing ECU locks, or automatically revoke an existing lock on disconnect.
+
+  **Rationale**
+
+  Rejecting locks for known-offline ECUs avoids granting access based on an already known
+  communication failure while preserving the underlying cause of state lookup failures.
 
 
 .. req:: Lock Exclusivity
