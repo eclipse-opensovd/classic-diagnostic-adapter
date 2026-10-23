@@ -732,7 +732,14 @@ Variant Detection
     1. **Prepare**: Extract the set of diagnostic services required for variant identification
        from the MDD variant patterns (services referenced in ``matching_parameter`` elements)
 
-    2. **Execute**: Send each diagnostic service request to the ECU and collect responses
+    2. **Execute**: Send each diagnostic service request to the ECU and collect responses.
+       A connectivity failure aborts detection and marks the ECU (and its duplicates)
+       unreachable. Partial responses are discarded. Other per-request failures are logged
+       and the remaining requests are still sent. For duplicate groups, each member's own
+       detection services are sent and evaluated separately. A negative UDS response to an
+       unsupported service is still a response and does not block another member from
+       matching. Send or decoding errors leave incomplete evidence and prevent the group
+       from selecting a member.
 
     3. **Evaluate**: Match response parameter values against variant patterns. A variant matches
        when all its ``matching_parameter`` conditions are satisfied (expected value equals
@@ -741,12 +748,27 @@ Variant Detection
     4. **Update State**: Set the ECU state based on detection result (Online, Offline,
        NoVariantDetected, or Duplicate)
 
+    **ECUs Without Detection Services**
+
+    ECUs whose MDD defines no variant detection services always run their base variant. Only
+    reachability is checked by reading the ``UDSVersionDataIdentifier`` (``22 FF 00``). Any
+    response, positive or negative, sets the ECU Online with its base variant. No response
+    marks it unreachable.
+
     **Duplicate Resolution**
 
     When multiple ECU definitions share the same logical address, variant detection determines
     which definition matches the physical ECU. The matching ECU transitions to Online state;
     non-matching ECUs with the same address transition to Duplicate state and their databases
     are effectively disabled.
+
+    If no member with detection services matches a specific variant and the group contains
+    members without detection services, the ECU is probed once with ``22 FF 00`` (all members
+    share one logical address). If it responds and exactly one member has no detection
+    services, that member is set Online with its base variant and all other members become
+    Duplicate. With several such members the group cannot be resolved and all members become
+    NoVariantDetected. Without a response the regular group result applies, or the group is
+    marked unreachable when no member defines detection services.
 
     **Fallback Behavior**
 
@@ -817,7 +839,7 @@ ECU States
     - **DoIP Events**: VAM reception, connection establishment/loss, routing activation
       success/failure
     - **Variant Detection**: Detection success, failure, or duplicate identification
-    - **API Requests**: Explicit re-detection requests via POST to ECU endpoint
+    - **API Requests**: Explicit re-detection requests via PUT to ECU endpoint
     - **Communication Errors**: Timeout, NACK, or connection closure during diagnostic requests
     - **Persisted Topology Load**: Registration of an ECU from a persisted topology with last known state
       Online transitions it directly to AssumedOnline instead of NotTested

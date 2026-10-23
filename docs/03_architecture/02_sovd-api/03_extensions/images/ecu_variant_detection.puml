@@ -20,7 +20,7 @@ participant "Diagnostic\nKernel" as DIAG
 participant "UDS / DoIP" as COMM
 participant ECU
 
-Client -> HTTP : POST /components/{ecu}
+Client -> HTTP : PUT /components/{ecu}
 activate HTTP
 
 HTTP -> SEC : authenticate & authorize
