@@ -1860,21 +1860,23 @@ fn map_dtc_dop_from_uds(
 
     let record = dtc_dop
         .dtcs()
-        .and_then(|dtcs| dtcs.iter().find(|dtc| dtc.trouble_code() == code))
-        .ok_or(DiagServiceError::BadPayload(format!(
-            "No DTC with code {code:X} found in DTC references",
-        )))?;
+        .and_then(|dtcs| dtcs.iter().find(|dtc| dtc.trouble_code() == code));
 
     data.insert(
         param_name.to_owned(),
         DiagDataTypeContainer::DtcStruct(DiagDataContainerDtc {
             code,
-            display_code: record.display_trouble_code().map(ToOwned::to_owned),
+            display_code: record
+                .and_then(|record| record.display_trouble_code())
+                .map(ToOwned::to_owned),
             fault_name: record
-                .text()
-                .and_then(|text| text.value().map(ToOwned::to_owned))
-                .unwrap_or_default(),
-            severity: record.level().unwrap_or_default(),
+                .and_then(|record| {
+                    record
+                        .text()
+                        .and_then(|text| text.value().map(ToOwned::to_owned))
+                })
+                .unwrap_or_else(|| "DTC description not available".to_owned()),
+            severity: record.and_then(|record| record.level()).unwrap_or_default(),
             bit_pos: param_ctx.parameter.bit_position(),
             bit_len: DTC_CODE_BIT_LEN,
             byte_pos: u32::try_from(param_ctx.abs_byte_pos()).map_err(|_| {
