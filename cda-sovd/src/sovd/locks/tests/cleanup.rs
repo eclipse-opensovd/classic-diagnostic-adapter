@@ -11,15 +11,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#![cfg_attr(
-    nightly,
-    allow(
-        unknown_lints,
-        clippy::duration_suboptimal_units,
-        reason = "Literal duration for test clarity. Lint not available in all toolchains"
-    )
-)]
-
 use cda_interfaces::ResetOutcome;
 
 use super::*;
@@ -153,15 +144,15 @@ fn expect_ecu_lock_cleanup_multiple(uds_ecu: &mut MockUdsEcu, ecus: &Vec<String>
     for ecu in ecus {
         uds_ecu
             .expect_reset_ecu_session()
-            .with(eq(ecu.clone()), always())
+            .with(eq(ecu.clone()))
             .times(1)
-            .returning(|_, _| Ok(ResetOutcome::Completed));
+            .returning(|_| Ok(ResetOutcome::Completed));
 
         uds_ecu
             .expect_reset_ecu_security_access()
-            .with(eq(ecu.clone()), always())
+            .with(eq(ecu.clone()))
             .times(1)
-            .returning(|_, _| Ok(ResetOutcome::Completed));
+            .returning(|_| Ok(ResetOutcome::Completed));
     }
 }
 
@@ -207,17 +198,17 @@ pub(super) fn setup_ecu_lock_test() -> (
                 .returning(|_| Ok(()));
             cleanup
                 .expect_reset_ecu_session()
-                .with(eq(cleanup_ecu_name.clone()), always())
+                .with(eq(cleanup_ecu_name.clone()))
                 .times(1)
-                .returning(move |_, _| {
+                .returning(move |_| {
                     session_resets.fetch_add(1, Ordering::SeqCst);
                     Ok(ResetOutcome::Completed)
                 });
             cleanup
                 .expect_reset_ecu_security_access()
-                .with(eq(cleanup_ecu_name.clone()), always())
+                .with(eq(cleanup_ecu_name.clone()))
                 .times(1)
-                .returning(move |_, _| {
+                .returning(move |_| {
                     security_resets.fetch_add(1, Ordering::SeqCst);
                     Ok(ResetOutcome::Completed)
                 });

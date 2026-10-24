@@ -91,6 +91,7 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
     pub vehicle_route_handle: cda_sovd::RouteHandle,
     pub lock_provider: Arc<cda_sovd::SovdLockStateProvider>,
     pub flash_files_path: String,
+    pub flash_functional_class_default: String,
     pub components_config: cda_interfaces::datatypes::ComponentsConfig,
     pub health: Option<HashMap<String, Arc<dyn HealthProvider>>>,
     pub storage: Arc<LocalStorage>,
@@ -468,6 +469,7 @@ where
     CPB: CommunicationPluginBuilder,
 {
     let flash_files_path = config.flash_files_path.clone();
+    let flash_functional_class_default = config.flash_functional_class_default.clone();
     let components_config = config.components.clone();
     let mdd_decompress = config.flat_buf.mdd_decompress;
 
@@ -500,6 +502,8 @@ where
     let components = crate::vehicle::finish_vehicle_components(
         vehicle_data.prepared,
         &config,
+        Arc::clone(&lock_provider)
+            as Arc<dyn cda_interfaces::request_authorization::RequestLockProvider>,
         Arc::clone(&communication_access),
     );
     let uds_manager = ComponentSlot::new(components.uds_manager);
@@ -515,6 +519,7 @@ where
         &ws.dynamic_router,
         cda_sovd::VehicleConfig {
             flash_files_path: config.flash_files_path.clone(),
+            flash_functional_class_default: config.flash_functional_class_default.clone(),
             functional_group_config: config.functional_description.clone(),
             components_config: config.components.clone(),
         },
@@ -534,6 +539,7 @@ where
         dynamic_router: ws.dynamic_router.clone(),
         vehicle_route_handle,
         flash_files_path,
+        flash_functional_class_default,
         components_config,
         lock_provider: Arc::clone(&lock_provider),
         shutdown_signal,

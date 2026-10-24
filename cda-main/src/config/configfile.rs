@@ -88,6 +88,9 @@ pub struct Configuration {
     pub logging: cda_tracing::LoggingConfig,
     /// Path to the directory containing flash files.
     pub flash_files_path: String,
+    /// Default functional class used to resolve the flash services (0x34, 0x36, 0x37)
+    /// when the client does not provide `flashClass`. Compared case-insensitively.
+    pub flash_functional_class_default: String,
     /// Default communication parameters for UDS and `DoIP` protocols.
     pub com_params: ComParams,
     /// `FlatBuffers` verification settings for MDD database parsing.
@@ -279,6 +282,7 @@ impl Default for Configuration {
         Configuration {
             database: DatabaseConfig::default(),
             flash_files_path: ".".to_owned(),
+            flash_functional_class_default: "flash_download_upload".to_owned(),
             server: ServerTransport::default(),
             #[cfg(feature = "health")]
             health: cda_health::config::HealthConfig::default(),
@@ -425,6 +429,18 @@ impl Configuration {
         }
         Ok(())
     }
+
+    /// An empty default functional class would make every flash request without
+    /// `flashClass` fail at runtime with a misleading "not found" error.
+    fn validate_flash_functional_class_default(&self) -> Result<(), ConfigSanityError> {
+        if self.flash_functional_class_default.trim().is_empty() {
+            return Err(ConfigSanityError::InvalidValue {
+                field: "flash_functional_class_default".to_owned(),
+                reason: "must not be empty".to_owned(),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl ConfigSanity for Configuration {
@@ -436,6 +452,7 @@ impl ConfigSanity for Configuration {
         self.validate_can_mappings()?;
         self.validate_transport_overrides()?;
         self.locks.validate_sanity()?;
+        self.validate_flash_functional_class_default()?;
         // Add more checks for Configuration fields here if needed
         Ok(())
     }
@@ -453,10 +470,31 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn empty_flash_functional_class_default_is_rejected() {
+        assert!(
+            Configuration::default()
+                .validate_flash_functional_class_default()
+                .is_ok()
+        );
+        for value in ["", "   "] {
+            let config = Configuration {
+                flash_functional_class_default: value.to_owned(),
+                ..Configuration::default()
+            };
+            assert!(matches!(
+                config.validate_flash_functional_class_default(),
+                Err(ConfigSanityError::InvalidValue { field, .. })
+                    if field == "flash_functional_class_default"
+            ));
+        }
+    }
+
     #[tokio::test]
     async fn load_config_toml() -> Result<(), Box<dyn std::error::Error>> {
         let config_str = r#"
 flash_files_path = "/app/flash"
+flash_functional_class_default = "flash_bootloader"
 
 [database]
 path = "/app/database"
@@ -498,6 +536,11 @@ priority_lifecycle_queue_capacity = 32
             .merge(Toml::string(config_str));
         let config: Configuration = figment.extract()?;
         config.validate_sanity().map_err(|err| err.to_string())?;
+        assert_eq!(config.flash_functional_class_default, "flash_bootloader");
+        assert_eq!(
+            Configuration::default().flash_functional_class_default,
+            "flash_download_upload"
+        );
         assert_eq!(
             config
                 .com_params

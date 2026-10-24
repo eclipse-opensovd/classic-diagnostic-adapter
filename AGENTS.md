@@ -88,6 +88,8 @@ available IDs), e.g.:
 - `.opencode/skills/cda-diagnostic-protocol-spec` - UDS, DoIP and CAN/ISO-TP knowledge, doc sources
   and how to request specification text from the user.
 - `.opencode/skills/cda-issue-analysis` - structured analysis of bug reports and issues.
+- `.opencode/skills/cda-capture-analysis` - Wireshark capture analysis: UDS/DoIP/ISO-TP
+  timeline and timings, conformance checks and comparison with MDD com params.
 - `.opencode/skills/cda-mdd-mcp-setup` - install and register the mdd-mcp server (`mdd-mcp_*` tools).
 - `.opencode/skills/cda-pdf-reader-setup` - install and register the PDF MCP server (`pdf-reader_*` tools).
 - `.opencode/skills/cda-github-mcp-setup` - install and register the GitHub MCP server (`github_*` tools).

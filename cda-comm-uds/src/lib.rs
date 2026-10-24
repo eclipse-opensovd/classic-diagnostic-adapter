@@ -20,6 +20,7 @@ use cda_interfaces::{
     communication_control::{ActivationCause, CommunicationAccess, CommunicationGuard},
     datatypes::FaultConfig,
     diagservices::UdsPayloadData,
+    request_authorization::RequestLockProvider,
 };
 use tokio::{
     sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore},
@@ -38,7 +39,6 @@ pub mod state_coordinator;
 mod tester_present;
 mod transport;
 mod types;
-mod util;
 mod variant;
 
 #[cfg(test)]
@@ -116,6 +116,7 @@ pub struct UdsManager<S: EcuGateway, T: UdsEcuDb> {
     state_coordinator: EcuStateCoordinator,
     functional_description_database: String,
     fault_config: FaultConfig,
+    request_lock_provider: Arc<dyn RequestLockProvider>,
     communication_access: Arc<dyn CommunicationAccess>,
     /// Configured retry hint surfaced on [`DiagServiceError::CommunicationNotReady`].
     communication_retry_after: Duration,
@@ -194,6 +195,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         state_coordinator: EcuStateCoordinator,
         functional_description_config: &FunctionalDescriptionConfig,
         fault_config: FaultConfig,
+        request_lock_provider: Arc<dyn RequestLockProvider>,
         communication_access: Arc<dyn CommunicationAccess>,
         communication_retry_after: Duration,
     ) -> Self {
@@ -210,6 +212,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 .description_database
                 .clone(),
             fault_config,
+            request_lock_provider,
             communication_access,
             communication_retry_after,
             variant_detection_receiver: Arc::new(Mutex::new(Some(variant_detection_receiver))),
@@ -374,6 +377,7 @@ impl<S: Clone + EcuGateway, T: UdsEcuDb> Clone for UdsManager<S, T> {
             state_coordinator: self.state_coordinator.clone(),
             functional_description_database: self.functional_description_database.clone(),
             fault_config: self.fault_config.clone(),
+            request_lock_provider: Arc::clone(&self.request_lock_provider),
             communication_access: Arc::clone(&self.communication_access),
             communication_retry_after: self.communication_retry_after,
             variant_detection_receiver: Arc::clone(&self.variant_detection_receiver),

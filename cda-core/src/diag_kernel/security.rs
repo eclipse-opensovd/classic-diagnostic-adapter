@@ -14,7 +14,9 @@
 use cda_database::datatypes;
 use cda_interfaces::{
     DiagServiceError, DynamicPlugin, EcuSecurity, EcuStateManager, HashSet, SecurityAccess,
-    dlt_ctx, service_ids,
+    dlt_ctx,
+    request_authorization::{UdsRequestSendContext, UdsRequestTarget},
+    service_ids,
     util::{contains_ignore_ascii_case, std_ext},
 };
 use cda_plugin_security::SecurityPlugin;
@@ -83,6 +85,31 @@ impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
         let mapped_service = self.lookup_diag_service(service, None, None).await?;
         self.check_service_access(security_plugin, &mapped_service)
             .await
+    }
+
+    async fn validate_request_send(
+        &self,
+        security_plugin: &DynamicPlugin,
+        context: &UdsRequestSendContext<'_>,
+    ) -> Result<(), DiagServiceError> {
+        // Internal traffic carries the void plugin and is never checked; skip the lookup too.
+        if is_void_plugin(security_plugin) {
+            return Ok(());
+        }
+        // The transport only knows the ECU name; this manager knows the ECU's current
+        // variant and therefore which configured additional fields it belongs to.
+        if let UdsRequestTarget::Ecu { name, .. } = &context.target {
+            let enriched = UdsRequestSendContext {
+                target: UdsRequestTarget::Ecu {
+                    name: name.clone(),
+                    additional_fields: self.matching_additional_fields().await.to_vec(),
+                },
+                payload: context.payload,
+                lock: context.lock.clone(),
+            };
+            return check_request_send_plugin::<S>(security_plugin, &enriched);
+        }
+        check_request_send_plugin::<S>(security_plugin, context)
     }
 }
 
@@ -331,11 +358,319 @@ pub(in crate::diag_kernel) fn check_security_plugin<S: SecurityPlugin>(
     security_plugin.validate_service(service)
 }
 
+/// Reports whether `security_plugin` is the void plugin used by CDA-internal traffic.
+fn is_void_plugin(security_plugin: &DynamicPlugin) -> bool {
+    security_plugin.downcast_ref::<()>().is_some()
+}
+
+/// Runs the plugin's pre-send authorization for a fully resolved UDS request.
+///
+/// Like [`check_security_plugin`], the void plugin `()` skips the check. It is only ever
+/// passed by CDA-internal traffic (variant detection, session and security resets), whereas
+/// every request originating from a caller carries the plugin created from its token.
+pub(in crate::diag_kernel) fn check_request_send_plugin<S: SecurityPlugin>(
+    security_plugin: &DynamicPlugin,
+    context: &UdsRequestSendContext<'_>,
+) -> Result<(), DiagServiceError> {
+    if is_void_plugin(security_plugin) {
+        return Ok(());
+    }
+    let security_plugin = security_plugin
+        .downcast_ref::<S>()
+        .ok_or(DiagServiceError::InvalidSecurityPlugin)
+        .map(SecurityPlugin::as_security_plugin)?;
+
+    security_plugin.validate_request_send(context)
+}
+
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::{DiagServiceError, EcuSecurity, SecurityAccess, service_ids};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
-    use crate::diag_kernel::test_utils::ecu_manager_builder::create_ecu_manager_with_security_access_services;
+    use cda_database::datatypes::database_builder::EcuDataBuilder;
+    use cda_interfaces::{
+        DiagServiceError, DynamicPlugin, EcuSecurity, HashMap, Protocol, SecurityAccess,
+        ServicePayload,
+        datatypes::SdMappingsTruthyValue,
+        request_authorization::{UdsRequestSendContext, UdsRequestTarget},
+        service_ids,
+    };
+    use cda_plugin_security::{AuthApi, Claims, SecurityApi, SecurityPlugin};
+
+    use super::check_request_send_plugin;
+    use crate::diag_kernel::{
+        ecumanager::EcuManager,
+        test_utils::{
+            db_builder::finish_db,
+            ecu_manager_builder::{
+                create_ecu_manager_with_security_access_services, new_ecu_manager_with_plugin,
+            },
+        },
+    };
+
+    struct NoClaims;
+
+    impl Claims for NoClaims {
+        fn sub(&self) -> &'static str {
+            "nobody"
+        }
+    }
+
+    /// Security plugin counting pre-send checks and optionally denying them.
+    struct RecordingPlugin {
+        checks: Arc<AtomicUsize>,
+        deny: bool,
+        seen: Arc<std::sync::Mutex<Vec<SeenRequest>>>,
+    }
+
+    /// Target, request bytes and lock holder observed by a pre-send check.
+    type SeenRequest = (UdsRequestTarget, Vec<u8>, Option<String>);
+
+    impl AuthApi for RecordingPlugin {
+        fn claims(&self) -> Box<&dyn Claims> {
+            Box::new(&NoClaims)
+        }
+    }
+
+    impl SecurityApi for RecordingPlugin {
+        fn validate_request_send(
+            &self,
+            context: &UdsRequestSendContext<'_>,
+        ) -> Result<(), DiagServiceError> {
+            self.seen.lock().unwrap().push((
+                context.target.clone(),
+                context.payload.data.clone(),
+                context.lock.as_ref().map(|lock| lock.holder.clone()),
+            ));
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            if self.deny {
+                Err(DiagServiceError::RequestNotAllowed("denied".to_owned()))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn validate_service(
+            &self,
+            _service: &cda_database::datatypes::DiagService<'_>,
+        ) -> Result<(), DiagServiceError> {
+            Ok(())
+        }
+    }
+
+    impl SecurityPlugin for RecordingPlugin {
+        fn as_auth_plugin(&self) -> &dyn AuthApi {
+            self
+        }
+
+        fn as_security_plugin(&self) -> &dyn SecurityApi {
+            self
+        }
+    }
+
+    fn check(plugin: &DynamicPlugin) -> Result<(), DiagServiceError> {
+        let payload = ServicePayload {
+            data: vec![0x22, 0xF1, 0x90],
+            source_address: 0x0E00,
+            target_address: 0x0001,
+            new_session: None,
+            new_security: None,
+        };
+        let context = UdsRequestSendContext {
+            target: UdsRequestTarget::Ecu {
+                name: "ecu".to_owned(),
+                additional_fields: Vec::new(),
+            },
+            payload: &payload,
+            lock: None,
+        };
+        check_request_send_plugin::<RecordingPlugin>(plugin, &context)
+    }
+
+    fn recording(deny: bool) -> (DynamicPlugin, Arc<AtomicUsize>) {
+        let checks = Arc::new(AtomicUsize::new(0));
+        let plugin = RecordingPlugin {
+            checks: Arc::clone(&checks),
+            deny,
+            seen: Arc::default(),
+        };
+        (Box::new(plugin), checks)
+    }
+
+    fn recording_seen() -> (DynamicPlugin, Arc<std::sync::Mutex<Vec<SeenRequest>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let plugin = RecordingPlugin {
+            checks: Arc::default(),
+            deny: false,
+            seen: Arc::clone(&seen),
+        };
+        (Box::new(plugin), seen)
+    }
+
+    fn request_manager() -> EcuManager<RecordingPlugin> {
+        let mut builder = EcuDataBuilder::new();
+        let protocol_name = Protocol::default().to_string();
+        let protocol = builder.create_protocol(&protocol_name, None, None, None);
+        let filter = HashMap::from_iter([(
+            "LIN".to_owned(),
+            SdMappingsTruthyValue::new(["yes".to_owned()].into_iter().collect(), true),
+        )]);
+        let manager =
+            new_ecu_manager_with_plugin::<RecordingPlugin>(finish_db!(builder, protocol, vec![]))
+                .with_additional_field_filters(HashMap::from_iter([("x-lin".to_owned(), filter)]));
+        // The test database has no SDGs; seed what a detected variant would have produced.
+        manager.seed_additional_fields_cache(Some(0), &["x-lin"]);
+        manager
+    }
+
+    fn send_context(
+        payload: &ServicePayload,
+        target: UdsRequestTarget,
+    ) -> UdsRequestSendContext<'_> {
+        UdsRequestSendContext {
+            target,
+            payload,
+            lock: Some(cda_interfaces::request_authorization::RequestLockContext {
+                holder: "holder".to_owned(),
+                claims: serde_json::Map::new(),
+                metadata: serde_json::Map::new(),
+            }),
+        }
+    }
+
+    fn test_payload() -> ServicePayload {
+        ServicePayload {
+            data: vec![0x31, 0x01, 0xFF, 0x00],
+            source_address: 0x0E00,
+            target_address: 0x0001,
+            new_session: None,
+            new_security: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn physical_target_is_enriched_with_the_ecus_additional_fields() {
+        let manager = request_manager();
+        let (plugin, seen) = recording_seen();
+        let payload = test_payload();
+        let target = UdsRequestTarget::Ecu {
+            name: "ecu".to_owned(),
+            additional_fields: Vec::new(),
+        };
+
+        manager
+            .validate_request_send(&plugin, &send_context(&payload, target))
+            .await
+            .expect("recording plugin allows");
+
+        let seen = seen.lock().unwrap();
+        let [(target, data, holder)] = seen.as_slice() else {
+            panic!("expected one plugin call, got {}", seen.len());
+        };
+        assert_eq!(
+            *target,
+            UdsRequestTarget::Ecu {
+                name: "ecu".to_owned(),
+                additional_fields: vec!["x-lin".to_owned()],
+            }
+        );
+        assert_eq!(*data, payload.data, "request bytes must pass through");
+        assert_eq!(holder.as_deref(), Some("holder"), "lock must pass through");
+    }
+
+    #[tokio::test]
+    async fn functional_target_is_passed_through_unchanged() {
+        let manager = request_manager();
+        let (plugin, seen) = recording_seen();
+        let payload = test_payload();
+        let target = UdsRequestTarget::FunctionalGroup {
+            name: "Group".to_owned(),
+            ecus: vec!["a".to_owned(), "b".to_owned()],
+        };
+
+        manager
+            .validate_request_send(&plugin, &send_context(&payload, target.clone()))
+            .await
+            .expect("recording plugin allows");
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.first().map(|(target, ..)| target), Some(&target));
+    }
+
+    #[tokio::test]
+    async fn plugin_denial_is_returned_for_enriched_requests() {
+        let manager = request_manager();
+        let (plugin, _) = recording(true);
+        let payload = test_payload();
+        let target = UdsRequestTarget::Ecu {
+            name: "ecu".to_owned(),
+            additional_fields: Vec::new(),
+        };
+
+        let result = manager
+            .validate_request_send(&plugin, &send_context(&payload, target))
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DiagServiceError::RequestNotAllowed(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn void_plugin_skips_the_check_for_physical_targets() {
+        let manager = request_manager();
+        let void: DynamicPlugin = Box::new(());
+        let payload = test_payload();
+        let target = UdsRequestTarget::Ecu {
+            name: "ecu".to_owned(),
+            additional_fields: Vec::new(),
+        };
+
+        assert!(
+            manager
+                .validate_request_send(&void, &send_context(&payload, target))
+                .await
+                .is_ok()
+        );
+    }
+
+    /// Variant detection, session and security resets send with the void plugin, which must
+    /// never be rejected as an invalid plugin.
+    #[test]
+    fn void_plugin_skips_the_request_send_check() {
+        let void: DynamicPlugin = Box::new(());
+        assert!(check(&void).is_ok());
+    }
+
+    #[test]
+    fn unexpected_plugin_type_is_rejected() {
+        let wrong: DynamicPlugin = Box::new(42u32);
+        assert!(matches!(
+            check(&wrong),
+            Err(DiagServiceError::InvalidSecurityPlugin)
+        ));
+    }
+
+    #[test]
+    fn allowing_plugin_is_consulted_once() {
+        let (plugin, checks) = recording(false);
+        assert!(check(&plugin).is_ok());
+        assert_eq!(checks.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn denial_from_the_plugin_is_propagated() {
+        let (plugin, checks) = recording(true);
+        assert!(matches!(
+            check(&plugin),
+            Err(DiagServiceError::RequestNotAllowed(_))
+        ));
+        assert_eq!(checks.load(Ordering::SeqCst), 1);
+    }
 
     /// Name-based lookup: level name is contained in the service's `short_name`
     /// (underscores stripped, case-insensitive). The matching service is returned

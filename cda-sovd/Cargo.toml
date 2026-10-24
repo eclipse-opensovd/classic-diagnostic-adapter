@@ -97,9 +97,6 @@ tower-http = { workspace = true, features = [
 tracing = { workspace = true }
 percent-encoding = { workspace = true }
 
-[build-dependencies]
-cda-build = { workspace = true }
-
 [features]
 default = []
 auth = []

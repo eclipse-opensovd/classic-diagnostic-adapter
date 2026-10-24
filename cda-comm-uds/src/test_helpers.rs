@@ -165,8 +165,17 @@ impl DiagServiceResponse for TestResponse {
     }
 }
 
+/// Policy invoked by [`TestEcuDb`] for every pre-send authorization check.
+pub(crate) type RequestSendPolicy = dyn Fn(
+        &cda_interfaces::request_authorization::UdsRequestSendContext<'_>,
+    ) -> Result<(), DiagServiceError>
+    + Send
+    + Sync;
+
 /// Minimal test double satisfying `UdsEcuDb + VariantDetection`.
 pub(crate) struct TestEcuDb {
+    /// Pre-send authorization policy; `None` allows every request.
+    request_send_policy: Option<Arc<RequestSendPolicy>>,
     service_states: tokio::sync::Mutex<std::collections::HashMap<u8, String>>,
     /// Configurable `CP_P6Max`-backed timeout, so tests can verify that
     /// callers fall back to this comparam-derived value instead of using a
@@ -182,8 +191,15 @@ pub(crate) struct TestEcuDb {
 }
 
 impl TestEcuDb {
+    /// Sets the pre-send authorization policy consulted before every authorized send.
+    pub fn with_request_send_policy(mut self, policy: Arc<RequestSendPolicy>) -> Self {
+        self.request_send_policy = Some(policy);
+        self
+    }
+
     pub fn new() -> Self {
         Self {
+            request_send_policy: None,
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             timeout_default: Duration::from_secs(5),
             repeat_req_count_app: 2,
@@ -195,6 +211,7 @@ impl TestEcuDb {
     /// Create a test double with a custom `timeout_default` (`CP_P6Max`).
     pub fn with_timeout_default(timeout_default: Duration) -> Self {
         Self {
+            request_send_policy: None,
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             timeout_default,
             repeat_req_count_app: 2,
@@ -210,6 +227,7 @@ impl TestEcuDb {
         repeat_req_count_app: u32,
     ) -> Self {
         Self {
+            request_send_policy: None,
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             timeout_default,
             repeat_req_count_app,
@@ -224,6 +242,7 @@ impl TestEcuDb {
         tester_present_response_expected: bool,
     ) -> Self {
         Self {
+            request_send_policy: None,
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             timeout_default: Duration::from_secs(5),
             repeat_req_count_app: 2,
@@ -544,6 +563,18 @@ impl EcuSecurity for TestEcuDb {
         _security_plugin: &DynamicPlugin,
     ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
         std::future::ready(Ok(()))
+    }
+
+    fn validate_request_send(
+        &self,
+        _security_plugin: &DynamicPlugin,
+        context: &cda_interfaces::request_authorization::UdsRequestSendContext<'_>,
+    ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
+        std::future::ready(
+            self.request_send_policy
+                .as_ref()
+                .map_or(Ok(()), |policy| policy(context)),
+        )
     }
 }
 

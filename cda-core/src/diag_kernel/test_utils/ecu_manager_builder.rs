@@ -18,7 +18,7 @@ use cda_interfaces::{
     datatypes::{ComParams, DatabaseNamingConvention},
     util::std_ext,
 };
-use cda_plugin_security::DefaultSecurityPluginData;
+use cda_plugin_security::{DefaultSecurityPluginData, SecurityPlugin};
 
 use crate::diag_kernel::ecumanager::{EcuManager, EcuManagerConfig};
 
@@ -33,6 +33,13 @@ pub(crate) const SID_PARM_NAME: &str = "sid";
 pub(crate) fn new_ecu_manager(
     db: cda_database::datatypes::DiagnosticDatabase,
 ) -> EcuManager<DefaultSecurityPluginData> {
+    new_ecu_manager_with_plugin(db)
+}
+
+/// Same as [`new_ecu_manager`], for tests that need a specific security plugin type.
+pub(crate) fn new_ecu_manager_with_plugin<S: SecurityPlugin>(
+    db: cda_database::datatypes::DiagnosticDatabase,
+) -> EcuManager<S> {
     let manager = EcuManager::new(
         db,
         Protocol::default(),

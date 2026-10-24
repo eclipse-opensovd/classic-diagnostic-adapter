@@ -279,19 +279,115 @@ pub mod x {
             }
         }
         pub mod download {
+            use serde::{Deserialize, Deserializer};
+            use serde_json::{Map, Value};
+
+            /// Reads a JSON object and converts all its top-level keys to lowercase.
+            /// Keys that only differ in case are rejected as duplicates.
+            pub(crate) fn lowercase_keys<'de, D>(deserializer: D) -> Result<Value, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let fields = Map::<String, Value>::deserialize(deserializer)?;
+                let mut normalized = Map::with_capacity(fields.len());
+                for (key, value) in fields {
+                    let lowercase = key.to_ascii_lowercase();
+                    if normalized.contains_key(&lowercase) {
+                        return Err(serde::de::Error::custom(format!(
+                            "Duplicate field `{key}` (fields are matched case-insensitively)"
+                        )));
+                    }
+                    normalized.insert(lowercase, value);
+                }
+                Ok(Value::Object(normalized))
+            }
+
+            /// Implements `Deserialize` for a request type whose top-level field names are
+            /// matched case-insensitively.
+            ///
+            /// The type must derive `Deserialize` with `#[serde(remote = "Self")]` and use
+            /// lowercase serde field names. The generated impl lowercases the keys of the
+            /// input object and then runs the derived deserializer on it.
+            ///
+            /// Because serde only sees lowercase keys, the public (documented) field names
+            /// are set separately via `#[schemars(rename = "...")]` in camelCase. Both differ
+            /// only in casing, so any casing of the documented name is accepted.
+            macro_rules! case_insensitive_deserialize {
+                ($ty:ty) => {
+                    impl<'de> serde::Deserialize<'de> for $ty {
+                        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                        where
+                            D: serde::Deserializer<'de>,
+                        {
+                            let value =
+                                $crate::components::ecu::x::sovd2uds::download::lowercase_keys(
+                                    deserializer,
+                                )?;
+                            // Track the path so errors name the offending field.
+                            let mut track = serde_path_to_error::Track::new();
+                            <$ty>::deserialize(serde_path_to_error::Deserializer::new(
+                                value, &mut track,
+                            ))
+                            .map_err(|e| {
+                                let path = track.path().to_string();
+                                if path == "." {
+                                    serde::de::Error::custom(e)
+                                } else {
+                                    serde::de::Error::custom(format!("Invalid field `{path}`: {e}"))
+                                }
+                            })
+                        }
+                    }
+                };
+            }
+
+            pub mod transfer_exit {
+                pub mod put {
+                    use serde::Deserialize;
+
+                    /// Optional request body of the `RequestTransferExit` service. Field names
+                    /// are matched case-insensitively.
+                    #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+                    #[serde(remote = "Self")]
+                    #[schemars(rename = "TransferExitRequest")]
+                    pub struct Request {
+                        /// Functional class used to resolve the `RequestTransferExit` service.
+                        /// Falls back to the configured default when absent.
+                        #[serde(rename = "flashclass")]
+                        #[schemars(rename = "flashClass")]
+                        pub flash_class: Option<String>,
+                    }
+
+                    case_insensitive_deserialize!(Request);
+                }
+            }
+
             pub mod flash_transfer {
                 pub mod post {
                     use serde::{Deserialize, Serialize};
+
+                    /// Request body of the flash transfer. Field names are matched
+                    /// case-insensitively.
                     #[derive(Debug, Deserialize, schemars::JsonSchema)]
+                    #[serde(remote = "Self")]
                     #[schemars(rename = "FlashTransferRequest")]
                     pub struct Request {
                         #[serde(rename = "blocksequencecounter")]
+                        #[schemars(rename = "blockSequenceCounter")]
                         pub block_sequence_counter: u8,
+                        #[schemars(rename = "blockSize")]
                         pub blocksize: usize,
                         pub offset: u64,
                         pub length: u64,
                         pub id: String,
+                        /// Functional class used to resolve the `TransferData` service.
+                        /// Falls back to the configured default when absent.
+                        #[serde(rename = "flashclass")]
+                        #[schemars(rename = "flashClass")]
+                        pub flash_class: Option<String>,
                     }
+
+                    case_insensitive_deserialize!(Request);
 
                     #[derive(Debug, Serialize, schemars::JsonSchema)]
                     #[schemars(rename = "FlashTransferResponse")]
@@ -359,12 +455,23 @@ pub mod x {
 
                     use crate::error::DataError;
 
+                    /// Request body of the `RequestDownload` service. Top-level field names are
+                    /// matched case-insensitively, the parameter names are passed on unchanged.
                     #[derive(Deserialize, schemars::JsonSchema)]
+                    #[serde(remote = "Self")]
                     #[schemars(rename = "RequestDownloadRequest")]
                     pub struct Request {
                         #[serde(rename = "requestdownload")]
+                        #[schemars(rename = "requestDownload")]
                         pub parameters: HashMap<String, serde_json::Value>,
+                        /// Functional class used to resolve the `RequestDownload` service.
+                        /// Falls back to the configured default when absent.
+                        #[serde(rename = "flashclass")]
+                        #[schemars(rename = "flashClass")]
+                        pub flash_class: Option<String>,
                     }
+
+                    case_insensitive_deserialize!(Request);
                     #[derive(Serialize, schemars::JsonSchema)]
                     #[schemars(rename = "RequestDownloadResponse")]
                     pub struct Response<T> {
@@ -661,5 +768,95 @@ mod tests {
         assert!(query_with_schema.include_extended_data);
         assert!(!query_with_schema.include_snapshot_data);
         assert!(query_with_schema.include_schema);
+    }
+
+    mod flash_requests {
+        use crate::components::ecu::x::sovd2uds::download::{
+            flash_transfer, request_download, transfer_exit,
+        };
+
+        #[test]
+        fn flash_transfer_fields_are_case_insensitive() {
+            let request: flash_transfer::post::Request = serde_json::from_str(
+                r#"{"BlockSequenceCounter":1,"BLOCKSIZE":128,"Offset":0,"length":256,
+                    "ID":"file","FLASHCLASS":"flash_download_upload_bootloader"}"#,
+            )
+            .expect("Request should deserialize");
+            assert_eq!(request.block_sequence_counter, 1);
+            assert_eq!(request.blocksize, 128);
+            assert_eq!(request.length, 256);
+            assert_eq!(request.id, "file");
+            assert_eq!(
+                request.flash_class.as_deref(),
+                Some("flash_download_upload_bootloader")
+            );
+        }
+
+        #[test]
+        fn flash_transfer_without_flash_class() {
+            let request: flash_transfer::post::Request = serde_json::from_str(
+                r#"{"blocksequencecounter":1,"blocksize":128,"offset":0,"length":256,"id":"f"}"#,
+            )
+            .expect("Request should deserialize");
+            assert!(request.flash_class.is_none());
+        }
+
+        #[test]
+        fn flash_transfer_missing_field_is_rejected() {
+            let result: Result<flash_transfer::post::Request, _> =
+                serde_json::from_str(r#"{"blocksize":128,"offset":0,"length":256,"id":"f"}"#);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn duplicate_fields_differing_in_case_are_rejected() {
+            let result: Result<transfer_exit::put::Request, _> =
+                serde_json::from_str(r#"{"flashClass":"a","FlashClass":"b"}"#);
+            let error = result.expect_err("Duplicate fields should be rejected");
+            assert!(
+                error.to_string().contains("case-insensitively"),
+                "unexpected error: {error}"
+            );
+        }
+
+        #[test]
+        fn invalid_field_type_error_names_the_field() {
+            let result: Result<flash_transfer::post::Request, _> = serde_json::from_str(
+                r#"{"blocksequencecounter":1,"BlockSize":"x","offset":0,"length":256,"id":"f"}"#,
+            );
+            let error = result.expect_err("Invalid field type should be rejected");
+            assert!(
+                error.to_string().contains("Invalid field `blocksize`"),
+                "unexpected error: {error}"
+            );
+        }
+
+        #[test]
+        fn missing_field_error_is_not_prefixed() {
+            let result: Result<flash_transfer::post::Request, _> =
+                serde_json::from_str(r#"{"blocksize":128,"offset":0,"length":256,"id":"f"}"#);
+            let error = result.expect_err("Missing field should be rejected");
+            let message = error.to_string();
+            assert!(
+                message.contains("missing field") && !message.contains("Invalid field"),
+                "unexpected error: {message}"
+            );
+        }
+
+        #[test]
+        fn request_download_keeps_parameter_names() {
+            let request: request_download::put::Request =
+                serde_json::from_str(r#"{"RequestDownload":{"MemoryAddress":1},"flashclass":"X"}"#)
+                    .expect("Request should deserialize");
+            assert!(request.parameters.contains_key("MemoryAddress"));
+            assert_eq!(request.flash_class.as_deref(), Some("X"));
+        }
+
+        #[test]
+        fn transfer_exit_accepts_empty_object() {
+            let request: transfer_exit::put::Request =
+                serde_json::from_str("{}").expect("Request should deserialize");
+            assert!(request.flash_class.is_none());
+        }
     }
 }
