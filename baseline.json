@@ -3036,15 +3036,6 @@
       "crate": "cda-plugin-communication-management"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/variant.rs",
-      "function": "UdsManager::mark_group_unreachable",
-      "line": 471,
-      "cyclomatic": 6.0,
-      "coverage": 78.57142857142857,
-      "crap": 6.354227405247814,
-      "crate": "cda-comm-uds"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "get_payload_data",
       "line": 1105,
@@ -3102,6 +3093,15 @@
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/variant.rs",
       "function": "UdsManager::uds_ecu_variant_detection_concluded",
       "line": 184,
+      "cyclomatic": 6.0,
+      "coverage": 82.14285714285714,
+      "crap": 6.204992711370263,
+      "crate": "cda-comm-uds"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/variant.rs",
+      "function": "UdsManager::mark_group_unreachable",
+      "line": 471,
       "cyclomatic": 6.0,
       "coverage": 82.14285714285714,
       "crap": 6.204992711370263,
