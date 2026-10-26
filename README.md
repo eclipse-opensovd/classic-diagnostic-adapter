@@ -233,6 +233,61 @@ make doctor
 cargo build --release
 ```
 
+### Bazel
+
+Install [Bazelisk](https://github.com/bazelbuild/bazelisk), which uses the Bazel
+version pinned in `.bazelversion`. Python 3.11 or newer is also required for the
+mbedTLS revision consistency check.
+
+Run the same Bazel checks as CI from the repository root:
+
+```shell
+python3 bazel/check_mbedtls_revision.py
+bazel build //:cda_mbedtls
+bazel build //:opensovd-cda
+```
+
+Applications embedding CDA should depend on its stable root targets rather
+than package-internal targets. The public API includes `//:cda_lib`,
+`//:interfaces`, all `//:plugin_*` targets, `//:vendor_override_macros`, and
+the supporting `//:core`, `//:database`, `//:sovd`, and `//:storage` targets.
+The `//:dep_*` targets expose the exact third-party Rust crates used by public
+plugin signatures and generated vendor-override code.
+
+`bazel/vendor-consumer-test` is a separate Bzlmod workspace that builds a
+custom CDA main with custom security, communication, runtime-update plugins,
+custom routes, and a vendor override. It validates the supported external
+consumption contract without relying on this repository's `.bazelrc` or
+package visibility.
+
+Consuming workspaces that enable Bazel stamping must configure their root
+workspace to provide `STABLE_BUILD_DATE` and `STABLE_GIT_COMMIT_HASH`. CDA's
+`.bazelrc` and workspace-status command do not propagate through Bzlmod
+dependencies. For example, the consumer's `.bazelrc` can contain:
+
+```text
+build --stamp
+build --workspace_status_command=./path/to/workspace_status
+```
+
+The configured command must print both values in Bazel workspace-status
+format:
+
+```text
+STABLE_BUILD_DATE 2026-10-12T10:30:00Z
+STABLE_GIT_COMMIT_HASH abc1234
+```
+
+See `bazel/workspace_status.py` for the implementation used by this repository.
+Consumers that do not enable stamping do not need to provide these values.
+
+Until `mbedtls-rs` is published in a neutral Bazel registry, consuming modules
+must provide the same `git_override` revision used in this repository. Bzlmod
+overrides are intentionally controlled by the root module and do not propagate
+from dependencies. See `bazel/vendor-consumer-test/MODULE.bazel` for a complete
+example. The mbedTLS target receives its Rust dependencies from CDA's crate
+universe, so mbedTLS does not expose a second crate universe to consumers.
+
 ### Windows
 
 Prerequisite:
