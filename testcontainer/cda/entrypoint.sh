@@ -11,11 +11,25 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+# Environment:
+#   CDA_ENTRYPOINT_HOOK_DIR Directory with additional scripts executed before
+#                          the CDA starts (default: /app/entrypoint.d). Every
+#                          regular file in it is run in lexical order with sh.
+#                          A missing or empty directory is ignored.
 
-DOIP_TESTER_IP=$(ip -4 a show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+DOIP_TESTER_IP=$(ip -4 a show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
+HOOK_DIR="${CDA_ENTRYPOINT_HOOK_DIR:-/app/entrypoint.d}"
 
 echo "Using arguments: $*"
 echo "Using DoIpTesterIp: $DOIP_TESTER_IP"
+
+if [ -d "$HOOK_DIR" ]; then
+    for hook in "$HOOK_DIR"/*; do
+        [ -f "$hook" ] || continue
+        echo "Running entrypoint hook: $hook"
+        sh "$hook"
+    done
+fi
 
 find "." -maxdepth 1 -type f -print0 | xargs -0 sha1sum
 
