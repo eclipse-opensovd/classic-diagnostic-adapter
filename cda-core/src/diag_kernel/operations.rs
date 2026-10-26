@@ -311,12 +311,21 @@ fn decode_numeric_val_from_str(
             let lowercase = value.to_lowercase();
             if lowercase.starts_with("0x") {
                 let decoded = decode_hex_with_optional_prefix(value)?;
-                let decoded = if decoded.len() < size_of::<u32>() {
-                    pad_msb_to_len(&decoded, size_of::<u32>())
-                } else {
-                    decoded
-                };
-                let u32_val = u32::from_be_bytes(decoded.try_into().expect("padded to u32 length"));
+                // Leading zero bytes do not change the value, strip them before
+                // checking that the value fits into an u32.
+                let significant = decoded
+                    .iter()
+                    .position(|&b| b != 0)
+                    .and_then(|start| decoded.get(start..))
+                    .unwrap_or_default();
+                let bytes: [u8; size_of::<u32>()] = pad_msb_to_len(significant, size_of::<u32>())
+                    .try_into()
+                    .map_err(|_| {
+                        DiagServiceError::ParameterConversionError(format!(
+                            "Input value {value} is too large for UInt32"
+                        ))
+                    })?;
+                let u32_val = u32::from_be_bytes(bytes);
                 validate_bit_len_unsigned(u32_val, diag_type.bit_len().unwrap_or(32))?;
                 Ok(u32_val.to_be_bytes().to_vec())
             } else if lowercase.starts_with("0o") {
@@ -898,7 +907,11 @@ fn process_physical_type_value(
                 let val = i32::from_be_bytes(
                     pad_msb_to_len(&data, size_of::<i32>())
                         .try_into()
-                        .expect("input bytes padded to i32 size"),
+                        .map_err(|_| {
+                            DiagServiceError::ParameterConversionError(format!(
+                                "Input value {value} is too large for i32"
+                            ))
+                        })?,
                 );
                 to_numeric_base_type(val, base_type)
             }
@@ -906,7 +919,11 @@ fn process_physical_type_value(
                 let val = u32::from_be_bytes(
                     pad_msb_to_len(&data, size_of::<u32>())
                         .try_into()
-                        .expect("input bytes padded to u32 size"),
+                        .map_err(|_| {
+                            DiagServiceError::ParameterConversionError(format!(
+                                "Input value {value} is too large for u32"
+                            ))
+                        })?,
                 );
                 to_numeric_base_type(val, base_type)
             }
@@ -914,7 +931,11 @@ fn process_physical_type_value(
                 let val = f32::from_be_bytes(
                     pad_msb_to_len(&data, size_of::<f32>())
                         .try_into()
-                        .expect("input bytes padded to f32 size"),
+                        .map_err(|_| {
+                            DiagServiceError::ParameterConversionError(format!(
+                                "Input value {value} is too large for f32"
+                            ))
+                        })?,
                 );
                 to_numeric_base_type(val, base_type)
             }
@@ -922,7 +943,11 @@ fn process_physical_type_value(
                 let val = f64::from_be_bytes(
                     pad_msb_to_len(&data, size_of::<f64>())
                         .try_into()
-                        .expect("input bytes padded to f64 size"),
+                        .map_err(|_| {
+                            DiagServiceError::ParameterConversionError(format!(
+                                "Input value {value} is too large for f64"
+                            ))
+                        })?,
                 );
                 to_numeric_base_type(val, base_type)
             }
@@ -1642,6 +1667,24 @@ mod tests {
         let value = "101010";
         let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
         assert_eq!(result, 101_010u32.to_be_bytes().to_vec());
+
+        // over-length hex value must be rejected, not panic
+        let value = "0x0102030405";
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type);
+        assert!(matches!(
+            result,
+            Err(super::DiagServiceError::ParameterConversionError(_))
+        ));
+
+        // leading zero bytes do not count towards the length
+        let value = "0x00000000FFFFFFFF";
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
+        assert_eq!(result, u32::MAX.to_be_bytes().to_vec());
+
+        // all-zero over-length value
+        let value = "0x0000000000";
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
+        assert_eq!(result, 0u32.to_be_bytes().to_vec());
     }
 
     #[test]
