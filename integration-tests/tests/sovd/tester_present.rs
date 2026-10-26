@@ -135,7 +135,7 @@ async fn tester_present_sent_after_programming_session_switch() -> Result<(), Te
     send_cda_request(
         &runtime.config,
         ecu_endpoint,
-        StatusCode::CREATED,
+        StatusCode::OK,
         Method::PUT,
         None,
         Some(&auth),
@@ -178,7 +178,7 @@ async fn tester_present_sent_after_programming_session_switch() -> Result<(), Te
     let _ = send_cda_request(
         &runtime.config,
         ecu_endpoint,
-        StatusCode::CREATED,
+        StatusCode::OK,
         Method::PUT,
         None,
         Some(&auth),

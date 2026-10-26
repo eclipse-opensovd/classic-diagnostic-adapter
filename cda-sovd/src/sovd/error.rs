@@ -49,6 +49,8 @@ pub enum ApiError {
     NotFound(Option<String>),
     #[error("Internal Server Error: {}", .0.as_ref().map(|m| format!(": {m}")).unwrap_or_default())]
     InternalServerError(Option<String>),
+    #[error("SOVD server misconfigured: {0}")]
+    SovdServerMisconfigured(String),
     #[error("Conflict: {0}")]
     Conflict(String),
     #[error("Required lock is missing: {0}")]
@@ -102,6 +104,7 @@ impl ApiError {
     pub fn error_and_vendor_code(&self) -> (ErrorCode, Option<VendorErrorCode>) {
         match &self {
             ApiError::NotResponding(_) => (ErrorCode::NotResponding, None),
+            ApiError::SovdServerMisconfigured(_) => (ErrorCode::SovdServerMisconfigured, None),
             ApiError::NotFound(_) => (ErrorCode::VendorSpecific, Some(VendorErrorCode::NotFound)),
             ApiError::BadRequest(_) => (
                 ErrorCode::InvalidResponseContent,
@@ -147,6 +150,9 @@ impl From<DiagServiceError> for ApiError {
             DiagServiceError::EcuOffline(_)
             | DiagServiceError::Timeout
             | DiagServiceError::NoResponse(_) => ApiError::NotResponding(value.to_string()),
+            DiagServiceError::InvalidConfiguration(message) => {
+                ApiError::SovdServerMisconfigured(message)
+            }
             DiagServiceError::InvalidDatabase(_)
             | DiagServiceError::VariantDetectionError(_)
             | DiagServiceError::ResourceError(_)
@@ -155,7 +161,6 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::InvalidAddress(_)
             | DiagServiceError::UnexpectedResponse(_)
             | DiagServiceError::DataError(_)
-            | DiagServiceError::InvalidConfiguration(_)
             | DiagServiceError::InvalidSecurityPlugin => {
                 ApiError::InternalServerError(Some(value.to_string()))
             }
@@ -291,6 +296,10 @@ impl OperationOutput for ErrorWrapper {
 }
 
 impl IntoResponse for ErrorWrapper {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keeping the exhaustive HTTP error mapping together makes it easier to audit"
+    )]
     fn into_response(self) -> Response {
         let schema = error_response_schema(self.include_schema);
         let (status, message, error_code, vendor_code, parameters) = match self.error {
@@ -326,6 +335,13 @@ impl IntoResponse for ErrorWrapper {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 message.unwrap_or_else(|| "Internal Server Error".into()),
                 ErrorCode::SovdServerFailure,
+                None,
+                None,
+            ),
+            ApiError::SovdServerMisconfigured(message) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                message,
+                ErrorCode::SovdServerMisconfigured,
                 None,
                 None,
             ),
@@ -672,6 +688,24 @@ mod tests {
             axum_response_into(response).await.expect("Valid body");
         assert_eq!(body.error_code, ErrorCode::VendorSpecific);
         assert_eq!(body.vendor_code, Some(VendorErrorCode::LockRequired));
+    }
+
+    #[tokio::test]
+    async fn invalid_configuration_uses_server_misconfigured_error_code() {
+        let response = ErrorWrapper {
+            error: DiagServiceError::InvalidConfiguration(
+                "No variant detection services are configured".to_owned(),
+            )
+            .into(),
+            include_schema: false,
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: sovd_interfaces::error::ApiErrorResponse<VendorErrorCode> =
+            axum_response_into(response).await.expect("Valid body");
+        assert_eq!(body.error_code, ErrorCode::SovdServerMisconfigured);
+        assert_eq!(body.vendor_code, None);
     }
 
     #[test]
