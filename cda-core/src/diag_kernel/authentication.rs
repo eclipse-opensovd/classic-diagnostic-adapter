@@ -51,7 +51,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
     ) -> Result<Option<u64>, DiagServiceError> {
         let service = self.find_authentication_service(sub_function)?;
 
-        let Some((param, offset)) = service
+        let Some((param, byte_pos, offset)) = service
             .pos_responses()
             .into_iter()
             .flatten()
@@ -61,18 +61,18 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 // The raw response starts at the first DATA parameter, see
                 // `raw_payload_offset`.
                 let offset = self.raw_payload_offset(&params);
-                params
+                effective_byte_positions(&params)
                     .into_iter()
-                    .filter(|p| {
-                        p.has_byte_position()
-                            && p.byte_position() >= FIRST_DATA_BYTE
-                            && p.byte_position() >= offset
+                    .filter_map(|(p, pos)| pos.map(|pos| (p, pos)))
+                    .filter(|(p, pos)| {
+                        *pos >= FIRST_DATA_BYTE
+                            && *pos >= offset
                             && p.specific_data_as_value().is_some()
                     })
-                    .min_by_key(datatypes::Parameter::byte_position)
-                    .map(|p| (p, offset))
+                    .min_by_key(|(_, pos)| *pos)
+                    .map(|(p, pos)| (p, pos, offset))
             })
-            .min_by_key(|(p, _)| p.byte_position())
+            .min_by_key(|(_, pos, _)| *pos)
         else {
             return Ok(None);
         };
@@ -91,7 +91,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let coded_type = dop.diag_coded_type()?;
         let (bytes, _) = coded_type.decode(
             raw_response,
-            param.byte_position().saturating_sub(offset) as usize,
+            byte_pos.saturating_sub(offset) as usize,
             param.bit_position() as usize,
         )?;
 
@@ -101,9 +101,59 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 param.short_name().unwrap_or_default()
             )));
         }
+        // `decode` normalizes numeric types to most-significant byte first (it
+        // reverses LOW-HIGH). Shift each byte in from the right to build the value.
         Ok(Some(
             bytes.iter().fold(0u64, |acc, b| (acc << 8) | u64::from(*b)),
         ))
+    }
+}
+
+/// Resolves the byte position of each param in database order. A param
+/// without BYTE-POSITION follows its predecessor (ISO 22901-1 §7.4.8); its
+/// position is only known if all preceding params up to the last positioned
+/// one have a static length, otherwise it is `None`.
+fn effective_byte_positions<'a>(
+    params: &[datatypes::Parameter<'a>],
+) -> Vec<(datatypes::Parameter<'a>, Option<u32>)> {
+    let mut next = Some(0u32);
+    params
+        .iter()
+        .map(|p| {
+            let pos = if p.has_byte_position() {
+                Some(p.byte_position())
+            } else {
+                next
+            };
+            next = pos.and_then(|pos| static_byte_length(p).and_then(|len| pos.checked_add(len)));
+            (p.clone(), pos)
+        })
+        .collect()
+}
+
+/// Number of bytes a CODED-CONST or VALUE param with a standard length
+/// occupies, `None` for variable or unsupported lengths.
+fn static_byte_length(param: &datatypes::Parameter) -> Option<u32> {
+    let coded_type: datatypes::DiagCodedType =
+        if let Some(cc) = param.specific_data_as_coded_const() {
+            cc.diag_coded_type()?.try_into().ok()?
+        } else {
+            param
+                .specific_data_as_value()
+                .and_then(|v| v.dop())
+                .and_then(|dop| dop.specific_data_as_normal_dop())
+                .map(datatypes::NormalDop)?
+                .diag_coded_type()
+                .ok()?
+        };
+    match coded_type.type_() {
+        datatypes::DiagCodedTypeVariant::StandardLength(slt) => Some(
+            param
+                .bit_position()
+                .checked_add(slt.bit_length)?
+                .div_ceil(8),
+        ),
+        _ => None,
     }
 }
 
@@ -128,13 +178,16 @@ mod tests {
     const VERIFY_NAME: &str = "Authentication_VerifyPOWN_Bidirectional";
     const DEAUTH_NAME: &str = "Authentication_DeAuthenticate";
     const POWN_NAME: &str = "Authentication_ProofOfOwnership";
+    const CONFIG_NAME: &str = "Authentication_Config";
 
-    /// Builds an ECU with two Authentication services whose short names do not
+    /// Builds an ECU with Authentication services whose short names do not
     /// follow any convention:
     /// * sub-function 0x07, positive response `69 07 <returnParameter> <proofOfOwnershipServer>`
     /// * sub-function 0x00, positive response `69 00` without return parameter
     /// * sub-function 0x03, positive response `69 03 <returnParameter> <sessionKeyInfo>`
     ///   with DATA semantic, so the raw response starts at the return parameter
+    /// * sub-function 0x08, positive response `69 08 <returnParameter>`, the
+    ///   return parameter has no BYTE-POSITION
     fn ecu_manager() -> EcuManager<DefaultSecurityPluginData> {
         let default_protocol = Protocol::default();
         let mut b = EcuDataBuilder::new();
@@ -154,6 +207,7 @@ mod tests {
             (VERIFY_NAME, 7u8, true),
             (DEAUTH_NAME, 0, false),
             (POWN_NAME, 3, true),
+            (CONFIG_NAME, 8, true),
         ] {
             let req_sid = create_sid_param!(b, "sid", sid);
             let req_sf = b.create_coded_const_param(
@@ -191,6 +245,11 @@ mod tests {
                     proof_dop,
                     3,
                 ));
+            } else if sub_function == 8 {
+                // Without BYTE-POSITION, follows the sub-function at byte 2.
+                params.push(
+                    b.create_value_param_no_byte_pos("authenticationReturnParameter", return_dop),
+                );
             } else if with_return {
                 // Declared out of order to verify the lowest byte position is used.
                 params.push(b.create_value_param("proofOfOwnershipServer", proof_dop, 3, 0));
@@ -260,6 +319,18 @@ mod tests {
             .authentication_return_value(
                 AuthenticationSubFunction::VerifyProofOfOwnershipBidirectional,
                 &[0x69, 0x07, 0x12, 0xAB, 0xCD],
+            )
+            .unwrap();
+        assert_eq!(value, Some(0x12));
+    }
+
+    #[test]
+    fn return_value_without_byte_position_follows_predecessor() {
+        let ecu = ecu_manager();
+        let value = ecu
+            .authentication_return_value(
+                AuthenticationSubFunction::AuthenticationConfiguration,
+                &[0x69, 0x08, 0x12],
             )
             .unwrap();
         assert_eq!(value, Some(0x12));
