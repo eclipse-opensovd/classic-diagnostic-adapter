@@ -11,7 +11,7 @@
 
 
 @startuml
-title Authentication -- SID 29 -- deAuthenticate on lock release / expiry, mode_expiration, ECU cleanup
+title Authentication - SID 29 - deAuthenticate on lock release / expiry, mode_expiration, ECU cleanup
 
 participant "Lock Manager /\nECU Cleanup" as TRIGGER
 participant "Diagnostic\nKernel" as DIAG

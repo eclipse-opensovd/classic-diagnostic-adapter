@@ -15,6 +15,8 @@
 
 use std::{str::FromStr, time::SystemTime};
 
+use strum_macros::IntoStaticStr;
+
 use crate::DiagServiceError;
 
 /// `authenticationReturnParameter` value `OwnershipVerified, AuthenticationComplete`
@@ -25,7 +27,8 @@ pub const RETURN_OWNERSHIP_VERIFIED_AUTHENTICATION_COMPLETE: u8 = 0x12;
 pub const RETURN_CERTIFICATE_VERIFIED: u8 = 0x13;
 
 /// Sub-functions of the UDS service Authentication (ISO 14229-1 Table 74).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoStaticStr)]
+#[strum(serialize_all = "camelCase")]
 pub enum AuthenticationSubFunction {
     DeAuthenticate,
     VerifyCertificateUnidirectional,
@@ -71,17 +74,7 @@ impl AuthenticationSubFunction {
     /// The name used in the SOVD API, as defined by ISO 14229-1.
     #[must_use]
     pub fn name(self) -> &'static str {
-        match self {
-            Self::DeAuthenticate => "deAuthenticate",
-            Self::VerifyCertificateUnidirectional => "verifyCertificateUnidirectional",
-            Self::VerifyCertificateBidirectional => "verifyCertificateBidirectional",
-            Self::ProofOfOwnership => "proofOfOwnership",
-            Self::TransmitCertificate => "transmitCertificate",
-            Self::RequestChallengeForAuthentication => "requestChallengeForAuthentication",
-            Self::VerifyProofOfOwnershipUnidirectional => "verifyProofOfOwnershipUnidirectional",
-            Self::VerifyProofOfOwnershipBidirectional => "verifyProofOfOwnershipBidirectional",
-            Self::AuthenticationConfiguration => "authenticationConfiguration",
-        }
+        self.into()
     }
 }
 
@@ -131,6 +124,7 @@ impl AuthenticationStatus {
 /// the ECU remains the authority.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AuthenticationState {
+    /// Whether the CDA considers the ECU authenticated.
     pub status: AuthenticationStatus,
     /// The last sub-function that resulted in a positive response.
     pub last_subfunction: Option<AuthenticationSubFunction>,
@@ -215,6 +209,25 @@ mod tests {
             assert_eq!(sf.id(), expected);
             assert_eq!(sf.name().parse::<AuthenticationSubFunction>().unwrap(), sf);
         }
+    }
+
+    #[test]
+    fn names_match_iso() {
+        let names = AuthenticationSubFunction::ALL.map(AuthenticationSubFunction::name);
+        assert_eq!(
+            names,
+            [
+                "deAuthenticate",
+                "verifyCertificateUnidirectional",
+                "verifyCertificateBidirectional",
+                "proofOfOwnership",
+                "transmitCertificate",
+                "requestChallengeForAuthentication",
+                "verifyProofOfOwnershipUnidirectional",
+                "verifyProofOfOwnershipBidirectional",
+                "authenticationConfiguration",
+            ]
+        );
     }
 
     #[test]

@@ -120,6 +120,7 @@ pub mod authentication {
         #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         #[schemars(rename = "AuthenticationModeResponse")]
         pub struct Response {
+            /// The mode identifier, always `authentication`
             pub id: String,
             /// The name of the mode
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -138,6 +139,7 @@ pub mod authentication {
                 skip_serializing_if = "Option::is_none"
             )]
             pub expires_at: Option<String>,
+            /// JSON schema of the response, only present if `include-schema` was requested
             #[schemars(skip)]
             #[serde(skip_serializing_if = "Option::is_none")]
             pub schema: Option<schemars::Schema>,
@@ -164,10 +166,13 @@ pub mod authentication {
         #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
         #[schemars(rename = "UpdateAuthenticationModesResponse")]
         pub struct Response {
+            /// The mode identifier, always `authentication`
             pub id: String,
+            /// The sub-function that was sent, as defined in ISO 14229-1 Table 74
             pub value: String,
             /// Decoded response parameters
             pub parameters: serde_json::Map<String, serde_json::Value>,
+            /// JSON schema of the response, only present if `include-schema` was requested
             #[schemars(skip)]
             #[serde(skip_serializing_if = "Option::is_none")]
             pub schema: Option<schemars::Schema>,
