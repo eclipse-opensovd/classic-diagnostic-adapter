@@ -156,12 +156,29 @@ impl AuthenticationState {
     }
 }
 
-/// Returns true if the given `authenticationReturnParameter` signals that the
-/// authentication was completed.
+/// Returns true if the sub-function and `authenticationReturnParameter` confirm
+/// that the ECU authenticated the client.
 #[must_use]
-pub fn return_value_completes_authentication(value: u64) -> bool {
-    value == u64::from(RETURN_OWNERSHIP_VERIFIED_AUTHENTICATION_COMPLETE)
-        || value == u64::from(RETURN_CERTIFICATE_VERIFIED)
+pub fn return_value_completes_authentication(
+    sub_function: AuthenticationSubFunction,
+    value: u64,
+) -> bool {
+    match sub_function {
+        AuthenticationSubFunction::VerifyCertificateUnidirectional
+        | AuthenticationSubFunction::VerifyCertificateBidirectional => {
+            value == u64::from(RETURN_OWNERSHIP_VERIFIED_AUTHENTICATION_COMPLETE)
+                || value == u64::from(RETURN_CERTIFICATE_VERIFIED)
+        }
+        AuthenticationSubFunction::ProofOfOwnership
+        | AuthenticationSubFunction::VerifyProofOfOwnershipUnidirectional
+        | AuthenticationSubFunction::VerifyProofOfOwnershipBidirectional => {
+            value == u64::from(RETURN_OWNERSHIP_VERIFIED_AUTHENTICATION_COMPLETE)
+        }
+        AuthenticationSubFunction::DeAuthenticate
+        | AuthenticationSubFunction::TransmitCertificate
+        | AuthenticationSubFunction::RequestChallengeForAuthentication
+        | AuthenticationSubFunction::AuthenticationConfiguration => false,
+    }
 }
 
 #[cfg(test)]
@@ -202,10 +219,20 @@ mod tests {
 
     #[test]
     fn completion_return_values() {
-        assert!(return_value_completes_authentication(0x12));
-        assert!(return_value_completes_authentication(0x13));
-        assert!(!return_value_completes_authentication(0x11));
-        assert!(!return_value_completes_authentication(0x00));
-        assert!(!return_value_completes_authentication(0x10));
+        let verify = AuthenticationSubFunction::VerifyCertificateBidirectional;
+        let proof = AuthenticationSubFunction::ProofOfOwnership;
+        assert!(return_value_completes_authentication(verify, 0x12));
+        assert!(return_value_completes_authentication(verify, 0x13));
+        assert!(return_value_completes_authentication(proof, 0x12));
+        assert!(!return_value_completes_authentication(proof, 0x13));
+        assert!(!return_value_completes_authentication(verify, 0x11));
+        assert!(!return_value_completes_authentication(verify, 0x00));
+        assert!(!return_value_completes_authentication(verify, 0x10));
+        for value in [0x12, 0x13] {
+            assert!(!return_value_completes_authentication(
+                AuthenticationSubFunction::TransmitCertificate,
+                value
+            ));
+        }
     }
 }
