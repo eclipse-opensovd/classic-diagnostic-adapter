@@ -1845,14 +1845,14 @@ pub(crate) fn create_ecu_manager_with_state_transitions(
 /// the bytes following the SID must also be compared, otherwise an arbitrary
 /// same-SID service could be selected, resulting in the wrong service being
 /// used for the access/precondition check.
-fn create_ecu_manager_with_two_same_sid_services(
+fn create_ecu_manager_with_two_same_sid_services<S: SecurityPlugin>(
     sid: u8,
     extra_params: &[(&str, u32, u32)],
     unrestricted_name: &str,
     unrestricted_values: &[u32],
     programming_only_name: &str,
     programming_only_values: &[u32],
-) -> crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData> {
+) -> crate::diag_kernel::ecumanager::EcuManager<S> {
     let mut db_builder = EcuDataBuilder::new();
     let protocol_name = Protocol::default().to_string();
     let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
@@ -1955,7 +1955,7 @@ fn create_ecu_manager_with_two_same_sid_services(
         ..Default::default()
     });
 
-    new_ecu_manager(db)
+    new_ecu_manager_with_plugin(db)
 }
 
 /// Build an ECU manager with two `WriteDataByIdentifier` (SID `0x2E`) services
@@ -2762,4 +2762,19 @@ pub(crate) fn create_ecu_manager_with_phys_const_text_table_service() -> (
     };
 
     (ecu_manager, dc, sid)
+}
+
+/// Build an ECU manager with a single `WriteDataByIdentifier` DID service and a
+/// caller-chosen security plugin type `S`. Used to exercise raw requests that
+/// have no matching MDD service.
+pub(crate) fn create_ecu_manager_with_write_did_services_and_plugin<S: SecurityPlugin>()
+-> crate::diag_kernel::ecumanager::EcuManager<S> {
+    create_ecu_manager_with_two_same_sid_services(
+        service_ids::WRITE_DATA_BY_IDENTIFIER,
+        &[("DID", 1, 16)],
+        "WriteDid_A",
+        &[0xF190],
+        "WriteDid_B",
+        &[0xF191],
+    )
 }

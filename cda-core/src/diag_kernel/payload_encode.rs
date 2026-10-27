@@ -25,6 +25,7 @@ use crate::diag_kernel::{
     operations::{self, json_value_to_uds_data},
     payload::str_to_json_value,
     payload_decode::mux_case_struct_from_selector_value,
+    security::check_raw_service_plugin,
 };
 
 impl<S: SecurityPlugin> PayloadEncoder for EcuManager<S> {
@@ -46,17 +47,25 @@ impl<S: SecurityPlugin> PayloadEncoder for EcuManager<S> {
         // not sufficient to identify the correct service - doing so would pick
         // an arbitrary service with that SID, causing the wrong service to be
         // used for the access check (and thus reported in any resulting error).
-        // If no service with a matching prefix can be found,
-        // DiagServiceError::NotFound is returned to the caller.
+        // If no service with a matching prefix can be found, the security plugin
+        // is asked via `SecurityApi::check_raw_service` whether the raw request
+        // may be sent anyway. By default (and for the void plugin) this yields
+        // DiagServiceError::NotFound. Requests allowed this way are passed through
+        // without state transitions; `validate_request_send` still runs before sending.
         let sid_matched_services = self.lookup_services_by_sid(raw_data_sid)?;
         let mapped_service = sid_matched_services
             .iter()
-            .find(|service| service.matches_request_prefix(&rawdata))
-            .ok_or_else(|| {
-                DiagServiceError::NotFound(format!(
-                    "No matching generic service found for request prefix: {rawdata:02X?}"
-                ))
-            })?;
+            .find(|service| service.matches_request_prefix(&rawdata));
+        let Some(mapped_service) = mapped_service else {
+            check_raw_service_plugin::<S>(security_plugin, &rawdata)?;
+            return Ok(ServicePayload {
+                data: rawdata,
+                new_session: None,
+                new_security: None,
+                source_address: self.tester_address,
+                target_address: self.logical_address,
+            });
+        };
         let mapped_dc = mapped_service.diag_comm().map(datatypes::DiagComm).ok_or(
             DiagServiceError::InvalidDatabase("Service is missing DiagComm".to_owned()),
         )?;
@@ -1036,7 +1045,7 @@ mod tests {
     use cda_interfaces::{
         PayloadDecoder, PayloadEncoder, diagservices::UdsPayloadData, service_ids, util::std_ext,
     };
-    use cda_plugin_security::DefaultSecurityPluginData;
+    use cda_plugin_security::{DefaultSecurityPluginData, mock::StrictRawTestSecurityPlugin};
     use serde_json::json;
 
     use super::*;
@@ -1053,6 +1062,7 @@ mod tests {
         create_ecu_manager_with_struct_service,
         create_ecu_manager_with_trailing_param_after_param_length_info_service,
         create_ecu_manager_with_value_default_text_table_service,
+        create_ecu_manager_with_write_did_services_and_plugin,
     };
 
     macro_rules! skip_sec_plugin {
@@ -1996,6 +2006,45 @@ mod tests {
             result.is_err(),
             "Expected an error when providing more items than max_number_of_items allows"
         );
+    }
+
+    /// Unmatched raw prefix with the default plugin keeps the `NotFound` behavior.
+    #[tokio::test]
+    async fn test_check_genericservice_unmatched_prefix_default_plugin_not_found() {
+        let ecu_manager =
+            create_ecu_manager_with_write_did_services_and_plugin::<StrictRawTestSecurityPlugin>();
+        let plugin: DynamicPlugin = Box::new(StrictRawTestSecurityPlugin);
+        let result = ecu_manager
+            .check_genericservice(&plugin, vec![0x2E, 0x01, 0xFE])
+            .await;
+        assert!(matches!(result, Err(DiagServiceError::NotFound(_))));
+    }
+
+    /// Unmatched raw prefix with the void plugin keeps the `NotFound` behavior.
+    #[tokio::test]
+    async fn test_check_genericservice_unmatched_prefix_void_plugin_not_found() {
+        let ecu_manager =
+            create_ecu_manager_with_write_did_services_and_plugin::<StrictRawTestSecurityPlugin>();
+        let result = ecu_manager
+            .check_genericservice(&skip_sec_plugin!(), vec![0x2E, 0x01, 0xFE])
+            .await;
+        assert!(matches!(result, Err(DiagServiceError::NotFound(_))));
+    }
+
+    /// A plugin allowing the raw request lets it pass without state transitions.
+    #[tokio::test]
+    async fn test_check_genericservice_unmatched_prefix_permissive_plugin_ok() {
+        use cda_plugin_security::mock::TestSecurityPlugin;
+        let ecu_manager =
+            create_ecu_manager_with_write_did_services_and_plugin::<TestSecurityPlugin>();
+        let plugin: DynamicPlugin = Box::new(TestSecurityPlugin);
+        let payload = ecu_manager
+            .check_genericservice(&plugin, vec![0x2E, 0x01, 0xFE])
+            .await
+            .expect("permissive plugin must allow raw request");
+        assert_eq!(payload.data, vec![0x2E, 0x01, 0xFE]);
+        assert!(payload.new_session.is_none());
+        assert!(payload.new_security.is_none());
     }
 
     /// Regression test for `check_genericservice` incorrectly matching services
