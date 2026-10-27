@@ -2113,6 +2113,11 @@ async fn runtimefiles_deleting_all_databases_is_not_undone_by_seeding() -> Resul
         return Ok(());
     }
     let mut test_env = TestEnv::builder().await?;
+    // The test deliberately restarts after applying an empty data set. Keep
+    // the CDA online then, so the following update can restore an MDD.
+    let mut config = test_env.default_config().clone();
+    config.database.exit_no_database_loaded = false;
+    test_env.replace_cda(&config).await?;
     let dir_ids = database_dir_ids();
 
     let lock_id = setup_with_lock(&test_env).await;
