@@ -67,6 +67,51 @@ async fn test_ecu_lock_cleanup_calls_reset() {
 }
 
 #[tokio::test]
+async fn lock_release_waits_for_in_flight_authentication_before_cleanup() {
+    let (mock_uds, ecu_name, locks, session_resets, security_resets) = setup_ecu_lock_test();
+    let lock_id = create_ecu_lock(&mock_uds, &locks, &ecu_name, Duration::from_secs(60)).await;
+    let Ok(authentication) = locks
+        .authentication_write_guard(&TestSecurityPlugin.claims(), &ecu_name, false)
+        .await
+    else {
+        panic!("ECU lock must admit authentication");
+    };
+
+    let locks_for_delete = Arc::clone(&locks);
+    let ecu_for_delete = ecu_name.clone();
+    let deletion = tokio::spawn(async move {
+        delete_handler(
+            &locks_for_delete,
+            LockScope::Ecu {
+                name: ecu_for_delete,
+            },
+            &lock_id,
+            &TestSecurityPlugin.claims(),
+            false,
+        )
+        .await
+    });
+
+    wait_until("lock removed before authentication completes", || async {
+        !locks.has_non_vehicle_locks().await
+    })
+    .await;
+    assert_eq!(session_resets.load(Ordering::SeqCst), 0);
+    assert_eq!(security_resets.load(Ordering::SeqCst), 0);
+
+    drop(authentication);
+    assert_eq!(deletion.await.unwrap().status(), StatusCode::NO_CONTENT);
+    assert_eq!(session_resets.load(Ordering::SeqCst), 1);
+    assert_eq!(security_resets.load(Ordering::SeqCst), 1);
+    assert!(
+        locks
+            .authentication_write_guard(&TestSecurityPlugin.claims(), &ecu_name, false)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn test_ecu_lock_cleanup_timeout_cleans() {
     let (mock_uds, ecu_name, locks, _, _) = setup_ecu_lock_test();
     create_ecu_lock(&mock_uds, &locks, &ecu_name, Duration::from_secs(1)).await;

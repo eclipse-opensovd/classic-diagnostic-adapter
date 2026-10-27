@@ -161,6 +161,7 @@ use lock_core::{LockCore, TransitionReservation};
 
 pub struct Locks {
     core: LockCore,
+    authentication_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     priority_policy: Arc<dyn LockPriorityPolicy>,
     lifecycle_sender: mpsc::Sender<LifecycleDelivery>,
     lifecycle_receiver: Mutex<Option<mpsc::Receiver<LifecycleDelivery>>>,
@@ -209,10 +210,53 @@ impl Locks {
                 cleanups: HashMap::new(),
                 generation: 0,
             }),
+            authentication_gates: Mutex::new(HashMap::new()),
             priority_policy: policy,
             lifecycle_sender,
             lifecycle_receiver: Mutex::new(Some(lifecycle_receiver)),
             config,
+        }
+    }
+
+    async fn authentication_gate(&self, ecu_name: &str) -> Arc<Mutex<()>> {
+        let mut gates = self.authentication_gates.lock().await;
+        Arc::clone(
+            gates
+                .entry(ecu_name.to_ascii_lowercase())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
+
+    /// Serializes authentication requests with lock cleanup for one ECU.
+    pub(crate) async fn authentication_guard(
+        &self,
+        ecu_name: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.authentication_gate(ecu_name).await.lock_owned().await
+    }
+
+    /// Admits a write only while the caller's lock is effective and no cleanup
+    /// for this ECU is pending. The transition reservation prevents a lock
+    /// release between validating ownership and acquiring the ECU guard.
+    pub(crate) async fn authentication_write_guard(
+        &self,
+        claims: &impl Claims,
+        ecu_name: &str,
+        include_schema: bool,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, ErrorWrapper> {
+        let gate = self.authentication_gate(ecu_name).await;
+        loop {
+            let reservation = self.core.reserve_transition().await;
+            if let Ok(guard) = Arc::clone(&gate).try_lock_owned() {
+                let validation = validate_ecu_write(claims, ecu_name, self, include_schema).await;
+                reservation.finish();
+                validation?;
+                return Ok(guard);
+            }
+            // Never wait for an in-flight PUT while holding the global lock
+            // transition gate: its release may be waiting to clean up this ECU.
+            reservation.finish();
+            drop(Arc::clone(&gate).lock_owned().await);
         }
     }
 
