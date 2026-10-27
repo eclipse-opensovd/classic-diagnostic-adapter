@@ -754,15 +754,40 @@ pub(crate) mod authentication {
         >,
     ) -> Response {
         let include_schema = query.include_schema;
-        require_ecu_access!(write, security_plugin, &ecu_name, &locks, include_schema);
-        execute_put(
-            &uds,
-            &ecu_name,
-            security_plugin as DynamicPlugin,
-            request_body,
-            include_schema,
-        )
-        .await
+        let authentication_guard = match locks
+            .authentication_write_guard(
+                &security_plugin.as_auth_plugin().claims(),
+                &ecu_name,
+                include_schema,
+            )
+            .await
+        {
+            Ok(guard) => guard,
+            Err(error) => return error.into_response(),
+        };
+        // Keep the UDS operation and its state update alive if the HTTP request
+        // is cancelled after transmission. Cleanup waits for this guard.
+        let task = cda_interfaces::spawn_named!("ecu-authentication", async move {
+            let _authentication_guard = authentication_guard;
+            execute_put(
+                &uds,
+                &ecu_name,
+                security_plugin as DynamicPlugin,
+                request_body,
+                include_schema,
+            )
+            .await
+        });
+        match task.await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::error!(%error, "Authentication task failed");
+                error_response(
+                    ApiError::InternalServerError(Some("Authentication task failed".to_owned())),
+                    include_schema,
+                )
+            }
+        }
     }
 
     /// Executes an authorized `PUT /modes/authentication`.
