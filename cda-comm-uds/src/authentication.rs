@@ -86,6 +86,28 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         ecu.set_authentication_state(state.clone());
         Ok((state, completes))
     }
+
+    /// Clears `expires_at` of the tracked state after a failed reset when no
+    /// reset task is pending anymore (e.g. the expiration itself failed), so
+    /// the API does not report an expiration that will never run. The state
+    /// stays authenticated, so the next lock release or cleanup retries.
+    async fn clear_expiration_without_reset_task(&self, ecu_name: &str) {
+        let tasks = self.authentication_reset_tasks.read().await;
+        if tasks.contains_key(ecu_name) {
+            return;
+        }
+        let Ok(ecu) = self.uds_ecu_db(ecu_name) else {
+            return;
+        };
+        let ecu = ecu.read().await;
+        let state = ecu.authentication_state();
+        if state.expires_at.is_some() {
+            ecu.set_authentication_state(AuthenticationState {
+                expires_at: None,
+                ..state
+            });
+        }
+    }
 }
 
 #[async_trait]
@@ -162,12 +184,10 @@ impl<S: EcuGateway, T: EcuManager> UdsAuthentication for UdsManager<S, T> {
         &self,
         ecu_name: &str,
     ) -> Result<ResetOutcome, DiagServiceError> {
-        // Cancel any existing expiration to prevent double resetting
-        self.cancel_reset(ecu_name, ResetType::Authentication).await;
-
         let ecu = self.uds_ecu_db(ecu_name)?;
         if !ecu.read().await.authentication_state().is_authenticated() {
             tracing::debug!(ecu_name, "Not authenticated, nothing to do");
+            self.cancel_reset(ecu_name, ResetType::Authentication).await;
             return Ok(ResetOutcome::Completed);
         }
 
@@ -178,13 +198,16 @@ impl<S: EcuGateway, T: EcuManager> UdsAuthentication for UdsManager<S, T> {
             return Ok(ResetOutcome::Deferred);
         };
 
+        // A running expiration is only cancelled once deAuthenticate succeeded
+        // (by `authenticate`, as the state is no longer authenticated), so a
+        // failed reset still has its expiration as retry.
         // On failure the tracked state stays authenticated: the ECU may still
         // be unprotected (NRC 0x5D, ISO 14229-1:2020 Table A.1), and keeping
         // the state makes the next lock release or cleanup retry deAuthenticate.
         // A reset is housekeeping and must never be blocked by service validation or the
         // pre-send authorization.
         let void_plugin: DynamicPlugin = Box::new(());
-        let response = self
+        let result = self
             .authenticate(
                 ecu_name,
                 AuthenticationSubFunction::DeAuthenticate,
@@ -192,16 +215,23 @@ impl<S: EcuGateway, T: EcuManager> UdsAuthentication for UdsManager<S, T> {
                 &void_plugin,
                 None,
             )
-            .await?;
+            .await
+            .and_then(|response| match response.response_type() {
+                DiagServiceResponseType::Positive => Ok(()),
+                DiagServiceResponseType::Negative => Err(DiagServiceError::UnexpectedResponse(
+                    Some("deAuthenticate negative response".to_owned()),
+                )),
+            });
 
-        match response.response_type() {
-            DiagServiceResponseType::Positive => {
+        match result {
+            Ok(()) => {
                 tracing::info!(ecu_name, "ECU deauthenticated");
                 Ok(ResetOutcome::Completed)
             }
-            DiagServiceResponseType::Negative => Err(DiagServiceError::UnexpectedResponse(Some(
-                "deAuthenticate negative response".to_owned(),
-            ))),
+            Err(e) => {
+                self.clear_expiration_without_reset_task(ecu_name).await;
+                Err(e)
+            }
         }
     }
 
@@ -573,6 +603,82 @@ mod tests {
         // The next cleanup tries again.
         let _ = manager.reset_ecu_authentication(ECU).await;
         assert_eq!(sent.load(Ordering::SeqCst), 2);
+    }
+
+    /// A failed cleanup keeps the expiration timer, so `expires_at` stays
+    /// valid and the expiration retries deAuthenticate.
+    #[tokio::test]
+    async fn failed_reset_keeps_running_expiration() {
+        let (manager, _) = manager_with_responses(vec![
+            vec![POSITIVE, 0x07, 0x12],
+            vec![service_ids::NEGATIVE_RESPONSE, 0x29, 0x5D],
+        ]);
+        manager
+            .authenticate(
+                ECU,
+                AuthenticationSubFunction::VerifyProofOfOwnershipBidirectional,
+                None,
+                &plugin(),
+                Some(Duration::from_secs(60)),
+            )
+            .await
+            .unwrap();
+        let before = state(&manager).await;
+        assert!(before.expires_at.is_some());
+
+        let result = manager.reset_ecu_authentication(ECU).await;
+
+        assert!(matches!(
+            result,
+            Err(DiagServiceError::UnexpectedResponse(_))
+        ));
+        assert_eq!(state(&manager).await, before);
+        assert!(
+            manager
+                .authentication_reset_tasks
+                .read()
+                .await
+                .contains_key(ECU)
+        );
+    }
+
+    /// Without a pending timer (e.g. the expiration itself failed), the
+    /// reported `expires_at` is cleared, the state stays authenticated.
+    #[tokio::test]
+    async fn failed_reset_without_timer_clears_expiration() {
+        let (manager, _) = manager(vec![service_ids::NEGATIVE_RESPONSE, 0x29, 0x5D]);
+        let expired = AuthenticationState {
+            expires_at: Some(std::time::SystemTime::now()),
+            ..authenticated()
+        };
+        set_state(&manager, expired).await;
+
+        let _ = manager.reset_ecu_authentication(ECU).await;
+
+        assert_eq!(state(&manager).await, authenticated());
+    }
+
+    /// A successful reset cancels a running expiration.
+    #[tokio::test]
+    async fn successful_reset_cancels_expiration() {
+        let (manager, _) =
+            manager_with_responses(vec![vec![POSITIVE, 0x07, 0x12], vec![POSITIVE, 0x00, 0x10]]);
+        manager
+            .authenticate(
+                ECU,
+                AuthenticationSubFunction::VerifyProofOfOwnershipBidirectional,
+                None,
+                &plugin(),
+                Some(Duration::from_secs(60)),
+            )
+            .await
+            .unwrap();
+
+        let outcome = manager.reset_ecu_authentication(ECU).await.unwrap();
+
+        assert_eq!(outcome, ResetOutcome::Completed);
+        assert!(manager.authentication_reset_tasks.read().await.is_empty());
+        assert!(state(&manager).await.expires_at.is_none());
     }
 
     #[tokio::test]
