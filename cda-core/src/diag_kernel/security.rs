@@ -141,6 +141,8 @@ impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
         sub_function: AuthenticationSubFunction,
         raw_response: &[u8],
     ) -> Result<Option<u64>, DiagServiceError> {
+        // The decoding is a SID 0x29 specific database lookup, it lives in
+        // `authentication.rs` together with the other Authentication lookups.
         self.decode_authentication_return_value(sub_function, raw_response)
     }
 }

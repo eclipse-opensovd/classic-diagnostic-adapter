@@ -11,7 +11,7 @@
 
 
 @startuml
-title Authentication -- SID 29 -- client-driven challenge-response (bidirectional)
+title Authentication - SID 29 - client-driven challenge-response (bidirectional)
 
 participant Client
 participant CDA
