@@ -47,7 +47,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         }
 
         let completes = match ecu.authentication_return_value(sub_function, raw_response) {
-            Ok(Some(value)) => return_value_completes_authentication(value),
+            Ok(Some(value)) => return_value_completes_authentication(sub_function, value),
             Ok(None) => {
                 tracing::warn!(
                     ecu_name,
@@ -380,6 +380,30 @@ mod tests {
             .await
             .unwrap();
         assert!(state(&manager).await.is_authenticated());
+    }
+
+    #[tokio::test]
+    async fn transmit_certificate_does_not_authenticate_or_start_expiration() {
+        let (manager, _) = manager(vec![POSITIVE, 0x04, 0x13]);
+        manager
+            .authenticate(
+                ECU,
+                AuthenticationSubFunction::TransmitCertificate,
+                None,
+                &plugin(),
+                Some(Duration::from_secs(60)),
+            )
+            .await
+            .unwrap();
+
+        let state = state(&manager).await;
+        assert_eq!(state.status, AuthenticationStatus::DeAuthenticated);
+        assert_eq!(
+            state.last_subfunction,
+            Some(AuthenticationSubFunction::TransmitCertificate)
+        );
+        assert!(state.expires_at.is_none());
+        assert!(manager.authentication_reset_tasks.read().await.is_empty());
     }
 
     #[tokio::test]

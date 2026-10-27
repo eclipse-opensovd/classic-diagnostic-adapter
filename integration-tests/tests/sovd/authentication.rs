@@ -438,18 +438,20 @@ async fn authentication_bidirectional_and_transmit_certificate() {
     assert_cda_state(
         &runtime.config,
         &auth,
-        AUTHENTICATED,
+        DE_AUTHENTICATED,
         Some("transmitCertificate"),
     )
     .await;
+    assert_sim_state(runtime, &Authentication::Unauthenticated).await;
 
-    // Releasing the lock deauthenticates the ECU.
+    // Certificate transmission did not authenticate the ECU, so cleanup has
+    // no authenticated state to reset.
     release_lock(runtime, &auth, &lock_id).await;
     assert_cda_state(
         &runtime.config,
         &auth,
         DE_AUTHENTICATED,
-        Some("deAuthenticate"),
+        Some("transmitCertificate"),
     )
     .await;
 }
