@@ -411,6 +411,8 @@ impl ServicePayload {
     /// - `InputOutputControlByIdentifier` (0x2F): 2-byte `dataIdentifier` echo (Table 401)
     /// - `RoutineControl` (0x31): 1-byte `routineControlType` (bits 6-0 of `SubFunction`,
     ///   suppress-positive-response bit masked out) + 2-byte `routineIdentifier` (Table 428)
+    /// - `Authentication` (0x29): 1-byte `authenticationTask` (bits 6-0 of `SubFunction`,
+    ///   suppress-positive-response bit masked out)
     ///
     /// Returns `true` if:
     /// - The service does not require echo validation (no echo bytes defined), or
@@ -442,10 +444,10 @@ impl ServicePayload {
             return false; // Response too short to contain expected echo bytes.
         };
 
-        // For RoutineControl, the subfunction byte (index 1 of the request) may have the
-        // suppress-positive-response bit (0x80) set; the response never includes this bit.
-        // We mask it out for comparison.
-        if sent_sid == service_ids::ROUTINE_CONTROL {
+        // For RoutineControl and Authentication, the subfunction byte (index 1 of the
+        // request) may have the suppress-positive-response bit (0x80) set; the response
+        // never includes this bit. We mask it out for comparison.
+        if sent_sid == service_ids::ROUTINE_CONTROL || sent_sid == service_ids::AUTHENTICATION {
             let request_subfn =
                 request_echo.first().copied().unwrap_or(0) & crate::DEFAULT_SUBFUNCTION_MASK;
             let response_subfn = response_echo.first().copied().unwrap_or(0);
@@ -475,6 +477,8 @@ impl ServicePayload {
             | service_ids::INPUT_OUTPUT_CONTROL_BY_IDENTIFIER => 2,
             // RoutineControl: 1-byte subfunction + 2-byte RoutineIdentifier
             service_ids::ROUTINE_CONTROL => 3,
+            // Authentication: 1-byte authenticationTask (sub-function, Table 75 ff.)
+            service_ids::AUTHENTICATION => 1,
             _ => 0,
         }
     }
@@ -1125,6 +1129,36 @@ mod tests {
             ServicePayload::echo_byte_count(service_ids::ROUTINE_CONTROL),
             3
         );
+    }
+
+    #[test]
+    fn echo_byte_count_authentication() {
+        assert_eq!(
+            ServicePayload::echo_byte_count(service_ids::AUTHENTICATION),
+            1
+        );
+    }
+
+    #[test]
+    fn authentication_matching_sub_function_returns_true() {
+        let request = vec![0x29, 0x07, 0x00];
+        let response = make_payload(vec![0x69, 0x07, 0x12]);
+        assert!(response.has_matching_echo_bytes(&request));
+    }
+
+    #[test]
+    fn authentication_mismatched_sub_function_returns_false() {
+        // deAuthenticate request answered with a verifyProofOfOwnershipBidirectional response
+        let request = vec![0x29, 0x00];
+        let response = make_payload(vec![0x69, 0x07, 0x12]);
+        assert!(!response.has_matching_echo_bytes(&request));
+    }
+
+    #[test]
+    fn authentication_suppress_bit_is_masked() {
+        let request = vec![0x29, 0x88];
+        let response = make_payload(vec![0x69, 0x08, 0x02]);
+        assert!(response.has_matching_echo_bytes(&request));
     }
 
     #[test]
