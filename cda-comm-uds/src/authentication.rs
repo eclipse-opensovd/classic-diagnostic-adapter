@@ -265,13 +265,26 @@ mod tests {
     /// Builds a manager whose gateway answers every request with `response`
     /// and counts the requests.
     fn manager(response: Vec<u8>) -> (UdsManager<TestGateway, TestEcuDb>, Arc<AtomicUsize>) {
+        manager_with_responses(vec![response])
+    }
+
+    /// Builds a manager whose gateway answers the n-th request with the n-th
+    /// entry of `responses` (the last one repeats) and counts the requests.
+    fn manager_with_responses(
+        responses: Vec<Vec<u8>>,
+    ) -> (UdsManager<TestGateway, TestEcuDb>, Arc<AtomicUsize>) {
         let sent = Arc::new(AtomicUsize::new(0));
         let sent_clone = Arc::clone(&sent);
         let gateway = TestGateway {
             send_fn: Arc::new(move |response_tx, _| {
-                sent_clone.fetch_add(1, Ordering::SeqCst);
+                let index = sent_clone.fetch_add(1, Ordering::SeqCst);
+                let data = responses
+                    .get(index)
+                    .or_else(|| responses.last())
+                    .cloned()
+                    .unwrap_or_default();
                 let msg = TransportResponse::UdsResponse(ServicePayload {
-                    data: response.clone(),
+                    data,
                     source_address: 0x0001,
                     target_address: 0x0E00,
                     new_session: None,
@@ -564,9 +577,8 @@ mod tests {
 
     #[tokio::test]
     async fn expiration_sends_deauthenticate() {
-        // The ECU answers every request with this, the return value 0x12 also
-        // marks the authentication as completed; deAuthenticate ignores it.
-        let (manager, sent) = manager(vec![POSITIVE, 0x07, 0x12]);
+        let (manager, sent) =
+            manager_with_responses(vec![vec![POSITIVE, 0x07, 0x12], vec![POSITIVE, 0x00, 0x10]]);
         manager
             .authenticate(
                 ECU,
