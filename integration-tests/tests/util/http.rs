@@ -302,18 +302,12 @@ async fn send_request_any_status(
     let body = if status == StatusCode::NO_CONTENT {
         None
     } else {
-        Some(
-            req_response
-                .text()
-                .await
-                .map_err(|_| TestingError::UnexpectedResponse {
-                    expected: status,
-                    actual: status,
-                    body: None,
-                    message: "Failed to get text from response".to_owned(),
-                    url: url.to_string(),
-                })?,
-        )
+        Some(req_response.text().await.map_err(|e| {
+            TestingError::ProcessFailed(format!(
+                "Failed to read response body from {url}: {}",
+                error_chain(&e)
+            ))
+        })?)
     };
 
     Ok(Response {
