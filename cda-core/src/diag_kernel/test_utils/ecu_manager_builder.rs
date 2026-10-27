@@ -2269,6 +2269,19 @@ pub(crate) fn create_ecu_manager_with_param_length_info_service() -> (
     cda_interfaces::DiagComm,
     u8,
 ) {
+    create_ecu_manager_with_param_length_info_service_ordered(true)
+}
+
+/// Like [`create_ecu_manager_with_param_length_info_service`]. With
+/// `key_first == false` the positioned LENGTH-KEY (byte 1) is declared after
+/// the variable field (byte 2) that references it (ISO 22901-1 §7.3.5.4).
+pub(crate) fn create_ecu_manager_with_param_length_info_service_ordered(
+    key_first: bool,
+) -> (
+    crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
+    cda_interfaces::DiagComm,
+    u8,
+) {
     const LEN_KEY: &str = "len_key";
     const VAR_DATA: &str = "var_data";
 
@@ -2294,7 +2307,12 @@ pub(crate) fn create_ecu_manager_with_param_length_info_service() -> (
         let sid_param = create_sid_param!(db_builder, sid);
         let len_key_param = db_builder.create_length_key_param(LEN_KEY, len_key_dop, 1, 0);
         let var_data_param = db_builder.create_value_param(VAR_DATA, var_data_dop, 2, 0);
-        db_builder.create_request(Some(vec![sid_param, len_key_param, var_data_param]), None)
+        let params = if key_first {
+            vec![sid_param, len_key_param, var_data_param]
+        } else {
+            vec![sid_param, var_data_param, len_key_param]
+        };
+        db_builder.create_request(Some(params), None)
     };
 
     let pos_response = {
@@ -2305,11 +2323,12 @@ pub(crate) fn create_ecu_manager_with_param_length_info_service() -> (
         );
         let len_key_param = db_builder.create_length_key_param(LEN_KEY, len_key_dop, 1, 0);
         let var_data_param = db_builder.create_value_param(VAR_DATA, var_data_dop, 2, 0);
-        db_builder.create_response(
-            ResponseType::Positive,
-            Some(vec![pos_sid_param, len_key_param, var_data_param]),
-            None,
-        )
+        let params = if key_first {
+            vec![pos_sid_param, len_key_param, var_data_param]
+        } else {
+            vec![pos_sid_param, var_data_param, len_key_param]
+        };
+        db_builder.create_response(ResponseType::Positive, Some(params), None)
     };
 
     let diag_service =
@@ -2318,6 +2337,67 @@ pub(crate) fn create_ecu_manager_with_param_length_info_service() -> (
     (
         new_ecu_manager(db),
         cda_interfaces::DiagComm::new(dc_name, DiagCommType::Configurations),
+        sid,
+    )
+}
+
+/// Service with a TABLE-KEY selecting the structure of a TABLE-STRUCT.
+///
+/// Positive response layout: byte 0 SID, byte 1 TABLE-STRUCT (row `row_a`
+/// with key `5`: one u8 `val`), byte 2 TABLE-KEY (u8). With
+/// `key_first == false` the positioned TABLE-KEY is declared after the
+/// TABLE-STRUCT referencing it (ISO 22901-1:2008 §7.3.5.4).
+pub(crate) fn create_ecu_manager_with_table_struct_service(
+    key_first: bool,
+) -> (
+    crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
+    cda_interfaces::DiagComm,
+    u8,
+) {
+    let mut db_builder = EcuDataBuilder::new();
+    let protocol_name = Protocol::default().to_string();
+    let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
+    let compu_identical = db_builder.create_compu_method(CompuCategory::Identical, None, None);
+    let u8_type = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
+    let u8_dop = db_builder.create_regular_normal_dop("u8_dop", u8_type, compu_identical);
+
+    let val_param = db_builder.create_value_param("val", u8_dop, 0, 0);
+    let structure = db_builder.create_structure(Some(vec![val_param]), Some(1), true);
+    let structure_dop = db_builder.create_structure_dop("row_a_struct", structure);
+
+    let sid = service_ids::READ_DATA_BY_IDENTIFIER;
+    let dc_name = "TestTableStructService";
+    let diag_comm = new_diag_comm!(db_builder, dc_name, protocol);
+    let request = {
+        let sid_param = create_sid_param!(db_builder, sid);
+        db_builder.create_request(Some(vec![sid_param]), None)
+    };
+    let pos_response = {
+        let pos_sid_param = create_sid_param!(
+            db_builder,
+            "pos_sid",
+            sid.saturating_add(UDS_ID_RESPONSE_BITMASK)
+        );
+        let key_param = db_builder.create_table_key_param(
+            "table_key",
+            u8_dop,
+            &[("row_a", "5", Some(structure_dop))],
+            2,
+        );
+        let struct_param = db_builder.create_table_struct_param("table_struct", key_param, 1);
+        let params = if key_first {
+            vec![pos_sid_param, key_param, struct_param]
+        } else {
+            vec![pos_sid_param, struct_param, key_param]
+        };
+        db_builder.create_response(ResponseType::Positive, Some(params), None)
+    };
+    let diag_service =
+        new_diag_service!(db_builder, diag_comm, request, vec![pos_response], vec![]);
+    let db = finish_db!(db_builder, protocol, vec![diag_service]);
+    (
+        new_ecu_manager(db),
+        cda_interfaces::DiagComm::new(dc_name, DiagCommType::Data),
         sid,
     )
 }

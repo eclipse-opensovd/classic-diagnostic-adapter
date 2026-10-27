@@ -1043,6 +1043,94 @@ impl<'a> EcuDataBuilder<'a> {
         })
     }
 
+    /// Creates a TABLE-KEY param at `byte_pos` referencing a TABLE whose key
+    /// is coded with `key_dop`. Each row is `(short_name, key, structure)`.
+    pub fn create_table_key_param(
+        &mut self,
+        name: &'a str,
+        key_dop: WIPOffset<dataformat::DOP<'a>>,
+        rows: &[(&str, &str, Option<WIPOffset<dataformat::DOP<'a>>>)],
+        byte_pos: u32,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|(row_name, key, structure)| {
+                let short_name = Some(self.fbb.create_string(row_name));
+                let key = Some(self.fbb.create_string(key));
+                dataformat::TableRow::create(
+                    &mut self.fbb,
+                    &dataformat::TableRowArgs {
+                        short_name,
+                        key,
+                        structure: *structure,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        let rows = Some(self.fbb.create_vector(&rows));
+        let table_name = Some(self.fbb.create_string(name));
+        let table = dataformat::TableDop::create(
+            &mut self.fbb,
+            &dataformat::TableDopArgs {
+                short_name: table_name,
+                key_dop: Some(key_dop),
+                rows,
+                ..Default::default()
+            },
+        );
+        let table_key = dataformat::TableKey::create(
+            &mut self.fbb,
+            &dataformat::TableKeyArgs {
+                table_key_reference_type: dataformat::TableKeyReference::TableDop,
+                table_key_reference: Some(
+                    dataformat::TableKeyReference::tag_as_table_dop(table).value_offset(),
+                ),
+            },
+        );
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::TABLE_KEY,
+            short_name: Some(name),
+            semantic: None,
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: Some(byte_pos),
+            bit_position: Some(0),
+            specific_data_type: dataformat::ParamSpecificData::TableKey,
+            specific_data: Some(
+                dataformat::ParamSpecificData::tag_as_table_key(table_key).value_offset(),
+            ),
+        })
+    }
+
+    /// Creates a TABLE-STRUCT param at `byte_pos` referencing `table_key`.
+    pub fn create_table_struct_param(
+        &mut self,
+        name: &'a str,
+        table_key: WIPOffset<dataformat::Param<'a>>,
+        byte_pos: u32,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let table_struct = dataformat::TableStruct::create(
+            &mut self.fbb,
+            &dataformat::TableStructArgs {
+                table_key: Some(table_key),
+            },
+        );
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::TABLE_STRUCT,
+            short_name: Some(name),
+            semantic: None,
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: Some(byte_pos),
+            bit_position: Some(0),
+            specific_data_type: dataformat::ParamSpecificData::TableStruct,
+            specific_data: Some(
+                dataformat::ParamSpecificData::tag_as_table_struct(table_struct).value_offset(),
+            ),
+        })
+    }
+
     pub fn create_structure(
         &mut self,
         params: Option<Vec<WIPOffset<dataformat::Param<'a>>>>,
