@@ -56,11 +56,26 @@ Config: `opensovd-cda.toml`, overridable with `CDA_`-prefixed env vars; file sel
 - Commits must carry a DCO sign-off (`git commit -s`, adds `Signed-off-by: Name <email>`).
   Do not add `Co-authored-by:` trailers (or any other AI attribution) to commit messages.
 - Do not commit, push or open PRs unless asked.
+- Real ECU MDD files provided by the user are confidential. Never include any data from them
+  (ECU/variant names, DIDs, service/parameter names, values, com params, ...) in commits,
+  commit messages, PR titles/descriptions, PR/issue comments, code, tests, fixtures or docs.
+  Describe related issues generically. Only the test MDDs under `testcontainer/` may be cited.
+- Before creating a PR (`gh pr create` or equivalent), always run the `cda-adversarial-reviewer`
+  subagent (Task tool, fresh session, no `task_id` reuse) on the full branch diff against the
+  base branch. Pass only the scope (base branch / PR number), not your own conclusions, so the
+  review stays unbiased. Relay its findings verbatim and wait for the user to decide (fix,
+  ignore, or proceed) before creating the PR. Skip only if the user explicitly says so.
+  If the review cannot run (error, timeout, missing permissions), tell the user and wait.
+  Never copy sections marked confidential from the report into PRs, commits or comments.
 
 ## Agents
 
 - `.opencode/agents/cda-issue-analyst.md` - root-cause analysis of issues, logs and failing tests.
 - `.opencode/agents/cda-mdd-inspector.md` - inspect and diff MDD databases.
+- `.opencode/agents/cda-adversarial-reviewer.md` - independent adversarial review in a clean
+  context (uses the `cda-adversarial-review` skill). No source edits; mandatory before PR
+  creation. Agent and skill files are loaded at session start: after changing them, restart
+  opencode before relying on a review that should use the new rules.
 - `.opencode/agents/cda-spec-expert.md` - UDS, DoIP and CAN/ISO-TP specification questions and
   CDA docs. Requests markdown spec text or excerpts from the user when needed.
 
@@ -70,8 +85,9 @@ agent files):
 | Agent | Model class | Examples | Temperature | Reason |
 | --- | --- | --- | --- | --- |
 | `cda-mdd-inspector` | lightweight / fast | Claude Haiku, GPT mini, Gemini Flash | 0.1 | Mostly MCP tool calls and factual reporting |
-| `cda-spec-expert` | strong reasoning | Claude Opus/Sonnet, GPT-5, Gemini Pro | 0.1 | Interprets normative text, must not hallucinate |
-| `cda-issue-analyst` | strong reasoning | Claude Opus/Sonnet, GPT-5, Gemini Pro | 0.2 | Root-cause analysis across crates and layers |
+| `cda-spec-expert` | strong reasoning | Claude Opus/Sonnet, GPT-6, Gemini Pro | 0.1 | Interprets normative text, must not hallucinate |
+| `cda-issue-analyst` | strong reasoning | Claude Opus/Sonnet, GPT-6, Gemini Pro | 0.2 | Root-cause analysis across crates and layers |
+| `cda-adversarial-reviewer` | strong reasoning | Claude Opus/Sonnet, GPT-6, Gemini Pro | 0.1 | Independent review; ideally a different model than the author |
 
 Without a configured model, a subagent uses the model of the agent that invoked it. Set a
 concrete model per user in `~/.config/opencode/opencode.json` (`opencode models` lists the
@@ -88,6 +104,8 @@ available IDs), e.g.:
 - `.opencode/skills/cda-diagnostic-protocol-spec` - UDS, DoIP and CAN/ISO-TP knowledge, doc sources
   and how to request specification text from the user.
 - `.opencode/skills/cda-issue-analysis` - structured analysis of bug reports and issues.
+- `.opencode/skills/cda-adversarial-review` - skeptical review of diffs, branches, PRs or
+  designs. Reports findings only by default; fixes them only when the user instructs to.
 - `.opencode/skills/cda-capture-analysis` - Wireshark capture analysis: UDS/DoIP/ISO-TP
   timeline and timings, conformance checks and comparison with MDD com params.
 - `.opencode/skills/cda-mdd-mcp-setup` - install and register the mdd-mcp server (`mdd-mcp_*` tools).

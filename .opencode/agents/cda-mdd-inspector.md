@@ -57,3 +57,9 @@ Report (final message, returned to the caller):
 - Node indices / paths used, so the caller can verify.
 - Direct answer to the question, and anything that looks inconsistent or suspicious.
 - If data was not found, say so explicitly; never invent database content.
+
+Confidentiality: MDD files outside `testcontainer/` are real ECU descriptions and confidential.
+Start the report with a "CONFIDENTIAL - do not use in commits, PRs, comments, code, tests or
+docs" note when such files were inspected, and add a generic, anonymized summary of the
+finding the caller may use in public text. Test MDDs tracked in git under `testcontainer/`
+are public and may be cited.

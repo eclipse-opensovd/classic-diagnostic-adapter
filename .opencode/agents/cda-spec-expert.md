@@ -34,7 +34,7 @@ SPDX-License-Identifier: Apache-2.0
 -->
 
 <!--
-Model guidance: strong reasoning model class (e.g. Claude Opus/Sonnet, GPT-5, Gemini Pro).
+Model guidance: strong reasoning model class (e.g. Claude Opus/Sonnet, GPT-6, Gemini Pro).
 Interprets normative text, compares it with docs and code and must not hallucinate. Set the
 concrete model per user in ~/.config/opencode/opencode.json under agent.cda-spec-expert.model.
 Without it, the model of the invoking agent is used.
