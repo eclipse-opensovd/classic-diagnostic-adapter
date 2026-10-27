@@ -29,7 +29,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, LazyLock, Mutex, MutexGuard, PoisonError, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -94,9 +94,8 @@ const BUILD_CONTEXT_PADDING_SIZE: usize = 4 * 1024 * 1024;
 
 /// The directory of [`CDA_COVERAGE_PROFILE_FILE`].
 const CDA_COVERAGE_DIR: &str = "/app/coverage";
-/// Where a coverage-instrumented CDA writes its profile. Every container runs
-/// the CDA once, so one fixed file per container suffices, and it can be copied
-/// out as a single file.
+/// Where a coverage-instrumented CDA writes its profile. A restarted container
+/// writes to this path again, so copy the previous run out before starting it.
 const CDA_COVERAGE_PROFILE_FILE: &str = "/app/coverage/cda.profraw";
 /// The CDA binary in its image, needed to decode the coverage profiles.
 const CDA_BINARY: &str = "/app/opensovd-cda";
@@ -729,10 +728,11 @@ pub(crate) fn session_network_prefix() -> String {
 }
 
 /// Copies the coverage profile of the stopped CDA container `cda` and, once
-/// per process, the CDA binary to [`coverage_output_dir`].
-pub(crate) async fn save_coverage(cda: Arc<ContainerAsync<GenericImage>>) {
+/// per process, the CDA binary to [`coverage_output_dir`]. Returns whether the
+/// profile was saved, so a restart can refuse to overwrite an unsaved run.
+pub(crate) async fn save_coverage(cda: Arc<ContainerAsync<GenericImage>>) -> bool {
     let Some(dir) = coverage_output_dir() else {
-        return;
+        return false;
     };
     let profile = dir.join(coverage_profile_name(cda.id()));
     let copy_binary = claim_coverage_binary_copy();
@@ -740,7 +740,8 @@ pub(crate) async fn save_coverage(cda: Arc<ContainerAsync<GenericImage>>) {
     // as tasks of the shared runtime; a blocking thread drives them instead.
     let copied = tokio::task::spawn_blocking(move || {
         Handle::current().block_on(async {
-            if let Err(e) = cda.copy_file_from(CDA_COVERAGE_PROFILE_FILE, profile).await {
+            let profile_copied = cda.copy_file_from(CDA_COVERAGE_PROFILE_FILE, profile).await;
+            if let Err(e) = &profile_copied {
                 eprintln!(
                     "Failed to copy the coverage profile out of {}: {e}",
                     cda.id()
@@ -753,14 +754,21 @@ pub(crate) async fn save_coverage(cda: Arc<ContainerAsync<GenericImage>>) {
                 if let Err(e) = &binary {
                     eprintln!("Failed to copy the CDA binary out of {}: {e}", cda.id());
                 }
-                return binary.is_ok();
+                return (profile_copied.is_ok(), binary.is_ok());
             }
-            true
+            (profile_copied.is_ok(), true)
         })
     })
     .await;
-    if copy_binary && !copied.unwrap_or(false) {
+    if copy_binary && !copied.as_ref().is_ok_and(|(_, binary)| *binary) {
         release_coverage_binary_copy();
+    }
+    match copied {
+        Ok((profile, _)) => profile,
+        Err(e) => {
+            eprintln!("Failed to finish copying CDA coverage: {e}");
+            false
+        }
     }
 }
 
@@ -782,11 +790,14 @@ fn coverage_output_dir() -> Option<PathBuf> {
     }
 }
 
-/// File name of the coverage profile of the CDA container `container_id`,
-/// unique across containers and test processes.
+static NEXT_COVERAGE_PROFILE: AtomicUsize = AtomicUsize::new(1);
+
+/// File name of a coverage profile, unique across restarts of the same
+/// container as well as across containers and test processes.
 fn coverage_profile_name(container_id: &str) -> String {
     let id: String = container_id.chars().take(12).collect();
-    format!("cda-{}-{id}.profraw", session_id())
+    let run = NEXT_COVERAGE_PROFILE.fetch_add(1, Ordering::Relaxed);
+    format!("cda-{}-{id}-{run}.profraw", session_id())
 }
 
 static COVERAGE_BINARY_CLAIMED: AtomicBool = AtomicBool::new(false);

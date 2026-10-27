@@ -59,7 +59,8 @@ pub(crate) const CDA_CONFIG_FILE: &str = "/app/cda-test-config.toml";
 /// Where the flash files are mounted inside the CDA container, read-only.
 pub(crate) const CDA_FLASH_DIR: &str = "/app/flash";
 /// Where a `TestEnv` CDA keeps its storage (`runtime_update_config.storage_dir`),
-/// e.g. the MDDs of runtime updates: a tmpfs, removed with the container.
+/// e.g. the MDDs of runtime updates: a volume, removed with the container but kept
+/// when the container is restarted.
 pub(crate) const CDA_STORAGE_DIR: &str = "/app/storage";
 
 pub(crate) fn cda_test_config(host: String, cda_port: u16) -> Result<Configuration, TestingError> {

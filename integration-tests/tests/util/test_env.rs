@@ -87,11 +87,6 @@ const DEFAULT_POOL_SIZE: usize = 4;
 /// instrumented CDA writes its profile.
 const CDA_STOP_TIMEOUT_SECS: i32 = 10;
 
-/// Size limit of the tmpfs at [`CDA_STORAGE_DIR`]. The storage holds a few
-/// copies of the test MDDs (current, next update, backup, journal), which are
-/// well below 1 MB together.
-const CDA_STORAGE_SIZE_BYTES: i64 = 64 * 1024 * 1024;
-
 type Container = Arc<ContainerAsync<GenericImage>>;
 
 /// How long [`host_port`] waits for Docker to report a published port.
@@ -201,7 +196,7 @@ impl EnvSpec {
     }
 
     /// The configuration file a CDA container of this environment runs with,
-    /// for the host-facing `config`, with the storage on the tmpfs at
+    /// for the host-facing `config`, with the storage on the volume at
     /// [`CDA_STORAGE_DIR`].
     fn cda_config_toml(&self, config: &Configuration) -> Result<String, TestingError> {
         let mut config = config.clone();
@@ -271,6 +266,53 @@ impl TestEnv {
         // The healthcheck runs inside the container. Tests reach the CDA
         // through the published host port, which the Docker host may forward
         // only a moment later.
+        wait_for_cda_online(&self.config.server).await
+    }
+
+    /// Restarts the CDA in place: stops its container and starts the same
+    /// container again, and waits until it is ready. The configuration, the
+    /// storage and the flash files stay as they were, so this is the way to
+    /// test what has to survive a restart of the CDA, unlike
+    /// [`Self::replace_cda`], which starts with empty storage.
+    ///
+    /// Docker picks a new host port at every start, so read [`Self::config`]
+    /// again, and authorize again with [`Self::auth_header`].
+    ///
+    /// In coverage mode the stopped run's profile is copied out before the
+    /// restarted CDA can overwrite it.
+    ///
+    /// # Errors
+    /// Returns an error if the CDA cannot be stopped or started, or does not
+    /// become ready.
+    pub(crate) async fn restart_cda(&mut self) -> Result<(), TestingError> {
+        let cda = self
+            .containers
+            .cda
+            .clone()
+            .ok_or_else(|| TestingError::SetupError("CDA container is gone".to_owned()))?;
+        // Not reused by the next lease, which expects a CDA it started itself.
+        self.dirty = true;
+        *self.auth.get_mut().unwrap_or_else(PoisonError::into_inner) = None;
+        let owner = self.spec.owner.clone();
+        let coverage = coverage_mode();
+        let port = on_shared_runtime(async move {
+            cda.stop_with_timeout(Some(CDA_STOP_TIMEOUT_SECS))
+                .await
+                .map_err(|e| TestingError::ProcessFailed(format!("Failed to stop the CDA: {e}")))?;
+            if coverage && !save_coverage(Arc::clone(&cda)).await {
+                return Err(TestingError::ProcessFailed(
+                    "Failed to save CDA coverage before restart".to_owned(),
+                ));
+            }
+            start_stopped(&cda, Service::Cda, owner)
+                .await
+                .map_err(|e| {
+                    TestingError::ProcessFailed(format!("Failed to start the CDA: {e}"))
+                })?;
+            host_port(&cda, CDA_HTTP_PORT, "CDA").await
+        })
+        .await?;
+        self.set_cda_port(port);
         wait_for_cda_online(&self.config.server).await
     }
 
@@ -1038,7 +1080,9 @@ fn ecu_sim_start_error(spec: &EnvSpec, error: &TestcontainersError) -> TestingEr
 #[derive(Clone)]
 enum CdaSetup {
     /// A writable root filesystem, `toml` as the configuration file, and an
-    /// empty tmpfs as the storage at [`CDA_STORAGE_DIR`].
+    /// empty volume as the storage at [`CDA_STORAGE_DIR`]. Unlike a tmpfs, the
+    /// volume keeps the storage when the container is stopped, see
+    /// [`TestEnv::restart_cda`].
     Configured { toml: String },
     /// A read-only root filesystem, which also holds the storage, and no
     /// configuration, see [`TestEnvBuilder::with_read_only_rootfs`].
@@ -1069,9 +1113,7 @@ async fn start_cda(
                 CdaSetup::Configured { toml } => cda
                     .with_copy_to(CDA_CONFIG_FILE, toml.into_bytes())
                     .with_env_var("CDA_CONFIG_FILE", CDA_CONFIG_FILE)
-                    .with_mount(
-                        Mount::tmpfs_mount(CDA_STORAGE_DIR).with_size_bytes(CDA_STORAGE_SIZE_BYTES),
-                    ),
+                    .with_mount(Mount::volume_mount("", CDA_STORAGE_DIR)),
                 CdaSetup::ReadOnly => cda.with_readonly_rootfs(true),
             })
         }
@@ -1152,7 +1194,7 @@ async fn stop_and_save_coverage(cda: &Container) {
             cda.id()
         );
     }
-    save_coverage(Arc::clone(cda)).await;
+    let _ = save_coverage(Arc::clone(cda)).await;
 }
 
 /// In coverage mode, saves the coverage of the CDAs still running at process

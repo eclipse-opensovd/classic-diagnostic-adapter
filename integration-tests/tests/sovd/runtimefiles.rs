@@ -2099,8 +2099,8 @@ async fn runtimefiles_first_update_starts_from_database_dir() -> Result<(), Test
     Ok(())
 }
 
-/// Deleting every database is a deliberate, empty data set. The next update
-/// must not seed `database.dir` again.
+/// Deleting every database is a deliberate, empty data set. Neither the next
+/// update nor a restart may seed `database.dir` again.
 #[tokio::test]
 async fn runtimefiles_deleting_all_databases_is_not_undone_by_seeding() -> Result<(), TestingError>
 {
@@ -2112,7 +2112,7 @@ async fn runtimefiles_deleting_all_databases_is_not_undone_by_seeding() -> Resul
     ) {
         return Ok(());
     }
-    let test_env = TestEnv::builder().await?;
+    let mut test_env = TestEnv::builder().await?;
     let dir_ids = database_dir_ids();
 
     let lock_id = setup_with_lock(&test_env).await;
@@ -2146,6 +2146,10 @@ async fn runtimefiles_deleting_all_databases_is_not_undone_by_seeding() -> Resul
     assert_route(&test_env, COMPONENTS_FLXC1000_BASE, StatusCode::NOT_FOUND).await?;
     teardown_lock(&test_env, &lock_id).await;
 
+    // The empty data set must survive a restart: the storage exists, so
+    // database.dir must not be loaded again.
+    test_env.restart_cda().await?;
+    assert_route(&test_env, COMPONENTS_FLXC1000_BASE, StatusCode::NOT_FOUND).await?;
     assert_route(&test_env, COMPONENTS_FSNR2000_BASE, StatusCode::NOT_FOUND).await?;
 
     // The next update starts from the empty data set, not from database.dir.
