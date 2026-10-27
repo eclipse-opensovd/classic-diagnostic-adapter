@@ -706,7 +706,11 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
 ) -> Result<DiagDataTypeContainer, DiagServiceError> {
     let uds_payload = payload.data()?;
 
-    // Only a MinMaxLength parameter with a minimum length of zero may contain no data.
+    // Empty data is only valid for
+    // - a MinMaxLength parameter with a minimum length of zero (optional, may be absent), or
+    // - a LeadingLength parameter whose encoded length is zero.
+    // A missing leading length field itself is rejected by `decode`, and MinMaxLength has
+    // no length field, so `is_optional` never needs to skip leading length bytes.
     let is_optional = matches!(
         diag_type.type_(),
         DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType { min_length: 0, .. })
@@ -2387,6 +2391,45 @@ mod tests {
         }
         assert_eq!(decoded, vec![vec![0xAA, 0xBB], vec![], vec![0xCC]]);
         assert_eq!(byte_pos, data.len());
+    }
+
+    // A leading length of zero is valid and yields no data, but the length
+    // field itself is mandatory: a payload ending before it is an error.
+    #[test]
+    fn test_leading_length_missing_length_field_is_error() {
+        let dct = DiagCodedType::new(
+            DataType::ByteField,
+            DiagCodedTypeVariant::LeadingLengthInfo(16),
+            true,
+        )
+        .unwrap();
+        for data in [&[0x69u8, 0x07][..], &[0x69, 0x07, 0x00][..]] {
+            let mut payload = Payload::new(data);
+            let res = extract_diag_data_container(
+                Some("test_param"),
+                2,
+                0,
+                &mut payload,
+                &dct,
+                None,
+                None,
+            );
+            assert!(
+                matches!(res, Err(cda_interfaces::DiagServiceError::BadPayload(_))),
+                "Expected a missing leading length field to be rejected, got {res:?}"
+            );
+        }
+
+        let data = [0x69, 0x07, 0x00, 0x00];
+        let mut payload = Payload::new(&data);
+        let res =
+            extract_diag_data_container(Some("test_param"), 2, 0, &mut payload, &dct, None, None)
+                .unwrap();
+        let crate::DiagDataTypeContainer::RawContainer(raw) = res else {
+            panic!("Expected raw container");
+        };
+        assert!(raw.data.is_empty());
+        assert_eq!(payload.last_read_byte_pos(), data.len());
     }
 
     // This test reproduces a response that contains only the RoutineControl header. The
