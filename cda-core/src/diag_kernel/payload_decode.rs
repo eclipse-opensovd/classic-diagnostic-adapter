@@ -199,7 +199,9 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             // BYTE-POSITION (ISO 22901-1 §7.4.8) starts where the preceding
             // param ended. This covers both a leading param at byte 0 whose
             // position was omitted and a param following a variable-length field.
-            for param in params {
+            // Positioned LENGTH-KEYs and TABLE-KEYs are decoded before the param
+            // referencing them.
+            for param in hoist_positioned_keys(&params) {
                 let semantic = param.semantic();
                 if semantic.is_some_and(|semantic| {
                     semantic != self.database_naming_convention.semantics.data
@@ -297,7 +299,7 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             .map(|params| params.iter().map(datatypes::Parameter).collect())
             .unwrap_or_default();
 
-        for param in params {
+        for param in hoist_positioned_keys(&params) {
             let short_name = param.short_name().ok_or_else(|| {
                 DiagServiceError::InvalidDatabase(
                     "Unable to find short name for request param".to_owned(),
@@ -371,6 +373,76 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             response_type,
         })
     }
+}
+
+/// Returns the params in database order, except that a positioned key param
+/// (LENGTH-KEY or TABLE-KEY) declared after the param referencing it is moved
+/// directly in front of that param. ISO 22901-1:2008 §7.3.5.4 (and checker
+/// rule 254) allows such a forward reference if the key is positioned; its
+/// value must be decoded before the referencing param. Unpositioned params
+/// keep their order, so "follows the preceding param" is unchanged for them.
+fn hoist_positioned_keys<'a>(params: &[datatypes::Parameter<'a>]) -> Vec<datatypes::Parameter<'a>> {
+    let mut hoisted = vec![false; params.len()];
+    let mut ordered = Vec::with_capacity(params.len());
+    for (index, param) in params.iter().enumerate() {
+        if hoisted.get(index).copied().unwrap_or(false) {
+            continue;
+        }
+        if let Some((key_type, key_name)) = referenced_key(param) {
+            let later_key = params
+                .iter()
+                .enumerate()
+                .skip(index.saturating_add(1))
+                .find(|(_, p)| {
+                    p.has_byte_position()
+                        && p.param_type().is_ok_and(|t| key_type.matches(&t))
+                        && p.short_name() == Some(key_name.as_str())
+                });
+            if let Some((key_index, key)) = later_key
+                && let Some(flag) = hoisted.get_mut(key_index)
+            {
+                *flag = true;
+                ordered.push(key.clone());
+            }
+        }
+        ordered.push(param.clone());
+    }
+    ordered
+}
+
+/// Param types that are referenced by another param of the same PDU.
+#[derive(Clone, Copy)]
+enum KeyType {
+    Length,
+    Table,
+}
+
+impl KeyType {
+    fn matches(self, param_type: &datatypes::ParamType) -> bool {
+        match self {
+            Self::Length => matches!(param_type, datatypes::ParamType::LengthKey),
+            Self::Table => matches!(param_type, datatypes::ParamType::TableKey),
+        }
+    }
+}
+
+/// Type and short name of the key param referenced by `param`: the
+/// LENGTH-KEY of a VALUE param with PARAM-LENGTH-INFO, or the TABLE-KEY of a
+/// TABLE-STRUCT param.
+fn referenced_key(param: &datatypes::Parameter<'_>) -> Option<(KeyType, String)> {
+    if let Some(table_struct) = param.specific_data_as_table_struct() {
+        let key = datatypes::Parameter(table_struct.table_key()?);
+        return Some((KeyType::Table, key.short_name()?.to_owned()));
+    }
+    let dop = param
+        .specific_data_as_value()?
+        .dop()?
+        .specific_data_as_normal_dop()
+        .map(datatypes::NormalDop)?;
+    dop.diag_coded_type()
+        .ok()?
+        .length_key_name()
+        .map(|name| (KeyType::Length, name.to_owned()))
 }
 
 impl<S: SecurityPlugin> EcuManager<S> {
@@ -685,7 +757,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     param_name.to_owned(),
                     operations::extract_diag_data_container(
                         param_ctx.parameter.short_name(),
-                        param_ctx.abs_byte_pos(),
+                        param_ctx.read_byte_pos(uds_payload),
                         param_ctx.parameter.bit_position() as usize,
                         uds_payload,
                         &diag_type,
@@ -734,8 +806,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     "TABLE-KEY param referenced by TABLE-STRUCT has no short_name".to_owned(),
                 ))?;
 
-        // Look up the TABLE-KEY's decoded value from data (it was already
-        // decoded since TABLE-KEY has a lower byte position)
+        // Look up the TABLE-KEY's decoded value from data. It was already
+        // decoded: it is declared before this param or, if declared after, it
+        // is positioned and hoisted by `hoist_positioned_keys`.
         let key_container = data.get(key_param_name).ok_or_else(|| {
             DiagServiceError::InvalidRequest(format!(
                 "TABLE-STRUCT references TABLE-KEY '{key_param_name}' but it was not decoded"
@@ -2006,9 +2079,11 @@ mod tests {
         create_ecu_manager_with_env_data_desc_wildcard, create_ecu_manager_with_mux_service,
         create_ecu_manager_with_mux_service_and_default_case,
         create_ecu_manager_with_param_length_info_service,
+        create_ecu_manager_with_param_length_info_service_ordered,
         create_ecu_manager_with_phys_const_normal_dop_service,
         create_ecu_manager_with_phys_const_structure_dop_service,
         create_ecu_manager_with_static_field_service, create_ecu_manager_with_struct_service,
+        create_ecu_manager_with_table_struct_service,
     };
 
     fn create_payload(data: Vec<u8>) -> cda_interfaces::ServicePayload {
@@ -2493,6 +2568,60 @@ mod tests {
             json!({"pos_sid": u32::from(pos_sid), "len_key": 3, "var_data": "0xAA 0xBB 0xCC"}),
         )
         .await;
+    }
+
+    /// A positioned LENGTH-KEY declared after the field referencing it
+    /// (ISO 22901-1 §7.3.5.4) is decoded first.
+    #[tokio::test]
+    async fn test_length_key_declared_after_referencing_param() {
+        let sid = cda_interfaces::service_ids::WRITE_DATA_BY_IDENTIFIER;
+        let pos_sid = sid.saturating_add(cda_interfaces::UDS_ID_RESPONSE_BITMASK);
+        let (ecu_manager, dc, _sid) =
+            create_ecu_manager_with_param_length_info_service_ordered(false);
+
+        assert_uds_converts_to_json(
+            &ecu_manager,
+            &dc,
+            vec![pos_sid, 0x02, 0xAA, 0xBB],
+            json!({"pos_sid": u32::from(pos_sid), "len_key": 2, "var_data": "0xAA 0xBB"}),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_request_length_key_declared_after_referencing_param() {
+        let (ecu_manager, dc, sid) =
+            create_ecu_manager_with_param_length_info_service_ordered(false);
+        let response = ecu_manager
+            .convert_request_from_uds(&dc, &create_payload(vec![sid, 0x02, 0xAA, 0xBB]), true)
+            .await
+            .expect("request with forward-referenced length key must decode");
+        let mapped = response.mapped_data.expect("mapped data");
+        assert!(mapped.errors.is_empty());
+        assert!(mapped.data.contains_key("var_data"));
+        assert!(mapped.data.contains_key("len_key"));
+    }
+
+    /// A positioned TABLE-KEY declared after the TABLE-STRUCT referencing it
+    /// (ISO 22901-1:2008 §7.3.5.4) is decoded first; declaration order does
+    /// not change the result.
+    #[tokio::test]
+    async fn test_table_key_declared_after_table_struct() {
+        for key_first in [true, false] {
+            let (ecu_manager, dc, sid) = create_ecu_manager_with_table_struct_service(key_first);
+            let pos_sid = sid.saturating_add(cda_interfaces::UDS_ID_RESPONSE_BITMASK);
+            assert_uds_converts_to_json(
+                &ecu_manager,
+                &dc,
+                vec![pos_sid, 0x2A, 0x05],
+                json!({
+                    "pos_sid": u32::from(pos_sid),
+                    "table_key": 5,
+                    "table_struct": {"row_a": {"val": 0x2A}},
+                }),
+            )
+            .await;
+        }
     }
 
     #[tokio::test]
