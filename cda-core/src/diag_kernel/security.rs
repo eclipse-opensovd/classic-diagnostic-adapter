@@ -392,6 +392,25 @@ pub(in crate::diag_kernel) fn check_security_plugin<S: SecurityPlugin>(
     security_plugin.validate_service(service)
 }
 
+/// Asks the security plugin whether a raw request without a matching MDD service may be sent.
+///
+/// The void plugin `()` (CDA-internal traffic) never allows unmatched raw requests.
+pub(in crate::diag_kernel) fn check_raw_service_plugin<S: SecurityPlugin>(
+    security_plugin: &DynamicPlugin,
+    bytes: &[u8],
+) -> Result<(), DiagServiceError> {
+    if is_void_plugin(security_plugin) {
+        return Err(DiagServiceError::NotFound(format!(
+            "No matching generic service found for request prefix: {bytes:02X?}"
+        )));
+    }
+    security_plugin
+        .downcast_ref::<S>()
+        .ok_or(DiagServiceError::InvalidSecurityPlugin)
+        .map(SecurityPlugin::as_security_plugin)?
+        .check_raw_service(bytes)
+}
+
 /// Reports whether `security_plugin` is the void plugin used by CDA-internal traffic.
 fn is_void_plugin(security_plugin: &DynamicPlugin) -> bool {
     security_plugin.downcast_ref::<()>().is_some()
