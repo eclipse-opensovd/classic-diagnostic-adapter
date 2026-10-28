@@ -37,6 +37,7 @@ pub(crate) type ConnectionResetReason = String;
 /// Runtime state for managing active gateway connections and ECU mappings.
 pub(crate) struct GatewayState<T> {
     pub doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>>,
+    pub logical_address_to_connection: Arc<RwLock<HashMap<u16, usize>>>,
     pub ecus: Arc<HashMap<String, RwLock<T>>>,
     pub gateway_ecu_map: HashMap<u16, Vec<u16>>,
     pub connection_tasks: Arc<ConnectionTasks>,
@@ -200,14 +201,23 @@ where
     let doip_ecus = create_ecu_receiver_map(ecu_ids, &sender, &receivers);
 
     tracing::info!("Connected to gateway");
-    state
-        .doip_connections
-        .write()
-        .await
-        .push(Arc::new(DoipConnection {
+    // Register the connection and its route in one step, before the ECUs are
+    // announced as online: the announcement triggers variant detection, which
+    // must already find the route to the gateway.
+    {
+        let mut connections = state.doip_connections.write().await;
+        if doip_ecus.contains_key(&discovered_gateway.logical_address) {
+            state
+                .logical_address_to_connection
+                .write()
+                .await
+                .insert(discovered_gateway.logical_address, connections.len());
+        }
+        connections.push(Arc::new(DoipConnection {
             ecus: doip_ecus,
             ip: discovered_gateway.ip,
         }));
+    }
 
     // Notify connectivity handler that ECUs behind this gateway are now online.
     // This sets their state to Online so the pre-send variant detection guard works correctly.

@@ -549,6 +549,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             let state = self.state.clone();
             let gateway_state = GatewayState {
                 doip_connections: Arc::clone(&state.doip_connections),
+                logical_address_to_connection: Arc::clone(&state.logical_address_to_connection),
                 ecus: Arc::clone(&state.ecus),
                 gateway_ecu_map: gateway_ecu_map.clone(),
                 connection_tasks: Arc::clone(&connection_tasks),
@@ -576,8 +577,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                     )
                     .await
                     {
-                        Ok(logical_address) => {
-                            state.register_connection(logical_address).await;
+                        Ok(_) => {
                             if let Err(error) = variant_detection
                                 .send(VariantDetectionRequest::new(gateway_ecu_names))
                                 .await
@@ -1090,6 +1090,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         let (gateway_ecu_map, gateway_ecu_name_map) = self.gateway_ecu_maps().await;
         let gateway_state = GatewayState {
             doip_connections: Arc::clone(&self.state.doip_connections),
+            logical_address_to_connection: Arc::clone(&self.state.logical_address_to_connection),
             ecus: Arc::clone(&self.state.ecus),
             gateway_ecu_map,
             connection_tasks: Arc::clone(&connection_tasks),
