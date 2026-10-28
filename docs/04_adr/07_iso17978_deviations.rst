@@ -22,9 +22,10 @@ Date: 2026-10-27
 Context
 -------
 
-The CDA implements the SOVD API as specified in ISO 17978-3. A conformance
-audit compares the wire model and routes with the standard table by table.
-Most departures it finds are defects and are tracked for fixing.
+The CDA implements the SOVD API as specified in ISO 17978-3. The conformance
+audit in classic-diagnostic-adapter#553 compares the wire model and routes with
+the standard table by table. Most departures it found are defects and are
+tracked for fixing in classic-diagnostic-adapter#600.
 
 A small number of departures are intentional. Each one is a point where the
 project has decided, for a stated reason, to keep behaviour the standard does
@@ -96,25 +97,8 @@ property it does not know: it ignores it either way.
 extensions. The capability description and the OpenAPI document are the
 authoritative list of what the CDA serves.
 
-**Record.** This ADR.
-
-Deviation 3 (pending): ``genericservice`` transport
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-**Standard.** No raw UDS passthrough is defined; Clause 8 maps UDS onto SOVD
-service by service. §5.10 and every Clause 7 diagnostic method exchange JSON
-with ``Content-Type: application/json``; ``application/octet-stream`` is used
-only for bulk-data and update packages (§7.20).
-
-**CDA.** ``PUT /components/{ecu}/genericservice`` accepts and returns
-``application/octet-stream`` only.
-
-**Status.** Under discussion. The resource itself stays as a vendor
-extension. Whether the binary transport is recorded here as deliberate, or
-replaced by the JSON form the architecture requirement
-:need:`arch~sovd-api-generic-service` already describes with
-``application/octet-stream`` as an opt-in, is decided there. This entry is
-updated or removed when that decision is made.
+**Record.** This ADR. The affected names are listed in
+classic-diagnostic-adapter#553 under "Accepted deviations".
 
 Rationale
 ---------
@@ -142,4 +126,5 @@ Consequences
 References
 ----------
 
-* ISO 17978-3, §5.4.5, §5.10, §7.9.1, §7.17.1, §7.20, Table 241
+* ISO 17978-3, §5.4.5, §7.9.1, §7.17.1, Table 241
+* classic-diagnostic-adapter#553 (conformance audit), #600 (P0 work list)
