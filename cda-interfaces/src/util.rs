@@ -12,6 +12,13 @@
  */
 use crate::{DiagServiceError, service_ids};
 
+/// Formats a timestamp as RFC 3339 in UTC with millisecond precision,
+/// e.g. `2026-01-02T03:04:05.678Z`.
+#[must_use]
+pub fn format_rfc3339_millis(time: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
 pub mod tracing {
     #[must_use]
     pub fn print_hex(data: &[u8], max_size: usize) -> String {

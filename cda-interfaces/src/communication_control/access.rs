@@ -57,6 +57,10 @@ pub enum CommunicationState {
     Error(CommunicationOperationFailure),
 }
 
+/// Message of a refusal while communication is quiesced, shared by
+/// [`CommunicationError::Quiesced`] and the transport gate.
+pub const QUIESCED_MESSAGE: &str = "Communication is paused";
+
 /// Error returned by communication guard acquisition.
 ///
 /// This is a minimal enum containing only the states that can prevent
@@ -77,6 +81,9 @@ pub enum CommunicationError {
     /// Communication is disabled and exclusively owned by a disable lease.
     #[error("Communication is exclusively disabled")]
     DisabledExclusive,
+    /// Communication is paused by an exclusive quiesce lease.
+    #[error("{}", QUIESCED_MESSAGE)]
+    Quiesced,
     /// Communication has failed and cannot be used.
     #[error("Communication has failed: {0}")]
     Failed(CommunicationOperationFailure),

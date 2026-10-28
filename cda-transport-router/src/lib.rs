@@ -39,7 +39,7 @@
 //!     .with_can(can_gateway);
 //! ```
 
-use std::{pin::Pin, sync::Arc};
+use std::{pin::Pin, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 pub use cda_interfaces::TransportType;
@@ -48,8 +48,10 @@ use cda_interfaces::{
     PhysicalTransport, RouteStatus, ServicePayload, Shutdown, TransmissionParameters,
     TransportProbe, TransportResponse,
     communication_control::{
-        TransportControl, TransportState, TransportStateTracker, error::CommControlError,
+        TransportControl, TransportGate, TransportState, TransportStateTracker,
+        access::QUIESCED_MESSAGE, error::CommControlError,
     },
+    topology::PendingGateways,
 };
 use tokio::sync::{Mutex, RwLock, mpsc};
 
@@ -78,6 +80,10 @@ pub struct DiagnosticTransportRouter<D: EcuGateway + TransportProbe, C: EcuGatew
     /// Serializes a complete lifecycle operation (status check, gateway
     /// fan-out, final transition) against concurrent enable/disable callers.
     operation_lock: Arc<Mutex<()>>,
+    /// Closed while communication is quiesced: no send starts.
+    gate: TransportGate,
+    /// Retry hint of a send refused by the closed gate.
+    quiesce_retry_after: Duration,
 }
 
 impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe>
@@ -94,7 +100,18 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe>
             ecu_bindings: Arc::new(RwLock::new(HashMap::default())),
             transport_state: Arc::new(tracker),
             operation_lock: Arc::new(Mutex::new(())),
+            gate: TransportGate::new(),
+            quiesce_retry_after: Duration::ZERO,
         }
+    }
+
+    /// Uses `gate`, closed while communication is quiesced. A send refused by
+    /// it carries `retry_after` as its retry hint.
+    #[must_use]
+    pub fn with_gate(mut self, gate: TransportGate, retry_after: Duration) -> Self {
+        self.gate = gate;
+        self.quiesce_retry_after = retry_after;
+        self
     }
 
     /// Adds a `DoIP` gateway to this diagnostic transport router.
@@ -153,6 +170,14 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe>
             },
             TransportType::Can => self.can_ecu_network_address(ecu_name).await,
         }
+    }
+
+    /// The transport the ECU is pinned or bound to, without binding it.
+    async fn selected_transport(&self, ecu_name_lower: &str) -> Option<TransportType> {
+        if let Some(&pinned) = self.transport_overrides.get(ecu_name_lower) {
+            return Some(pinned);
+        }
+        self.ecu_bindings.read().await.get(ecu_name_lower).copied()
     }
 
     /// Tries to detect and bind an ECU on a single transport.
@@ -219,6 +244,12 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe>
     /// Router-level send gate, rejecting datapath traffic while communication is
     /// inhibited.
     async fn ensure_communication_active(&self) -> Result<(), DiagServiceError> {
+        if !self.gate.is_open() {
+            return Err(DiagServiceError::CommunicationNotReady {
+                message: QUIESCED_MESSAGE.to_owned(),
+                retry_after: self.quiesce_retry_after,
+            });
+        }
         if self.transport_state.active().await {
             Ok(())
         } else {
@@ -337,6 +368,26 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe> FunctionalT
 impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe> NetworkTopology
     for DiagnosticTransportRouter<D, C>
 {
+    /// Answered by the transport the ECU is pinned or bound to; an ECU that is
+    /// not bound yet is answered by the first transport that would be bound on
+    /// first use (`DoIP` before CAN).
+    async fn route_pending(&self, ecu_name: &str) -> bool {
+        let ecu_name = ecu_name.to_lowercase();
+        let selected = self.selected_transport(&ecu_name).await;
+        if selected != Some(TransportType::Can)
+            && let Some(ref doip) = self.doip_gateway
+            && doip.route_pending(&ecu_name).await
+        {
+            return true;
+        }
+        if selected != Some(TransportType::DoIP)
+            && let Some(ref can) = self.can_gateway
+        {
+            return can.route_pending(&ecu_name).await;
+        }
+        false
+    }
+
     async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
         // DoIP addresses are returned verbatim (bare IP) to keep the SOVD
         // network-structure API compatible with pre-multi-transport releases.
@@ -408,6 +459,8 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe> Clone
             ecu_bindings: Arc::clone(&self.ecu_bindings),
             transport_state: Arc::clone(&self.transport_state),
             operation_lock: Arc::clone(&self.operation_lock),
+            gate: self.gate.clone(),
+            quiesce_retry_after: self.quiesce_retry_after,
         }
     }
 }
@@ -536,6 +589,32 @@ impl<
     }
 }
 
+/// Reports and connects the gateways a lazy start left pending. Only the `DoIP`
+/// gateway connects persisted gateways lazily, so a router without one has none.
+#[async_trait]
+impl<D: EcuGateway + TransportProbe + PendingGateways, C: EcuGateway + TransportProbe>
+    PendingGateways for DiagnosticTransportRouter<D, C>
+{
+    async fn has_pending(&self) -> bool {
+        match &self.doip_gateway {
+            Some(doip) => doip.has_pending().await,
+            None => false,
+        }
+    }
+
+    async fn connect_all_pending(&self) {
+        if let Some(doip) = &self.doip_gateway {
+            doip.connect_all_pending().await;
+        }
+    }
+
+    async fn forget_pending_addresses(&self) {
+        if let Some(doip) = &self.doip_gateway {
+            doip.forget_pending_addresses().await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -563,6 +642,7 @@ mod tests {
         disable_calls: Arc<AtomicUsize>,
         shutdown_calls: Arc<AtomicUsize>,
         state: Arc<RwLock<TransportState>>,
+        pending: bool,
     }
 
     impl FakeGateway {
@@ -574,7 +654,13 @@ mod tests {
                 disable_calls: Arc::new(AtomicUsize::new(0)),
                 shutdown_calls: Arc::new(AtomicUsize::new(0)),
                 state: Arc::new(RwLock::new(TransportState::Disabled)),
+                pending: false,
             }
+        }
+
+        fn with_pending_route(mut self) -> Self {
+            self.pending = true;
+            self
         }
 
         fn with_failing_disable(mut self) -> Self {
@@ -638,6 +724,10 @@ mod tests {
         ) -> impl Future<Output = Option<String>> {
             std::future::ready(None)
         }
+
+        fn route_pending(&self, _ecu_name: &str) -> impl Future<Output = bool> + Send {
+            std::future::ready(self.pending)
+        }
     }
 
     impl TransportProbe for FakeGateway {
@@ -677,6 +767,128 @@ mod tests {
         async fn state(&self) -> TransportState {
             *self.state.read().await
         }
+    }
+
+    /// [[ test~transport-router-route-pending, A pending route is asked from the transport the ECU is bound to, test ]]
+    #[tokio::test]
+    async fn route_pending_follows_the_selected_transport() {
+        let router: DiagnosticTransportRouter<FakeGateway, FakeGateway> =
+            DiagnosticTransportRouter::new(HashMap::from_iter([(
+                "can_ecu".to_owned(),
+                TransportType::Can,
+            )]))
+            .with_doip(FakeGateway::new(false).with_pending_route())
+            .with_can(FakeGateway::new(false));
+
+        assert!(
+            router.route_pending("Unbound").await,
+            "DoIP pending, unbound"
+        );
+        assert!(
+            !router.route_pending("can_ecu").await,
+            "an ECU pinned to CAN ignores a pending DoIP gateway"
+        );
+        router
+            .ecu_bindings
+            .write()
+            .await
+            .insert("bound_can".to_owned(), TransportType::Can);
+        assert!(!router.route_pending("bound_can").await);
+
+        let not_pending: DiagnosticTransportRouter<FakeGateway, FakeGateway> =
+            DiagnosticTransportRouter::new(HashMap::default())
+                .with_doip(FakeGateway::new(false))
+                .with_can(FakeGateway::new(false));
+        assert!(!not_pending.route_pending("ecu").await);
+
+        let none: DiagnosticTransportRouter<FakeGateway, FakeGateway> =
+            DiagnosticTransportRouter::new(HashMap::default());
+        assert!(!none.route_pending("ecu").await, "no transport configured");
+    }
+
+    fn payload(data: &[u8]) -> ServicePayload {
+        ServicePayload {
+            data: data.to_vec(),
+            source_address: 0,
+            target_address: 0,
+            new_session: None,
+            new_security: None,
+        }
+    }
+
+    const READ_VIN: [u8; 3] = [0x22, 0xF1, 0x90];
+    const RETRY_AFTER: Duration = Duration::from_secs(7);
+
+    /// The refusal of the closed gate, which maps like a quiesced `acquire`.
+    fn paused(result: &Result<(), DiagServiceError>) -> bool {
+        matches!(
+            result,
+            Err(DiagServiceError::CommunicationNotReady { message, retry_after })
+                if message == QUIESCED_MESSAGE && *retry_after == RETRY_AFTER
+        )
+    }
+
+    fn quiesced_router(
+        gate: &TransportGate,
+    ) -> DiagnosticTransportRouter<FakeGateway, FakeGateway> {
+        DiagnosticTransportRouter::new(HashMap::from_iter([
+            ("doip_ecu".to_owned(), TransportType::DoIP),
+            ("can_ecu".to_owned(), TransportType::Can),
+        ]))
+        .with_gate(gate.clone(), RETRY_AFTER)
+        .with_doip(FakeGateway::new(false))
+        .with_can(FakeGateway::new(false))
+    }
+
+    async fn send(
+        router: &DiagnosticTransportRouter<FakeGateway, FakeGateway>,
+        ecu: &str,
+        data: &[u8],
+    ) -> Result<(), DiagServiceError> {
+        let params = TransmissionParameters {
+            gateway_address: 0,
+            timeout_ack: Duration::from_secs(1),
+            ecu_name: ecu.to_owned(),
+            repeat_request_count_transmission: 0,
+        };
+        router
+            .send(params, payload(data), mpsc::channel(1).0, true)
+            .await
+            .map(|_| ())
+    }
+
+    /// [[ test~transport-gate-refuses-send-while-quiesced, A closed gate refuses sends on both transports, test ]]
+    #[tokio::test]
+    async fn closed_gate_refuses_sends_on_both_transports() {
+        let gate = TransportGate::new();
+        let router = quiesced_router(&gate);
+        router.enable().await.unwrap();
+
+        gate.close();
+        assert!(paused(&send(&router, "doip_ecu", &READ_VIN).await));
+        assert!(paused(&send(&router, "can_ecu", &READ_VIN).await));
+        let functional = router
+            .send_functional(
+                TransmissionParameters {
+                    gateway_address: 0,
+                    timeout_ack: Duration::from_secs(1),
+                    ecu_name: "doip_ecu".to_owned(),
+                    repeat_request_count_transmission: 0,
+                },
+                payload(&READ_VIN),
+                HashMap::default(),
+                Duration::from_secs(1),
+                true,
+            )
+            .await;
+        assert!(paused(&functional.map(|_| ())));
+
+        gate.open();
+        assert!(
+            !paused(&send(&router, "doip_ecu", &READ_VIN).await),
+            "an open gate lets the send through"
+        );
+        assert!(!paused(&send(&router, "can_ecu", &READ_VIN).await));
     }
 
     /// A runtime update disables the transport before replacing the ECU data.

@@ -92,9 +92,17 @@ impl IntoSovd for cda_interfaces::EcuState {
     fn into_sovd(self) -> Self::SovdType {
         match (&self.connectivity, &self.variant_state) {
             (_, VariantState::Duplicate) => sovd_ecu::State::Duplicate,
-            (Connectivity::Online, VariantState::Detected { .. }) => sovd_ecu::State::Online,
-            (Connectivity::Online, VariantState::NotDetected) => sovd_ecu::State::NoVariantDetected,
-            (Connectivity::Online, VariantState::NotTested) => sovd_ecu::State::NotTested,
+            // AssumedOnline is internal-only and reported like Online; `last_seen`
+            // tells clients how current that is.
+            (Connectivity::Online | Connectivity::AssumedOnline, VariantState::Detected { .. }) => {
+                sovd_ecu::State::Online
+            }
+            (Connectivity::Online | Connectivity::AssumedOnline, VariantState::NotDetected) => {
+                sovd_ecu::State::NoVariantDetected
+            }
+            (Connectivity::Online | Connectivity::AssumedOnline, VariantState::NotTested) => {
+                sovd_ecu::State::NotTested
+            }
             (Connectivity::Offline, VariantState::NotTested) => sovd_ecu::State::Offline,
             (Connectivity::Offline, VariantState::Detected { .. } | VariantState::NotDetected) => {
                 sovd_ecu::State::Disconnected

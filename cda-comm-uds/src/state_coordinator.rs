@@ -15,12 +15,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    EcuConnectivityHandler, EcuRuntimeState, HashMap, VariantDetectionRequest,
+    Connectivity, EcuConnectivityHandler, EcuRuntimeState, HashMap, VariantDetectionRequest,
     VariantDetectionSender, dlt_ctx,
 };
 
 use crate::coordinator::{
-    EcuConnected, EcuCoordinatorHandle, EcuDisconnected, RestoreDisconnectHandling,
+    EcuConnected, EcuCoordinatorHandle, EcuDisconnected, EcuResponded, RestoreDisconnectHandling,
     SuppressDisconnectHandling,
 };
 
@@ -102,7 +102,9 @@ impl EcuStateCoordinator {
 
     /// Mark the ECU's variant for re-detection on the next request.
     ///
-    /// Sends a fire-and-forget message to the ECU's coordinator actor.
+    /// Waits until the ECU's coordinator actor has applied the event, so the
+    /// state is visible to the caller on return (the topology persistence
+    /// snapshots it right after).
     /// Does NOT acquire any `RwLock<EcuManager>` - safe to call from any context.
     #[tracing::instrument(skip_all, fields(ecu_name, dlt_context = dlt_ctx!("UDS")))]
     pub(crate) async fn handle_ecu_disconnected(&self, ecu_name: &str) {
@@ -111,8 +113,43 @@ impl EcuStateCoordinator {
             "ECU disconnected - setting connectivity to Offline"
         );
 
-        if let Some(handle) = self.handles.get(ecu_name) {
-            let _ = handle.actor_ref.tell(EcuDisconnected).await;
+        if let Some(handle) = self.handles.get(ecu_name)
+            && let Err(error) = handle.actor_ref.ask(EcuDisconnected).await
+        {
+            tracing::warn!(ecu_name, %error, "Failed to report ECU disconnect to coordinator");
+        }
+    }
+
+    /// Records a reply of the ECU, positive or negative (including the
+    /// response-pending NRC 0x78), regardless of the overall result of the
+    /// request: updates `last_seen` and confirms an `AssumedOnline` ECU as `Online`.
+    /// [[ dimpl~ecu-state-assumed-online, A reply confirms an assumed online ECU as online, dimpl ]]
+    ///
+    /// `last_seen` is updated inline. The state transition goes through the actor,
+    /// so it is ordered with concurrent connect and disconnect events; it is only
+    /// sent while the ECU is assumed online, keeping the common path free of
+    /// actor messages.
+    pub(crate) async fn handle_ecu_responded(&self, ecu_name: &str) {
+        let Some(handle) = self.handles.get(ecu_name) else {
+            return;
+        };
+        handle.state.touch_last_seen();
+        if handle.connectivity() == Connectivity::AssumedOnline
+            && let Err(error) = handle.actor_ref.tell(EcuResponded).await
+        {
+            tracing::warn!(ecu_name, %error, "Failed to report ECU response to coordinator");
+        }
+    }
+
+    /// Queues a variant detection for `ecu_name`, without waiting. Used when a
+    /// request finds the ECU undetected while communication is enabled, e.g.
+    /// behind a gateway that connects on its first use.
+    pub(crate) fn request_detection(&self, ecu_name: &str) {
+        if !self
+            .redetect
+            .try_send(VariantDetectionRequest::new(vec![ecu_name.to_owned()]))
+        {
+            tracing::debug!(ecu_name, "Variant detection queue full, request dropped");
         }
     }
 
@@ -214,6 +251,20 @@ mod tests {
         );
     }
 
+    /// [[ test~uds-gateway-disconnect-applied-before-return, A gateway disconnect is applied to the ECU states before the call returns, test ]]
+    #[tokio::test]
+    async fn gateway_disconnect_is_applied_before_return() {
+        use cda_interfaces::EcuConnectivityHandler as _;
+
+        let (coordinator, runtime_state) = make_coordinator();
+
+        coordinator
+            .on_gateway_disconnected(&["TestECU".to_owned()])
+            .await;
+
+        assert_eq!(runtime_state.status().connectivity, Connectivity::Offline);
+    }
+
     #[tokio::test]
     async fn disconnected_unknown_ecu_is_noop() {
         let (coordinator, runtime_state) = make_coordinator();
@@ -251,5 +302,75 @@ mod tests {
             Connectivity::Online,
             "ECU should be marked as Online after connected event"
         );
+    }
+
+    fn assumed_online_coordinator() -> (
+        EcuStateCoordinator,
+        EcuRuntimeState,
+        tokio::sync::mpsc::Receiver<cda_interfaces::QueuedRequest>,
+    ) {
+        let runtime_state = EcuRuntimeState::new();
+        {
+            let mut ecu_state = runtime_state.ecu_state.write().unwrap();
+            ecu_state.connectivity = Connectivity::AssumedOnline;
+            ecu_state.variant_state = VariantState::Detected {
+                name: "RestoredVariant".to_owned(),
+                is_base_variant: false,
+                is_fallback: false,
+            };
+        }
+        let runtime_states: HashMap<String, EcuRuntimeState> =
+            HashMap::from_iter([("TestECU".to_string(), runtime_state.clone())]);
+        let (redetect_tx, redetect_rx) = tokio::sync::mpsc::channel(8);
+        let coordinator =
+            EcuStateCoordinator::new(runtime_states, VariantDetectionSender::new(redetect_tx));
+        (coordinator, runtime_state, redetect_rx)
+    }
+
+    async fn settle() {
+        cda_interfaces::util::tokio_ext::sleep_for(std::time::Duration::from_millis(10)).await;
+    }
+
+    /// [[ test~uds-state-restored-duplicate-survives-connect-but-real-reconnect-redetects, Connecting the gateway keeps a restored variant while a reconnect of an Offline ECU detects it again, test ]]
+    #[tokio::test]
+    async fn restored_duplicate_survives_connect_but_real_reconnect_redetects() {
+        use cda_interfaces::EcuConnectivityHandler as _;
+
+        let (coordinator, runtime_state, mut redetect_rx) = assumed_online_coordinator();
+        runtime_state.ecu_state.write().unwrap().variant_state = VariantState::Duplicate;
+        let names = ["TestECU".to_owned()];
+        coordinator.on_gateway_connected(&names).await;
+        assert_eq!(
+            runtime_state.status().variant_state,
+            VariantState::Duplicate
+        );
+        assert_eq!(
+            runtime_state.status().connectivity,
+            Connectivity::AssumedOnline
+        );
+        assert!(redetect_rx.try_recv().is_err());
+
+        coordinator.on_gateway_disconnected(&names).await;
+        coordinator.on_gateway_connected(&names).await;
+        assert_eq!(
+            runtime_state.status().variant_state,
+            VariantState::NotTested
+        );
+        assert_eq!(redetect_rx.try_recv().unwrap().0.into_ecus(), names);
+    }
+
+    /// [[ test~uds-state-assumed-online-becomes-online-on-response, The first reply turns an `AssumedOnline` ECU Online, test ]]
+    #[tokio::test]
+    async fn assumed_online_becomes_online_on_response() {
+        let (coordinator, runtime_state, _redetect_rx) = assumed_online_coordinator();
+        assert_eq!(runtime_state.last_seen(), None);
+
+        coordinator.handle_ecu_responded("TestECU").await;
+        settle().await;
+
+        let state = runtime_state.status();
+        assert_eq!(state.connectivity, Connectivity::Online);
+        assert_eq!(state.name(), Some("RestoredVariant"));
+        assert!(runtime_state.last_seen().is_some());
     }
 }

@@ -16,6 +16,7 @@ workspace_rust_library(
     srcs = glob(["src/**/*.rs"]),
     crate_deps = [
         "bytes",
+        "chrono",
         "foldhash",
         "futures",
         "hex",
