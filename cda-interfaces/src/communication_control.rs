@@ -126,9 +126,21 @@ impl<Operation: Default> GatewayLifecycle<Operation> {
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
 pub enum CommunicationInitMode {
-    /// Whole-vehicle communication is initialized immediately during startup.
+    /// Whole-vehicle communication is initialized immediately during startup,
+    /// always with a full VIR/VAM broadcast discovery. A persisted ECU topology
+    /// is never used to skip that discovery, but detection results are still
+    /// persisted when [`EcuListPersistenceSettings::enabled`] is set.
     #[default]
     Always,
+    /// Whole-vehicle communication is initialized immediately during startup.
+    /// A full VIR/VAM broadcast discovery only runs when no persisted ECU
+    /// topology exists. Otherwise the persisted gateways are reconnected
+    /// directly and their ECUs restored from the persisted state.
+    ///
+    /// Equivalent to [`Always`](Self::Always) while
+    /// [`EcuListPersistenceSettings::enabled`] is `false`, since no persisted
+    /// topology can exist then.
+    WhenNotPersisted,
     /// Communication stays uninitialized at startup. HTTP/SOVD start first, and
     /// the first qualifying ECU diagnostic request, or an explicit
     /// `CommunicationPlugin::activate()` call, triggers one whole-vehicle
@@ -245,7 +257,10 @@ impl Default for EcuListPersistenceSettings {
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 pub struct CommunicationSettings {
     /// Controls when diagnostic transport network activation begins:
-    /// - "Always": whole-vehicle communication initializes eagerly at startup (default).
+    /// - "Always": whole-vehicle communication initializes eagerly at startup,
+    ///   always with a full broadcast discovery (default).
+    /// - "WhenNotPersisted": like "Always", but a persisted topology (see
+    ///   `ecu_list_persistence`) is reused instead of a broadcast discovery.
     /// - "OnDemand": HTTP/SOVD starts first. The first qualifying ECU diagnostic
     ///   request, or an explicit `activate()` call, triggers initialization.
     /// - "Disabled": HTTP/SOVD starts first. The default communication plugin

@@ -18,6 +18,8 @@ use cda_interfaces::communication_control::{
     CommunicationState, DisableCommunication, TransportControl, TransportState,
     VariantDetectionMode,
 };
+#[cfg(test)]
+use cda_interfaces::topology::PendingGateways;
 
 struct TestTransport(TransportState);
 
@@ -51,6 +53,18 @@ pub(crate) fn communication_handle_new(
     transport_control: Arc<dyn TransportControl>,
 ) -> CommunicationHandle {
     communication_handle_with_detection_mode(transport_control, VariantDetectionMode::Always)
+}
+
+/// A handle whose transport reports `pending_gateways`.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn communication_handle_with_pending_gateways(
+    transport_control: Arc<dyn TransportControl>,
+    pending_gateways: Arc<dyn PendingGateways>,
+) -> CommunicationHandle {
+    let mut handle = communication_handle_new(transport_control);
+    handle.pending_gateways = Some(pending_gateways);
+    handle
 }
 
 #[must_use]
@@ -88,6 +102,7 @@ fn communication_handle_from_resources(
         state,
         worker: sender,
         worker_task,
+        pending_gateways: None,
     }
 }
 

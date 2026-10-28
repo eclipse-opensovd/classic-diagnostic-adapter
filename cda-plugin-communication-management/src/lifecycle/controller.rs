@@ -21,9 +21,10 @@ use cda_interfaces::{
     communication_control::{
         CommunicationError, CommunicationGuard, CommunicationInitMode, CommunicationLifecycle,
         CommunicationOperation, CommunicationOperationFailure, CommunicationState,
-        CommunicationVariantDetection, TransportControl, VariantDetectionMode,
+        CommunicationVariantDetection, TransportControl, TransportGate, VariantDetectionMode,
     },
     dlt_ctx,
+    topology::PendingGateways,
 };
 use tokio::{
     sync::{oneshot, watch},
@@ -31,7 +32,10 @@ use tokio::{
 };
 
 use super::{
-    disable::{DisableError, DisableLease, DisableLeaseId, DisableOwner, DisableReason},
+    disable::{
+        DisableError, DisableLease, DisableLeaseId, DisableOwner, DisableReason, QuiesceLease,
+        QuiesceLeaseId,
+    },
     guard::ActiveGuard,
     state::{CommunicationStateStore, EnablingResultReceiver, detection_mode},
     transition::{self, LifecycleDecision, LifecycleRequest},
@@ -69,6 +73,8 @@ pub struct CommunicationHandle {
     state: Arc<CommunicationStateStore>,
     worker: WorkerSender,
     worker_task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
+    /// Gateways a lazy start left pending, if the transport has such.
+    pending_gateways: Option<Arc<dyn PendingGateways>>,
 }
 
 /// Failure while constructing the authoritative communication plugin runtime.
@@ -97,6 +103,11 @@ impl CommunicationHandle {
     pub fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
         let mut state = self.state.lock();
         transition::guard_admission(&state.state)?;
+        // A quiesce pauses admission without a lifecycle state of its own;
+        // callers get the retryable `Quiesced` error.
+        if state.quiesce_owner.is_some() {
+            return Err(CommunicationError::Quiesced);
+        }
         // Must be atomic with the admission check above. Otherwise a
         // `disable()` could claim `Enabled -> Disabling` in the gap.
         Ok(ActiveGuard::register(&mut state, Arc::clone(&self.state)))
@@ -211,7 +222,8 @@ impl CommunicationHandle {
     pub async fn enable_and_detect(
         &self,
     ) -> Result<CommunicationState, CommunicationOperationFailure> {
-        self.run_claimed(LifecycleRequest::EnableAndDetect).await
+        self.run_claimed(LifecycleRequest::EnableAndDetect, false)
+            .await
     }
 
     /// Non-awaiting counterpart to
@@ -244,7 +256,7 @@ impl CommunicationHandle {
     /// exclusive disable lease currently owns the state, or the lifecycle
     /// worker is shutting down.
     pub async fn enable(&self) -> Result<CommunicationState, CommunicationOperationFailure> {
-        self.run_claimed(LifecycleRequest::Enable).await
+        self.run_claimed(LifecycleRequest::Enable, false).await
     }
 
     /// Non-awaiting counterpart to [`enable`](Self::enable), mirroring
@@ -275,7 +287,40 @@ impl CommunicationHandle {
     /// [`CommunicationOperationFailure::GuardsHeld`]), or the lifecycle worker
     /// is shutting down.
     pub async fn redetect(&self) -> Result<CommunicationState, CommunicationOperationFailure> {
-        self.run_claimed(LifecycleRequest::Detect).await
+        self.run_claimed(LifecycleRequest::Detect, false).await
+    }
+
+    /// Runs the whole-vehicle variant detection of an activation against a live
+    /// transport: like [`redetect`](Self::redetect), but ECUs that need no new
+    /// detection (assumed online with a detected variant) are skipped instead of
+    /// being reset to `NotTested`.
+    ///
+    /// If a detection is already in flight, this joins it.
+    ///
+    /// # Errors
+    ///
+    /// As for [`redetect`](Self::redetect).
+    pub async fn detect_if_needed(
+        &self,
+    ) -> Result<CommunicationState, CommunicationOperationFailure> {
+        self.run_claimed(LifecycleRequest::Detect, true).await
+    }
+
+    /// `true` if a lazy start left gateways pending, which an explicit
+    /// activation has to connect.
+    pub async fn has_pending_gateways(&self) -> bool {
+        match &self.pending_gateways {
+            Some(pending) => pending.has_pending().await,
+            None => false,
+        }
+    }
+
+    /// Connects all gateways a lazy start left pending (with broadcast
+    /// fallback) and waits for the result. No-op without pending gateways.
+    pub async fn connect_pending_gateways(&self) {
+        if let Some(pending) = &self.pending_gateways {
+            pending.connect_all_pending().await;
+        }
     }
 
     /// Returns the effective detection policy for the runtime that is currently
@@ -294,9 +339,10 @@ impl CommunicationHandle {
     async fn run_claimed(
         &self,
         request: LifecycleRequest,
+        if_needed: bool,
     ) -> Result<CommunicationState, CommunicationOperationFailure> {
         let operation = request.operation();
-        let mut rx = match self.claim_or_join(request) {
+        let mut rx = match self.claim_or_join(request, if_needed) {
             ClaimOutcome::Settled(result) => return result,
             ClaimOutcome::LeaseHeld(_) => {
                 return Err(CommunicationOperationFailure::DisableLeaseHeld { operation });
@@ -315,7 +361,7 @@ impl CommunicationHandle {
     }
 
     fn request_claimed(&self, request: LifecycleRequest) -> CommunicationState {
-        match self.claim_or_join(request) {
+        match self.claim_or_join(request, false) {
             ClaimOutcome::Settled(Ok(settled)) => settled,
             ClaimOutcome::Settled(Err(failure)) => CommunicationState::Error(failure),
             ClaimOutcome::LeaseHeld(current) => current,
@@ -325,13 +371,13 @@ impl CommunicationHandle {
 
     /// Applies the verdict [`transition::decide`] returns for `request`. All
     /// joined callers observe the same final result via the returned receiver.
-    fn claim_or_join(&self, request: LifecycleRequest) -> ClaimOutcome {
+    fn claim_or_join(&self, request: LifecycleRequest, if_needed: bool) -> ClaimOutcome {
         let operation = request.operation();
         let mut state = self.state.lock();
         match transition::decide(&state, self.worker.is_shutting_down(), request) {
             // Detection leaves transport and hooks untouched and writes its own
             // slot rather than `state.state`.
-            LifecycleDecision::ClaimDetection => self.spawn_redetect(&mut state),
+            LifecycleDecision::ClaimDetection => self.spawn_redetect(&mut state, if_needed),
             LifecycleDecision::JoinDetection => Self::join_detection(&mut state),
             LifecycleDecision::Claim(shape) => self.spawn_enabling(&mut state, shape),
             LifecycleDecision::Join(in_flight) => {
@@ -419,6 +465,7 @@ impl CommunicationHandle {
     fn spawn_redetect(
         &self,
         state: &mut std::sync::MutexGuard<'_, super::state::CommunicationStateData>,
+        if_needed: bool,
     ) -> ClaimOutcome {
         let (tx, rx) = watch::channel(None);
         let detector = state.variant_detector();
@@ -428,7 +475,7 @@ impl CommunicationHandle {
 
         let handle = self.clone();
         cda_interfaces::spawn_named!("communication-redetect", async move {
-            let result = handle.run_redetect_operation(detector).await;
+            let result = handle.run_redetect_operation(detector, if_needed).await;
             let result = handle.finish_detection(result);
             let _ = tx.send(Some(result));
         });
@@ -495,9 +542,14 @@ impl CommunicationHandle {
     async fn run_redetect_operation(
         &self,
         detector: Option<Arc<dyn CommunicationVariantDetection>>,
+        if_needed: bool,
     ) -> Result<CommunicationState, CommunicationOperationFailure> {
         self.submit_and_await(CommunicationOperation::Detect, |reply| {
-            LifecycleCommand::Redetect { detector, reply }
+            LifecycleCommand::Redetect {
+                detector,
+                if_needed,
+                reply,
+            }
         })
         .await
     }
@@ -560,6 +612,54 @@ impl CommunicationHandle {
             state.enabling_result = None;
         }
         failure
+    }
+
+    /// Acquires the exclusive quiesce lease: no guard is admitted and no
+    /// lifecycle transition or detection starts while it is held, and the
+    /// transport stays as it is.
+    ///
+    /// Granted from `Enabled` and `Disabled`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DisableError::InUse`] when guards are held, and
+    /// [`DisableError::Conflict`] when another exclusive lease is held, a
+    /// transition or detection is in flight, or the state is `Enabling(_)`,
+    /// `Disabling`, `DisabledExclusive`, `RecoveryRequired(_)` or `Error(_)`.
+    /// Fails with [`CommunicationOperationFailure::ShuttingDown`] during shutdown.
+    pub fn quiesce(&self, reason: DisableReason) -> Result<QuiesceLease, DisableError> {
+        let mut state = self.state.lock();
+        if self.worker.is_shutting_down() || state.shutting_down {
+            return Err(DisableError::Failed(
+                CommunicationOperationFailure::ShuttingDown {
+                    operation: CommunicationOperation::Disable,
+                },
+            ));
+        }
+        if !state.active_guards.is_empty() {
+            return Err(DisableError::InUse);
+        }
+        let state_allows = matches!(
+            state.state,
+            CommunicationState::Enabled | CommunicationState::Disabled
+        );
+        if !state_allows
+            || state.disable_owner.is_some()
+            || state.quiesce_owner.is_some()
+            || state.enabling_result.is_some()
+            || state.detection_in_flight.is_some()
+        {
+            tracing::debug!(
+                state = ?state.state,
+                ?reason,
+                "Quiesce rejected: current state does not permit it"
+            );
+            return Err(DisableError::Conflict);
+        }
+        let id = QuiesceLeaseId::new();
+        state.quiesce_owner = Some(id);
+        self.state.gate.close();
+        Ok(QuiesceLease::new(Arc::clone(&self.state), id, reason))
     }
 
     /// Acquires the sole exclusive disable lease, taking the physical transport
@@ -825,6 +925,9 @@ impl Drop for WorkerBuildGuard {
 /// The lifecycle worker is started before the plugin builder receives its
 /// fully functional [`CommunicationHandle`].
 ///
+/// `pending_gateways` is the transport's view of gateways a lazy start left
+/// unconnected, or `None` if it has none.
+///
 /// `init_mode` is passed through unchanged for the plugin to interpret.
 /// `variant_detection` is framework policy, applied by the worker.
 ///
@@ -834,6 +937,8 @@ impl Drop for WorkerBuildGuard {
 pub async fn build_communication_runtime<B>(
     builder: B,
     transport_control: Arc<dyn TransportControl>,
+    pending_gateways: Option<Arc<dyn PendingGateways>>,
+    transport_gate: TransportGate,
     init_mode: CommunicationInitMode,
     variant_detection: VariantDetectionMode,
 ) -> Result<CommunicationRuntime, BuildCommunicationRuntimeError<B::Error>>
@@ -841,16 +946,17 @@ where
     B: CommunicationPluginBuilder,
 {
     let resources = worker::new_resources(transport_control);
-    let state = Arc::new(CommunicationStateStore::new(
-        CommunicationState::Disabled,
-        variant_detection,
-    ));
+    let state = Arc::new(
+        CommunicationStateStore::new(CommunicationState::Disabled, variant_detection)
+            .with_gate(transport_gate),
+    );
     let (sender, receivers) = worker::channel();
     let worker_task = Arc::new(tokio::sync::Mutex::new(None));
     let handle = CommunicationHandle {
         state: Arc::clone(&state),
         worker: sender,
         worker_task: Arc::clone(&worker_task),
+        pending_gateways,
     };
 
     *worker_task.lock().await = Some(worker::spawn(state, resources, receivers));
@@ -2071,6 +2177,113 @@ mod tests {
             .expect("the lease must be grantable once detection settles");
         drop(lease);
         assert_eq!(handle.state(), CommunicationState::Disabled);
+    }
+
+    /// [[ test~communication-quiesce-rejects-active-guards, Quiesce is refused while guards are held, test ]]
+    #[tokio::test]
+    async fn quiesce_rejects_active_guards() {
+        let (handle, _control) = handle();
+        handle.enable_and_detect().await.unwrap();
+
+        let guard = handle.acquire().unwrap();
+        assert!(matches!(
+            handle.quiesce(DisableReason::RuntimeUpdate),
+            Err(DisableError::InUse)
+        ));
+        drop(guard);
+        let lease = handle
+            .quiesce(DisableReason::RuntimeUpdate)
+            .expect("quiesce must succeed once no guard is active");
+        drop(lease);
+    }
+
+    /// [[ test~communication-quiesce-closes-gate, The quiesce lease closes the transport gate and refuses new guards with the paused error until dropped, test ]]
+    #[tokio::test]
+    async fn quiesce_closes_the_gate_and_blocks_new_guards_until_dropped() {
+        let (handle, _control) = handle();
+        let gate = handle.state.gate.clone();
+        handle.enable_and_detect().await.unwrap();
+        assert!(gate.is_open());
+
+        let lease = handle.quiesce(DisableReason::RuntimeUpdate).unwrap();
+        assert!(!gate.is_open());
+        // A retryable not-ready error of its own.
+        assert_eq!(handle.acquire().err(), Some(CommunicationError::Quiesced));
+        assert_eq!(handle.state(), CommunicationState::Enabled);
+
+        drop(lease);
+        assert!(gate.is_open());
+        assert!(handle.acquire().is_ok());
+    }
+
+    /// [[ test~communication-quiesce-conflicts-with-disable-and-detection, A quiesce is refused during a detection or another lease and blocks disable and detection and activation, test ]]
+    #[tokio::test]
+    async fn quiesce_conflicts_with_disable_and_detection() {
+        let (handle, _control) = handle();
+        handle.enable_and_detect().await.unwrap();
+        let detector = Arc::new(BlockingDetector {
+            entered: Notify::new(),
+            proceed: Notify::new(),
+        });
+        handle
+            .register_variant_detection(
+                Arc::clone(&detector) as Arc<dyn CommunicationVariantDetection>
+            )
+            .await
+            .unwrap();
+
+        // Detection in flight refuses a quiesce.
+        let sweep = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.redetect().await }
+        });
+        detector.entered.notified().await;
+        assert!(matches!(
+            handle.quiesce(DisableReason::RuntimeUpdate),
+            Err(DisableError::Conflict)
+        ));
+        detector.proceed.notify_one();
+        assert_eq!(sweep.await.unwrap(), Ok(CommunicationState::Enabled));
+
+        // A quiesce refuses disable, detection, a second quiesce and a transition.
+        let lease = handle.quiesce(DisableReason::RuntimeUpdate).unwrap();
+        assert!(matches!(
+            handle.disable(DisableReason::RuntimeUpdate).await,
+            Err(DisableError::Conflict)
+        ));
+        assert!(matches!(
+            handle.redetect().await,
+            Err(CommunicationOperationFailure::TransitionFailure { .. })
+        ));
+        assert!(matches!(
+            handle.quiesce(DisableReason::RuntimeUpdate),
+            Err(DisableError::Conflict)
+        ));
+        drop(lease);
+
+        // A disable lease refuses a quiesce.
+        let disable_lease = handle.disable(DisableReason::RuntimeUpdate).await.unwrap();
+        assert!(matches!(
+            handle.quiesce(DisableReason::RuntimeUpdate),
+            Err(DisableError::Conflict)
+        ));
+        drop(disable_lease);
+        assert_eq!(handle.state(), CommunicationState::Disabled);
+
+        // From `Disabled` a quiesce is granted and still blocks an activation.
+        let lease = handle.quiesce(DisableReason::RuntimeUpdate).unwrap();
+        assert!(matches!(
+            handle.enable_and_detect().await,
+            Err(CommunicationOperationFailure::TransitionFailure { .. })
+        ));
+        assert_eq!(handle.state(), CommunicationState::Disabled);
+        drop(lease);
+        // The activation runs the blocking detector, so pre-release it.
+        detector.proceed.notify_one();
+        assert_eq!(
+            handle.enable_and_detect().await,
+            Ok(CommunicationState::Enabled)
+        );
     }
 
     /// A detector failure during a full activation unwinds all hooks and takes

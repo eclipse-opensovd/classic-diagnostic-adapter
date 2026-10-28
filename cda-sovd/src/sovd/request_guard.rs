@@ -30,10 +30,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use axum::{
-    Json,
-    response::{IntoResponse, Response},
-};
+use axum::response::Response;
 use cda_interfaces::http_protection::registry::{
     HttpProtectionReason, HttpRestrictionDenial, HttpRestrictionGuard,
 };
@@ -132,15 +129,12 @@ fn http_restriction_denial_to_sovd_response(denial: HttpRestrictionDenial) -> Re
         ),
     };
 
-    let body = sovd_interfaces::error::ApiErrorResponse {
-        message: denial.message,
+    let response = crate::sovd::error::api_error_response(
+        denial.status,
         error_code,
         vendor_code,
-        parameters: None,
-        error_source: None,
-        schema: None,
-    };
-    let response = (denial.status, Json(body)).into_response();
+        denial.message,
+    );
 
     crate::sovd::with_retry_after(response, denial.retry_after)
 }

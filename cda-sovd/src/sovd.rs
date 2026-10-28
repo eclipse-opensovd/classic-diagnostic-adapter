@@ -757,7 +757,7 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
         .route("/vehicle/v15/authorize", routing::post(S::authorize))
         .with_state(state)
         .api_route(
-            "/vehicle/v15/apps/sovd2uds/data/networkstructure",
+            cda_interfaces::topology::NETWORK_STRUCTURE_ROUTE,
             routing::get_with(
                 apps::sovd2uds::data::networkstructure::get::<T>,
                 apps::sovd2uds::data::networkstructure::docs_get,

@@ -21,6 +21,7 @@
 pub mod access;
 pub mod disable;
 pub mod guard;
+pub mod rediscovery;
 pub mod state;
 
 pub mod controller;

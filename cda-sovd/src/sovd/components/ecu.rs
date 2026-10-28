@@ -70,6 +70,16 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
             .into_response();
         }
     };
+    let last_seen = match uds.get_last_seen(&ecu_name).await {
+        Ok(v) => v.map(cda_interfaces::util::format_rfc3339_millis),
+        Err(e) => {
+            return ErrorWrapper {
+                error: e.into(),
+                include_schema,
+            }
+            .into_response();
+        }
+    };
 
     let sdgs = if query.include_sdgs {
         match uds.get_sdgs(&ecu_name, None).await {
@@ -104,6 +114,7 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
             id: ecu_name.to_lowercase(),
             name: ecu_name.clone(),
             variant,
+            last_seen,
             locks: format!("{base_path}/locks"),
             operations: format!("{base_path}/operations"),
             configurations: format!("{base_path}/configurations"),
@@ -130,6 +141,7 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
                     state: sovd_interfaces::components::ecu::State::Online,
                     logical_address: "0x42".to_owned(),
                 },
+                last_seen: Some("2026-10-09T08:15:00.123Z".to_owned()),
                 locks: "http://localhost:20002/vehicle/v15/components/my_ecu/locks".to_string(),
                 operations: "http://localhost:20002/vehicle/v15/components/my_ecu/operations"
                     .to_string(),
