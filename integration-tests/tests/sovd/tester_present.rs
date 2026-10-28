@@ -13,14 +13,18 @@
 
 use std::time::Duration;
 
-use http::{Method, StatusCode};
+use http::StatusCode;
+use sovd_interfaces::{
+    common::modes::SESSION_ID,
+    components::ecu::modes::security_and_session::put::{
+        Response as SessionResponse, SessionRequest,
+    },
+};
 
 use crate::{
-    sovd::{self, ECU_FLXC1000, ECU_FSNR2000, ecu::switch_session},
+    sovd::{ECU_FLXC1000, ECU_FSNR2000},
     util::{
         TestingError, ecusim,
-        http::{extract_field_from_json, response_to_json, send_authenticated_cda_request},
-        locks::{COMPONENTS_FLXC1000_LOCKS as ECU_LOCK_ENDPOINT, create_lock, lock_operation},
         test_env::{TestEnv, wait_for_ecus_online},
     },
 };
@@ -43,6 +47,7 @@ const TESTER_PRESENT_FRAME_RESPOND: &str = "3e00";
 async fn tester_present_sent_while_ecu_lock_held() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
     wait_for_ecus_online(&test_env.config).await?;
+    let ecu = test_env.client().component(ECU_FLXC1000);
 
     // Start recording UDS frames on the ECU simulator before creating the lock
     // so we capture even the very first Tester Present frame.
@@ -52,14 +57,13 @@ async fn tester_present_sent_while_ecu_lock_held() -> Result<(), TestingError> {
         .expect("failed to start ECU sim recording");
 
     // Create an ECU lock - this should trigger Tester Present to start
-    let lock_response = create_lock(
-        Duration::from_secs(100),
-        ECU_LOCK_ENDPOINT,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
-    let lock_id = extract_field_from_json::<String>(&response_to_json(&lock_response)?, "id")?;
+    let lock = ecu
+        .locks()
+        .create(Duration::from_secs(100))
+        .await
+        .expect("Failed to create lock")
+        .expect_status(StatusCode::CREATED)
+        .into_body();
 
     // Wait long enough for multiple Tester Present intervals.
     // Default TP interval is 2 seconds; waiting 5 seconds should yield at least 2 frames.
@@ -72,14 +76,10 @@ async fn tester_present_sent_while_ecu_lock_held() -> Result<(), TestingError> {
         .expect("failed to stop ECU sim recording");
 
     // Cleanup: delete the lock regardless of the assertion outcome
-    let _ = lock_operation(
-        ECU_LOCK_ENDPOINT,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    lock.release()
+        .await
+        .expect("lock operation failed")
+        .expect_status(StatusCode::NO_CONTENT);
 
     // Assert that at least one Tester Present frame was received
     let tp_count = recorded_frames
@@ -106,16 +106,14 @@ async fn tester_present_sent_while_ecu_lock_held() -> Result<(), TestingError> {
 async fn tester_present_sent_after_programming_session_switch() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
     wait_for_ecus_online(&test_env.config).await?;
-    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
+    let ecu = test_env.client().component(ECU_FLXC1000);
 
     // Create an ECU lock - this should trigger Tester Present to start
-    create_lock(
-        Duration::from_secs(100),
-        ECU_LOCK_ENDPOINT,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
+    ecu.locks()
+        .create(Duration::from_secs(100))
+        .await
+        .expect("Failed to create lock")
+        .expect_status(StatusCode::CREATED);
 
     // Switch the ECU sim to BOOT variant (simulates ECU going into bootloader)
     ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "BOOT")
@@ -123,21 +121,20 @@ async fn tester_present_sent_after_programming_session_switch() -> Result<(), Te
         .expect("failed to switch ECU sim to BOOT variant");
 
     // Force variant detection so the CDA picks up the boot variant
-    send_authenticated_cda_request(
-        &test_env,
-        ecu_endpoint,
-        StatusCode::OK,
-        Method::PUT,
-        None,
-        None,
-    )
-    .await
-    .expect("failed to trigger variant detection");
+    ecu.detect_variant()
+        .await
+        .expect("failed to trigger variant detection")
+        .expect_status(StatusCode::OK);
 
     // Switch to programming session
-    switch_session("programming", &test_env, ecu_endpoint, StatusCode::OK)
+    ecu.mode(SESSION_ID)
+        .put::<SessionResponse<String>>(&SessionRequest {
+            value: "programming".to_owned(),
+            mode_expiration: None,
+        })
         .await
-        .expect("failed to switch to programming session");
+        .expect("failed to switch to programming session")
+        .expect_status(StatusCode::OK);
 
     // Now start recording after the session switch to isolate the issue:
     // We want to verify that TP continues to be sent in the new session state.
@@ -186,15 +183,14 @@ async fn tester_present_sent_after_programming_session_switch() -> Result<(), Te
 async fn tester_present_sent_after_doip_reconnection() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
     wait_for_ecus_online(&test_env.config).await?;
+    let ecu = test_env.client().component(ECU_FLXC1000);
 
     // Create an ECU lock - this should trigger Tester Present to start
-    create_lock(
-        Duration::from_secs(100),
-        ECU_LOCK_ENDPOINT,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
+    ecu.locks()
+        .create(Duration::from_secs(100))
+        .await
+        .expect("Failed to create lock")
+        .expect_status(StatusCode::CREATED);
 
     // Wait briefly to confirm TP is running before we disconnect
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(3)).await;
@@ -207,16 +203,10 @@ async fn tester_present_sent_after_doip_reconnection() -> Result<(), TestingErro
         .expect("failed to set hard reset duration");
 
     // Send UDS ECU Reset (0x11 0x01) via genericservice - this triggers the ECU sim
-    // to close the TCP connection for 5 seconds (simulating a real ECU reboot)
-    let _ = send_authenticated_cda_request(
-        &test_env,
-        &format!("{}/genericservice", sovd::COMPONENTS_FLXC1000_BASE),
-        StatusCode::OK,
-        Method::PUT,
-        Some(&serde_json::json!({"request": "0x11 0x01"}).to_string()),
-        None,
-    )
-    .await;
+    // to close the TCP connection for 5 seconds (simulating a real ECU reboot).
+    // The result is ignored: the simulator closes the connection concurrently with
+    // its positive response, so the CDA may or may not deliver the response.
+    let _ = ecu.generic_service(&[0x11, 0x01]).await;
 
     // Wait for the ECU to come back online after the hard reset (5s reset + reconnection time)
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(10)).await;
@@ -268,6 +258,7 @@ async fn tester_present_sent_after_doip_reconnection() -> Result<(), TestingErro
 async fn tester_present_resumes_after_network_disconnect() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
     wait_for_ecus_online(&test_env.config).await?;
+    let ecu = test_env.client().component(ECU_FLXC1000);
 
     // Start recording before acquiring the lock to capture the very first TP frame.
     let recorder = test_env
@@ -276,14 +267,13 @@ async fn tester_present_resumes_after_network_disconnect() -> Result<(), Testing
         .expect("failed to start ECU sim recording");
 
     // Acquire an ECU lock - this should trigger Tester Present to start.
-    let lock_response = create_lock(
-        Duration::from_secs(100),
-        ECU_LOCK_ENDPOINT,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
-    let lock_id = extract_field_from_json::<String>(&response_to_json(&lock_response)?, "id")?;
+    let lock = ecu
+        .locks()
+        .create(Duration::from_secs(100))
+        .await
+        .expect("Failed to create lock")
+        .expect_status(StatusCode::CREATED)
+        .into_body();
 
     // Wait for multiple TP intervals to confirm TP is running before we disconnect.
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(3)).await;
@@ -327,14 +317,10 @@ async fn tester_present_resumes_after_network_disconnect() -> Result<(), Testing
         .expect("failed to stop post-reconnect recording");
 
     // Cleanup: delete the lock.
-    let _ = lock_operation(
-        ECU_LOCK_ENDPOINT,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    lock.release()
+        .await
+        .expect("lock operation failed")
+        .expect_status(StatusCode::NO_CONTENT);
 
     let post_tp_count = post_reconnect_frames
         .iter()
@@ -362,8 +348,8 @@ async fn tester_present_resumes_after_network_disconnect() -> Result<(), Testing
 #[tokio::test]
 async fn tester_present_honours_com_params_with_db_and_fallback() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
-
-    let fallback_lock_endpoint = format!("{}/locks", sovd::COMPONENTS_FSNR2000_BASE);
+    let db_ecu = test_env.client().component(ECU_FLXC1000);
+    let fallback_ecu = test_env.client().component(ECU_FSNR2000);
 
     // Record both ECUs before locking so the very first frame is captured.
     let db_recorder = test_env
@@ -376,24 +362,20 @@ async fn tester_present_honours_com_params_with_db_and_fallback() -> Result<(), 
         .expect("failed to start fallback ECU sim recording");
 
     // Locking an ECU starts periodic Tester Present for it.
-    let db_lock = create_lock(
-        Duration::from_secs(100),
-        ECU_LOCK_ENDPOINT,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
-    let db_lock_id = extract_field_from_json::<String>(&response_to_json(&db_lock)?, "id")?;
-
-    let fallback_lock = create_lock(
-        Duration::from_secs(100),
-        &fallback_lock_endpoint,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
-    let fallback_lock_id =
-        extract_field_from_json::<String>(&response_to_json(&fallback_lock)?, "id")?;
+    let db_lock = db_ecu
+        .locks()
+        .create(Duration::from_secs(100))
+        .await
+        .expect("Failed to create DB-provided ECU lock")
+        .expect_status(StatusCode::CREATED)
+        .into_body();
+    let fallback_lock = fallback_ecu
+        .locks()
+        .create(Duration::from_secs(100))
+        .await
+        .expect("Failed to create fallback ECU lock")
+        .expect_status(StatusCode::CREATED)
+        .into_body();
 
     // Default TP interval is 2 seconds; 5 seconds yields multiple frames.
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(5)).await;
@@ -408,22 +390,8 @@ async fn tester_present_honours_com_params_with_db_and_fallback() -> Result<(), 
         .expect("failed to stop fallback ECU sim recording");
 
     // Cleanup: release both locks regardless of the assertion outcome.
-    let _ = lock_operation(
-        ECU_LOCK_ENDPOINT,
-        Some(&db_lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
-    let _ = lock_operation(
-        &fallback_lock_endpoint,
-        Some(&fallback_lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    let _ = db_lock.release().await;
+    let _ = fallback_lock.release().await;
 
     // DB-provided ECU: MDD com-params suppress the positive response (3e80) and
     // never request one (3e00).

@@ -25,7 +25,7 @@ pub mod comparams {
         pub offset_to_si_unit: Option<f64>,
     }
 
-    #[derive(Serialize, Clone, schemars::JsonSchema)]
+    #[derive(Debug, Serialize, Clone, schemars::JsonSchema)]
     pub struct ComParamSimpleValue {
         pub value: String,
         pub unit: Option<Unit>,
@@ -62,7 +62,7 @@ pub mod comparams {
         }
     }
 
-    #[derive(Deserialize, Serialize, Clone)]
+    #[derive(Debug, Deserialize, Serialize, Clone)]
     #[serde(untagged)]
     #[derive(schemars::JsonSchema)]
     pub enum ComParamValue {
@@ -83,7 +83,7 @@ pub mod comparams {
     pub mod executions {
         use super::{ComParamValue, Deserialize, HashMap, Serialize};
 
-        #[derive(Deserialize, Serialize, Clone)]
+        #[derive(Debug, Deserialize, Serialize, Clone)]
         #[serde(rename_all = "lowercase")]
         #[derive(schemars::JsonSchema)]
         pub enum Status {
@@ -92,7 +92,7 @@ pub mod comparams {
             Failed,
         }
 
-        #[derive(Deserialize, Serialize, Clone)]
+        #[derive(Debug, Deserialize, Serialize, Clone)]
         #[serde(rename_all = "lowercase")]
         #[derive(schemars::JsonSchema)]
         pub enum Capability {
@@ -103,7 +103,7 @@ pub mod comparams {
             Status,
         }
 
-        #[derive(Serialize, schemars::JsonSchema)]
+        #[derive(Debug, Serialize, schemars::JsonSchema, serde::Deserialize)]
         pub struct Item {
             pub id: String,
         }
@@ -111,7 +111,7 @@ pub mod comparams {
         pub mod update {
             use super::{Capability, ComParamValue, Deserialize, HashMap, Serialize, Status};
             // todo: which ones are optional or not
-            #[derive(Deserialize)]
+            #[derive(Debug, Deserialize, serde::Serialize)]
             #[allow(
                 dead_code,
                 reason = "Request fields not all consumed yet. Struct kept for future use"
@@ -125,7 +125,7 @@ pub mod comparams {
                 pub proximity_response: Option<String>,
             }
 
-            #[derive(Serialize, schemars::JsonSchema)]
+            #[derive(Debug, Serialize, schemars::JsonSchema, serde::Deserialize)]
             #[schemars(rename = "UpdateExecutionResponse")]
             pub struct Response {
                 pub id: String,
@@ -150,7 +150,7 @@ pub mod comparams {
             use super::{Capability, ComParamValue, HashMap, Serialize, Status};
             pub mod get {
                 use super::{Capability, ComParamValue, HashMap, Serialize, Status};
-                #[derive(Serialize, schemars::JsonSchema)]
+                #[derive(Debug, Serialize, schemars::JsonSchema, serde::Deserialize)]
                 #[schemars(rename = "GetExecutionResponse")]
                 pub struct Response {
                     pub capability: Capability,
@@ -175,7 +175,7 @@ pub mod service {
         use super::{Deserialize, HashMap, HashMapExtensions, Serialize};
         use crate::{Payload, error::DataError};
 
-        #[derive(Serialize, schemars::JsonSchema)]
+        #[derive(Debug, Serialize, schemars::JsonSchema, serde::Deserialize)]
         pub struct Response<T> {
             #[serde(skip_serializing_if = "Option::is_none")]
             pub parameters: Option<serde_json::Map<String, serde_json::Value>>,
@@ -219,7 +219,8 @@ pub enum ExecutionStatus {
 }
 
 /// Response body for a successful async `POST /operations/{service}/executions`.
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, schemars::JsonSchema, serde::Deserialize)]
+#[serde(bound(deserialize = "T: Deserialize<'de>, E: Deserialize<'de>"))]
 pub struct AsyncPostResponse<T, E> {
     /// Unique id for this execution, used in subsequent GET / DELETE calls.
     pub id: String,
@@ -238,6 +239,9 @@ pub struct AsyncPostResponse<T, E> {
 
 /// Response body for `GET /operations/{service}/executions/{id}` (`RequestResults`).
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+// Without the explicit bound, `#[serde(default)]` on `error` makes serde
+// require `T: Default` for deserializing.
+#[serde(bound(deserialize = "T: Deserialize<'de>"))]
 pub struct AsyncGetByIdResponse<T> {
     /// Status of the executed operation.
     pub status: ExecutionStatus,
@@ -258,7 +262,7 @@ pub struct AsyncGetByIdResponse<T> {
 }
 
 /// The capability reported in `GET /operations/{operation-id}/executions/{id}` responses.
-#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum GetByIdCapability {
     Execute,

@@ -15,22 +15,74 @@ use std::time::Duration;
 
 use http::{Method, StatusCode};
 use serde::Deserialize;
-use sovd_interfaces::components::ecu::modes::security_and_session::put::RequestSeedResponse;
+use sovd_interfaces::{
+    common::modes::{SECURITY_ID, SESSION_ID},
+    components::ecu::{
+        modes::security_and_session::put::{
+            ModeKey, Request as SecurityRequest, RequestSeedResponse, Response as ModeResponse,
+            SessionRequest,
+        },
+        x::sovd2uds::download::{flash_transfer, request_download, transfer_exit},
+    },
+};
 
 use crate::{
-    sovd::{self, ECU_FLXC1000, compute_security_key, ecu::switch_session, put_mode},
+    client::{components::Component, locks::Lock},
+    sovd::{ECU_FLXC1000, compute_security_key},
     util::{
         TestingError,
         ecusim::{self, EcuSim},
-        endpoints::APPS_SOVD2UDS_BULK_DATA_FLASHFILES,
-        http::{
-            extract_field_from_json, response_to_json, response_to_t,
-            send_authenticated_cda_request,
-        },
-        locks::{self, create_lock, lock_operation},
+        http::response_to_t,
         test_env::TestEnv,
     },
 };
+
+/// Forces the variant detection of `component`, which the CDA answers with
+/// `200 OK`.
+async fn force_variant_detection(component: &Component<'_>) {
+    component
+        .detect_variant()
+        .await
+        .expect("variant detection failed")
+        .expect_status(StatusCode::OK);
+}
+
+/// Switches `component` to the session `name`.
+async fn switch_session(component: &Component<'_>, name: &str) -> ModeResponse<String> {
+    component
+        .mode(SESSION_ID)
+        .put::<ModeResponse<String>>(&SessionRequest {
+            value: name.to_owned(),
+            mode_expiration: None,
+        })
+        .await
+        .expect("session switch failed")
+        .expect_status(StatusCode::OK)
+        .into_body()
+}
+
+/// A security access request for the level `value`, with `key` if given.
+fn security_request(value: &str, key: Option<String>) -> SecurityRequest {
+    SecurityRequest {
+        value: value.to_owned(),
+        mode_expiration: None,
+        key: key.map(|send_key| ModeKey { send_key }),
+        parameters: None,
+    }
+}
+
+/// A `RequestDownload` request with the parameters `parameters`, a JSON
+/// object, and the functional class `flash_class`, if given.
+fn download_request(
+    parameters: serde_json::Value,
+    flash_class: Option<&str>,
+) -> request_download::put::Request {
+    request_download::put::Request {
+        parameters: serde_json::from_value(parameters)
+            .expect("RequestDownload parameters must be a JSON object"),
+        flash_class: flash_class.map(ToOwned::to_owned),
+    }
+}
 
 /// Integration test for the full flash download sequence:
 /// `RequestDownload` (0x34) -> `TransferData` (0x36) -> `TransferExit` (0x37)
@@ -46,28 +98,25 @@ use crate::{
 )]
 async fn test_flash_download_transfer_sequence() {
     let test_env = TestEnv::builder().await.unwrap();
-    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
+    let client = test_env.client();
+    let component = client.component(ECU_FLXC1000);
+    let download = component.download();
 
     // Create and acquire ECU lock
     let expiration_timeout = Duration::from_secs(120);
-    let ecu_lock = create_lock(
-        expiration_timeout,
-        locks::COMPONENTS_FLXC1000_LOCKS,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
-    let lock_id =
-        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
-
-    lock_operation(
-        locks::COMPONENTS_FLXC1000_LOCKS,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::OK,
-        Method::GET,
-    )
-    .await;
+    let ecu_lock = component
+        .locks()
+        .create(expiration_timeout)
+        .await
+        .expect("Failed to create lock")
+        .expect_status(StatusCode::CREATED)
+        .into_body();
+    ecu_lock
+        .handle()
+        .get()
+        .await
+        .expect("lock operation failed")
+        .expect_status(StatusCode::OK);
 
     // Switch ECU sim to BOOT variant
     ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "BOOT")
@@ -75,22 +124,10 @@ async fn test_flash_download_transfer_sequence() {
         .unwrap();
 
     // Force variant detection so the CDA picks up the boot variant
-    send_authenticated_cda_request(
-        &test_env,
-        ecu_endpoint,
-        StatusCode::OK,
-        Method::PUT,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    force_variant_detection(&component).await;
 
     // Switch to programming session
-    let session_result = switch_session("programming", &test_env, ecu_endpoint, StatusCode::OK)
-        .await
-        .unwrap()
-        .unwrap();
+    let session_result = switch_session(&component, "programming").await;
     assert_eq!(
         session_result.value.to_lowercase(),
         "programming",
@@ -104,21 +141,12 @@ async fn test_flash_download_transfer_sequence() {
         .expect("Failed to start ECU sim recording");
 
     // SecurityAccess Level 7 (request seed + send key)
-    let seed_response: RequestSeedResponse = put_mode(
-        &test_env,
-        ecu_endpoint,
-        "security",
-        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
-            value: "Level_7_RequestSeed".to_owned(),
-            mode_expiration: None,
-            key: None,
-            parameters: None,
-        },
-        StatusCode::OK,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let security = component.mode(SECURITY_ID);
+    let seed_response = security
+        .put::<RequestSeedResponse>(&security_request("Level_7_RequestSeed", None))
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 
     // Verify that the seed payload is the deterministic sequence 0x00..0x07
     assert_eq!(
@@ -128,27 +156,11 @@ async fn test_flash_download_transfer_sequence() {
 
     let key = compute_security_key(&seed_response.seed.request_seed);
 
-    let key_result: sovd_interfaces::components::ecu::modes::security_and_session::put::Response<
-        String,
-    > = put_mode(
-        &test_env,
-        ecu_endpoint,
-        "security",
-        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
-            value: "Level_7".to_owned(),
-            mode_expiration: None,
-            key: Some(
-                sovd_interfaces::components::ecu::modes::security_and_session::put::ModeKey {
-                    send_key: key,
-                },
-            ),
-            parameters: None,
-        },
-        StatusCode::OK,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let key_result = security
+        .put::<ModeResponse<String>>(&security_request("Level_7", Some(key)))
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
     assert_eq!(key_result.value, "Level_7");
 
     // Verify the ECU sim is in the expected state
@@ -186,45 +198,30 @@ async fn test_flash_download_transfer_sequence() {
     );
 
     // List flash files to get the file ID
-    let flash_files_response = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_FLASHFILES,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let flash_files_json = response_to_json(&flash_files_response).unwrap();
-    let files = flash_files_json
-        .get("items")
-        .and_then(|v| v.as_array())
-        .expect("Expected 'items' array in flash files response");
+    let files = client
+        .sovd2uds()
+        .flash_files()
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .files;
     assert!(
         !files.is_empty(),
-        "Expected at least one flash file, got none. Response: {flash_files_json:#?}"
+        "Expected at least one flash file, got none. Response: {files:#?}"
     );
 
     // Find the test_flash.bin file specifically (not .gitkeep or other files)
-    // The origin path field is serialized as "x-sovd2uds-OrigPath" in the JSON response
     let flash_file = files
         .iter()
         .find(|f| {
-            f.get("x-sovd2uds-OrigPath")
-                .and_then(|v| v.as_str())
+            f.origin_path
+                .as_deref()
                 .is_some_and(|p| p.contains("test_flash"))
         })
         .expect("Expected to find test_flash.bin in flash files list");
-    let file_id = flash_file
-        .get("id")
-        .and_then(|v| v.as_str())
-        .expect("Expected 'id' in flash file")
-        .to_owned();
-    let file_size = flash_file
-        .get("size")
-        .and_then(serde_json::Value::as_u64)
-        .expect("Expected 'size' in flash file");
+    let file_id = flash_file.id.clone();
+    let file_size = flash_file.size.expect("Expected 'size' in flash file");
     assert!(
         file_size > 0,
         "Flash file size should be > 0, got {file_size}. File: {flash_file:#?}"
@@ -234,35 +231,29 @@ async fn test_flash_download_transfer_sequence() {
     // memory address: 0x00000000, memory size: file_size
     // DataFormatIdentifier: 0x00 (no compression, no encryption)
     // AddressAndLengthFormatIdentifier: 0x44 (4-byte address, 4-byte size)
-    let request_download_body = serde_json::json!({
-        "requestdownload": {
-            "DataFormatIdentifier": 0,
-            "AddressAndLengthFormatIdentifier": 0x44,
-            "MemoryAddress": "0x00 0x00 0x00 0x00",
-            "MemorySize": format!("0x{:02x} 0x{:02x} 0x{:02x} 0x{:02x}",
-                (file_size >> 24) & 0xFF,
-                (file_size >> 16) & 0xFF,
-                (file_size >> 8) & 0xFF,
-                file_size & 0xFF
-            )
-        }
-    });
-    let request_download_response = send_authenticated_cda_request(
-        &test_env,
-        &format!("{ecu_endpoint}/x-sovd2uds-download/requestdownload"),
-        StatusCode::OK,
-        Method::PUT,
-        Some(&request_download_body.to_string()),
-        None,
-    )
-    .await
-    .unwrap();
+    let request_download = download
+        .request_download(&download_request(
+            serde_json::json!({
+                "DataFormatIdentifier": 0,
+                "AddressAndLengthFormatIdentifier": 0x44,
+                "MemoryAddress": "0x00 0x00 0x00 0x00",
+                "MemorySize": format!("0x{:02x} 0x{:02x} 0x{:02x} 0x{:02x}",
+                    (file_size >> 24) & 0xFF,
+                    (file_size >> 16) & 0xFF,
+                    (file_size >> 8) & 0xFF,
+                    file_size & 0xFF
+                )
+            }),
+            None,
+        ))
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .expect("Expected a body in the RequestDownload response");
 
-    let rd_json = response_to_json(&request_download_response).unwrap();
-    let rd_params = rd_json
-        .get("requestdownload")
-        .expect("Expected 'requestdownload' field in response");
-    let max_block_length = rd_params
+    let max_block_length = request_download
+        .parameters
         .get("MaxNumberOfBlockLength")
         .expect("Expected 'MaxNumberOfBlockLength' in response");
     assert!(
@@ -271,70 +262,45 @@ async fn test_flash_download_transfer_sequence() {
     );
 
     // Start flash transfer (TransferData)
-    let flash_transfer_body = serde_json::json!({
-        "blocksequencecounter": 1,
-        "blocksize": 128,
-        "offset": 0,
-        "length": file_size,
-        "id": file_id
-    });
-
-    let flash_transfer_response = send_authenticated_cda_request(
-        &test_env,
-        &format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer"),
-        StatusCode::OK,
-        Method::POST,
-        Some(&flash_transfer_body.to_string()),
-        None,
-    )
-    .await
-    .unwrap();
-
-    let transfer_json = response_to_json(&flash_transfer_response).unwrap();
-    let transfer_id = transfer_json
-        .get("id")
-        .and_then(|v| v.as_str())
-        .expect("Expected 'id' in flash transfer response")
-        .to_owned();
+    let transfer_id = download
+        .start_transfer(&flash_transfer::post::Request {
+            block_sequence_counter: 1,
+            blocksize: 128,
+            offset: 0,
+            length: file_size,
+            id: file_id,
+            flash_class: None,
+        })
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .id;
 
     // Poll transfer status until finished
     let mut transfer_finished = false;
     for attempt in 0..20 {
         cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(500)).await;
 
-        let status_response = send_authenticated_cda_request(
-            &test_env,
-            &format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer/{transfer_id}"),
-            StatusCode::OK,
-            Method::GET,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
+        let transfer = download
+            .transfer(&transfer_id)
+            .await
+            .unwrap()
+            .expect_status(StatusCode::OK);
 
-        let status_json = response_to_json(&status_response).unwrap();
-        let status = status_json
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-
-        if status == "finished" {
+        if transfer.status == flash_transfer::get::DataTransferStatus::Finished {
             transfer_finished = true;
-            let acknowledged = status_json
-                .get("acknowledgedBytes")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
             assert!(
-                acknowledged > 0,
-                "Expected acknowledgedBytes > 0, got {acknowledged}"
+                transfer.acknowledged_bytes > 0,
+                "Expected acknowledgedBytes > 0, got {}",
+                transfer.acknowledged_bytes
             );
             break;
         }
 
         assert!(
-            status != "aborted",
-            "Flash transfer was aborted on attempt {attempt}. Status: {status_json:#?}"
+            transfer.status != flash_transfer::get::DataTransferStatus::Aborted,
+            "Flash transfer was aborted on attempt {attempt}. Status: {transfer:#?}"
         );
     }
     assert!(
@@ -343,28 +309,18 @@ async fn test_flash_download_transfer_sequence() {
     );
 
     // Remove finished flash transfer
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer/{transfer_id}"),
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    download
+        .delete_transfer(&transfer_id)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::NO_CONTENT);
 
     // TransferExit
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{ecu_endpoint}/x-sovd2uds-download/transferexit"),
-        StatusCode::NO_CONTENT,
-        Method::PUT,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    download
+        .transfer_exit(None)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::NO_CONTENT);
 
     // Verify on ECU simulator
     let sim_transfers = get_sim_data_transfers(&test_env.ecu_sim, ECU_FLXC1000)
@@ -390,14 +346,11 @@ async fn test_flash_download_transfer_sequence() {
     );
 
     // Cleanup: delete lock
-    lock_operation(
-        locks::COMPONENTS_FLXC1000_LOCKS,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    ecu_lock
+        .release()
+        .await
+        .expect("lock operation failed")
+        .expect_status(StatusCode::NO_CONTENT);
 }
 
 /// Verify that attempting a flash transfer with length=0 is rejected with a bad request error.
@@ -410,28 +363,25 @@ async fn test_flash_download_transfer_sequence() {
 )]
 async fn test_flash_transfer_zero_length_rejected() {
     let test_env = TestEnv::builder().await.unwrap();
-    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
+    let client = test_env.client();
+    let component = client.component(ECU_FLXC1000);
+    let download = component.download();
 
     // Create and acquire ECU lock
     let expiration_timeout = Duration::from_secs(120);
-    let ecu_lock = create_lock(
-        expiration_timeout,
-        locks::COMPONENTS_FLXC1000_LOCKS,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
-    let lock_id =
-        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
-
-    lock_operation(
-        locks::COMPONENTS_FLXC1000_LOCKS,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::OK,
-        Method::GET,
-    )
-    .await;
+    let ecu_lock = component
+        .locks()
+        .create(expiration_timeout)
+        .await
+        .expect("Failed to create lock")
+        .expect_status(StatusCode::CREATED)
+        .into_body();
+    ecu_lock
+        .handle()
+        .get()
+        .await
+        .expect("lock operation failed")
+        .expect_status(StatusCode::OK);
 
     // Switch ECU sim to BOOT variant
     ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "BOOT")
@@ -439,22 +389,10 @@ async fn test_flash_transfer_zero_length_rejected() {
         .unwrap();
 
     // Force variant detection
-    send_authenticated_cda_request(
-        &test_env,
-        ecu_endpoint,
-        StatusCode::OK,
-        Method::PUT,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    force_variant_detection(&component).await;
 
     // Switch to programming session
-    switch_session("programming", &test_env, ecu_endpoint, StatusCode::OK)
-        .await
-        .unwrap()
-        .unwrap();
+    switch_session(&component, "programming").await;
 
     // Start recording to verify the raw UDS frames sent for SecurityAccess Level 5
     let recorder = test_env
@@ -463,21 +401,12 @@ async fn test_flash_transfer_zero_length_rejected() {
         .expect("Failed to start ECU sim recording");
 
     // SecurityAccess Level 5
-    let seed_response: RequestSeedResponse = put_mode(
-        &test_env,
-        ecu_endpoint,
-        "security",
-        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
-            value: "Level_5_RequestSeed".to_owned(),
-            mode_expiration: None,
-            key: None,
-            parameters: None,
-        },
-        StatusCode::OK,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let security = component.mode(SECURITY_ID);
+    let seed_response = security
+        .put::<RequestSeedResponse>(&security_request("Level_5_RequestSeed", None))
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 
     // Verify that the seed payload is the deterministic sequence 0x00..0x07
     assert_eq!(
@@ -487,27 +416,11 @@ async fn test_flash_transfer_zero_length_rejected() {
 
     let key = compute_security_key(&seed_response.seed.request_seed);
 
-    let key_result: sovd_interfaces::components::ecu::modes::security_and_session::put::Response<
-        String,
-    > = put_mode(
-        &test_env,
-        ecu_endpoint,
-        "security",
-        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
-            value: "Level_5".to_owned(),
-            mode_expiration: None,
-            key: Some(
-                sovd_interfaces::components::ecu::modes::security_and_session::put::ModeKey {
-                    send_key: key,
-                },
-            ),
-            parameters: None,
-        },
-        StatusCode::OK,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let key_result = security
+        .put::<ModeResponse<String>>(&security_request("Level_5", Some(key)))
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
     assert_eq!(key_result.value, "Level_5");
 
     // Verify the ECU sim is in the expected state
@@ -545,83 +458,58 @@ async fn test_flash_transfer_zero_length_rejected() {
     );
 
     // RequestDownload (required before flash transfer)
-    let request_download_body = serde_json::json!({
-        "requestdownload": {
-            "DataFormatIdentifier": 0,
-            "AddressAndLengthFormatIdentifier": 0x44,
-            "MemoryAddress": "0x00 0x00 0x00 0x00",
-            "MemorySize": "0x00 0x00 0x01 0x00"
-        }
-    });
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{ecu_endpoint}/x-sovd2uds-download/requestdownload"),
-        StatusCode::OK,
-        Method::PUT,
-        Some(&request_download_body.to_string()),
-        None,
-    )
-    .await
-    .unwrap();
+    download
+        .request_download(&download_request(
+            serde_json::json!({
+                "DataFormatIdentifier": 0,
+                "AddressAndLengthFormatIdentifier": 0x44,
+                "MemoryAddress": "0x00 0x00 0x00 0x00",
+                "MemorySize": "0x00 0x00 0x01 0x00"
+            }),
+            None,
+        ))
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 
     // List flash files to get a valid file ID
-    let flash_files_response = send_authenticated_cda_request(
-        &test_env,
-        APPS_SOVD2UDS_BULK_DATA_FLASHFILES,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let flash_files_json = response_to_json(&flash_files_response).unwrap();
-    let files = flash_files_json
-        .get("items")
-        .and_then(|v| v.as_array())
-        .expect("Expected 'items' array in flash files response");
+    let files = client
+        .sovd2uds()
+        .flash_files()
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .files;
     let flash_file = files
         .iter()
         .find(|f| {
-            f.get("x-sovd2uds-OrigPath")
-                .and_then(|v| v.as_str())
+            f.origin_path
+                .as_deref()
                 .is_some_and(|p| p.contains("test_flash"))
         })
         .expect("Expected to find test_flash.bin in flash files list");
-    let file_id = flash_file
-        .get("id")
-        .and_then(|v| v.as_str())
-        .expect("Expected 'id' in flash file");
 
     // Attempt flash transfer with length=0 - should be rejected
-    let zero_length_body = serde_json::json!({
-        "blocksequencecounter": 1,
-        "blocksize": 128,
-        "offset": 0,
-        "length": 0,
-        "id": file_id
-    });
-
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer"),
-        StatusCode::BAD_REQUEST,
-        Method::POST,
-        Some(&zero_length_body.to_string()),
-        None,
-    )
-    .await
-    .unwrap();
+    let err = download
+        .start_transfer(&flash_transfer::post::Request {
+            block_sequence_counter: 1,
+            blocksize: 128,
+            offset: 0,
+            length: 0,
+            id: flash_file.id.clone(),
+            flash_class: None,
+        })
+        .await
+        .expect_err("zero-length flash transfer was accepted");
+    assert_eq!(err.status(), Some(StatusCode::BAD_REQUEST), "{err}");
 
     // Cleanup
-    lock_operation(
-        locks::COMPONENTS_FLXC1000_LOCKS,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    ecu_lock
+        .release()
+        .await
+        .expect("lock operation failed")
+        .expect_status(StatusCode::NO_CONTENT);
 }
 
 /// Integration test for the `Supplier` security access level, which uses (semantic label)
@@ -641,28 +529,23 @@ async fn test_flash_transfer_zero_length_rejected() {
 )]
 async fn test_security_access_supplier_level() {
     let test_env = TestEnv::builder().await.unwrap();
-    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
+    let component = test_env.client().component(ECU_FLXC1000);
 
     // Create and acquire ECU lock
     let expiration_timeout = Duration::from_secs(120);
-    let ecu_lock = create_lock(
-        expiration_timeout,
-        locks::COMPONENTS_FLXC1000_LOCKS,
-        StatusCode::CREATED,
-        &test_env,
-    )
-    .await;
-    let lock_id =
-        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
-
-    lock_operation(
-        locks::COMPONENTS_FLXC1000_LOCKS,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::OK,
-        Method::GET,
-    )
-    .await;
+    let ecu_lock = component
+        .locks()
+        .create(expiration_timeout)
+        .await
+        .expect("Failed to create lock")
+        .expect_status(StatusCode::CREATED)
+        .into_body();
+    ecu_lock
+        .handle()
+        .get()
+        .await
+        .expect("lock operation failed")
+        .expect_status(StatusCode::OK);
 
     // Switch ECU sim to BOOT variant (security access services live on the boot variant)
     ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "BOOT")
@@ -670,22 +553,10 @@ async fn test_security_access_supplier_level() {
         .unwrap();
 
     // Force variant detection
-    send_authenticated_cda_request(
-        &test_env,
-        ecu_endpoint,
-        StatusCode::OK,
-        Method::PUT,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    force_variant_detection(&component).await;
 
     // Switch to programming session
-    switch_session("programming", &test_env, ecu_endpoint, StatusCode::OK)
-        .await
-        .unwrap()
-        .unwrap();
+    switch_session(&component, "programming").await;
 
     // Start recording to verify the raw UDS frames sent for SecurityAccess Supplier (Level 9)
     let recorder = test_env
@@ -697,21 +568,12 @@ async fn test_security_access_supplier_level() {
     // The SOVD value "Supplier_RequestSeed" has exactly two underscore-separated parts;
     // split_at_last_underscore recognises "RequestSeed" as the service suffix and
     // produces level="Supplier", seed_service=Some("RequestSeed").
-    let seed_response: RequestSeedResponse = put_mode(
-        &test_env,
-        ecu_endpoint,
-        "security",
-        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
-            value: "Supplier_RequestSeed".to_owned(),
-            mode_expiration: None,
-            key: None,
-            parameters: None,
-        },
-        StatusCode::OK,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let security = component.mode(SECURITY_ID);
+    let seed_response = security
+        .put::<RequestSeedResponse>(&security_request("Supplier_RequestSeed", None))
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 
     assert_eq!(
         seed_response.seed.request_seed, "0x00 0x01 0x02 0x03 0x04 0x05 0x06 0x07",
@@ -720,27 +582,11 @@ async fn test_security_access_supplier_level() {
 
     let key = compute_security_key(&seed_response.seed.request_seed);
 
-    let key_result: sovd_interfaces::components::ecu::modes::security_and_session::put::Response<
-        String,
-    > = put_mode(
-        &test_env,
-        ecu_endpoint,
-        "security",
-        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
-            value: "Supplier".to_owned(),
-            mode_expiration: None,
-            key: Some(
-                sovd_interfaces::components::ecu::modes::security_and_session::put::ModeKey {
-                    send_key: key,
-                },
-            ),
-            parameters: None,
-        },
-        StatusCode::OK,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let key_result = security
+        .put::<ModeResponse<String>>(&security_request("Supplier", Some(key)))
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
     assert_eq!(key_result.value, "Supplier");
 
     // Verify the ECU sim is in the expected state
@@ -778,14 +624,11 @@ async fn test_security_access_supplier_level() {
     );
 
     // Cleanup
-    lock_operation(
-        locks::COMPONENTS_FLXC1000_LOCKS,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    ecu_lock
+        .release()
+        .await
+        .expect("lock operation failed")
+        .expect_status(StatusCode::NO_CONTENT);
 }
 
 // Helper types and functions for ECU sim data transfer verification
@@ -824,118 +667,61 @@ async fn get_sim_data_transfers(sim: &EcuSim, ecu: &str) -> Result<SimDataTransf
 
 const FLASH_CLASS_BOOTLOADER: &str = "flash_download_upload_bootloader";
 
-/// Acquires an ECU lock and brings FLXC1000 into the state required for flashing
-/// (BOOT variant, programming session, `SecurityAccess` `LEVEL_07`).
-/// Returns the lock id.
-async fn prepare_flxc1000_for_flashing(test_env: &TestEnv) -> String {
-    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
-    let ecu_lock = create_lock(
-        Duration::from_secs(120),
-        locks::COMPONENTS_FLXC1000_LOCKS,
-        StatusCode::CREATED,
-        test_env,
-    )
-    .await;
-    let lock_id = extract_field_from_json::<String>(
-        &response_to_json(&ecu_lock).expect("Flash test preparation failed"),
-        "id",
-    )
-    .expect("Flash test preparation failed");
+/// Acquires a lock of `component` (FLXC1000) and brings it into the state
+/// required for flashing (BOOT variant, programming session, `SecurityAccess`
+/// `LEVEL_07`).
+async fn prepare_flxc1000_for_flashing(test_env: &TestEnv, component: &Component<'_>) -> Lock {
+    let lock = component
+        .locks()
+        .create(Duration::from_secs(120))
+        .await
+        .expect("Flash test preparation failed")
+        .expect_status(StatusCode::CREATED)
+        .into_body();
 
     ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "BOOT")
         .await
         .expect("Flash test preparation failed");
-    send_authenticated_cda_request(
-        test_env,
-        ecu_endpoint,
-        StatusCode::OK,
-        Method::PUT,
-        None,
-        None,
-    )
-    .await
-    .expect("Flash test preparation failed");
+    force_variant_detection(component).await;
+    switch_session(component, "programming").await;
 
-    switch_session("programming", test_env, ecu_endpoint, StatusCode::OK)
+    let security = component.mode(SECURITY_ID);
+    let seed_response = security
+        .put::<RequestSeedResponse>(&security_request("Level_7_RequestSeed", None))
         .await
         .expect("Flash test preparation failed")
-        .expect("Flash test preparation failed");
-
-    let seed_response: RequestSeedResponse = put_mode(
-        test_env,
-        ecu_endpoint,
-        "security",
-        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
-            value: "Level_7_RequestSeed".to_owned(),
-            mode_expiration: None,
-            key: None,
-            parameters: None,
-        },
-        StatusCode::OK,
-    )
-    .await
-    .expect("Flash test preparation failed")
-    .expect("Flash test preparation failed");
+        .expect_status(StatusCode::OK);
     let key = compute_security_key(&seed_response.seed.request_seed);
-    let _: sovd_interfaces::components::ecu::modes::security_and_session::put::Response<String> =
-        put_mode(
-            test_env,
-            ecu_endpoint,
-            "security",
-            sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
-                value: "Level_7".to_owned(),
-                mode_expiration: None,
-                key: Some(
-                    sovd_interfaces::components::ecu::modes::security_and_session::put::ModeKey {
-                        send_key: key,
-                    },
-                ),
-                parameters: None,
-            },
-            StatusCode::OK,
-        )
+    security
+        .put::<ModeResponse<String>>(&security_request("Level_7", Some(key)))
         .await
         .expect("Flash test preparation failed")
-        .expect("Flash test preparation failed");
+        .expect_status(StatusCode::OK);
 
-    lock_id
+    lock
 }
 
 /// Returns `(id, size)` of `test_flash.bin` from the flash file list.
 async fn find_test_flash_file(test_env: &TestEnv) -> (String, u64) {
-    let flash_files_response = send_authenticated_cda_request(
-        test_env,
-        APPS_SOVD2UDS_BULK_DATA_FLASHFILES,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        None,
-    )
-    .await
-    .expect("Flash test preparation failed");
-    let flash_files_json =
-        response_to_json(&flash_files_response).expect("Flash test preparation failed");
-    let flash_file = flash_files_json
-        .get("items")
-        .and_then(|v| v.as_array())
-        .and_then(|files| {
-            files.iter().find(|f| {
-                f.get("x-sovd2uds-OrigPath")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|p| p.contains("test_flash"))
-            })
+    let files = test_env
+        .client()
+        .sovd2uds()
+        .flash_files()
+        .await
+        .expect("Flash test preparation failed")
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .files;
+    let flash_file = files
+        .into_iter()
+        .find(|f| {
+            f.origin_path
+                .as_deref()
+                .is_some_and(|p| p.contains("test_flash"))
         })
         .expect("Expected to find test_flash.bin in flash files list");
-    let file_id = flash_file
-        .get("id")
-        .and_then(|v| v.as_str())
-        .expect("Expected 'id' in flash file")
-        .to_owned();
-    let file_size = flash_file
-        .get("size")
-        .and_then(serde_json::Value::as_u64)
-        .expect("Expected 'size' in flash file");
-    (file_id, file_size)
+    let size = flash_file.size.expect("Expected 'size' in flash file");
+    (flash_file.id, size)
 }
 
 /// Verifies that the functional class used to resolve the flash services can be selected
@@ -953,12 +739,10 @@ async fn find_test_flash_file(test_env: &TestEnv) -> (String, u64) {
 )]
 async fn test_flash_download_functional_class_selection() {
     let test_env = TestEnv::builder().await.unwrap();
-    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
-    let request_download_url = format!("{ecu_endpoint}/x-sovd2uds-download/requestdownload");
-    let flash_transfer_url = format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer");
-    let transfer_exit_url = format!("{ecu_endpoint}/x-sovd2uds-download/transferexit");
+    let component = test_env.client().component(ECU_FLXC1000);
+    let download = component.download();
 
-    let lock_id = prepare_flxc1000_for_flashing(&test_env).await;
+    let lock = prepare_flxc1000_for_flashing(&test_env, &component).await;
     let (file_id, file_size) = find_test_flash_file(&test_env).await;
     assert!(
         file_size <= 0xFFFF,
@@ -973,57 +757,39 @@ async fn test_flash_download_functional_class_selection() {
     });
 
     // Invalid selections for RequestDownload
-    for (body, status) in [
-        (
-            serde_json::json!({"requestdownload": request_download_params, "flashClass": ""}),
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            serde_json::json!({
-                "requestdownload": request_download_params,
-                "flashClass": "does_not_exist"
-            }),
-            StatusCode::NOT_FOUND,
-        ),
+    for (flash_class, status) in [
+        ("", StatusCode::BAD_REQUEST),
+        ("does_not_exist", StatusCode::NOT_FOUND),
     ] {
-        send_authenticated_cda_request(
-            &test_env,
-            &request_download_url,
-            status,
-            Method::PUT,
-            Some(&body.to_string()),
-            None,
-        )
-        .await
-        .unwrap();
+        let err = download
+            .request_download(&download_request(
+                request_download_params.clone(),
+                Some(flash_class),
+            ))
+            .await
+            .expect_err("an invalid functional class should be rejected");
+        assert_eq!(err.status(), Some(status), "{err}");
     }
     // Malformed body is reported as bad request
-    send_authenticated_cda_request(
-        &test_env,
-        &request_download_url,
-        StatusCode::BAD_REQUEST,
-        Method::PUT,
-        Some("{\"requestdownload\": "),
-        None,
-    )
-    .await
-    .unwrap();
+    let err = download
+        .request(Method::PUT, "requestdownload")
+        .raw_json("{\"requestdownload\": ")
+        .send()
+        .await
+        .expect_err("a malformed body should be rejected");
+    assert_eq!(err.status(), Some(StatusCode::BAD_REQUEST), "{err}");
 
     // RequestDownload via the bootloader functional class, field name and value in other casing
-    let request_download_body = serde_json::json!({
-        "RequestDownload": request_download_params,
-        "FlashClass": FLASH_CLASS_BOOTLOADER.to_uppercase(),
-    });
-    send_authenticated_cda_request(
-        &test_env,
-        &request_download_url,
-        StatusCode::OK,
-        Method::PUT,
-        Some(&request_download_body.to_string()),
-        None,
-    )
-    .await
-    .unwrap();
+    download
+        .request(Method::PUT, "requestdownload")
+        .json(&serde_json::json!({
+            "RequestDownload": request_download_params,
+            "FlashClass": FLASH_CLASS_BOOTLOADER.to_uppercase(),
+        }))
+        .send()
+        .await
+        .unwrap()
+        .expect_status(StatusCode::OK);
 
     let sim_transfers = get_sim_data_transfers(&test_env.ecu_sim, ECU_FLXC1000)
         .await
@@ -1043,77 +809,50 @@ async fn test_flash_download_functional_class_selection() {
     );
 
     // TransferData with an unknown functional class must not start a transfer
-    send_authenticated_cda_request(
-        &test_env,
-        &flash_transfer_url,
-        StatusCode::NOT_FOUND,
-        Method::POST,
-        Some(
-            &serde_json::json!({
-                "blocksequencecounter": 1,
-                "blocksize": 128,
-                "offset": 0,
-                "length": file_size,
-                "id": file_id,
-                "flashClass": "does_not_exist"
-            })
-            .to_string(),
-        ),
-        None,
-    )
-    .await
-    .unwrap();
+    let err = download
+        .start_transfer(&flash_transfer::post::Request {
+            block_sequence_counter: 1,
+            blocksize: 128,
+            offset: 0,
+            length: file_size,
+            id: file_id.clone(),
+            flash_class: Some("does_not_exist".to_owned()),
+        })
+        .await
+        .expect_err("an unknown functional class should be rejected");
+    assert_eq!(err.status(), Some(StatusCode::NOT_FOUND), "{err}");
 
-    let flash_transfer_response = send_authenticated_cda_request(
-        &test_env,
-        &flash_transfer_url,
-        StatusCode::OK,
-        Method::POST,
-        Some(
-            &serde_json::json!({
-                "BlockSequenceCounter": 1,
-                "BlockSize": 128,
-                "Offset": 0,
-                "Length": file_size,
-                "Id": file_id,
-                "FLASHCLASS": FLASH_CLASS_BOOTLOADER
-            })
-            .to_string(),
-        ),
-        None,
-    )
-    .await
-    .unwrap();
-    let transfer_id = response_to_json(&flash_transfer_response)
+    // Field names in other casing
+    let transfer_id = download
+        .request(Method::POST, "flashtransfer")
+        .json(&serde_json::json!({
+            "BlockSequenceCounter": 1,
+            "BlockSize": 128,
+            "Offset": 0,
+            "Length": file_size,
+            "Id": file_id,
+            "FLASHCLASS": FLASH_CLASS_BOOTLOADER
+        }))
+        .send_json::<flash_transfer::post::Response>()
+        .await
         .unwrap()
-        .get("id")
-        .and_then(|v| v.as_str())
-        .expect("Expected 'id' in flash transfer response")
-        .to_owned();
+        .expect_status(StatusCode::OK)
+        .into_body()
+        .id;
 
     let mut transfer_finished = false;
     for _ in 0..20 {
         cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(500)).await;
-        let status_response = send_authenticated_cda_request(
-            &test_env,
-            &format!("{flash_transfer_url}/{transfer_id}"),
-            StatusCode::OK,
-            Method::GET,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        let status_json = response_to_json(&status_response).unwrap();
-        let status = status_json
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
+        let transfer = download
+            .transfer(&transfer_id)
+            .await
+            .unwrap()
+            .expect_status(StatusCode::OK);
         assert!(
-            status != "aborted",
-            "Flash transfer was aborted. Status: {status_json:#?}"
+            transfer.status != flash_transfer::get::DataTransferStatus::Aborted,
+            "Flash transfer was aborted. Status: {transfer:#?}"
         );
-        if status == "finished" {
+        if transfer.status == flash_transfer::get::DataTransferStatus::Finished {
             transfer_finished = true;
             break;
         }
@@ -1123,51 +862,40 @@ async fn test_flash_download_functional_class_selection() {
         "Flash transfer did not finish within the timeout"
     );
 
-    send_authenticated_cda_request(
-        &test_env,
-        &format!("{flash_transfer_url}/{transfer_id}"),
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    download
+        .delete_transfer(&transfer_id)
+        .await
+        .unwrap()
+        .expect_status(StatusCode::NO_CONTENT);
 
     // TransferExit: invalid selections and malformed body are rejected
-    for (body, status) in [
-        (
-            serde_json::json!({"flashClass": "does_not_exist"}).to_string(),
-            StatusCode::NOT_FOUND,
-        ),
-        (
-            serde_json::json!({"flashClass": " "}).to_string(),
-            StatusCode::BAD_REQUEST,
-        ),
-        ("{not json".to_owned(), StatusCode::BAD_REQUEST),
+    for (flash_class, status) in [
+        ("does_not_exist", StatusCode::NOT_FOUND),
+        (" ", StatusCode::BAD_REQUEST),
     ] {
-        send_authenticated_cda_request(
-            &test_env,
-            &transfer_exit_url,
-            status,
-            Method::PUT,
-            Some(&body),
-            None,
-        )
-        .await
-        .unwrap();
+        let err = download
+            .transfer_exit(Some(&transfer_exit::put::Request {
+                flash_class: Some(flash_class.to_owned()),
+            }))
+            .await
+            .expect_err("an invalid functional class should be rejected");
+        assert_eq!(err.status(), Some(status), "{err}");
     }
+    let err = download
+        .request(Method::PUT, "transferexit")
+        .raw_json("{not json")
+        .send()
+        .await
+        .expect_err("a malformed body should be rejected");
+    assert_eq!(err.status(), Some(StatusCode::BAD_REQUEST), "{err}");
 
-    send_authenticated_cda_request(
-        &test_env,
-        &transfer_exit_url,
-        StatusCode::NO_CONTENT,
-        Method::PUT,
-        Some(&serde_json::json!({"flashclass": FLASH_CLASS_BOOTLOADER}).to_string()),
-        None,
-    )
-    .await
-    .unwrap();
+    download
+        .transfer_exit(Some(&transfer_exit::put::Request {
+            flash_class: Some(FLASH_CLASS_BOOTLOADER.to_owned()),
+        }))
+        .await
+        .unwrap()
+        .expect_status(StatusCode::NO_CONTENT);
 
     let sim_transfers = get_sim_data_transfers(&test_env.ecu_sim, ECU_FLXC1000)
         .await
@@ -1177,12 +905,8 @@ async fn test_flash_download_functional_class_selection() {
     assert!(last_transfer.data_transfer_count > 0);
     assert!(last_transfer.checksum.is_some());
 
-    lock_operation(
-        locks::COMPONENTS_FLXC1000_LOCKS,
-        Some(&lock_id),
-        &test_env,
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-    )
-    .await;
+    lock.release()
+        .await
+        .expect("lock operation failed")
+        .expect_status(StatusCode::NO_CONTENT);
 }

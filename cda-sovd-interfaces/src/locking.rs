@@ -60,13 +60,17 @@ pub struct Lock {
     pub schema: Option<schemars::Schema>,
 }
 
-#[derive(Clone, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[schemars(rename = "CreateLockRequest")]
 pub struct Request {
     pub lock_expiration: u64,
     #[serde(default)]
     pub break_lock: bool,
-    #[serde(default, rename = "x-sovd2uds-isexclusive")]
+    #[serde(
+        default,
+        rename = "x-sovd2uds-isexclusive",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub x_sovd2uds_isexclusive: Option<bool>,
     #[serde(flatten)]
     pub metadata: Map<String, Value>,
@@ -185,7 +189,7 @@ pub mod id {
     use super::{Deserialize, Serialize};
     pub mod get {
         use super::{Deserialize, Serialize};
-        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         #[schemars(rename = "LockResponse")]
         pub struct Response {
             pub lock_expiration: String,

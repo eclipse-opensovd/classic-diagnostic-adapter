@@ -17,5 +17,6 @@
               modules of this target live in directories with a mod.rs"
 )]
 
+mod client;
 mod sovd;
 mod util;

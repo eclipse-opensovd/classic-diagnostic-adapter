@@ -66,7 +66,12 @@ pub struct ComponentDataInfo {
     pub name: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// A special data (SD) or a special data group (SDG).
+///
+/// Serialized untagged. Both variants have optional fields only, so an
+/// untagged derive would read every SDG as an SD; deserialization tells them
+/// apart by the fields only an SDG has, `caption` and `sdgs`.
+#[derive(Debug, Serialize)]
 #[serde(untagged)]
 #[derive(schemars::JsonSchema)]
 pub enum SdSdg {
@@ -101,14 +106,49 @@ pub enum SdSdg {
     },
 }
 
-#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+impl<'de> Deserialize<'de> for SdSdg {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// The fields of both variants.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            value: Option<String>,
+            si: Option<String>,
+            ti: Option<String>,
+            caption: Option<String>,
+            sdgs: Option<Vec<SdSdg>>,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        if fields.caption.is_some() || fields.sdgs.is_some() {
+            if fields.value.is_some() || fields.ti.is_some() {
+                return Err(serde::de::Error::custom(
+                    "an SDG has neither `value` nor `ti`",
+                ));
+            }
+            Ok(Self::Sdg {
+                caption: fields.caption,
+                si: fields.si,
+                sdgs: fields.sdgs.unwrap_or_default(),
+            })
+        } else {
+            Ok(Self::Sd {
+                value: fields.value,
+                si: fields.si,
+                ti: fields.ti,
+            })
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServicesSdgs {
     pub items: HashMap<String, ServiceSdgs>,
     #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<schemars::Schema>,
 }
-#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServiceSdgs {
     pub sdgs: Vec<SdSdg>,
 }
@@ -170,7 +210,7 @@ pub mod data {
     use super::ComponentData;
     use crate::Payload;
 
-    #[derive(Deserialize, schemars::JsonSchema)]
+    #[derive(Debug, Deserialize, schemars::JsonSchema, serde::Serialize)]
     pub struct DataRequestPayload {
         data: HashMap<String, serde_json::Value>,
     }
@@ -193,7 +233,7 @@ pub mod data {
         pub type Response = ComponentData;
 
         /// Query parameters for `GET /data`.
-        #[derive(serde::Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, serde::Deserialize, schemars::JsonSchema, serde::Serialize)]
         pub struct Query {
             #[serde(rename = "include-schema", default)]
             pub include_schema: bool,
@@ -341,13 +381,29 @@ pub mod x {
                 };
             }
 
+            /// Implements `Serialize` for a type that derives it with
+            /// `#[serde(remote = "Self")]`, as `case_insensitive_deserialize!` requires,
+            /// by delegating to the derived serializer.
+            macro_rules! remote_self_serialize {
+                ($ty:ty) => {
+                    impl serde::Serialize for $ty {
+                        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                        where
+                            S: serde::Serializer,
+                        {
+                            <$ty>::serialize(self, serializer)
+                        }
+                    }
+                };
+            }
+
             pub mod transfer_exit {
                 pub mod put {
-                    use serde::Deserialize;
+                    use serde::{Deserialize, Serialize};
 
                     /// Optional request body of the `RequestTransferExit` service. Field names
                     /// are matched case-insensitively.
-                    #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+                    #[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
                     #[serde(remote = "Self")]
                     #[schemars(rename = "TransferExitRequest")]
                     pub struct Request {
@@ -359,6 +415,7 @@ pub mod x {
                     }
 
                     case_insensitive_deserialize!(Request);
+                    remote_self_serialize!(Request);
                 }
             }
 
@@ -368,7 +425,7 @@ pub mod x {
 
                     /// Request body of the flash transfer. Field names are matched
                     /// case-insensitively.
-                    #[derive(Debug, Deserialize, schemars::JsonSchema)]
+                    #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
                     #[serde(remote = "Self")]
                     #[schemars(rename = "FlashTransferRequest")]
                     pub struct Request {
@@ -388,8 +445,9 @@ pub mod x {
                     }
 
                     case_insensitive_deserialize!(Request);
+                    remote_self_serialize!(Request);
 
-                    #[derive(Debug, Serialize, schemars::JsonSchema)]
+                    #[derive(Debug, Serialize, schemars::JsonSchema, serde::Deserialize)]
                     #[schemars(rename = "FlashTransferResponse")]
                     pub struct Response {
                         pub id: String,
@@ -403,7 +461,7 @@ pub mod x {
 
                     use crate::Items;
 
-                    #[derive(Serialize, Clone, schemars::JsonSchema)]
+                    #[derive(Debug, Serialize, Clone, schemars::JsonSchema, serde::Deserialize)]
                     #[serde(rename_all = "camelCase")]
                     pub struct DataTransferMetaData {
                         pub acknowledged_bytes: u64,
@@ -419,12 +477,12 @@ pub mod x {
                         pub schema: Option<schemars::Schema>,
                     }
 
-                    #[derive(Serialize, Clone, schemars::JsonSchema)]
+                    #[derive(Debug, Serialize, Clone, schemars::JsonSchema, serde::Deserialize)]
                     pub struct DataTransferError {
                         pub text: String,
                     }
 
-                    #[derive(Serialize, Debug, Clone, PartialEq)]
+                    #[derive(Serialize, Debug, Clone, PartialEq, serde::Deserialize)]
                     #[serde(rename_all = "lowercase")]
                     #[derive(schemars::JsonSchema)]
                     #[allow(
@@ -457,7 +515,7 @@ pub mod x {
 
                     /// Request body of the `RequestDownload` service. Top-level field names are
                     /// matched case-insensitively, the parameter names are passed on unchanged.
-                    #[derive(Deserialize, schemars::JsonSchema)]
+                    #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
                     #[serde(remote = "Self")]
                     #[schemars(rename = "RequestDownloadRequest")]
                     pub struct Request {
@@ -472,12 +530,16 @@ pub mod x {
                     }
 
                     case_insensitive_deserialize!(Request);
-                    #[derive(Serialize, schemars::JsonSchema)]
+                    remote_self_serialize!(Request);
+                    #[derive(Debug, Serialize, schemars::JsonSchema, serde::Deserialize)]
                     #[schemars(rename = "RequestDownloadResponse")]
+                    // Without the explicit bound, `#[serde(default)]` makes serde require
+                    // `Default` for the type parameters when deserializing.
+                    #[serde(bound(deserialize = "T: serde::Deserialize<'de>"))]
                     pub struct Response<T> {
                         #[serde(rename = "requestdownload")]
                         pub parameters: serde_json::Map<String, serde_json::Value>,
-                        #[serde(skip_serializing_if = "Vec::is_empty")]
+                        #[serde(default, skip_serializing_if = "Vec::is_empty")]
                         pub errors: Vec<DataError<T>>,
                         #[schemars(skip)]
                         #[serde(skip_serializing_if = "Option::is_none")]
@@ -491,7 +553,7 @@ pub mod x {
     pub mod single_ecu_job {
         use serde::{Deserialize, Serialize};
 
-        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         pub struct LongName {
             #[serde(skip_serializing_if = "Option::is_none")]
             #[serde(default)]
@@ -502,7 +564,7 @@ pub mod x {
             pub ti: Option<String>,
         }
 
-        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         pub struct Param {
             pub short_name: String,
 
@@ -521,7 +583,7 @@ pub mod x {
             pub long_name: Option<LongName>,
         }
 
-        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         pub struct ProgCode {
             pub code_file: String,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -537,7 +599,7 @@ pub mod x {
             pub entrypoint: String,
         }
 
-        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         pub struct Job {
             #[serde(rename = "x-input-params")]
             pub input_params: Vec<Param>,
@@ -662,7 +724,7 @@ pub mod faults {
             pub memory_selection: Option<u8>,
         }
 
-        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         pub struct Response {
             pub items: Vec<Fault>,
             #[schemars(skip)]
@@ -674,7 +736,7 @@ pub mod faults {
     pub mod delete {
         use serde::{Deserialize, Serialize};
 
-        #[derive(Deserialize, Serialize, schemars::JsonSchema)]
+        #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
         pub struct FaultQuery {
             /// Defines the scope for which fault entries are deleted
             /// must be a valid scope for the given component
@@ -688,7 +750,7 @@ pub mod faults {
             use super::{Deserialize, Fault, HashMap, Serialize};
             use crate::{default_true, error::DataError};
 
-            #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+            #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
             #[serde(rename_all = "kebab-case")]
             pub struct DtcIdQuery {
                 /// If true, extended dtc data from 0x19 06 is included in the response
@@ -858,5 +920,63 @@ mod tests {
                 serde_json::from_str("{}").expect("Request should deserialize");
             assert!(request.flash_class.is_none());
         }
+
+        #[test]
+        fn flash_transfer_round_trips() {
+            let request = flash_transfer::post::Request {
+                block_sequence_counter: 1,
+                blocksize: 128,
+                offset: 0,
+                length: 256,
+                id: "f".to_owned(),
+                flash_class: Some("X".to_owned()),
+            };
+            let json = serde_json::to_string(&request).expect("Request should serialize");
+            let parsed: flash_transfer::post::Request =
+                serde_json::from_str(&json).expect("Request should deserialize");
+            assert_eq!(parsed.block_sequence_counter, 1);
+            assert_eq!(parsed.id, "f");
+            assert_eq!(parsed.flash_class.as_deref(), Some("X"));
+        }
+    }
+
+    #[test]
+    fn sd_sdg_round_trips() {
+        use super::SdSdg;
+
+        let json = serde_json::json!([{
+            "caption": "default_sdg",
+            "si": "default",
+            "sdgs": [
+                { "value": "1", "si": "bool", "ti": "true" },
+                { "si": "empty" },
+                { "caption": "nested" }
+            ]
+        }]);
+        let parsed: Vec<SdSdg> = serde_json::from_value(json.clone()).unwrap();
+
+        let [SdSdg::Sdg { caption, si, sdgs }] = parsed.as_slice() else {
+            panic!("expected one SDG, got {parsed:?}");
+        };
+        assert_eq!(caption.as_deref(), Some("default_sdg"));
+        assert_eq!(si.as_deref(), Some("default"));
+        assert!(matches!(
+            sdgs.as_slice(),
+            [
+                SdSdg::Sd { value: Some(_), .. },
+                SdSdg::Sd { value: None, .. },
+                SdSdg::Sdg {
+                    caption: Some(_),
+                    ..
+                },
+            ]
+        ));
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+
+        assert!(
+            serde_json::from_value::<SdSdg>(serde_json::json!({ "caption": "c", "ti": "t" }))
+                .is_err()
+        );
+        assert!(serde_json::from_value::<SdSdg>(serde_json::json!({ "unknown": 1 })).is_err());
     }
 }
