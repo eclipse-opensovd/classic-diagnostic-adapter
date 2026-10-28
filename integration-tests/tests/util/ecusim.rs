@@ -419,6 +419,35 @@ pub(crate) async fn disconnect(sim: &EcuSim) -> Result<(), TestingError> {
     Ok(())
 }
 
+/// Make the `DoIP` gateway at `ip` unreachable while the other gateways stay reachable.
+///
+/// The simulator removes the address from its network interface, so new connections to
+/// it time out, and closes all active `DoIP` connections (of every gateway; testers of
+/// the other gateways reconnect). Undo with [`start_gateway`]; stopping an already
+/// stopped address is a no-op.
+pub(crate) async fn stop_gateway(sim: &EcuSim, ip: &str) -> Result<(), TestingError> {
+    gateway_command(sim, ip, "stop").await
+}
+
+/// Make an address stopped by [`stop_gateway`] reachable again. Starting an address
+/// that is not stopped is a no-op (also `200`).
+pub(crate) async fn start_gateway(sim: &EcuSim, ip: &str) -> Result<(), TestingError> {
+    gateway_command(sim, ip, "start").await
+}
+
+async fn gateway_command(sim: &EcuSim, ip: &str, command: &str) -> Result<(), TestingError> {
+    let mut url = sim_endpoint(sim)?;
+    url.path_segments_mut()
+        .map_err(|()| TestingError::InvalidUrl("cannot modify URL path".to_owned()))?
+        .push("network")
+        .push("addresses")
+        .push(ip)
+        .push(command);
+
+    crate::util::http::send_request(StatusCode::OK, http::Method::POST, None, None, url).await?;
+    Ok(())
+}
+
 /// Configure the ECU simulator's hard reset duration.
 ///
 /// When set to a value > 0, subsequent UDS ECU Reset (0x11 0x01) requests will cause
