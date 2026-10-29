@@ -357,7 +357,7 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
         &databases,
         doip_config,
         variant_detection.clone(),
-        connectivity_handler,
+        Arc::clone(&connectivity_handler),
         doip_health_provider,
     )
     .await?
@@ -367,7 +367,9 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
 
     #[cfg(feature = "can")]
     if let Some(can_cfg) = can_config {
-        gateway = gateway.with_can(init_can_gateway(&databases, can_cfg, variant_detection).await?);
+        gateway = gateway.with_can(
+            init_can_gateway(&databases, can_cfg, variant_detection, connectivity_handler).await?,
+        );
     }
 
     Ok(gateway)
@@ -431,8 +433,9 @@ async fn init_can_gateway<S: SecurityPlugin>(
     databases: &Arc<DatabaseMap<S>>,
     can_cfg: &CanConfig,
     variant_detection: VariantDetectionSender,
+    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
 ) -> Result<CanDiagGateway, AppError> {
-    match CanDiagGateway::new(can_cfg, databases, variant_detection).await {
+    match CanDiagGateway::new(can_cfg, databases, variant_detection, connectivity_handler).await {
         Ok(c) => {
             tracing::info!(interface = %can_cfg.interface, "CAN gateway initialized");
             Ok(c)
