@@ -823,6 +823,9 @@
 
 # Lock priority behavior and limits.
 [locks]
+# Whether an active vehicle lock must exist before ECU or functional-group locks
+# can be acquired.
+# lock_acquisition_policy = "unrestricted"
 # Default used when `x-sovd2uds-isexclusive` is omitted.
 # lock_exclusivity_policy = "exclusive_by_default"
 # Number of lifecycle events buffered for ordered best-effort delivery.
