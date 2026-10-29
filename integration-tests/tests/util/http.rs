@@ -141,8 +141,8 @@ where
 pub(crate) fn vehicle_url(config: &Configuration, endpoint: &str) -> String {
     format!(
         "http://{}:{}/vehicle/v15/{endpoint}",
-        config.server.address(),
-        config.server.port()
+        config.server.transport.address(),
+        config.server.transport.port()
     )
 }
 

@@ -23,7 +23,7 @@ pub use cda_comm_can::config::{CanAddressingMode, CanConfig, CanEcuMapping, Tran
 pub use cda_comm_doip::config::DoipConfig;
 pub use cda_database::DatabaseConfig;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap,
+    BinaryEncoding, FunctionalDescriptionConfig, HashMap,
     config::{ConfigSanity, ConfigSanityError},
     datatypes::{
         ComParams, ComponentsConfig, FaultConfig, FlatbBufConfig, SdBoolMappings,
@@ -74,8 +74,8 @@ impl StrictConfig {
 /// Top-level application configuration.
 #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct Configuration {
-    /// SOVD HTTP server bind settings.
-    pub server: ServerTransport,
+    /// SOVD HTTP server settings.
+    pub server: ServerConfig,
     /// `DoIP` (Diagnostics over IP) transport layer settings.
     pub doip: DoipConfig,
     /// Optional CAN bus transport configuration.
@@ -132,6 +132,31 @@ pub struct EcuConfig {
     /// the MDD for this ECU.  Replaces the global `doip.protocol_name`.
     #[serde(default)]
     pub protocol: Option<String>,
+}
+
+/// SOVD HTTP server configuration.
+///
+/// The transport (TCP or Unix domain socket) is flattened into the `[server]`
+/// table, settings independent of the transport live next to it.
+///
+/// [[ dimpl~sovd-api-binary-encoding-config, Configured default binary encoding ]]
+#[derive(Deserialize, Serialize, Clone, Debug, Default, schemars::JsonSchema)]
+pub struct ServerConfig {
+    /// Bind settings, see [`ServerTransport`].
+    #[serde(flatten)]
+    pub transport: ServerTransport,
+    /// Encoding of binary data (e.g. `ByteField` parameters) in SOVD JSON
+    /// requests and responses: `"base64"` (SOVD standard) or `"hex"`
+    /// (`"0x01 0xAB"`). Clients can override it per request with the
+    /// `x-sovd2uds-binary-encoding` query parameter.
+    #[serde(default)]
+    pub binary_encoding: BinaryEncoding,
+}
+
+impl ConfigSanity for ServerConfig {
+    fn validate_sanity(&self) -> Result<(), ConfigSanityError> {
+        self.transport.validate_sanity()
+    }
 }
 
 /// SOVD HTTP server bind configuration.
@@ -219,6 +244,7 @@ impl ConfigSanity for ServerTransport {
                 address,
                 port,
                 unix_socket,
+                ..
             } => {
                 validate_address_port(address, *port)?;
                 if unix_socket.is_some() {
@@ -234,6 +260,7 @@ impl ConfigSanity for ServerTransport {
                 unix_socket,
                 address,
                 port,
+                ..
             } => {
                 if unix_socket.trim().is_empty() {
                     return Err(ConfigSanityError::InvalidValue {
@@ -283,7 +310,7 @@ impl Default for Configuration {
             database: DatabaseConfig::default(),
             flash_files_path: ".".to_owned(),
             flash_functional_class_default: "flash_download_upload".to_owned(),
-            server: ServerTransport::default(),
+            server: ServerConfig::default(),
             #[cfg(feature = "health")]
             health: cda_health::config::HealthConfig::default(),
             doip: DoipConfig {
@@ -648,11 +675,41 @@ port = 12345
             .merge(Toml::string(config_str));
         let config: Configuration = figment.extract()?;
         assert!(matches!(
-            config.server,
+            config.server.transport,
             ServerTransport::Tcp { ref address, port, unix_socket: None }
                 if address == "127.0.0.1" && port == 12345
         ));
         config.server.validate_sanity()?;
+        Ok(())
+    }
+
+    /// `server.binary_encoding` selects the binary data encoding.
+    /// [[ test~sovd-api-binary-encoding-config, Binary encoding is configurable for both transports, test ]]
+    #[tokio::test]
+    async fn load_config_toml_server_binary_encoding() -> Result<(), Box<dyn std::error::Error>> {
+        let config_str = r#"
+[server]
+binary_encoding = "hex"
+"#;
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract()?;
+        assert_eq!(config.server.binary_encoding, BinaryEncoding::Hex);
+
+        let config_str = r#"
+[server]
+transport = "unix_socket"
+unix_socket = "/run/cda.sock"
+binary_encoding = "hex"
+"#;
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract()?;
+        assert_eq!(config.server.binary_encoding, BinaryEncoding::Hex);
+        assert_eq!(
+            Configuration::default().server.binary_encoding,
+            BinaryEncoding::Base64
+        );
         Ok(())
     }
 
@@ -669,7 +726,7 @@ unix_socket = "/run/cda.sock"
             .merge(Toml::string(config_str));
         let config: Configuration = figment.extract()?;
         assert!(matches!(
-            config.server,
+            config.server.transport,
             ServerTransport::UnixSocket { ref unix_socket, .. } if unix_socket == "/run/cda.sock"
         ));
         config.server.validate_sanity()?;

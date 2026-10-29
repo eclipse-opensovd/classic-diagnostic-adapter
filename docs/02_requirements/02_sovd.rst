@@ -368,11 +368,21 @@ Data Type A_BYTEFIELD as Hex
 
 .. req:: Data Type A_BYTEFIELD as Hex
     :id: req~sovd-api-bytefield-as-hex
+    :links: arch~sovd-api-binary-encoding
     :status: draft
 
     For the data type ``A_BYTEFIELD`` the json output type ``string`` with the format ``hex`` must be supported
     through an optional query-parameter. Using ``hex`` means, that the binary data must be base16-encoded,
     either with or without preceding ``0x`` prefixes.
+
+    By default, binary data is base64-encoded (format ``byte``) as specified by ISO 17978-3. The default
+    must be configurable (``server.binary_encoding = "base64" | "hex"``) and can be overridden per request
+    with the query parameter ``x-sovd2uds-binary-encoding=base64|hex``. The selected encoding applies to
+    ``A_BYTEFIELD`` values in requests and responses, including security access seeds and keys.
+
+    JSON schemas returned by the CDA must describe ``A_BYTEFIELD`` values as ``string`` with the format of the
+    selected encoding (``byte`` for base64, ``hex`` for hex), and their ``default`` values must be given in
+    that encoding as well.
 
     **Rationale**
 

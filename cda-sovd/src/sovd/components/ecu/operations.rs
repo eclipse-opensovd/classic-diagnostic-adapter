@@ -737,6 +737,7 @@ pub(crate) mod service {
             openapi,
             sovd::{
                 WebserverEcuState,
+                binary_encoding::BinaryEncodingParam,
                 docs::{self, operations::OperationDocsMeta},
                 error::ApiError,
                 locks::require_ecu_access,
@@ -748,6 +749,7 @@ pub(crate) mod service {
         pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(OperationNamePathParam { service }): Path<OperationNamePathParam>,
+            BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
             State(WebserverEcuState {
                 ecu_name,
                 uds,
@@ -787,13 +789,13 @@ pub(crate) mod service {
                 .schema_for_request(&ecu_name, &diag_service)
                 .await
                 .ok()
-                .and_then(cda_interfaces::SchemaDescription::into_schema);
+                .and_then(|s| s.with_binary_encoding(binary_encoding).into_schema());
 
             let response_params_schema = uds
                 .schema_for_responses(&ecu_name, &diag_service)
                 .await
                 .ok()
-                .and_then(cda_interfaces::SchemaDescription::into_schema);
+                .and_then(|s| s.with_binary_encoding(binary_encoding).into_schema());
 
             let meta = OperationDocsMeta {
                 name: service.clone(),
@@ -834,7 +836,8 @@ pub(crate) mod service {
         };
         use axum_extra::extract::WithRejection;
         use cda_interfaces::{
-            DiagComm, DiagCommType, DiagServiceError, DynamicPlugin, SchemaProvider, UdsEcu,
+            BinaryEncoding, DiagComm, DiagCommType, DiagServiceError, DynamicPlugin,
+            SchemaProvider, UdsEcu,
             communication_control::CommunicationAccess,
             diagservices::{DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType},
             file_manager::FileManager,
@@ -855,8 +858,9 @@ pub(crate) mod service {
         use crate::{
             openapi,
             sovd::{
-                self, ExecutionReservation, ServiceExecution, WebserverEcuState,
+                self, ExecutionReservation, ServiceExecution, StoredParameters, WebserverEcuState,
                 acquire_and_reserve_execution, api_error_from_diag_response,
+                binary_encoding::BinaryEncodingParam,
                 components::get_content_type_and_accept,
                 create_response_schema, create_schema,
                 error::{ApiError, ErrorWrapper, VendorErrorCode},
@@ -872,6 +876,7 @@ pub(crate) mod service {
             pub include_schema: bool,
             pub suppress_service: bool,
             pub base_path: String,
+            pub binary_encoding: BinaryEncoding,
         }
 
         /// Request data forwarded from the HTTP layer into `ecu_operation_write_handler`.
@@ -936,6 +941,7 @@ pub(crate) mod service {
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(OperationServicePathParam { service }): Path<OperationServicePathParam>,
             WithRejection(Query(query), _): WithRejection<Query<OperationQuery>, ApiError>,
+            BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
             State(WebserverEcuState {
                 ecu_name,
                 uds,
@@ -971,6 +977,7 @@ pub(crate) mod service {
                     include_schema: query.include_schema,
                     suppress_service: query.suppress_service,
                     base_path: format!("http://{host}{uri}"),
+                    binary_encoding,
                 },
             )
             .await
@@ -1025,6 +1032,7 @@ pub(crate) mod service {
         fn validate_and_parse_write_request(
             headers: &HeaderMap,
             body: &Bytes,
+            binary_encoding: BinaryEncoding,
         ) -> Result<(Option<cda_interfaces::diagservices::UdsPayloadData>, bool), ApiError>
         {
             let (Some(content_type), accept) = get_content_type_and_accept(headers)? else {
@@ -1034,6 +1042,7 @@ pub(crate) mod service {
                 Some(&content_type),
                 headers,
                 body,
+                binary_encoding,
             )?;
             if accept != mime::APPLICATION_OCTET_STREAM && accept != mime::APPLICATION_JSON {
                 return Err(ApiError::BadRequest(format!(
@@ -1090,6 +1099,7 @@ pub(crate) mod service {
                 include_schema,
                 suppress_service,
                 base_path,
+                binary_encoding,
             } = opts;
             let err_response = |error: ApiError| -> Response {
                 ErrorWrapper {
@@ -1106,6 +1116,7 @@ pub(crate) mod service {
                     body,
                     security_plugin,
                     include_schema,
+                    binary_encoding,
                 )
                 .await;
             }
@@ -1149,12 +1160,13 @@ pub(crate) mod service {
                 }
             };
 
-            let (data, map_to_json) = match validate_and_parse_write_request(&headers, &body) {
-                Ok(v) => v,
-                Err(e) => {
-                    return err_response(e);
-                }
-            };
+            let (data, map_to_json) =
+                match validate_and_parse_write_request(&headers, &body, binary_encoding) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return err_response(e);
+                    }
+                };
 
             let response = if suppress_service {
                 None
@@ -1186,6 +1198,7 @@ pub(crate) mod service {
                 ecu_name,
                 uds,
                 diag_service,
+                binary_encoding,
             })
             .await
         }
@@ -1201,6 +1214,7 @@ pub(crate) mod service {
             ecu_name: &'a str,
             uds: &'a T,
             diag_service: DiagComm,
+            binary_encoding: BinaryEncoding,
         }
 
         /// Dispatch the tail of a write request to the async or sync
@@ -1218,9 +1232,16 @@ pub(crate) mod service {
                 ecu_name,
                 uds,
                 diag_service,
+                binary_encoding,
             } = args;
             if is_async {
-                handle_async_post::<T>(response, include_schema, &base_path, reservation)
+                handle_async_post::<T>(
+                    response,
+                    include_schema,
+                    &base_path,
+                    reservation,
+                    binary_encoding,
+                )
             } else {
                 drop(reservation);
                 handle_sync_post::<T>(
@@ -1230,6 +1251,7 @@ pub(crate) mod service {
                     ecu_name,
                     uds,
                     &diag_service,
+                    binary_encoding,
                 )
                 .await
             }
@@ -1346,11 +1368,12 @@ pub(crate) mod service {
         fn parse_json_response_params<R: DiagServiceResponse>(
             response: R,
             context: &str,
+            binary_encoding: BinaryEncoding,
         ) -> (
             serde_json::Map<String, serde_json::Value>,
             Vec<sovd_interfaces::error::DataError<VendorErrorCode>>,
         ) {
-            match response.into_json() {
+            match response.into_json(binary_encoding) {
                 Ok(DiagServiceJsonResponse {
                     data: serde_json::Value::Object(m),
                     errors,
@@ -1373,6 +1396,29 @@ pub(crate) mod service {
                     ))],
                 ),
             }
+        }
+
+        type ResponseParameters = serde_json::Map<String, serde_json::Value>;
+
+        /// Like [`parse_json_response_params`] for `binary_encoding`, additionally
+        /// returns the stored parameters, which map the kept response on demand
+        /// in the encoding of a later request.
+        fn parse_json_response_params_stored<R: DiagServiceResponse>(
+            response: &R,
+            context: &'static str,
+            binary_encoding: BinaryEncoding,
+        ) -> (
+            ResponseParameters,
+            StoredParameters<ResponseParameters>,
+            Vec<sovd_interfaces::error::DataError<VendorErrorCode>>,
+        ) {
+            let (parameters, errors) =
+                parse_json_response_params(response.clone(), context, binary_encoding);
+            let stored_response = response.clone();
+            let stored = StoredParameters::from_fn(move |encoding| {
+                parse_json_response_params(stored_response.clone(), context, encoding).0
+            });
+            (parameters, stored, errors)
         }
 
         fn parse_exec_uuid(id: &str, include_schema: bool) -> Result<Uuid, ErrorWrapper> {
@@ -1424,12 +1470,14 @@ pub(crate) mod service {
             include_schema: bool,
             base_path: &str,
             reservation: ExecutionReservation<ServiceExecution>,
+            binary_encoding: BinaryEncoding,
         ) -> Response {
-            let (parameters, errors) = match response {
-                Some(r) if !r.is_empty() => parse_json_response_params(r, "Start"),
-                _ => (serde_json::Map::new(), vec![]),
+            let (parameters, stored_parameters, errors) = match response {
+                Some(r) if !r.is_empty() => {
+                    parse_json_response_params_stored(&r, "Start", binary_encoding)
+                }
+                _ => (serde_json::Map::new(), StoredParameters::default(), vec![]),
             };
-            let stored_parameters = parameters.clone();
             let exec_id = reservation.commit_async(|exec| {
                 exec.parameters = stored_parameters;
             });
@@ -1464,9 +1512,10 @@ pub(crate) mod service {
             ecu_name: &str,
             uds: &T,
             diag_service: &DiagComm,
+            binary_encoding: BinaryEncoding,
         ) -> Response {
             let schema = if map_to_json && include_schema {
-                let subschema = get_subschema(ecu_name, uds, diag_service).await;
+                let subschema = get_subschema(ecu_name, uds, diag_service, binary_encoding).await;
                 Some(create_response_schema!(
                     sovd_executions::Response<VendorErrorCode>,
                     "parameters",
@@ -1477,31 +1526,32 @@ pub(crate) mod service {
             };
 
             if map_to_json {
-                let (mapped_data, parse_errors) =
-                    match response.and_then(|r| (!r.is_empty()).then(|| r.into_json())) {
-                        None => (serde_json::Map::new(), vec![]),
-                        Some(Ok(DiagServiceJsonResponse {
-                            data: serde_json::Value::Object(mapped_data),
-                            errors,
-                        })) => (mapped_data, errors),
-                        Some(Ok(v)) => {
-                            return ErrorWrapper {
-                                error: ApiError::InternalServerError(Some(format!(
-                                    "Expected JSON object but got: {}",
-                                    v.data
-                                ))),
-                                include_schema,
-                            }
-                            .into_response();
+                let (mapped_data, parse_errors) = match response
+                    .and_then(|r| (!r.is_empty()).then(|| r.into_json(binary_encoding)))
+                {
+                    None => (serde_json::Map::new(), vec![]),
+                    Some(Ok(DiagServiceJsonResponse {
+                        data: serde_json::Value::Object(mapped_data),
+                        errors,
+                    })) => (mapped_data, errors),
+                    Some(Ok(v)) => {
+                        return ErrorWrapper {
+                            error: ApiError::InternalServerError(Some(format!(
+                                "Expected JSON object but got: {}",
+                                v.data
+                            ))),
+                            include_schema,
                         }
-                        Some(Err(e)) => {
-                            return ErrorWrapper {
-                                error: ApiError::InternalServerError(Some(format!("{e:?}"))),
-                                include_schema,
-                            }
-                            .into_response();
+                        .into_response();
+                    }
+                    Some(Err(e)) => {
+                        return ErrorWrapper {
+                            error: ApiError::InternalServerError(Some(format!("{e:?}"))),
+                            include_schema,
                         }
-                    };
+                        .into_response();
+                    }
+                };
                 // Spec Table 183: `error` is singular (first parse error wins).
                 let error = field_parse_errors_to_json(parse_errors, "parameters")
                     .into_iter()
@@ -1537,6 +1587,7 @@ pub(crate) mod service {
             body: Bytes,
             security_plugin: Box<dyn SecurityPlugin>,
             include_schema: bool,
+            binary_encoding: BinaryEncoding,
         ) -> Response {
             // todo: in the future we have to handle possible parameters for the reset service
             let Some(request_parameters) =
@@ -1605,7 +1656,7 @@ pub(crate) mod service {
             };
 
             let schema = if include_schema {
-                let subschema = get_subschema(ecu_name, uds, &diag_service).await;
+                let subschema = get_subschema(ecu_name, uds, &diag_service, binary_encoding).await;
                 Some(create_response_schema!(
                     sovd_executions::Response<VendorErrorCode>,
                     "parameters",
@@ -1638,7 +1689,9 @@ pub(crate) mod service {
                     if response.is_empty() {
                         StatusCode::NO_CONTENT.into_response()
                     } else {
-                        let (response_data, parse_errors) = match response.into_json() {
+                        let (response_data, parse_errors) = match response
+                            .into_json(binary_encoding)
+                        {
                             Ok(DiagServiceJsonResponse {
                                 data: serde_json::Value::Object(mapped_data),
                                 errors,
@@ -1696,11 +1749,12 @@ pub(crate) mod service {
             ecu_name: &str,
             uds: &T,
             diag_service: &DiagComm,
+            binary_encoding: BinaryEncoding,
         ) -> Option<schemars::Schema> {
             match uds
                 .schema_for_responses(ecu_name, diag_service)
                 .await
-                .map(cda_interfaces::SchemaDescription::into_schema)
+                .map(|s| s.with_binary_encoding(binary_encoding).into_schema())
             {
                 Ok(v) => v,
                 Err(e) => {
@@ -1727,32 +1781,35 @@ pub(crate) mod service {
             /// Process a successful UDS `RequestResults` response: parse it, update stored
             /// execution state, and return the `200 OK` response body.
             fn get_operations_response<T: UdsEcu>(
-                response: T::Response,
+                response: &T::Response,
                 service: &str,
                 exec_id: Uuid,
                 service_executions: &std::sync::RwLock<
                     cda_interfaces::HashMap<String, indexmap::IndexMap<Uuid, ServiceExecution>>,
                 >,
                 include_schema: bool,
+                binary_encoding: BinaryEncoding,
             ) -> Response {
                 if let DiagServiceResponseType::Negative = response.response_type() {
                     tracing::warn!(
                         exec_id = %exec_id,
                         "RequestResults subfunction returned negative response"
                     );
-                    return api_error_from_diag_response(&response, include_schema).into_response();
+                    return api_error_from_diag_response(response, include_schema).into_response();
                 }
 
-                let (parameters, error_list) = if response.is_empty() {
-                    (serde_json::Map::new(), vec![])
+                // Mapped before the lock is taken, so the conversion happens outside the
+                // critical section rather than under the write lock.
+                let (parameters, stored_parameters, error_list) = if response.is_empty() {
+                    (serde_json::Map::new(), StoredParameters::default(), vec![])
                 } else {
-                    parse_json_response_params::<T::Response>(response, "RequestResults")
+                    parse_json_response_params_stored::<T::Response>(
+                        response,
+                        "RequestResults",
+                        binary_encoding,
+                    )
                 };
 
-                // Copied before the lock is taken: the stored execution and the response body
-                // both need the parameters, so the deep copy happens outside the critical
-                // section rather than under the write lock.
-                let stored_parameters = parameters.clone();
                 if let Some(stored_mut) = lock_write(service_executions)
                     .get_mut(service)
                     .and_then(|m| m.get_mut(&exec_id))
@@ -1773,6 +1830,7 @@ pub(crate) mod service {
                 UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
                 Path(ServiceAndIdPathParam { service, id }): Path<ServiceAndIdPathParam>,
                 WithRejection(Query(query), _): WithRejection<Query<OperationQuery>, ApiError>,
+                BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
                 State(WebserverEcuState {
                     ecu_name,
                     uds,
@@ -1803,7 +1861,7 @@ pub(crate) mod service {
                 if query.suppress_service {
                     return get_by_id_response(
                         stored.snapshot().status.clone(),
-                        stored.snapshot().parameters.clone(),
+                        stored.snapshot().parameters.in_encoding(binary_encoding),
                         vec![],
                         include_schema,
                     );
@@ -1841,11 +1899,12 @@ pub(crate) mod service {
                         .into_response()
                     }
                     Ok(response) => get_operations_response::<T>(
-                        response,
+                        &response,
                         &service,
                         exec_id,
                         &service_executions,
                         include_schema,
+                        binary_encoding,
                     ),
                 }
             }
@@ -1875,6 +1934,7 @@ pub(crate) mod service {
                     Query<OperationDeleteQuery>,
                     ApiError,
                 >,
+                BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
                 State(WebserverEcuState {
                     ecu_name,
                     uds,
@@ -1925,8 +1985,11 @@ pub(crate) mod service {
                         if r.is_empty() {
                             StatusCode::NO_CONTENT.into_response()
                         } else {
-                            let (parameters, error_list) =
-                                parse_json_response_params::<T::Response>(r, "Stop");
+                            let (parameters, error_list) = parse_json_response_params::<T::Response>(
+                                r,
+                                "Stop",
+                                binary_encoding,
+                            );
                             get_by_id_response(
                                 ExecutionStatus::Stopped,
                                 parameters,
@@ -2513,17 +2576,20 @@ mod tests {
         };
 
         fn make_json_response(data: serde_json::Value) -> MockDiagServiceResponse {
-            let mut resp = MockDiagServiceResponse::new();
-            resp.expect_response_type()
-                .returning(|| DiagServiceResponseType::Positive);
-            resp.expect_is_empty().returning(|| false);
-            resp.expect_into_json().return_once(move || {
-                Ok(DiagServiceJsonResponse {
-                    data,
-                    errors: vec![],
-                })
-            });
-            resp
+            MockDiagServiceResponse::cloneable(move || {
+                let data = data.clone();
+                let mut resp = MockDiagServiceResponse::new();
+                resp.expect_response_type()
+                    .returning(|| DiagServiceResponseType::Positive);
+                resp.expect_is_empty().returning(|| false);
+                resp.expect_into_json().return_once(move |_| {
+                    Ok(DiagServiceJsonResponse {
+                        data,
+                        errors: vec![],
+                    })
+                });
+                resp
+            })
         }
 
         fn make_empty_positive_response() -> MockDiagServiceResponse {
@@ -2642,7 +2708,7 @@ mod tests {
                 .insert(
                     exec_id,
                     ServiceExecution {
-                        parameters: serde_json::Map::new(),
+                        parameters: crate::sovd::StoredParameters::default(),
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
@@ -2714,6 +2780,7 @@ mod tests {
                     ),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -2760,7 +2827,7 @@ mod tests {
                 .insert(
                     exec_id,
                     ServiceExecution {
-                        parameters: serde_json::Map::new(),
+                        parameters: crate::sovd::StoredParameters::default(),
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
@@ -2786,6 +2853,7 @@ mod tests {
                     ),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -2830,11 +2898,15 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            let stored_params = {
+            // Different values per encoding, the request selects hex.
+            let stored_params = crate::sovd::StoredParameters::from_fn(|encoding| {
                 let mut m = serde_json::Map::new();
-                m.insert("stored".to_string(), serde_json::json!("value"));
+                m.insert(
+                    "stored".to_string(),
+                    serde_json::json!(encoding.to_string()),
+                );
                 m
-            };
+            });
             lock_write(&state.service_executions)
                 .entry("CalibrateSensor".to_string())
                 .or_default()
@@ -2867,6 +2939,7 @@ mod tests {
                     ),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -2887,7 +2960,7 @@ mod tests {
                     .expect("missing parameters")
                     .get("stored")
                     .expect("missing stored"),
-                &serde_json::json!("value")
+                &serde_json::json!("hex")
             );
         }
 
@@ -2917,7 +2990,7 @@ mod tests {
                 .insert(
                     exec_id,
                     ServiceExecution {
-                        parameters: serde_json::Map::new(),
+                        parameters: crate::sovd::StoredParameters::default(),
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
@@ -2943,6 +3016,7 @@ mod tests {
                     ),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -2983,6 +3057,7 @@ mod tests {
                     ),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -3023,7 +3098,7 @@ mod tests {
                 .insert(
                     exec_id,
                     ServiceExecution {
-                        parameters: serde_json::Map::new(),
+                        parameters: crate::sovd::StoredParameters::default(),
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
@@ -3053,6 +3128,7 @@ mod tests {
                     ),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -3102,7 +3178,7 @@ mod tests {
                 .insert(
                     exec_id,
                     ServiceExecution {
-                        parameters: serde_json::Map::new(),
+                        parameters: crate::sovd::StoredParameters::default(),
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
@@ -3131,6 +3207,7 @@ mod tests {
                     ),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -3193,7 +3270,7 @@ mod tests {
                 .insert(
                     exec_id,
                     ServiceExecution {
-                        parameters: serde_json::Map::new(),
+                        parameters: crate::sovd::StoredParameters::default(),
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
@@ -3222,6 +3299,7 @@ mod tests {
                     ),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -3281,7 +3359,7 @@ mod tests {
                 .insert(
                     exec_id,
                     ServiceExecution {
-                        parameters: serde_json::Map::new(),
+                        parameters: crate::sovd::StoredParameters::default(),
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
@@ -3310,6 +3388,7 @@ mod tests {
                     ),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -3354,7 +3433,7 @@ mod tests {
                     resp.expect_response_type()
                         .returning(|| DiagServiceResponseType::Positive);
                     resp.expect_is_empty().returning(|| false);
-                    resp.expect_into_json().return_once(|| {
+                    resp.expect_into_json().return_once(|_| {
                         Err(DiagServiceError::BadPayload(
                             "simulated Stop parse failure".to_string(),
                         ))
@@ -3376,7 +3455,7 @@ mod tests {
                 .insert(
                     exec_id,
                     ServiceExecution {
-                        parameters: serde_json::Map::new(),
+                        parameters: crate::sovd::StoredParameters::default(),
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
@@ -3405,6 +3484,7 @@ mod tests {
                     ),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -3452,7 +3532,7 @@ mod tests {
                 .insert(
                     exec_id,
                     ServiceExecution {
-                        parameters: serde_json::Map::new(),
+                        parameters: crate::sovd::StoredParameters::default(),
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
@@ -3482,6 +3562,7 @@ mod tests {
                     ),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -3520,7 +3601,7 @@ mod tests {
                 .insert(
                     exec_id,
                     ServiceExecution {
-                        parameters: serde_json::Map::new(),
+                        parameters: crate::sovd::StoredParameters::default(),
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
@@ -3549,6 +3630,7 @@ mod tests {
                     ),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -3586,7 +3668,7 @@ mod tests {
                 .insert(
                     exec_id,
                     ServiceExecution {
-                        parameters: serde_json::Map::new(),
+                        parameters: crate::sovd::StoredParameters::default(),
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
@@ -3616,6 +3698,7 @@ mod tests {
                     ),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -3650,7 +3733,7 @@ mod tests {
                 .insert(
                     exec_id,
                     ServiceExecution {
-                        parameters: serde_json::Map::new(),
+                        parameters: crate::sovd::StoredParameters::default(),
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
@@ -3679,6 +3762,7 @@ mod tests {
                     ),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -3719,7 +3803,7 @@ mod tests {
                 .insert(
                     exec_id,
                     ServiceExecution {
-                        parameters: serde_json::Map::new(),
+                        parameters: crate::sovd::StoredParameters::default(),
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
@@ -3749,6 +3833,7 @@ mod tests {
                     ),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -3781,7 +3866,7 @@ mod tests {
                 .insert(
                     exec_id,
                     ServiceExecution {
-                        parameters: serde_json::Map::new(),
+                        parameters: crate::sovd::StoredParameters::default(),
                         status: ExecutionStatus::Running,
                         in_flight: true,
                         is_created: true,
@@ -3807,6 +3892,7 @@ mod tests {
                     ),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -3833,7 +3919,7 @@ mod tests {
                 .insert(
                     exec_id,
                     ServiceExecution {
-                        parameters: serde_json::Map::new(),
+                        parameters: crate::sovd::StoredParameters::default(),
                         status: ExecutionStatus::Running,
                         in_flight: true,
                         is_created: true,
@@ -3860,6 +3946,7 @@ mod tests {
                     ),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -3899,7 +3986,7 @@ mod tests {
                 .insert(
                     uuid::Uuid::new_v4(),
                     ServiceExecution {
-                        parameters: serde_json::Map::new(),
+                        parameters: crate::sovd::StoredParameters::default(),
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
@@ -3921,6 +4008,7 @@ mod tests {
                     include_schema: false,
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
+                    binary_encoding: cda_interfaces::BinaryEncoding::Hex,
                 },
             )
             .await;
@@ -3962,7 +4050,7 @@ mod tests {
                 .insert(
                     uuid::Uuid::new_v4(),
                     ServiceExecution {
-                        parameters: serde_json::Map::new(),
+                        parameters: crate::sovd::StoredParameters::default(),
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
@@ -3984,6 +4072,7 @@ mod tests {
                     include_schema: false,
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
+                    binary_encoding: cda_interfaces::BinaryEncoding::Hex,
                 },
             )
             .await;
@@ -4037,6 +4126,7 @@ mod tests {
                     include_schema: false,
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
+                    binary_encoding: cda_interfaces::BinaryEncoding::Hex,
                 },
             )
             .await;
@@ -4084,6 +4174,7 @@ mod tests {
                     include_schema: false,
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
+                    binary_encoding: cda_interfaces::BinaryEncoding::Hex,
                 },
             )
             .await;
@@ -4154,6 +4245,7 @@ mod tests {
                     suppress_service: false,
                     base_path: "http://localhost/operations/TestOutput_Control/executions"
                         .to_owned(),
+                    binary_encoding: cda_interfaces::BinaryEncoding::Hex,
                 },
             )
             .await;
@@ -4205,6 +4297,7 @@ mod tests {
                     include_schema: false,
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
+                    binary_encoding: cda_interfaces::BinaryEncoding::Hex,
                 },
             )
             .await;
@@ -4255,6 +4348,7 @@ mod tests {
                     include_schema: false,
                     suppress_service: true,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
+                    binary_encoding: cda_interfaces::BinaryEncoding::Hex,
                 },
             )
             .await;
@@ -4281,14 +4375,17 @@ mod tests {
                 });
             // send returns a response whose into_json() fails
             mock_uds.expect_send().times(1).returning(|_, _, _, _, _| {
-                let mut resp = MockDiagServiceResponse::new();
-                resp.expect_response_type()
-                    .returning(|| DiagServiceResponseType::Positive);
-                resp.expect_is_empty().returning(|| false);
-                resp.expect_into_json().return_once(|| {
-                    Err(DiagServiceError::BadPayload(
-                        "simulated parse failure".to_string(),
-                    ))
+                let resp = MockDiagServiceResponse::cloneable(move || {
+                    let mut resp = MockDiagServiceResponse::new();
+                    resp.expect_response_type()
+                        .returning(|| DiagServiceResponseType::Positive);
+                    resp.expect_is_empty().returning(|| false);
+                    resp.expect_into_json().return_once(|_| {
+                        Err(DiagServiceError::BadPayload(
+                            "simulated parse failure".to_string(),
+                        ))
+                    });
+                    resp
                 });
                 Ok(resp)
             });
@@ -4315,6 +4412,7 @@ mod tests {
                     include_schema: false,
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
+                    binary_encoding: cda_interfaces::BinaryEncoding::Hex,
                 },
             )
             .await;
@@ -4365,15 +4463,18 @@ mod tests {
                 });
             // send returns a response whose into_json() gives a non-Object JSON value
             mock_uds.expect_send().times(1).returning(|_, _, _, _, _| {
-                let mut resp = MockDiagServiceResponse::new();
-                resp.expect_response_type()
-                    .returning(|| DiagServiceResponseType::Positive);
-                resp.expect_is_empty().returning(|| false);
-                resp.expect_into_json().return_once(|| {
-                    Ok(DiagServiceJsonResponse {
-                        data: serde_json::Value::String("unexpected_string".to_string()),
-                        errors: vec![],
-                    })
+                let resp = MockDiagServiceResponse::cloneable(move || {
+                    let mut resp = MockDiagServiceResponse::new();
+                    resp.expect_response_type()
+                        .returning(|| DiagServiceResponseType::Positive);
+                    resp.expect_is_empty().returning(|| false);
+                    resp.expect_into_json().return_once(|_| {
+                        Ok(DiagServiceJsonResponse {
+                            data: serde_json::Value::String("unexpected_string".to_string()),
+                            errors: vec![],
+                        })
+                    });
+                    resp
                 });
                 Ok(resp)
             });
@@ -4400,6 +4501,7 @@ mod tests {
                     include_schema: false,
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
+                    binary_encoding: cda_interfaces::BinaryEncoding::Hex,
                 },
             )
             .await;
@@ -4431,14 +4533,17 @@ mod tests {
 
             // RequestResults returns a non-empty response whose into_json() fails
             mock_uds.expect_send().times(1).returning(|_, _, _, _, _| {
-                let mut resp = MockDiagServiceResponse::new();
-                resp.expect_response_type()
-                    .returning(|| DiagServiceResponseType::Positive);
-                resp.expect_is_empty().returning(|| false);
-                resp.expect_into_json().return_once(|| {
-                    Err(DiagServiceError::BadPayload(
-                        "simulated parse failure".to_string(),
-                    ))
+                let resp = MockDiagServiceResponse::cloneable(move || {
+                    let mut resp = MockDiagServiceResponse::new();
+                    resp.expect_response_type()
+                        .returning(|| DiagServiceResponseType::Positive);
+                    resp.expect_is_empty().returning(|| false);
+                    resp.expect_into_json().return_once(|_| {
+                        Err(DiagServiceError::BadPayload(
+                            "simulated parse failure".to_string(),
+                        ))
+                    });
+                    resp
                 });
                 Ok(resp)
             });
@@ -4457,7 +4562,7 @@ mod tests {
                 .insert(
                     exec_id,
                     ServiceExecution {
-                        parameters: serde_json::Map::new(),
+                        parameters: crate::sovd::StoredParameters::default(),
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
@@ -4483,6 +4588,7 @@ mod tests {
                     ),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;

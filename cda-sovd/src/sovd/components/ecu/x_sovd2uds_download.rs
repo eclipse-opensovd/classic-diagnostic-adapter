@@ -70,6 +70,10 @@ macro_rules! flash_class_or_return {
     };
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Combining parameters into a struct would not improve readability here"
+)]
 async fn sovd_to_func_class_service_exec<T: UdsEcu + Clone>(
     uds: &T,
     func_class: &str,
@@ -78,8 +82,9 @@ async fn sovd_to_func_class_service_exec<T: UdsEcu + Clone>(
     parameters: HashMap<String, serde_json::Value>,
     security_plugin: Box<dyn SecurityPlugin>,
     include_schema: bool,
+    binary_encoding: cda_interfaces::BinaryEncoding,
 ) -> Result<DiagServiceJsonResponse, Box<Response>> {
-    let params = UdsPayloadData::ParameterMap(parameters);
+    let params = UdsPayloadData::ParameterMap(parameters, binary_encoding);
     let response = match uds
         .ecu_exec_service_from_function_class(
             ecu_name,
@@ -108,7 +113,7 @@ async fn sovd_to_func_class_service_exec<T: UdsEcu + Clone>(
         ));
     }
 
-    let mapped_data = match response.into_json() {
+    let mapped_data = match response.into_json(binary_encoding) {
         Ok(v) => v,
         Err(e) => {
             return Err(Box::new(
@@ -169,7 +174,9 @@ pub(crate) mod request_download {
     use crate::{
         openapi,
         sovd::{
-            WebserverEcuState, create_response_schema,
+            WebserverEcuState,
+            binary_encoding::BinaryEncodingParam,
+            create_response_schema,
             error::{ApiError, ErrorWrapper, VendorErrorCode},
             field_parse_errors_to_json,
             locks::require_ecu_access,
@@ -183,6 +190,7 @@ pub(crate) mod request_download {
             Query<sovd_interfaces::IncludeSchemaQuery>,
             ApiError,
         >,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverEcuState {
             ecu_name,
             uds,
@@ -215,7 +223,7 @@ pub(crate) mod request_download {
                 let Ok(subschema) = uds
                     .schema_for_responses(&ecu_name, &service)
                     .await
-                    .map(cda_interfaces::SchemaDescription::into_schema)
+                    .map(|s| s.with_binary_encoding(binary_encoding).into_schema())
                 else {
                     break 'schema None;
                 };
@@ -237,6 +245,7 @@ pub(crate) mod request_download {
             body.parameters,
             security_plugin,
             include_schema,
+            binary_encoding,
         )
         .await
         {
@@ -678,8 +687,8 @@ pub(crate) mod transferexit {
     use crate::{
         openapi,
         sovd::{
-            WebserverEcuState, error::ApiError, locks::require_ecu_access,
-            x_sovd2uds_download::sovd_to_func_class_service_exec,
+            WebserverEcuState, binary_encoding::BinaryEncodingParam, error::ApiError,
+            locks::require_ecu_access, x_sovd2uds_download::sovd_to_func_class_service_exec,
         },
     };
 
@@ -695,6 +704,7 @@ pub(crate) mod transferexit {
 
     pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverEcuState {
             ecu_name,
             uds,
@@ -718,6 +728,7 @@ pub(crate) mod transferexit {
             HashMap::new(),
             security_plugin,
             false,
+            binary_encoding,
         )
         .await
         {

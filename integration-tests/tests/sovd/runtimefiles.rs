@@ -1494,8 +1494,8 @@ async fn assert_ecu_routes_after_apply(test_env: &TestEnv) -> Result<(), Testing
     // by replace_routes on the vehicle route handle.
     let health_url = format!(
         "http://{}:{}/health/ready",
-        test_env.config.server.address(),
-        test_env.config.server.port()
+        test_env.config.server.transport.address(),
+        test_env.config.server.transport.port()
     );
     let health_response = reqwest::Client::new()
         .get(&health_url)

@@ -118,6 +118,7 @@ pub(crate) mod docs_endpoint {
     use crate::{
         openapi,
         sovd::{
+            binary_encoding::BinaryEncodingParam,
             docs::{self, operations::OperationDocsMeta},
             error::ApiError,
         },
@@ -128,6 +129,7 @@ pub(crate) mod docs_endpoint {
     pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         Path(FgOperationDocsPathParam { service }): Path<FgOperationDocsPathParam>,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverFgState {
             uds,
             functional_group_name,
@@ -164,7 +166,7 @@ pub(crate) mod docs_endpoint {
             .schema_for_fg_request(&diag_service, &functional_group_name)
             .await
             .ok()
-            .and_then(cda_interfaces::SchemaDescription::into_schema);
+            .and_then(|s| s.with_binary_encoding(binary_encoding).into_schema());
 
         // Note: schema_for_fg_responses is not yet available; response schema
         // is omitted for now and can be added once the trait method exists.
@@ -222,7 +224,9 @@ pub(crate) mod diag_service {
     use crate::{
         create_schema, openapi,
         sovd::{
-            ExecutionReservation, FgServiceExecution, acquire_and_reserve_execution,
+            ExecutionReservation, FgServiceExecution, StoredParameters,
+            acquire_and_reserve_execution,
+            binary_encoding::BinaryEncodingParam,
             components::{ecu::DiagServicePathParam, get_content_type_and_accept},
             error::{ApiError, ErrorWrapper, VendorErrorCode},
             functions::functional_groups::{handle_ecu_response, map_to_json},
@@ -270,17 +274,27 @@ pub(crate) mod diag_service {
             .into_response()
     }
 
+    #[derive(Clone, Copy)]
+    struct AsyncResponseContext<'a> {
+        host: &'a str,
+        uri: &'a Uri,
+        include_schema: bool,
+    }
+
     /// Finalises the previously reserved execution with per-ECU response
     /// parameters and builds the `202 Accepted` response.
     fn build_async_response(
-        response_data: HashMap<String, serde_json::Map<String, serde_json::Value>>,
+        response_data: EcuParameters,
+        stored_parameters: StoredParameters<EcuParameters>,
         errors: Vec<sovd_interfaces::error::DataError<VendorErrorCode>>,
-        host: &str,
-        uri: &Uri,
-        include_schema: bool,
+        ctx: AsyncResponseContext<'_>,
         reservation: ExecutionReservation<FgServiceExecution>,
     ) -> Response {
-        let stored_parameters = response_data.clone();
+        let AsyncResponseContext {
+            host,
+            uri,
+            include_schema,
+        } = ctx;
         let exec_id = reservation.commit_async(|exec| {
             exec.parameters = stored_parameters;
         });
@@ -410,6 +424,7 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::functions::functional_groups::operations::service::Query>,
             ApiError,
         >,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverFgState {
             uds,
             locks,
@@ -495,7 +510,7 @@ pub(crate) mod diag_service {
         } else {
             match get_payload_data::<
                 sovd_interfaces::functions::functional_groups::operations::service::Request,
-            >(content_type.as_ref(), &headers, &body)
+            >(content_type.as_ref(), &headers, &body, binary_encoding)
             {
                 Ok(value) => value,
                 Err(e) => {
@@ -535,22 +550,26 @@ pub(crate) mod diag_service {
                 .await
             };
 
-        let EcuResponsesData {
-            response_data,
-            errors,
-        } = handle_ecu_responses(results);
-
         if is_async {
+            let (response_data, stored_parameters, errors) =
+                handle_ecu_responses_stored(&results, binary_encoding);
             build_async_response(
                 response_data,
+                stored_parameters,
                 errors,
-                &host,
-                &uri,
-                include_schema,
+                AsyncResponseContext {
+                    host: &host,
+                    uri: &uri,
+                    include_schema,
+                },
                 reservation,
             )
         } else {
             drop(reservation);
+            let EcuResponsesData {
+                response_data,
+                errors,
+            } = handle_ecu_responses(results, binary_encoding);
             build_operation_response(response_data, errors, include_schema)
         }
     }
@@ -614,6 +633,7 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::components::ecu::operations::OperationDeleteQuery>,
             ApiError,
         >,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverFgState {
             uds,
             locks,
@@ -693,7 +713,7 @@ pub(crate) mod diag_service {
         let EcuResponsesData {
             response_data,
             errors,
-        } = handle_ecu_responses(results);
+        } = handle_ecu_responses(results, binary_encoding);
 
         if errors.is_empty() {
             // All ECUs succeeded - remove execution and return 204.
@@ -798,13 +818,13 @@ pub(crate) mod diag_service {
         use uuid::Uuid;
 
         use super::{
-            super::super::WebserverFgState, EcuResponsesData, OperationAndIdPathParam,
-            handle_ecu_responses,
+            super::super::WebserverFgState, OperationAndIdPathParam, handle_ecu_responses_stored,
         };
         use crate::{
             create_schema, openapi,
             sovd::{
                 FgServiceExecution,
+                binary_encoding::BinaryEncodingParam,
                 error::{ApiError, ErrorWrapper, VendorErrorCode},
                 guard_execution,
                 locks::validate_fg_write,
@@ -840,6 +860,7 @@ pub(crate) mod diag_service {
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(OperationAndIdPathParam { operation, id }): Path<OperationAndIdPathParam>,
             WithRejection(Query(query), _): WithRejection<Query<OperationQuery>, ApiError>,
+            BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
             State(WebserverFgState {
                 uds,
                 locks,
@@ -885,7 +906,7 @@ pub(crate) mod diag_service {
             if query.suppress_service {
                 return fg_get_by_id_response(
                     stored.snapshot().status.clone(),
-                    stored.snapshot().parameters.clone(),
+                    stored.snapshot().parameters.in_encoding(binary_encoding),
                     vec![],
                     query.include_schema,
                 );
@@ -914,7 +935,7 @@ pub(crate) mod diag_service {
             if !has_request_results {
                 return fg_get_by_id_response(
                     stored.snapshot().status.clone(),
-                    stored.snapshot().parameters.clone(),
+                    stored.snapshot().parameters.in_encoding(binary_encoding),
                     vec![sovd_interfaces::error::DataError {
                         path: "/".to_owned(),
                         error: sovd_interfaces::error::ApiErrorResponse {
@@ -941,6 +962,7 @@ pub(crate) mod diag_service {
                 exec_id,
                 ctx,
                 query.include_schema,
+                binary_encoding,
             )
             .await
         }
@@ -965,6 +987,10 @@ pub(crate) mod diag_service {
         /// Sends `REQUEST_RESULTS` to the functional group, collects
         /// per-ECU responses, updates the stored execution state, and returns the
         /// aggregated `FgAsyncGetByIdResponse`.
+        #[allow(
+            clippy::too_many_arguments,
+            reason = "Combining parameters into a struct would not improve readability here"
+        )]
         async fn send_request_results<T: UdsEcu + Clone>(
             uds: &T,
             security_plugin: &DynamicPlugin,
@@ -973,6 +999,7 @@ pub(crate) mod diag_service {
             exec_id: Uuid,
             ctx: RequestResultsContext<'_>,
             include_schema: bool,
+            binary_encoding: cda_interfaces::BinaryEncoding,
         ) -> Response {
             let RequestResultsContext { fg_executions } = ctx;
             let results = uds
@@ -991,10 +1018,8 @@ pub(crate) mod diag_service {
                 .await;
 
             // Collect per-ECU results.
-            let EcuResponsesData {
-                response_data,
-                errors,
-            } = handle_ecu_responses(results);
+            let (response_data, stored_parameters, errors) =
+                handle_ecu_responses_stored(&results, binary_encoding);
 
             // Update stored execution state.
             let status = if errors.is_empty() {
@@ -1002,10 +1027,8 @@ pub(crate) mod diag_service {
             } else {
                 ExecutionStatus::Running
             };
-            // Copied before the lock is taken: the stored execution and the response body both
-            // need the parameters, and deep-copying every ECU's map while holding the write lock
-            // would stall all other execution bookkeeping for the duration.
-            let stored_parameters = response_data.clone();
+            // The responses are mapped before the lock is taken: mapping every ECU's
+            // response while holding the write lock would stall all other execution bookkeeping.
             {
                 let mut guard = lock_write(fg_executions);
                 if let Some(op_map) = guard.get_mut(operation)
@@ -1037,6 +1060,9 @@ pub(crate) mod diag_service {
         }
     }
 
+    /// Response parameters keyed by ECU name.
+    type EcuParameters = HashMap<String, serde_json::Map<String, serde_json::Value>>;
+
     struct EcuResponsesData {
         response_data: HashMap<String, serde_json::Map<String, serde_json::Value>>,
         errors: Vec<sovd_interfaces::error::DataError<VendorErrorCode>>,
@@ -1044,6 +1070,7 @@ pub(crate) mod diag_service {
 
     fn handle_ecu_responses<R: DiagServiceResponse>(
         results: HashMap<String, Result<R, cda_interfaces::DiagServiceError>>,
+        binary_encoding: cda_interfaces::BinaryEncoding,
     ) -> EcuResponsesData {
         let mut response_data: HashMap<String, serde_json::Map<String, serde_json::Value>> =
             HashMap::default();
@@ -1055,12 +1082,35 @@ pub(crate) mod diag_service {
                 &mut errors,
                 ecu_name,
                 result,
+                binary_encoding,
             );
         }
         EcuResponsesData {
             response_data,
             errors,
         }
+    }
+
+    /// Like [`handle_ecu_responses`] for `binary_encoding`, additionally returns
+    /// the stored parameters, which map the kept responses on demand in the
+    /// encoding of a later request.
+    fn handle_ecu_responses_stored<R: DiagServiceResponse>(
+        results: &HashMap<String, Result<R, cda_interfaces::DiagServiceError>>,
+        binary_encoding: cda_interfaces::BinaryEncoding,
+    ) -> (
+        EcuParameters,
+        StoredParameters<EcuParameters>,
+        Vec<sovd_interfaces::error::DataError<VendorErrorCode>>,
+    ) {
+        let EcuResponsesData {
+            response_data,
+            errors,
+        } = handle_ecu_responses(results.clone(), binary_encoding);
+        let stored_results = results.clone();
+        let stored = StoredParameters::from_fn(move |encoding| {
+            handle_ecu_responses(stored_results.clone(), encoding).response_data
+        });
+        (response_data, stored, errors)
     }
 
     #[cfg(test)]
@@ -1100,29 +1150,34 @@ pub(crate) mod diag_service {
         }
 
         fn make_empty_json_response() -> MockDiagServiceResponse {
-            let mut mock = MockDiagServiceResponse::new();
-            mock.expect_response_type()
-                .returning(|| cda_interfaces::diagservices::DiagServiceResponseType::Positive);
-            mock.expect_into_json().returning(|| {
-                Ok(DiagServiceJsonResponse {
-                    data: serde_json::Value::Object(serde_json::Map::new()),
-                    errors: vec![],
-                })
-            });
-            mock
+            MockDiagServiceResponse::cloneable(move || {
+                let mut mock = MockDiagServiceResponse::new();
+                mock.expect_response_type()
+                    .returning(|| cda_interfaces::diagservices::DiagServiceResponseType::Positive);
+                mock.expect_into_json().returning(|_| {
+                    Ok(DiagServiceJsonResponse {
+                        data: serde_json::Value::Object(serde_json::Map::new()),
+                        errors: vec![],
+                    })
+                });
+                mock
+            })
         }
 
         fn make_json_response(data: serde_json::Value) -> MockDiagServiceResponse {
-            let mut mock = MockDiagServiceResponse::new();
-            mock.expect_response_type()
-                .returning(|| cda_interfaces::diagservices::DiagServiceResponseType::Positive);
-            mock.expect_into_json().return_once(move || {
-                Ok(DiagServiceJsonResponse {
-                    data,
-                    errors: vec![],
-                })
-            });
-            mock
+            MockDiagServiceResponse::cloneable(move || {
+                let data = data.clone();
+                let mut mock = MockDiagServiceResponse::new();
+                mock.expect_response_type()
+                    .returning(|| cda_interfaces::diagservices::DiagServiceResponseType::Positive);
+                mock.expect_into_json().return_once(move |_| {
+                    Ok(DiagServiceJsonResponse {
+                        data,
+                        errors: vec![],
+                    })
+                });
+                mock
+            })
         }
 
         fn make_query(
@@ -1199,6 +1254,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
@@ -1262,6 +1318,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
@@ -1324,6 +1381,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, true)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
                 Bytes::from_static(b"not valid JSON"),
             )
@@ -1379,6 +1437,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
@@ -1405,17 +1464,20 @@ pub(crate) mod diag_service {
                 .expect_send_functional_group()
                 .times(1)
                 .returning(|_, _, _, _, _| {
-                    let mut params = serde_json::Map::new();
-                    params.insert("status".to_string(), serde_json::json!("ok"));
-                    let mut mock = MockDiagServiceResponse::new();
-                    mock.expect_response_type().returning(|| {
-                        cda_interfaces::diagservices::DiagServiceResponseType::Positive
-                    });
-                    mock.expect_into_json().returning(move || {
-                        Ok(DiagServiceJsonResponse {
-                            data: serde_json::Value::Object(params.clone()),
-                            errors: vec![],
-                        })
+                    let mock = MockDiagServiceResponse::cloneable(move || {
+                        let mut params = serde_json::Map::new();
+                        params.insert("status".to_string(), serde_json::json!("ok"));
+                        let mut mock = MockDiagServiceResponse::new();
+                        mock.expect_response_type().returning(|| {
+                            cda_interfaces::diagservices::DiagServiceResponseType::Positive
+                        });
+                        mock.expect_into_json().returning(move |_| {
+                            Ok(DiagServiceJsonResponse {
+                                data: serde_json::Value::Object(params.clone()),
+                                errors: vec![],
+                            })
+                        });
+                        mock
                     });
                     let mut results = cda_interfaces::HashMap::default();
                     results.insert("ECU1".to_string(), Ok(mock));
@@ -1447,6 +1509,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
@@ -1524,6 +1587,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
@@ -1565,14 +1629,17 @@ pub(crate) mod diag_service {
                 .expect_send_functional_group()
                 .times(1)
                 .returning(|_, _, _, _, _| {
-                    let mut response = MockDiagServiceResponse::new();
-                    response.expect_response_type().returning(|| {
-                        cda_interfaces::diagservices::DiagServiceResponseType::Positive
-                    });
-                    response.expect_into_json().return_once(|| {
-                        Err(DiagServiceError::BadPayload(
-                            "simulated parse failure".to_string(),
-                        ))
+                    let response = MockDiagServiceResponse::cloneable(move || {
+                        let mut response = MockDiagServiceResponse::new();
+                        response.expect_response_type().returning(|| {
+                            cda_interfaces::diagservices::DiagServiceResponseType::Positive
+                        });
+                        response.expect_into_json().return_once(|_| {
+                            Err(DiagServiceError::BadPayload(
+                                "simulated parse failure".to_string(),
+                            ))
+                        });
+                        response
                     });
                     let mut results = cda_interfaces::HashMap::default();
                     results.insert("ECU1".to_string(), Ok(response));
@@ -1603,6 +1670,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
@@ -1636,7 +1704,7 @@ pub(crate) mod diag_service {
             >,
             operation: &str,
         ) -> Uuid {
-            insert_async_execution_with_params(fg_executions, operation, HashMap::default())
+            insert_async_execution_with_params(fg_executions, operation, &HashMap::default())
         }
 
         fn insert_async_execution_with_params(
@@ -1644,7 +1712,7 @@ pub(crate) mod diag_service {
                 RwLock<cda_interfaces::HashMap<String, IndexMap<Uuid, FgServiceExecution>>>,
             >,
             operation: &str,
-            parameters: HashMap<String, serde_json::Map<String, serde_json::Value>>,
+            parameters: &HashMap<String, serde_json::Map<String, serde_json::Value>>,
         ) -> Uuid {
             let id = Uuid::new_v4();
             lock_write(fg_executions)
@@ -1653,7 +1721,10 @@ pub(crate) mod diag_service {
                 .insert(
                     id,
                     FgServiceExecution {
-                        parameters,
+                        parameters: crate::sovd::StoredParameters::from_fn({
+                            let parameters = parameters.clone();
+                            move |_| parameters.clone()
+                        }),
                         status: ExecutionStatus::Running,
                         in_flight: false,
                         is_created: true,
@@ -1683,6 +1754,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_delete_query(false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -1710,6 +1782,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_delete_query(false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -1754,6 +1827,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_delete_query(false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -1803,6 +1877,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_delete_query_with_force(false, true)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -1852,6 +1927,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_delete_query(true)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -1915,6 +1991,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
@@ -1963,6 +2040,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
@@ -1991,15 +2069,18 @@ pub(crate) mod diag_service {
                 .times(1)
                 .returning(|_, _, _, _, _| {
                     let mut results = cda_interfaces::HashMap::default();
-                    let mut mock = MockDiagServiceResponse::new();
-                    mock.expect_response_type().returning(|| {
-                        cda_interfaces::diagservices::DiagServiceResponseType::Positive
-                    });
-                    mock.expect_into_json().returning(|| {
-                        Ok(DiagServiceJsonResponse {
-                            data: serde_json::Value::Object(serde_json::Map::new()),
-                            errors: vec![],
-                        })
+                    let mock = MockDiagServiceResponse::cloneable(move || {
+                        let mut mock = MockDiagServiceResponse::new();
+                        mock.expect_response_type().returning(|| {
+                            cda_interfaces::diagservices::DiagServiceResponseType::Positive
+                        });
+                        mock.expect_into_json().returning(|_| {
+                            Ok(DiagServiceJsonResponse {
+                                data: serde_json::Value::Object(serde_json::Map::new()),
+                                errors: vec![],
+                            })
+                        });
+                        mock
                     });
                     results.insert("ECU1".to_string(), Ok(mock));
                     results
@@ -2033,6 +2114,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
@@ -2089,6 +2171,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_delete_query_with_force(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -2157,6 +2240,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_delete_query_with_force(false, true)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -2215,17 +2299,20 @@ pub(crate) mod diag_service {
                 })
                 .times(1)
                 .returning(|_, _, _, _, _| {
-                    let mut params = serde_json::Map::new();
-                    params.insert("result".to_string(), serde_json::json!("pass"));
-                    let mut mock = MockDiagServiceResponse::new();
-                    mock.expect_response_type().returning(|| {
-                        cda_interfaces::diagservices::DiagServiceResponseType::Positive
-                    });
-                    mock.expect_into_json().returning(move || {
-                        Ok(DiagServiceJsonResponse {
-                            data: serde_json::Value::Object(params.clone()),
-                            errors: vec![],
-                        })
+                    let mock = MockDiagServiceResponse::cloneable(move || {
+                        let mut params = serde_json::Map::new();
+                        params.insert("result".to_string(), serde_json::json!("pass"));
+                        let mut mock = MockDiagServiceResponse::new();
+                        mock.expect_response_type().returning(|| {
+                            cda_interfaces::diagservices::DiagServiceResponseType::Positive
+                        });
+                        mock.expect_into_json().returning(move |_| {
+                            Ok(DiagServiceJsonResponse {
+                                data: serde_json::Value::Object(params.clone()),
+                                errors: vec![],
+                            })
+                        });
+                        mock
                     });
                     let mut results = cda_interfaces::HashMap::default();
                     results.insert("ECU1".to_string(), Ok(mock));
@@ -2250,6 +2337,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_get_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -2277,7 +2365,10 @@ pub(crate) mod diag_service {
             assert!(!exec.in_flight, "in_flight must be reset");
             // Verify stored parameters are ECU-keyed
             assert_eq!(
-                exec.parameters.get("ECU1").and_then(|m| m.get("result")),
+                exec.parameters
+                    .in_encoding(cda_interfaces::BinaryEncoding::Hex)
+                    .get("ECU1")
+                    .and_then(|m| m.get("result")),
                 Some(&serde_json::json!("pass")),
                 "stored params must be ECU-keyed after RequestResults"
             );
@@ -2302,7 +2393,7 @@ pub(crate) mod diag_service {
             params.insert("ECU2".to_string(), ecu2_params);
 
             let exec_id =
-                insert_async_execution_with_params(&state.fg_executions, "BrakeSelfTest", params);
+                insert_async_execution_with_params(&state.fg_executions, "BrakeSelfTest", &params);
 
             let response = id::get::<MockUdsEcu>(
                 UseApi(
@@ -2317,6 +2408,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_get_query(false, true)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -2370,6 +2462,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_get_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -2422,6 +2515,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_get_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;
@@ -2454,7 +2548,9 @@ pub(crate) mod diag_service {
             assert!(!exec.in_flight, "in_flight must be reset");
             // Verify stored params contain the successful ECU's data (ECU-keyed)
             assert!(
-                exec.parameters.contains_key("ECU1"),
+                exec.parameters
+                    .in_encoding(cda_interfaces::BinaryEncoding::Hex)
+                    .contains_key("ECU1"),
                 "successful ECU1 params must be stored"
             );
         }
@@ -2495,6 +2591,7 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_get_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::hex_encoding(),
                 State(state),
             )
             .await;

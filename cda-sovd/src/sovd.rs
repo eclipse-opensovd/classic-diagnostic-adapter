@@ -71,6 +71,7 @@ use crate::{
 };
 
 pub(crate) mod apps;
+pub(crate) mod binary_encoding;
 pub(crate) mod components;
 pub(crate) mod docs;
 pub(crate) mod error;
@@ -284,10 +285,63 @@ impl std::ops::DerefMut for ComparamExecution {
     }
 }
 
+/// Response parameters of an async execution.
+///
+/// Byte fields cannot be identified in mapped JSON anymore, so the UDS
+/// response is kept and only mapped to JSON when it is read, in the binary
+/// encoding of the reading request. This way later requests can use another
+/// encoding than the request that started the execution, without mapping the
+/// response up front for every encoding.
+pub(crate) struct StoredParameters<M> {
+    map: Option<Arc<dyn Fn(cda_interfaces::BinaryEncoding) -> M + Send + Sync>>,
+}
+
+impl<M> StoredParameters<M> {
+    /// Store `map`, which produces the parameters in the requested encoding.
+    pub(crate) fn from_fn(
+        map: impl Fn(cda_interfaces::BinaryEncoding) -> M + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            map: Some(Arc::new(map)),
+        }
+    }
+}
+
+impl<M: Default> StoredParameters<M> {
+    /// Parameters in the given encoding, empty if nothing is stored.
+    pub(crate) fn in_encoding(&self, encoding: cda_interfaces::BinaryEncoding) -> M {
+        self.map
+            .as_ref()
+            .map_or_else(M::default, |map| map(encoding))
+    }
+}
+
+impl<M> Default for StoredParameters<M> {
+    fn default() -> Self {
+        Self { map: None }
+    }
+}
+
+impl<M> Clone for StoredParameters<M> {
+    fn clone(&self) -> Self {
+        Self {
+            map: self.map.as_ref().map(Arc::clone),
+        }
+    }
+}
+
+impl<M> std::fmt::Debug for StoredParameters<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredParameters")
+            .field("stored", &self.map.is_some())
+            .finish()
+    }
+}
+
 /// Stored state for a single ECU routine execution (async lifecycle).
 #[derive(Debug)]
 pub(crate) struct ServiceExecution {
-    pub parameters: serde_json::Map<String, serde_json::Value>,
+    pub parameters: StoredParameters<serde_json::Map<String, serde_json::Value>>,
     pub status: sovd_ecu::operations::ExecutionStatus,
     pub in_flight: bool,
     pub is_created: bool,
@@ -331,7 +385,7 @@ impl ExecutionStatus for ServiceExecution {
     }
     fn placeholder(communication_guard: CommunicationGuard) -> Self {
         ServiceExecution {
-            parameters: serde_json::Map::new(),
+            parameters: StoredParameters::default(),
             status: sovd_ecu::operations::ExecutionStatus::Running,
             in_flight: false,
             is_created: false,
@@ -347,7 +401,7 @@ impl ExecutionStatus for ServiceExecution {
 /// per-ECU identity is preserved across the execution lifecycle.
 #[derive(Debug)]
 pub(crate) struct FgServiceExecution {
-    pub parameters: HashMap<String, serde_json::Map<String, serde_json::Value>>,
+    pub parameters: StoredParameters<HashMap<String, serde_json::Map<String, serde_json::Value>>>,
     pub status: sovd_ecu::operations::ExecutionStatus,
     pub in_flight: bool,
     pub is_created: bool,
@@ -391,7 +445,7 @@ impl ExecutionStatus for FgServiceExecution {
     }
     fn placeholder(communication_guard: CommunicationGuard) -> Self {
         FgServiceExecution {
-            parameters: HashMap::new(),
+            parameters: StoredParameters::default(),
             status: sovd_ecu::operations::ExecutionStatus::Running,
             in_flight: false,
             is_created: false,
@@ -1152,6 +1206,7 @@ fn get_payload_data<'a, T>(
     content_type: Option<&mime::Mime>,
     headers: &HeaderMap,
     body: &'a Bytes,
+    binary_encoding: cda_interfaces::BinaryEncoding,
 ) -> Result<Option<UdsPayloadData>, ApiError>
 where
     T: sovd_interfaces::Payload + serde::de::Deserialize<'a>,
@@ -1163,7 +1218,10 @@ where
         (mime::APPLICATION, mime::JSON) => {
             let sovd_request = serde_json::from_slice::<T>(body)
                 .map_err(|e| ApiError::BadRequest(format!("Invalid JSON: {e:?}")))?;
-            Some(UdsPayloadData::ParameterMap(sovd_request.get_data_map()))
+            Some(UdsPayloadData::ParameterMap(
+                sovd_request.get_data_map(),
+                binary_encoding,
+            ))
         }
         (mime::APPLICATION, mime::OCTET_STREAM) => get_octet_stream_payload(headers, body)?,
         _ => {
@@ -1448,6 +1506,36 @@ pub(crate) mod tests {
 
     use super::*;
 
+    #[test]
+    fn stored_parameters_are_mapped_on_read_in_requested_encoding() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let stored = StoredParameters::from_fn({
+            let calls = Arc::clone(&calls);
+            move |encoding| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                encoding.encode(&[0x01, 0x02])
+            }
+        });
+        // Nothing is mapped when storing.
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let clone = stored.clone();
+        assert_eq!(
+            stored.in_encoding(cda_interfaces::BinaryEncoding::Base64),
+            "AQI="
+        );
+        assert_eq!(
+            clone.in_encoding(cda_interfaces::BinaryEncoding::Hex),
+            "0x01 0x02"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        assert_eq!(
+            StoredParameters::<String>::default().in_encoding(cda_interfaces::BinaryEncoding::Hex),
+            ""
+        );
+    }
+
     struct DeferredCommunicationAccess {
         activation_requests: AtomicUsize,
     }
@@ -1534,7 +1622,7 @@ pub(crate) mod tests {
         entries.insert(
             exec_id,
             ServiceExecution {
-                parameters: serde_json::Map::new(),
+                parameters: crate::sovd::StoredParameters::default(),
                 status: sovd_ecu::operations::ExecutionStatus::Running,
                 in_flight: false,
                 is_created: true,
@@ -1644,9 +1732,9 @@ pub(crate) mod tests {
         };
 
         let id = reservation.commit_async(|execution| {
-            execution
-                .parameters
-                .insert("result".to_owned(), serde_json::json!("ok"));
+            execution.parameters = StoredParameters::from_fn(|_| {
+                serde_json::Map::from_iter([("result".to_owned(), serde_json::json!("ok"))])
+            });
         });
 
         assert_eq!(Arc::strong_count(&access.active), 2);
@@ -1673,7 +1761,7 @@ pub(crate) mod tests {
         entries.insert(
             Uuid::new_v4(),
             ServiceExecution {
-                parameters: serde_json::Map::new(),
+                parameters: crate::sovd::StoredParameters::default(),
                 status: sovd_ecu::operations::ExecutionStatus::Running,
                 in_flight: false,
                 is_created: true,

@@ -462,19 +462,18 @@ fn walk_schema(
     // schemars as `oneOf`/`anyOf` compositions of per-variant object schemas
     // instead of a single `properties` object. Walk each variant and merge
     // their descriptions under the same prefix, so fields nested in a tagged
-    // enum still get their doc comments picked up.
-    if let Some(variants) = resolved
+    // enum still get their doc comments picked up. A struct flattening such an
+    // enum (`#[serde(flatten)]`) has both, the variants and its own
+    // `properties`, so both are walked.
+    let variant_descriptions = resolved
         .get("oneOf")
         .or_else(|| resolved.get("anyOf"))
         .and_then(|v| v.as_array())
-    {
-        return variants
-            .iter()
-            .flat_map(|variant| walk_schema(variant, defs, prefix))
-            .collect();
-    }
+        .into_iter()
+        .flatten()
+        .flat_map(|variant| walk_schema(variant, defs, prefix));
 
-    resolved
+    let property_descriptions = resolved
         .get("properties")
         .and_then(|p| p.as_object())
         .into_iter()
@@ -497,8 +496,9 @@ fn walk_schema(
             let children = walk_schema(resolved_value, defs, &path);
 
             desc_entry.into_iter().chain(children)
-        })
-        .collect()
+        });
+
+    variant_descriptions.chain(property_descriptions).collect()
 }
 
 /// Check if a trimmed line is a TOML section header (e.g. `[section]` or `[[array]]`).

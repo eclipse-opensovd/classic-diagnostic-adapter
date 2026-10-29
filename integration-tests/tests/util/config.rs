@@ -19,7 +19,7 @@
 
 use cda_health::config::HealthConfig;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, HashMapExtensions,
+    BinaryEncoding, FunctionalDescriptionConfig, HashMap, HashMapExtensions,
     communication_control::CommunicationSettings,
     datatypes::{
         ComParamConfig, ComParamPrecedence, ComParams, ComponentsConfig, DatabaseNamingConvention,
@@ -30,7 +30,7 @@ use cda_interfaces::{
 use cda_tracing::LoggingConfig;
 use opensovd_cda_lib::config::configfile::{
     CanAddressingMode, CanConfig, CanEcuMapping, Configuration, DatabaseConfig, EcuComParams,
-    EcuConfig, RuntimeUpdateConfig, ServerTransport, StrictConfig, TransportOverride,
+    EcuConfig, RuntimeUpdateConfig, ServerConfig, ServerTransport, StrictConfig, TransportOverride,
     TransportType,
 };
 
@@ -120,7 +120,7 @@ pub(crate) fn cda_test_config_mixed(
 /// reaches it. Everything else, e.g. `faults`, is kept. The entrypoint of the
 /// CDA image sets the tester address from the container IP.
 pub(crate) fn container_config(mut config: Configuration, socketcand_host: &str) -> Configuration {
-    config.server = ServerTransport::Tcp {
+    config.server.transport = ServerTransport::Tcp {
         address: "0.0.0.0".to_owned(),
         port: CDA_HTTP_PORT,
         unix_socket: None,
@@ -186,10 +186,14 @@ fn base_test_config(
     ecu: HashMap<String, EcuConfig>,
 ) -> Result<Configuration, TestingError> {
     Ok(Configuration {
-        server: ServerTransport::Tcp {
-            address: host.clone(),
-            port: cda_port,
-            unix_socket: None,
+        server: ServerConfig {
+            transport: ServerTransport::Tcp {
+                address: host.clone(),
+                port: cda_port,
+                unix_socket: None,
+            },
+            // The existing integration tests expect hex coded binary data.
+            binary_encoding: BinaryEncoding::Hex,
         },
         doip: opensovd_cda_lib::config::configfile::DoipConfig {
             tester_address: host,
@@ -470,10 +474,13 @@ mod tests {
     #[test]
     fn container_config_uses_container_internal_values() {
         let mut config = Configuration {
-            server: ServerTransport::Tcp {
-                address: "localhost".to_owned(),
-                port: 45678,
-                unix_socket: None,
+            server: ServerConfig {
+                transport: ServerTransport::Tcp {
+                    address: "localhost".to_owned(),
+                    port: 45678,
+                    unix_socket: None,
+                },
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -484,8 +491,8 @@ mod tests {
 
         let config = container_config(config, "env-socketcand");
 
-        assert_eq!(config.server.address(), "0.0.0.0");
-        assert_eq!(config.server.port(), CDA_HTTP_PORT);
+        assert_eq!(config.server.transport.address(), "0.0.0.0");
+        assert_eq!(config.server.transport.port(), CDA_HTTP_PORT);
         assert_eq!(config.doip.gateway_port, DOIP_GATEWAY_PORT);
         assert_eq!(config.database.dir, CDA_DATABASES_DIR);
         assert_eq!(

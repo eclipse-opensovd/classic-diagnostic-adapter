@@ -931,10 +931,15 @@
 # Default: 50MB. Axum's built-in limit is 2MB which is too low for MDD files.
 # upload_body_limit_bytes = 52428800
 
-# SOVD HTTP server bind settings.
+# SOVD HTTP server settings.
 [server]
 # IP address the server listens on.
 # address = "0.0.0.0"
+# Encoding of binary data (e.g. `ByteField` parameters) in SOVD JSON
+# requests and responses: `"base64"` (SOVD standard) or `"hex"`
+# (`"0x01 0xAB"`). Clients can override it per request with the
+# `x-sovd2uds-binary-encoding` query parameter.
+# binary_encoding = "base64"
 # TCP port the server listens on.
 # port = 20002
 # transport = "tcp"

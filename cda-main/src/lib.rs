@@ -230,7 +230,7 @@ impl AppArgs {
         {
             use crate::config::configfile::ServerTransport;
 
-            config.server = if let Some(unix_socket) = self.unix_socket {
+            config.server.transport = if let Some(unix_socket) = self.unix_socket {
                 // `--unix-socket` takes priority over `--listen-address`/`--listen-port`,
                 // matching the config file's documented priority.
                 ServerTransport::UnixSocket {
@@ -239,8 +239,8 @@ impl AppArgs {
                     port: crate::config::configfile::default_server_port(),
                 }
             } else {
-                let mut address = config.server.address().to_owned();
-                let mut port = config.server.port();
+                let mut address = config.server.transport.address().to_owned();
+                let mut port = config.server.transport.port();
                 if let Some(listen_address) = self.listen_address {
                     address = listen_address;
                 }
@@ -564,7 +564,7 @@ async fn init_webserver(
         )));
     }
 
-    let webserver_config = match config.server.clone() {
+    let webserver_config = match config.server.transport.clone() {
         crate::config::configfile::ServerTransport::Tcp { address, port, .. } => {
             cda_sovd::WebServerConfig::Tcp {
                 host: address,
@@ -579,9 +579,12 @@ async fn init_webserver(
     let clonable_shutdown_signal = shutdown_signal
         .unwrap_or_else(|| cda_interfaces::shutdown_signal(crate::shutdown_signal()));
 
-    let (dynamic_router, webserver_task) =
-        cda_sovd::launch_webserver(webserver_config.clone(), clonable_shutdown_signal.clone())
-            .await?;
+    let (dynamic_router, webserver_task) = cda_sovd::launch_webserver(
+        webserver_config.clone(),
+        config.server.binary_encoding,
+        clonable_shutdown_signal.clone(),
+    )
+    .await?;
 
     let mut webserver_state = ApplicationState {
         _tracing_guards: tracing_guards,
@@ -871,7 +874,7 @@ mod cli_args_tests {
         args.update_config(&mut config);
 
         assert!(matches!(
-            config.server,
+            config.server.transport,
             crate::config::configfile::ServerTransport::UnixSocket { ref unix_socket, .. }
                 if unix_socket == "/run/cda.sock"
         ));
@@ -884,7 +887,7 @@ mod cli_args_tests {
         args.update_config(&mut config);
 
         assert!(matches!(
-            config.server,
+            config.server.transport,
             crate::config::configfile::ServerTransport::Tcp {
                 unix_socket: None,
                 ..
@@ -964,7 +967,7 @@ mod webserver_lifecycle_tests {
         let database_dir = tempfile::tempdir().expect("Create empty database directory");
         let storage_dir = tempfile::tempdir().expect("Create empty storage directory");
         let mut config = Configuration::default();
-        config.server = crate::config::configfile::ServerTransport::Tcp {
+        config.server.transport = crate::config::configfile::ServerTransport::Tcp {
             address: "0.0.0.0".to_owned(),
             port: available_port(),
             unix_socket: None,
