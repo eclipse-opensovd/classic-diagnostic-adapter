@@ -12,6 +12,15 @@
  */
 use crate::{DiagServiceError, service_ids};
 
+/// Formats a point in time as an RFC 3339 timestamp as used by the SOVD API.
+///
+/// The timestamp is always expressed in UTC with second precision and the `Z`
+/// suffix, e.g. `2026-01-02T03:04:05Z`.
+#[must_use]
+pub fn system_time_to_rfc3339(time: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
 pub mod tracing {
     #[must_use]
     pub fn print_hex(data: &[u8], max_size: usize) -> String {
@@ -556,7 +565,20 @@ pub fn byte_field_matches_hex_pattern(received: &str, expected: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, UNIX_EPOCH};
+
     use super::*;
+
+    #[test]
+    fn formats_utc_with_z_suffix_and_second_precision() {
+        let time = UNIX_EPOCH + Duration::from_millis(1_767_323_045_678);
+        assert_eq!(system_time_to_rfc3339(time), "2026-01-02T03:04:05Z");
+    }
+
+    #[test]
+    fn formats_unix_epoch() {
+        assert_eq!(system_time_to_rfc3339(UNIX_EPOCH), "1970-01-01T00:00:00Z");
+    }
 
     /// A task that never finishes is cancelled, and one that already
     /// panicked is reported instead of propagating the panic.
