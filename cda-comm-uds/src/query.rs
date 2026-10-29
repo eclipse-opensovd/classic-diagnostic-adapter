@@ -144,8 +144,14 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
                     ecus: Vec::new(),
                 });
 
-            if gateway_addr == ecu.logical_address() {
-                // this is the gateway itself
+            if gateway_addr == ecu.logical_address()
+                && !matches!(
+                    &network_ecu.variant.variant_state,
+                    cda_interfaces::VariantState::Duplicate
+                )
+            {
+                // Duplicate ODX descriptions share the same logical address.
+                // Only the selected ECU should define the gateway identity.
                 gateway.name.clone_from(&ecu_name);
                 gateway
                     .logical_address
