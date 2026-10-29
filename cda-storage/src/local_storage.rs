@@ -279,6 +279,7 @@ impl Storage for LocalStorage {
 ///
 /// This struct is held by the `Transaction` via `Arc<dyn TransactionCommitter>` and provides the
 /// bridge back into the storage backend for applying or discarding operations.
+#[derive(Clone)]
 struct LocalStorageCommitter {
     collections_dir: PathBuf,
     data_lock: Arc<tokio::sync::RwLock<()>>,
@@ -288,6 +289,7 @@ struct LocalStorageCommitter {
 #[async_trait]
 impl TransactionCommitter for LocalStorageCommitter {
     /// [[ dimpl~storage-atomic-commit, Atomic commit of a staged transaction via WAL and backup-rename, dimpl ]]
+    /// [[ dimpl~storage-commit-cancel-safe, A started commit runs to completion in its own task even if the caller is dropped, dimpl ]]
     async fn apply(
         &self,
         operations: Vec<Operation>,
@@ -360,15 +362,31 @@ impl TransactionCommitter for LocalStorageCommitter {
 
             result
         }
-        let result = apply_inner(self, operations, journal_path).await;
+        // The commit runs in its own task so that dropping the caller's future (e.g. a
+        // timeout or a cancelled task) cannot abandon it half way: the transaction flag is
+        // reset by the task itself, and the data lock is released when the task ends.
+        let committer = self.clone();
+        let handle = cda_interfaces::spawn_named!("storage-commit", async move {
+            let result = apply_inner(&committer, operations, journal_path).await;
 
-        // Release the transaction flag.
-        self.tx_active.store(false, Ordering::Release);
+            // Release the transaction flag.
+            committer.tx_active.store(false, Ordering::Release);
 
-        if result.is_ok() {
-            tracing::info!("Transaction committed successfully");
+            if result.is_ok() {
+                tracing::info!("Transaction committed successfully");
+            }
+            result
+        });
+
+        match handle.await {
+            Ok(result) => result,
+            Err(e) => {
+                // The task panicked or was aborted by a runtime shutdown. The WAL stays on disk
+                // for recovery at the next start; only the flag must not stay set.
+                self.tx_active.store(false, Ordering::Release);
+                Err(StorageError::Other(format!("Commit task failed: {e}")))
+            }
         }
-        result
     }
 
     fn discard(&self, staging_dir: &Path, journal_path: &Path) {

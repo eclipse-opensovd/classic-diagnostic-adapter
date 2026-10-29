@@ -42,10 +42,13 @@ pub enum ActivationCause {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetectionCause {
     /// An application or custom plugin explicitly requested (re-)detection.
+    /// This is an explicit authorization to communicate: the default plugin
+    /// brings a stopped transport up for it, in every `init_mode`.
     Explicit,
-    // TODO(networkreset-endpoint, #490): add TopologyRediscovery variant for
-    // the `networkreset(trigger_detection=true)` request once the endpoint
-    // exists.
+    /// A `networkreset` execution requested a full topology rediscovery: VIR/VAM
+    /// discovery and variant detection of every ECU. Handled like `Explicit`,
+    /// only the origin differs.
+    TopologyRediscovery,
 }
 
 /// A lifecycle operation controlled by the communication framework.

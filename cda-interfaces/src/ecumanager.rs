@@ -137,8 +137,21 @@ pub struct MuxCaseInfo {
 pub enum Connectivity {
     /// ECU responded to the last communication attempt.
     Online,
+    /// ECU was registered from a persisted topology with a last known state of
+    /// Online, but has not been contacted in the current session yet. Reported
+    /// as Online externally.
+    AssumedOnline,
     /// ECU is currently unreachable (never connected, or lost connection).
     Offline,
+}
+
+impl Connectivity {
+    /// Returns `true` for [`Online`](Self::Online) and
+    /// [`AssumedOnline`](Self::AssumedOnline).
+    #[must_use]
+    pub fn is_online(self) -> bool {
+        matches!(self, Self::Online | Self::AssumedOnline)
+    }
 }
 
 /// ECU variant detection result.
@@ -227,11 +240,11 @@ impl EcuState {
         self.variant_state.is_fallback()
     }
 
-    /// Returns `true` if the ECU is online with a successfully detected variant.
+    /// Returns `true` if the ECU is (assumed) online with a successfully detected
+    /// variant.
     #[must_use]
     pub fn is_online_and_detected(&self) -> bool {
-        self.connectivity == Connectivity::Online
-            && matches!(self.variant_state, VariantState::Detected { .. })
+        self.connectivity.is_online() && matches!(self.variant_state, VariantState::Detected { .. })
     }
 }
 
@@ -266,6 +279,37 @@ pub struct EcuRuntimeState {
     /// variant detection's conclusion instead of polling. `Arc`-wrapped so that
     /// cloning `EcuRuntimeState` shares one channel, like `ecu_state` itself.
     variant_state_tx: std::sync::Arc<tokio::sync::watch::Sender<VariantState>>,
+    /// Time of the last reply of the ECU. See [`LastSeen`].
+    last_seen: std::sync::Arc<std::sync::Mutex<LastSeen>>,
+}
+
+/// Time of the last reply of the ECU.
+///
+/// The newest write always wins, even if it is older than the previous value:
+/// vehicle clocks are often wrong at boot and corrected later, so keeping the
+/// maximum would pin a bogus future timestamp forever.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LastSeen {
+    /// The timestamp, `None` if the ECU was never contacted.
+    at: Option<std::time::SystemTime>,
+    /// Set on contact, cleared once the value has been persisted.
+    dirty: bool,
+    /// Identifies the contact independently of wall-clock precision or corrections.
+    generation: u64,
+}
+
+impl LastSeen {
+    /// The timestamp, `None` if the ECU was never contacted.
+    #[must_use]
+    pub fn at(&self) -> Option<std::time::SystemTime> {
+        self.at
+    }
+
+    /// `true` if the value has not been persisted yet.
+    #[must_use]
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
 }
 
 impl EcuRuntimeState {
@@ -280,6 +324,44 @@ impl EcuRuntimeState {
                 AuthenticationState::default(),
             )),
             variant_state_tx: std::sync::Arc::new(variant_state_tx),
+            last_seen: std::sync::Arc::new(std::sync::Mutex::new(LastSeen::default())),
+        }
+    }
+
+    /// Records a successful diagnostic contact now.
+    pub fn touch_last_seen(&self) {
+        let mut last_seen = std_ext::lock_mutex(&self.last_seen);
+        last_seen.at = Some(std::time::SystemTime::now());
+        last_seen.dirty = true;
+        last_seen.generation = last_seen.generation.saturating_add(1);
+    }
+
+    /// Restores a persisted timestamp. The value is not marked dirty, since it
+    /// is already persisted.
+    pub fn restore_last_seen(&self, at: std::time::SystemTime) {
+        let mut last_seen = std_ext::lock_mutex(&self.last_seen);
+        last_seen.at = Some(at);
+        last_seen.dirty = false;
+        last_seen.generation = last_seen.generation.saturating_add(1);
+    }
+
+    /// Returns the time of the last reply of the ECU.
+    #[must_use]
+    pub fn last_seen(&self) -> Option<std::time::SystemTime> {
+        std_ext::lock_mutex(&self.last_seen).at
+    }
+
+    /// Snapshots the timestamp and its persistence generation without acknowledging it.
+    #[must_use]
+    pub fn last_seen_snapshot(&self) -> LastSeen {
+        *std_ext::lock_mutex(&self.last_seen)
+    }
+
+    /// Acknowledges only the saved contact; a contact during storage remains dirty.
+    pub fn mark_last_seen_persisted(&self, saved: LastSeen) {
+        let mut last_seen = std_ext::lock_mutex(&self.last_seen);
+        if last_seen.generation == saved.generation {
+            last_seen.dirty = false;
         }
     }
 
@@ -1507,5 +1589,49 @@ mod tests {
             ),
             request_lock_key_for(true, 0x1000, 0x0712, None, "ecu1")
         );
+    }
+}
+
+#[cfg(test)]
+mod last_seen_tests {
+    use std::time::{Duration, SystemTime};
+
+    use super::EcuRuntimeState;
+
+    /// [[ test~ecu-last-seen, `last_seen` keeps the newest write and tracks persistence, test ]]
+    #[test]
+    fn last_seen_newest_write_wins_and_tracks_dirty() {
+        let state = EcuRuntimeState::new();
+        assert_eq!(state.last_seen(), None);
+        assert!(!state.last_seen_snapshot().is_dirty());
+
+        // A restored value is already persisted.
+        let future = SystemTime::now()
+            .checked_add(Duration::from_secs(3600))
+            .unwrap();
+        state.restore_last_seen(future);
+        assert_eq!(state.last_seen(), Some(future));
+        assert!(!state.last_seen_snapshot().is_dirty());
+
+        // A contact after a clock correction replaces the (future) value.
+        state.touch_last_seen();
+        let touched = state.last_seen().unwrap();
+        assert!(touched < future);
+        let saved = state.last_seen_snapshot();
+        assert_eq!(saved.at(), Some(touched));
+        assert!(saved.is_dirty());
+        state.mark_last_seen_persisted(saved);
+        assert!(!state.last_seen_snapshot().is_dirty());
+
+        state.touch_last_seen();
+        // Equal wall-clock values must not make a later contact look persisted.
+        state.last_seen.lock().unwrap().at = saved.at;
+        state.mark_last_seen_persisted(saved);
+        assert!(
+            state.last_seen_snapshot().is_dirty(),
+            "a newer contact is not acknowledged"
+        );
+        state.mark_last_seen_persisted(state.last_seen_snapshot());
+        assert!(!state.last_seen_snapshot().is_dirty());
     }
 }

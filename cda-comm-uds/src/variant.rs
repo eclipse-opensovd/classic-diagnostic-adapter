@@ -22,9 +22,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState, HashMap,
-    HashMapExtensions, HashSet, HashSetExtensions, PayloadDecoder, ServicePayload, UdsVariant,
-    VariantState,
+    Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState,
+    HashMap, HashMapExtensions, HashSet, HashSetExtensions, PayloadDecoder, ServicePayload,
+    UdsVariant, VariantState,
     communication_control::{
         ActivationCause, CommunicationLifecycle, CommunicationState, CommunicationVariantDetection,
         VariantDetectionMode, error::CommControlError,
@@ -94,8 +94,7 @@ async fn claim_detection(
 fn needs_offline_retry(state_handles: &[&EcuCoordinatorHandle]) -> bool {
     state_handles.iter().any(|handle| {
         let status = handle.ecu_status();
-        status.connectivity == cda_interfaces::Connectivity::Offline
-            && needs_variant_detection(&status)
+        status.connectivity == Connectivity::Offline && needs_variant_detection(&status)
     })
 }
 
@@ -152,6 +151,9 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             tracing::debug!(ecu_name, "Variant detection trigger obsolete, skipping");
             return Ok(());
         };
+        // Counted only when a detection actually runs, so a skipped probe does not
+        // count as a detection run (and is not persisted as one).
+        let _ticket = self.detection_tracker.begin();
 
         let Some(mut duplicated_ecus) = ecu
             .read()
@@ -435,6 +437,14 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         }
 
         if *variant_state.borrow() == VariantState::NotTested {
+            // Only a gateway that connects on its first use (pending after a lazy
+            // start) needs a request-triggered detection. An ECU detected as
+            // unreachable stays NotTested and must not start a detection with every
+            // client poll. Coalesced with a detection already running.
+            // [[ dimpl~uds-request-detection-pending-only, Only an ECU behind a pending gateway queues a detection on request, dimpl ]]
+            if self.gateway.route_pending(ecu_name).await {
+                self.state_coordinator.request_detection(ecu_name);
+            }
             Err(self.build_communication_not_ready_err("Variant detection has not concluded"))
         } else {
             Ok(ecu)
@@ -467,6 +477,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
 
         for ecu_name in representatives {
             let vd = self.clone();
+            let ticket = self.detection_tracker.begin();
             cda_interfaces::spawn_named!(&format!("variant-detection-{ecu_name}"), async move {
                 // Retry budget for detections that conclude offline: such a
                 // verdict is usually transient here (the detection raced the
@@ -479,6 +490,8 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 // offline ECUs still settle at Offline after the retries.
                 const OFFLINE_VERDICT_RETRIES: u32 = 3;
                 const OFFLINE_VERDICT_RETRY_DELAY: Duration = Duration::from_secs(1);
+                // Keeps detection pending across the retries below.
+                let _ticket = ticket;
 
                 for attempt in 0..=OFFLINE_VERDICT_RETRIES {
                     if attempt > 0 {
@@ -522,13 +535,40 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     #[tracing::instrument(skip_all,
         fields(dlt_context = dlt_ctx!("UDS"))
     )]
-    async fn start_variant_detection(&self) {
+    async fn start_variant_detection(&self, after_activation: bool) {
         let mut ecus = Vec::new();
         for (ecu_name, db) in self.ecus.iter() {
             if !db.read().await.is_physical_ecu() {
                 tracing::debug!(
                     ecu_name = %ecu_name,
                     "Skip variant detection for functional description"
+                );
+                continue;
+            }
+            // Restored from a persisted topology: keeps its variant until contacted,
+            // and its gateway may not be connected yet, which must not mark it
+            // offline here. Only for the detection of an activation; an explicit
+            // re-detection reset these ECUs to NotTested before.
+            // An ECU behind a gateway that is pending until its first use was not
+            // tested: ecu_online never connects a gateway and would report it
+            // offline without a contact attempt. It stays NotTested; its first
+            // request connects the gateway and queues the detection. This applies
+            // to an explicit whole-vehicle re-detection as well, which has the same
+            // ecu_online behavior.
+            if after_activation
+                && db.read().await.ecu_status().connectivity == Connectivity::AssumedOnline
+            {
+                tracing::debug!(
+                    ecu_name = %ecu_name,
+                    "Skip variant detection for ECU restored as assumed online"
+                );
+                continue;
+            }
+            // [[ dimpl~uds-activation-skips-pending, Whole-vehicle detection skips ECUs behind a pending gateway, dimpl ]]
+            if self.gateway.route_pending(ecu_name).await {
+                tracing::debug!(
+                    ecu_name = %ecu_name,
+                    "Skip variant detection, gateway connects on first use"
                 );
                 continue;
             }
@@ -878,13 +918,12 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 tracing::warn!(
                     "Variant detection failed for ECU {ecu_name}: {e:?}, marking as undetected"
                 );
-                any_online |= ecu.read().await.ecu_status().connectivity
-                    == cda_interfaces::Connectivity::Online;
+                any_online |= ecu.read().await.ecu_status().connectivity == Connectivity::Online;
                 continue;
             }
 
             let status = ecu.read().await.ecu_status();
-            any_online |= status.connectivity == cda_interfaces::Connectivity::Online;
+            any_online |= status.connectivity == Connectivity::Online;
             if !status.is_online_and_detected() {
                 continue;
             }
@@ -980,6 +1019,14 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
         let ecu = self.ecus.get(ecu_name)?;
         Some(ecu.read().await.runtime_state().variant_state_rx())
     }
+
+    async fn get_last_seen(
+        &self,
+        ecu_name: &str,
+    ) -> Result<Option<std::time::SystemTime>, DiagServiceError> {
+        let ecu = self.uds_ecu_db(ecu_name)?;
+        Ok(ecu.read().await.runtime_state().last_seen())
+    }
 }
 
 #[async_trait::async_trait]
@@ -989,6 +1036,8 @@ impl<S: EcuGateway, T: EcuManager> CommunicationLifecycle for UdsManager<S, T> {
     }
 
     async fn initialize(&self) -> Result<(), CommControlError> {
+        self.activation_detection_pending
+            .store(true, std::sync::atomic::Ordering::Release);
         // Start the variant-detection listener if it is not already running.
         if let Some(mut receiver) = self.variant_detection_receiver.lock().await.take() {
             let uds_manager = self.clone();
@@ -996,12 +1045,14 @@ impl<S: EcuGateway, T: EcuManager> CommunicationLifecycle for UdsManager<S, T> {
             let task_cancel = cancel.clone();
             let listener = cda_interfaces::spawn_named!("variant-detection-receiver", async move {
                 loop {
-                    let ecus = tokio::select! {
+                    // The ticket keeps the tracker busy until the detections
+                    // below are spawned and hold tickets of their own.
+                    let (ecus, _ticket) = tokio::select! {
                         biased; // prefer cancellation over variant detection
                         () = task_cancel.cancelled() => break,
-                        ecus = receiver.recv() => {
-                            let Some(ecus) = ecus else { break };
-                            ecus.into_ecus()
+                        received = receiver.recv_tracked() => {
+                            let Some((request, ticket)) = received else { break };
+                            (request.into_ecus(), ticket)
                         }
                     };
                     let mut processed_duplicates = HashSet::new();
@@ -1039,6 +1090,9 @@ impl<S: EcuGateway, T: EcuManager> CommunicationLifecycle for UdsManager<S, T> {
     }
 
     async fn on_enabled(&self) {
+        // The activation is complete, with or without detection (`Never` mode).
+        self.activation_detection_pending
+            .store(false, std::sync::atomic::Ordering::Release);
         self.resume_tester_present().await;
         self.resume_deferred_resets().await;
     }
@@ -1057,7 +1111,22 @@ impl<S: EcuGateway, T: EcuManager> CommunicationVariantDetection for UdsManager<
     }
 
     async fn detect(&self) -> Result<(), CommControlError> {
-        self.start_variant_detection().await;
+        // `initialize` runs on every activation, right before its detection;
+        // any other call is an explicit re-detection.
+        let after_activation = self
+            .activation_detection_pending
+            .swap(false, std::sync::atomic::Ordering::AcqRel);
+        if !after_activation {
+            // Explicit re-detection: AssumedOnline -> NotTested.
+            self.reset_ecu_states(true).await;
+        }
+        self.start_variant_detection(after_activation).await;
+        Ok(())
+    }
+
+    async fn detect_if_needed(&self) -> Result<(), CommControlError> {
+        // Detects like the activation does, without resetting assumed online ECUs.
+        self.start_variant_detection(true).await;
         Ok(())
     }
 }
@@ -1080,7 +1149,7 @@ mod tests {
     use crate::{
         UdsManager,
         coordinator::EcuCoordinatorHandle,
-        test_helpers::{TestEcuDb, TestGateway},
+        test_helpers::{RoutePendingGateway, TestEcuDb, TestGateway},
     };
 
     #[tokio::test]
@@ -1874,5 +1943,112 @@ mod tests {
             !needs_offline_retry(&[&representative, &member]),
             "online members must not trigger an offline retry"
         );
+    }
+
+    /// Runs the lookup of a never-tested ECU while communication is enabled and
+    /// returns the error plus the detection requests it queued.
+    async fn lookup_not_tested_ecu(
+        route_pending: bool,
+        connectivity: Option<Connectivity>,
+    ) -> (
+        DiagServiceError,
+        Vec<cda_interfaces::VariantDetectionRequest>,
+    ) {
+        let gateway = RoutePendingGateway {
+            inner: TestGateway {
+                send_fn: Arc::new(|_, _| Ok(())),
+            },
+            pending: route_pending,
+        };
+        let ecu_db = TestEcuDb::new();
+        ecu_db.set_status(|status| {
+            *status = EcuState::default();
+            if let Some(connectivity) = connectivity {
+                status.connectivity = connectivity;
+            }
+        });
+        let ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_owned(),
+            RwLock::new(ecu_db),
+        )]));
+        let mut manager = UdsManager::new_for_raw_payload_tests(
+            gateway,
+            ecus,
+            FaultConfig::default(),
+            enabled_communication_access_for_test(),
+        );
+        let (redetect_tx, mut redetect_rx) = tokio::sync::mpsc::channel(8);
+        manager.state_coordinator = crate::EcuStateCoordinator::new(
+            HashMap::from_iter([("TestECU".to_owned(), cda_interfaces::EcuRuntimeState::new())]),
+            cda_interfaces::VariantDetectionSender::new(redetect_tx),
+        );
+
+        let Err(error) = manager.uds_ecu_variant_detection_concluded("TestECU").await else {
+            panic!("detection has not concluded");
+        };
+        let mut queued = Vec::new();
+        while let Ok(request) = redetect_rx.try_recv() {
+            queued.push(request.0);
+        }
+        (error, queued)
+    }
+
+    /// Runs the whole-vehicle detection and returns the final connectivity of
+    /// the ECU.
+    async fn run_whole_vehicle_detection(
+        route_pending: bool,
+        after_activation: bool,
+    ) -> Connectivity {
+        let gateway = RoutePendingGateway {
+            inner: TestGateway {
+                send_fn: Arc::new(|_, _| Ok(())),
+            },
+            pending: route_pending,
+        };
+        let ecu_db = TestEcuDb::new();
+        // Online is a sentinel: only a detection with empty responses changes it
+        // (the test database sets Offline), a skipped ECU keeps it.
+        ecu_db.set_status(|status| status.connectivity = Connectivity::Online);
+        let ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_owned(),
+            RwLock::new(ecu_db),
+        )]));
+        let manager = UdsManager::new_for_raw_payload_tests(
+            gateway,
+            Arc::clone(&ecus),
+            FaultConfig::default(),
+            enabled_communication_access_for_test(),
+        );
+        manager.start_variant_detection(after_activation).await;
+        ecus.get("TestECU")
+            .expect("test ECU")
+            .read()
+            .await
+            .ecu_status()
+            .connectivity
+    }
+
+    /// An explicit whole-vehicle re-detection skips ECUs behind a pending gateway as well.
+    /// [[ test~uds-assumed-online-skip-explicit-detection, An explicit re-detection also skips ECUs behind a pending gateway, test ]]
+    #[tokio::test]
+    async fn explicit_detection_skips_ecu_behind_pending_gateway() {
+        assert_eq!(
+            run_whole_vehicle_detection(true, false).await,
+            Connectivity::Online,
+            "pending gateway: ECU must keep its state"
+        );
+    }
+
+    /// [[ test~uds-request-queues-one-detection-for-pending-gateway, A request to a never-tested ECU behind a pending gateway queues one variant detection, test ]]
+    #[tokio::test]
+    async fn request_queues_one_detection_for_pending_gateway() {
+        for connectivity in [None, Some(Connectivity::Offline)] {
+            let (error, queued) = lookup_not_tested_ecu(true, connectivity).await;
+            assert!(
+                matches!(error, DiagServiceError::CommunicationNotReady { .. }),
+                "{error:?}"
+            );
+            assert_eq!(queued.len(), 1, "one detection for a pending route");
+        }
     }
 }

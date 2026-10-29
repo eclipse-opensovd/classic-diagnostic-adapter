@@ -634,3 +634,55 @@ async fn list_normalizes_mixed_case_filenames_to_match_metadata_and_read() {
     handle.read_at(0, &mut buf).unwrap();
     assert_eq!(&buf, b"mixed case data");
 }
+
+/// [[ test~storage-commit-cancel-safe, A commit whose caller is dropped while waiting for the data lock still completes and releases the transaction flag, test ]]
+#[tokio::test]
+async fn commit_completes_when_caller_is_dropped() {
+    let (storage, _dir) = create_test_storage();
+    let name = CollectionName::DiagnosticDatabase;
+    let collection = storage.get_or_create_collection(&name).await.unwrap();
+
+    // Seed a value; its read handle holds the shared data lock, so the commit has to wait.
+    let mut tx = storage.begin_transaction().unwrap();
+    let mut data: &[u8] = b"old";
+    collection.write(&mut tx, "seed", &mut data).await.unwrap();
+    tx.commit().await.unwrap();
+    let guard_holder = collection.read("seed").await.unwrap();
+
+    let mut tx = storage.begin_transaction().unwrap();
+    let mut data: &[u8] = b"new";
+    collection.write(&mut tx, "key", &mut data).await.unwrap();
+    let commit = tokio::spawn(tx.commit());
+
+    // Let the commit reach the lock wait, then drop the caller.
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    commit.abort();
+    assert!(commit.await.unwrap_err().is_cancelled());
+
+    // The commit is still blocked, so the flag is still held.
+    assert!(matches!(
+        storage.begin_transaction(),
+        Err(StorageError::TransactionBusy)
+    ));
+
+    drop(guard_holder);
+
+    // The detached commit finishes; wait until the next transaction can begin.
+    let mut next = None;
+    for _ in 0..100_000 {
+        if let Ok(tx) = storage.begin_transaction() {
+            next = Some(tx);
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let next = next.expect("transaction flag was never released");
+    next.rollback();
+
+    let handle = collection.read("key").await.unwrap();
+    let mut buf = vec![0u8; 3];
+    assert_eq!(handle.read_at(0, &mut buf).unwrap(), 3);
+    assert_eq!(&buf, b"new");
+}

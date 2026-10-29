@@ -10,7 +10,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{sync::OnceLock, time::Duration};
+use std::{
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use cda_interfaces::{DoipComParams, EcuAddresses, HashMap, HashMapExtensions};
 
@@ -94,6 +100,129 @@ impl DoipComParams for TestEcu {
 
     fn connection_retry_attempts(&self) -> u32 {
         3
+    }
+}
+
+/// Connectivity handler that ignores all events.
+pub(crate) struct NoopConnectivityHandler;
+
+#[async_trait::async_trait]
+impl cda_interfaces::EcuConnectivityHandler for NoopConnectivityHandler {
+    async fn on_gateway_connected(&self, _ecu_names: &[String]) {}
+
+    async fn on_gateway_disconnected(&self, _ecu_names: &[String]) {}
+}
+
+/// Polls `condition` until it holds, panics after five seconds.
+pub(crate) async fn wait_until(mut condition: impl FnMut() -> bool) {
+    for _ in 0..500 {
+        if condition() {
+            return;
+        }
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(10)).await;
+    }
+    panic!("condition not reached in time");
+}
+
+/// `DoIP` gateway on the loopback interface that accepts every routing activation
+/// and counts the TCP connections it receives. Routing activation responses can
+/// be held back to keep a connect in flight, or left out to make it fail.
+pub(crate) struct FakeGateway {
+    port: u16,
+    connects: Arc<AtomicUsize>,
+    gate: tokio::sync::watch::Sender<bool>,
+    failing: Arc<AtomicBool>,
+    accept_task: tokio::task::JoinHandle<()>,
+}
+
+impl FakeGateway {
+    pub(crate) async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake gateway");
+        let port = listener.local_addr().expect("local address").port();
+        let connects = Arc::new(AtomicUsize::new(0));
+        let (gate, gate_rx) = tokio::sync::watch::channel(true);
+        let failing = Arc::new(AtomicBool::new(false));
+        let accept_connects = Arc::clone(&connects);
+        let accept_failing = Arc::clone(&failing);
+        let accept_task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                accept_connects.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(Self::serve(
+                    stream,
+                    gate_rx.clone(),
+                    Arc::clone(&accept_failing),
+                ));
+            }
+        });
+        Self {
+            port,
+            connects,
+            gate,
+            failing,
+            accept_task,
+        }
+    }
+
+    pub(crate) fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Number of TCP connections received so far.
+    pub(crate) fn connects(&self) -> usize {
+        self.connects.load(Ordering::SeqCst)
+    }
+
+    /// Holds back routing activation responses until `release_connects`.
+    pub(crate) fn block_connects(&self) {
+        self.gate.send_replace(false);
+    }
+
+    pub(crate) fn release_connects(&self) {
+        self.gate.send_replace(true);
+    }
+
+    /// While set, a released routing activation is answered by closing the
+    /// connection, so the connect fails.
+    pub(crate) fn set_failing(&self, failing: bool) {
+        self.failing.store(failing, Ordering::SeqCst);
+    }
+
+    async fn serve(
+        mut stream: tokio::net::TcpStream,
+        mut gate: tokio::sync::watch::Receiver<bool>,
+        failing: Arc<AtomicBool>,
+    ) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let mut header = [0u8; 8];
+        if stream.read_exact(&mut header).await.is_err() {
+            return;
+        }
+        let length = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+        let mut request = vec![0u8; usize::try_from(length).unwrap_or_default()];
+        if stream.read_exact(&mut request).await.is_err() {
+            return;
+        }
+        if gate.wait_for(|open| *open).await.is_err() || failing.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut response = vec![header[0], header[1], 0x00, 0x06, 0, 0, 0, 9];
+        // Tester address, entity address, "successfully activated", reserved.
+        response.extend_from_slice(request.get(..2).unwrap_or(&[0, 0]));
+        response.extend_from_slice(&[0x00, 0x00, 0x10, 0, 0, 0, 0]);
+        if stream.write_all(&response).await.is_err() {
+            return;
+        }
+        let mut buffer = [0u8; 256];
+        while matches!(stream.read(&mut buffer).await, Ok(read) if read > 0) {}
+    }
+}
+
+impl Drop for FakeGateway {
+    fn drop(&mut self) {
+        self.accept_task.abort();
     }
 }
 

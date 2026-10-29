@@ -440,6 +440,28 @@ impl IntoResponse for ErrorWrapper {
     }
 }
 
+/// Builds a response with an `ApiErrorResponse` body without parameters,
+/// error source and schema.
+pub(crate) fn api_error_response(
+    status: StatusCode,
+    error_code: ErrorCode,
+    vendor_code: Option<VendorErrorCode>,
+    message: String,
+) -> Response {
+    (
+        status,
+        Json(ApiErrorResponse::<VendorErrorCode> {
+            message,
+            error_code,
+            vendor_code,
+            parameters: None,
+            error_source: None,
+            schema: None,
+        }),
+    )
+        .into_response()
+}
+
 fn error_response_schema(include_schema: bool) -> Option<schemars::Schema> {
     include_schema.then(|| {
         let mut schema =

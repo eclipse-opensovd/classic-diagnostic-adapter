@@ -477,6 +477,8 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuSecurity> UdsManager<S, 
                             // if we received a response matching our sent SID, return it
                             // other responses are logged as warnings and ignored.
                             if !msg.data.is_empty() && msg.is_response_for_sid(sent_sid) {
+                                // [[ dimpl~uds-ecu-reply-contact, Any reply of the ECU counts as contact, dimpl ]]
+                                self.state_coordinator.handle_ecu_responded(ecu_name).await;
                                 // Validate that echo bytes (e.g. DID) in the response
                                 // match those in the request (ISO 14229-1).
                                 if !msg.has_matching_echo_bytes(&payload.data) {
@@ -493,15 +495,20 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuSecurity> UdsManager<S, 
                             }
                             tracing::warn!("Received unexpected UDS message: {:?}", msg);
                         }
-                        Ok(Some(TransportResponse::Pending(pending))) => match pending {
-                            // BusyRepeatRequest and TemporarilyNotAvailable differ
-                            // only in which com-params drive
-                            // them: both mean "retry the whole request after a
-                            // delay", unlike ResponsePending which keeps waiting below.
-                            PendingNrc::BusyRepeatRequest { .. }
-                            | PendingNrc::TemporarilyNotAvailable { .. } => {
-                                let (nrc, policy, completion_timeout, sleep_time) =
-                                    if matches!(pending, PendingNrc::BusyRepeatRequest { .. }) {
+                        Ok(Some(TransportResponse::Pending(pending))) => {
+                            // Every pending NRC is a reply of the ECU.
+                            self.state_coordinator.handle_ecu_responded(ecu_name).await;
+                            match pending {
+                                // BusyRepeatRequest and TemporarilyNotAvailable differ
+                                // only in which com-params drive
+                                // them: both mean "retry the whole request after a
+                                // delay", unlike ResponsePending which keeps waiting below.
+                                PendingNrc::BusyRepeatRequest { .. }
+                                | PendingNrc::TemporarilyNotAvailable { .. } => {
+                                    let (nrc, policy, completion_timeout, sleep_time) = if matches!(
+                                        pending,
+                                        PendingNrc::BusyRepeatRequest { .. }
+                                    ) {
                                         (
                                             "BusyRepeatRequest",
                                             &uds_params.rc_21_retry_policy,
@@ -516,37 +523,39 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuSecurity> UdsManager<S, 
                                             uds_params.rc_94_repeat_request_time,
                                         )
                                     };
-                                if let Err(e) = validate_timeout_by_policy(
-                                    ecu_name,
-                                    policy,
-                                    &start.elapsed(),
-                                    completion_timeout,
-                                ) {
-                                    break 'read_uds_messages Err(e);
+                                    if let Err(e) = validate_timeout_by_policy(
+                                        ecu_name,
+                                        policy,
+                                        &start.elapsed(),
+                                        completion_timeout,
+                                    ) {
+                                        break 'read_uds_messages Err(e);
+                                    }
+                                    tracing::debug!(
+                                        sleep_time = ?sleep_time,
+                                        "{nrc} received, resending after delay"
+                                    );
+                                    cda_interfaces::util::tokio_ext::sleep_for(sleep_time).await;
+                                    continue 'send; // continue 'send, will resend the message
                                 }
-                                tracing::debug!(
-                                    sleep_time = ?sleep_time,
-                                    "{nrc} received, resending after delay"
-                                );
-                                cda_interfaces::util::tokio_ext::sleep_for(sleep_time).await;
-                                continue 'send; // continue 'send, will resend the message
-                            }
-                            PendingNrc::ResponsePending { .. } => {
-                                if let Err(e) = validate_timeout_by_policy(
-                                    ecu_name,
-                                    &uds_params.rc_78_retry_policy,
-                                    &start.elapsed(),
-                                    &uds_params.rc_78_completion_timeout,
-                                ) {
-                                    break 'read_uds_messages Err(e);
+                                PendingNrc::ResponsePending { .. } => {
+                                    if let Err(e) = validate_timeout_by_policy(
+                                        ecu_name,
+                                        &uds_params.rc_78_retry_policy,
+                                        &start.elapsed(),
+                                        &uds_params.rc_78_completion_timeout,
+                                    ) {
+                                        break 'read_uds_messages Err(e);
+                                    }
+                                    tracing::debug!(
+                                        "ResponsePending received, continue waiting for final \
+                                         response"
+                                    );
+                                    rx_timeout_next = Some(uds_params.rc_78_timeout);
+                                    continue 'read_uds_messages; // continue reading UDS frames
                                 }
-                                tracing::debug!(
-                                    "ResponsePending received, continue waiting for final response"
-                                );
-                                rx_timeout_next = Some(uds_params.rc_78_timeout);
-                                continue 'read_uds_messages; // continue reading UDS frames
                             }
-                        },
+                        }
                         Ok(response) => {
                             break 'read_uds_messages Err(DiagServiceError::UnexpectedResponse(
                                 Some(format!("Unexpected response received: {response:?}")),
@@ -1096,6 +1105,8 @@ pub(crate) mod send_tests {
                 communication_retry_after: TEST_COMMUNICATION_RETRY_AFTER,
                 variant_detection_receiver: Arc::new(Mutex::new(None)),
                 variant_detection_listener: Arc::new(Mutex::new(None)),
+                detection_tracker: cda_interfaces::DetectionTracker::new(),
+                activation_detection_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }
         }
     }
@@ -2370,6 +2381,95 @@ pub(crate) mod send_tests {
                 0x22
             ]
         );
+    }
+
+    fn nrc_response(sid: u8, nrc: u8) -> TransportResponse {
+        TransportResponse::UdsResponse(ServicePayload {
+            data: vec![service_ids::NEGATIVE_RESPONSE, sid, nrc],
+            source_address: 0x0001,
+            target_address: 0x0E00,
+            new_session: None,
+            new_security: None,
+        })
+    }
+
+    fn last_seen_of(manager: &UdsManager<TestGateway, TestEcuDb>) -> Option<std::time::SystemTime> {
+        manager
+            .state_coordinator
+            .get_handle("TestECU")
+            .expect("handle exists")
+            .state
+            .last_seen()
+    }
+
+    async fn send_for_contact(
+        manager: &UdsManager<TestGateway, TestEcuDb>,
+        payload: ServicePayload,
+        expect_response: bool,
+    ) -> Result<Option<ServicePayload>, DiagServiceError> {
+        manager
+            .send_with_raw_payload(
+                "TestECU",
+                payload,
+                None,
+                expect_response,
+                CommunicationReadiness::AssumeReady,
+            )
+            .await
+    }
+
+    /// 0x78 followed by silence ends in a timeout, but the ECU replied.
+    /// [[ test~uds-ecu-reply-contact, A response-pending reply counts as contact even if the request times out, test ]]
+    #[tokio::test(start_paused = true)]
+    async fn reply_contact_response_pending_then_timeout_updates_last_seen() {
+        let gateway = TestGateway {
+            send_fn: Arc::new(|response_tx, _| {
+                response_tx
+                    .try_send(Ok(Some(TransportResponse::Pending(
+                        PendingNrc::ResponsePending {
+                            source_address: 0x0001,
+                        },
+                    ))))
+                    .ok();
+                park_sender(response_tx);
+                Ok(())
+            }),
+        };
+        let manager = make_manager(gateway);
+        assert_eq!(last_seen_of(&manager), None);
+
+        let result = send_for_contact(
+            &manager,
+            make_test_payload(service_ids::SESSION_CONTROL, &[0x01]),
+            true,
+        )
+        .await;
+
+        assert!(matches!(result, Err(DiagServiceError::Timeout)));
+        assert!(last_seen_of(&manager).is_some());
+    }
+
+    /// A request with a suppressed positive response is not a contact, even if
+    /// the ECU answers it with an NRC: the request ends with the (n)ack.
+    /// [[ test~uds-suppressed-response-no-contact, A suppressed positive response does not update `last_seen`, test ]]
+    #[tokio::test]
+    async fn reply_contact_suppressed_positive_keeps_last_seen() {
+        let gateway = TestGateway {
+            send_fn: Arc::new(|response_tx, _| {
+                response_tx.try_send(Ok(None)).ok();
+                response_tx
+                    .try_send(Ok(Some(nrc_response(service_ids::ECU_RESET, 0x22))))
+                    .ok();
+                Ok(())
+            }),
+        };
+        let manager = make_manager(gateway);
+        let payload = make_test_payload(service_ids::ECU_RESET, &[0x81]);
+
+        let result = send_for_contact(&manager, payload, false).await;
+
+        assert!(matches!(result, Ok(None)));
+        assert_eq!(last_seen_of(&manager), None);
     }
 
     #[tokio::test]

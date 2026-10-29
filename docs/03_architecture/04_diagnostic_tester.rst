@@ -363,12 +363,25 @@ Communication Initialization Mode
 
 .. arch:: Communication Initialization Mode
     :id: arch~dt-deferred-initialization
-    :links: dimpl~communication-control-contracts, dimpl~communication-control-access, dimpl~communication-control-operations, dimpl~communication-lifecycle-controller, dimpl~default-communication-policy, dimpl~deferred-communication-startup, dimpl~deferred-sovd-admission, dimpl~deferred-doip-transport, test~deferred-communication-config, test~deferred-startup-policy, test~deferred-admitting-modes-activate, test~deferred-disabled-rejects-activation, test~deferred-request-activation-policy, test~deferred-activation-retry, test~deferred-sovd-admission, test~deferred-doip-passive-construction, itest~deferred-on-demand-pending, itest~deferred-on-demand-uds-silence, itest~deferred-disabled-uds-silence
+    :links: test~doip-lazy-start-consumed, test~ecu-topology-reconnect-search, itest~deferred-on-demand-per-gateway, dimpl~doip-lazy-gateway-connect, dimpl~doip-lazy-activate-all, test~doip-lazy-activate-all, test~doip-aborted-discovery-finishes, dimpl~doip-gateway-connect-once, test~doip-gateway-connect-once, dimpl~uds-request-detection-pending-only, test~transport-router-route-pending, dimpl~doip-persisted-reconnect, test~doip-unreachable-reported-after-state-change, dimpl~ecu-topology-restore, dimpl~ecu-state-restore, test~doip-plan-reconnect, dimpl~communication-control-contracts, dimpl~communication-control-access, dimpl~communication-control-operations, dimpl~communication-lifecycle-controller, dimpl~default-communication-policy, dimpl~deferred-communication-startup, dimpl~deferred-sovd-admission, dimpl~deferred-doip-transport, test~deferred-communication-config, test~deferred-startup-policy, test~deferred-admitting-modes-activate, test~deferred-disabled-rejects-activation, test~deferred-request-activation-policy, test~deferred-activation-retry, test~deferred-sovd-admission, test~deferred-doip-passive-construction, itest~deferred-on-demand-pending, itest~deferred-on-demand-uds-silence, itest~deferred-disabled-uds-silence, dimpl~communication-explicit-detection-enables, test~communication-explicit-detection-enables, test~doip-reconnect-plan-reconnect-rejects-renamed-gateway, test~uds-request-queues-one-detection-for-pending-gateway, test~ecu-state-restore-without-assume-online-only-last-seen-is-restored, test~ecu-state-restore-variant-missing-from-the-database-is-detected-again, test~ecu-state-restore-address-mismatch-restores-nothing, test~ecu-state-restore-can-pinned-ecu-is-not-assumed-online, test~ecu-state-restore-inconsistent-duplicate-group-is-detected-again, test~communication-explicit-activation-connects-pending-gateways-and-detects-if-needed, test~doip-vam-during-reconnect-does-not-connect-twice, test~doip-stale-lazy-connect-does-not-touch-new-session
     :status: draft
 
     The CDA supports a configurable ``[communication] init_mode`` to enable scenarios where
     the HTTP API must be available before vehicle communication begins, or where communication must remain
     fully quiet until explicitly authorized.
+
+    **Configuration**
+
+    ``init_mode`` accepts ``"Always"`` (default), ``"WhenNotPersisted"``, ``"OnDemand"`` and ``"Disabled"``.
+    Reusing a persisted topology additionally requires ``[communication.ecu_list_persistence] enabled = true``
+    (see :need:`arch~dt-ecu-list-persistence`). Enabling persistence alone keeps the default ``Always``
+    behavior of a full broadcast discovery at every startup; startup without re-detection requires
+    ``init_mode = "WhenNotPersisted"`` (or ``OnDemand``/``Disabled`` once triggered). The CDA logs a warning
+    when ``WhenNotPersisted`` is configured while persistence is disabled, since the mode then behaves like
+    ``Always``.
+
+    For ``WhenNotPersisted``, the default communication plugin applies the same activation policy as for
+    ``Always``; the two modes only differ in how the transport discovers gateways.
 
     **Dynamic Router Architecture**
 
@@ -421,6 +434,9 @@ Communication Initialization Mode
       per-ECU auto-trigger in this mode), applying the same persisted-vs-broadcast behavior as
       **WhenNotPersisted**.
 
+    An explicit detection request (``networkreset`` rediscovery or a plugin's explicit detection) brings a
+    stopped transport up with a full initialization in every ``init_mode``, including ``Disabled``.
+
     **OnDemand** and **Disabled** always behave like **WhenNotPersisted** once triggered (at whichever
     scope applies), rather than offering their own **Always**/**WhenNotPersisted** choice, since these
     modes exist specifically to minimize vehicle network traffic until explicitly authorized.
@@ -455,6 +471,57 @@ Communication Initialization Mode
         Enabled --> Enabled : diagnostic requests served
         @enduml
 
+    **Reconnect Realization**
+
+    - The persisted ECU states are restored while the vehicle data is loaded, before communication starts:
+      ECUs last known Online get their persisted variant and are registered AssumedOnline, so they are not
+      detected again until contacted (see :need:`arch~dt-ecu-states`). Everything else (ECUs not last known
+      Online, variants no longer in the database, changed addresses, ECUs pinned to CAN, inconsistently
+      persisted duplicate groups) gets a regular variant detection.
+    - On transport start, the persisted gateways with a usable network address (inside the tester subnet,
+      known protocol version, same name in the database) are connected directly. A persisted gateway without
+      network address was not found by the last full broadcast and is not searched again. Gateways of the
+      databases that are not persisted at all, and persisted gateways that cannot be reached at their address,
+      are searched by one broadcast VIR sent from a separate, ephemeral socket (the VAM listener owns the
+      socket on the DoIP port); only announcements of these gateways are used.
+    - The ECUs of gateways that are still not found are reported as unreachable. The discovery then counts
+      as complete for :need:`arch~dt-ecu-list-persistence`, which writes the result.
+    - Every per-gateway broadcast fallback (spontaneous announcement connect, first use after a lazy start)
+      shares one VIR: at most one search is in flight per transport start, and gateways failing at the same
+      time wait for its result, so they cause exactly one broadcast. A gateway whose direct connect fails
+      after the broadcast was collected starts the next search.
+    - A gateway triggers at most one such search per failure episode, i.e. until it is connected again or the
+      transport restarts. Later failures within the episode (e.g. further announcements) try the direct
+      connect only and then report the gateway unreachable.
+    - A spontaneous announcement of an unconnected gateway starts its connect in the background: the VAM
+      listener does not wait for it and handles the next announcement meanwhile. A further announcement of the
+      same gateway joins the connect in flight.
+    - A gateway whose connect (including the broadcast fallback) failed is not retried automatically in the
+      same transport session; it is connected again by its spontaneous announcement (subject to
+      ``vam_handling_mode``), a ``networkreset`` with detection, or the next transport start.
+    - With ``init_mode = Always``, only ``last_seen`` is restored and the full broadcast discovery runs.
+    - **OnDemand, first diagnostic request:** the activation is recorded as a lazy start when a topology is
+      persisted. The transport then registers the persisted gateways as pending instead of connecting them,
+      and the discovery counts as complete right away. A pending gateway connects on its first use (a
+      request to one of its ECUs, a functional request through it, or a variant detection of one of its
+      ECUs), with the broadcast fallback for that gateway alone if its address does not work. Every connect of a
+      gateway (startup reconnect, broadcast fallback, first use, spontaneous announcement) is coordinated:
+      concurrent attempts wait for the one in flight, and an announcement of a gateway that is pending or
+      being connected does not open a second connection. Connect state belongs to one transport start; work
+      left over from an earlier start does not change it. An announcement of a pending gateway only
+      refreshes its address. Reachability checks (e.g. by the activation's variant detection) never connect a pending
+      gateway. A request for an ECU that is not detected yet queues its variant detection (only if its gateway is
+      still pending; an ECU that was detected unreachable is not detected again by requests), whose first request
+      connects the gateway; the client gets the usual pending response with a retry hint meanwhile.
+    - The lifecycle is vehicle-wide: health reports the transport as up once communication is enabled, even
+      while gateways are still pending. An explicit plugin activation after a lazy
+      start connects all pending gateways (with the broadcast fallback) and runs the activation's variant
+      detection, so it has the same result as an activation without a prior lazy start. The awaiting
+      activation returns when this is done.
+      Explicit activation is covered by unit tests, because no HTTP path issues an ``Explicit`` activation.
+    - After a runtime database update, the gateways are reconnected the same way, but ECU states are not
+      restored, since the variants may have changed with the databases.
+
     .. uml::
         :caption: WhenNotPersisted -- Reconnect to a Persisted Gateway
 
@@ -465,14 +532,15 @@ Communication Initialization Mode
         participant "CDA" as Startup
         participant "DoIP Entity\n(persisted address)" as GW
 
+        Startup -> Startup: restore last known variants;\nECUs last known Online -> AssumedOnline
         Startup -> GW: unicast connect (known IP/logical address)
         alt connection succeeds
             GW --> Startup: connected
-            Startup -> Startup: trigger variant detection
+            Startup -> Startup: AssumedOnline ECUs keep their variant\n(no variant detection);\nother ECUs: regular variant detection
         else connection fails / timeout
             GW --> Startup: unreachable
             note right: Fallback to broadcast VIR\n(see arch~doip-vehicle-identification)
-            Startup -> Startup: mark gateway's ECUs Offline\nif still not found
+            Startup -> Startup: mark gateway's ECUs Disconnected (AssumedOnline)\nor Offline if still not found;\nthe state is persisted\n(see arch~dt-ecu-list-persistence)
         end
         @enduml
 
@@ -504,13 +572,31 @@ Post-Update Deferred Communication
 
 .. arch:: Post-Update Deferred Communication
     :id: arch~dt-post-update-deferred-communication
-    :links: dimpl~communication-control-contracts, dimpl~communication-lifecycle-controller, dimpl~post-update-deferred-communication, test~deferred-communication-config, test~deferred-post-update-apply, test~deferred-post-update-rollback, itest~deferred-post-update
+    :links: dimpl~communication-control-contracts, dimpl~communication-lifecycle-controller, dimpl~post-update-deferred-communication, test~deferred-communication-config, test~deferred-post-update-apply, test~deferred-post-update-rollback, itest~deferred-post-update, dimpl~communication-quiesce-lease, test~communication-quiesce-closes-gate, test~transport-gate-refuses-send-while-quiesced, test~doip-gate-refuses-connect-while-quiesced, test~doip-gate-closed-during-connect, test~doip-refused-connect-stays-pending, test~doip-refused-startup-gateways-pending, test~lazy-start-flag-dropped-when-refused, test~communication-quiesce-conflicts-with-disable-and-detection, test~communication-quiesce-rejects-active-guards
     :status: draft
 
     Runtime database updates acquire the communication lifecycle controller's exclusive disable lease
     before replacing vehicle data. When ``post_update_mode`` is ``Deferred``, a successful apply or rollback
     drops that lease without requesting transport resumption. The communication lifecycle therefore returns
     to its deferred state while the registered ECU routes remain available.
+
+    Next to the disable lease, the lifecycle controller offers an exclusive quiesce lease for work that must
+    not overlap diagnostic requests but must not touch the transport either (a clear-only ``networkreset``).
+    It is refused while communication guards are held, a lifecycle transition or detection is in flight, or
+    another exclusive lease exists. While it is held, new guards are refused with a retryable not-ready
+    error of their own ("Communication is paused", answered as ``503`` with ``Retry-After``), no
+    transition or detection starts, and the transport and the lifecycle state stay unchanged. The lease also
+    closes a transport gate: the diagnostic transport router refuses sends with the same not-ready error
+    and the DoIP gateway refuses new gateway connects, so traffic that does not pass a communication guard
+    (the variant detection a request queues for a pending gateway, the connect of pending gateways) cannot
+    start either. A refused connect is not a failure of the gateway: it is not
+    reported unreachable, enters no failure episode and starts no broadcast fallback, also when the gate
+    closes while the connect is in progress, and a spontaneous announcement that arrives meanwhile is not
+    connected. The gateway connects on its next use or announcement after the lease was dropped, which
+    opens the gate again. A pending gateway stays pending and connects on its first use. A gateway
+    refused during the startup reconnect becomes pending without an address, because only the clear-only
+    ``networkreset`` closes the gate and its persisted address was just cleared: it is searched by the
+    broadcast fallback on its first use, unless an announcement gave it an address meanwhile.
 
     ECU-related requests are rejected with ``503 Service Unavailable`` and ``Retry-After`` while
     communication is disabled. Under ``init_mode = OnDemand``, such a request submits a new activation
@@ -788,6 +874,7 @@ ECU States
 
 .. arch:: ECU States
     :id: arch~dt-ecu-states
+    :links: dimpl~uds-activation-skips-pending, dimpl~ecu-state-restore, dimpl~ecu-state-assumed-online, test~ecu-last-seen, dimpl~uds-ecu-reply-contact, test~uds-ecu-reply-contact, test~uds-gateway-disconnect-applied-before-return, test~uds-assumed-online-skip-explicit-detection, test~uds-suppressed-response-no-contact, test~uds-state-assumed-online-becomes-online-on-response, test~uds-state-restored-duplicate-survives-connect-but-real-reconnect-redetects
     :status: draft
 
     ECU state management tracks the lifecycle of each ECU from registration through
@@ -830,11 +917,39 @@ ECU States
     database and adds runtime state information. The state is queryable through the SOVD API
     component endpoints.
 
-    In addition to the state enum, each ECU manager stores a ``last_seen`` timestamp, updated whenever a
-    diagnostic exchange with the ECU succeeds (e.g. a successful variant detection response, or a successful
-    diagnostic service response during normal operation). For ECUs registered in the AssumedOnline state,
+    In addition to the state enum, each ECU manager stores a ``last_seen`` timestamp, updated whenever the
+    ECU replies (e.g. to a variant detection request, or to a diagnostic service request during normal
+    operation). For ECUs registered in the AssumedOnline state,
     the initial value of ``last_seen`` is taken from the persisted topology (see
     :need:`arch~dt-ecu-list-persistence`) and reflects the last successful contact from a previous session.
+
+    Any reply of the ECU counts as contact, positive or negative, including the response-pending NRC
+    0x78, regardless of whether the request as a whole succeeds; it is only about the ECU replying. This
+    applies to physical requests and to each ECU responding to a functional request. A request without
+    any reply of the ECU (e.g. a positive response that is suppressed and only acknowledged by the
+    gateway) does not count. A request with a suppressed positive response does not count either, even
+    if the ECU answers it with an NRC.
+
+    ``last_seen`` is a wall-clock timestamp, and the newest write always wins even if it is older than the
+    previous value: vehicle clocks are often wrong at boot and corrected later by time synchronization, so
+    keeping the maximum would pin an incorrect future timestamp. Each update also marks the value as changed
+    since it was last persisted, which selects the ECUs written back at shutdown (see
+    :need:`arch~dt-ecu-list-persistence-shutdown`).
+
+    **AssumedOnline Handling**
+
+    - The first reply of the ECU transitions an AssumedOnline ECU to Online. The transition is serialized
+      with connect and disconnect events of that ECU.
+    - Connecting the ECU's gateway does not change the AssumedOnline state and does not reset the restored
+      variant, unlike the Offline to Online transition of a reconnected ECU, which clears the variant for
+      re-detection.
+    - A failed contact (e.g. a request timeout) transitions it to Offline with the variant kept, which is
+      reported as Disconnected.
+    - The variant detection of an activation skips AssumedOnline ECUs, so they are not marked Offline while
+      their gateway is still connecting, and ECUs behind a gateway that is pending until its first use; those
+      stay NotTested until their gateway is connected; the skip of ECUs behind a pending gateway applies to an
+      explicit whole-vehicle re-detection as well. An explicit whole-vehicle re-detection first resets AssumedOnline ECUs to
+      NotTested and then detects them; an explicit re-detection of a single ECU runs regardless.
 
     **State Transitions**
 
@@ -870,6 +985,7 @@ ECU List Persistence
 
 .. arch:: ECU List Persistence
     :id: arch~dt-ecu-list-persistence
+    :links: dimpl~ecu-topology-store, dimpl~ecu-topology-store-serialized, test~ecu-topology-store-serialized, test~ecu-topology-store-cancelled-call-keeps-lock, test~detection-tracker-undelivered-request-released, test~detection-tracker-idle-after-receiver-drop, test~ecu-list-persistence-snapshot-name-case, dimpl~ecu-topology-persist-after-detection, dimpl~ecu-topology-prune, test~ecu-topology-persist-after-detection, test~ecu-topology-prune, dimpl~ecu-topology-persist-serialized, test~ecu-topology-persist-serialized, dimpl~ecu-topology-persist-when-idle, dimpl~ecu-topology-persist-unreachable, itest~ecu-list-persistence-unreachable, itest~ecu-list-persistence-unreachable-gateway, itest~ecu-list-persistence-unreachable-on-demand, dimpl~ecu-list-persistence-requires-doip, test~ecu-list-persistence-requires-doip, itest~ecu-list-persistence-disabled, itest~ecu-list-persistence-reuse, test~detection-tracker-queued-requests-and-tickets-keep-tracker-busy, test~ecu-list-persistence-runs-during-write-coalesce-into-one-more-write, test~ecu-list-persistence-settle-budget-is-shared-between-discovery-and-detection, test~ecu-list-persistence-persisted-state-follows-sovd-mapping, test~ecu-list-persistence-snapshot-leaves-pending-gateway-untouched, test~ecu-topology-store-unreadable-entries-are-skipped, test~ecu-topology-store-upsert-keeps-other-entries
     :status: draft
 
     The detected ECU/gateway topology is persisted on top of the generic Persistence API (see
@@ -887,12 +1003,47 @@ ECU List Persistence
 
     **Bucket Layout**
 
-    A dedicated Bucket (e.g. ``ecu-topology``) is used. One entry is stored per gateway, keyed by the
-    gateway's logical address. Each value serializes:
+    A dedicated Bucket ``ecu-topology`` is used. One entry is stored per gateway, keyed by the gateway's
+    logical address as zero-padded hexadecimal (e.g. ``0x1000``). Each value serializes:
 
     - The gateway's network address and logical address
     - The list of ECUs reachable through that gateway, each with its logical address, name, last known
       variant, last known state, and ``last_seen`` timestamp (see :need:`arch~dt-ecu-states`)
+
+    The persisted topology covers DoIP gateways. With DoIP disabled, persistence behaves as disabled even if
+    ``ecu_list_persistence.enabled`` is ``true``: the stored data is neither read nor written (it is kept and
+    used again once DoIP is enabled), and a warning is logged at startup. In mixed DoIP/CAN configurations,
+    persistence covers the DoIP gateways; ECUs pinned to CAN are not restored AssumedOnline (see Reconnect
+    Realization).
+
+    The value is a versioned JSON document. ``last_seen`` is an RFC 3339 UTC timestamp. The network address is
+    absent for a gateway that is defined in the diagnostic databases but was not found by the last full
+    broadcast discovery, so that a gateway which is not fitted does not force a new broadcast on every startup.
+    Such a gateway is found again by its spontaneous announcement (subject to ``vam_handling_mode``) or by a
+    ``networkreset`` with ``trigger_detection=true``; with ``vam_handling_mode = never`` only the latter.
+    The internal AssumedOnline state is persisted as ``Online``.
+
+    .. code-block:: json
+
+        {
+          "version": 1,
+          "name": "FLXC1000",
+          "logical_address": 4096,
+          "network_address": "10.2.1.10",
+          "doip_protocol_version": 3,
+          "ecus": [{
+            "name": "FLXC1000",
+            "logical_address": 4096,
+            "variant": {"name": "FLXC1000_App_0101", "is_base_variant": false, "is_fallback": false},
+            "state": "Online",
+            "last_seen": "2026-10-09T08:15:00.123Z"
+          }]
+        }
+
+    Every write replaces (upserts) the entries of the gateways it covers (see Write Timing) and leaves all
+    other entries unchanged. An entry that cannot be read (invalid JSON, unsupported version, key not matching its logical
+    address) is skipped with a warning; its gateway is then handled as if it were not persisted, and the entry
+    is rewritten by the next write.
 
     .. uml::
         :caption: ECU Topology Persistence
@@ -939,6 +1090,45 @@ ECU List Persistence
     that detection run in the first place. A ``flush`` is issued to guarantee durability of the persisted
     data. This write is skipped entirely when ``communication.ecu_list_persistence.enabled`` is ``false``.
 
+    The write is performed by a communication lifecycle hook registered after the UDS manager hooks:
+
+    - When communication is enabled, it waits until the gateway discovery has settled (all initial gateway
+      connection attempts finished) and until no variant detection is queued or running, bounded by
+      ``communication.ecu_list_persistence.detection_settle_timeout_seconds`` (one budget for both waits;
+      a value outside 1 to 3600 is rejected as a configuration error).
+    - It then writes one entry per connected gateway with the current ECU states and ``last_seen``
+      timestamps. After a full broadcast discovery, database gateways that were not found and are not
+      persisted yet are written without network address.
+    - A persisted gateway whose connection was attempted and failed (direct reconnect and broadcast
+      fallback, or a connect on first use, see :need:`arch~dt-deferred-initialization`) is also written, so
+      the persisted state is the last known state: its network address, protocol version and ECU variants
+      are kept, and its ECUs are written with their current state (``Disconnected``). Gateways that were not
+      attempted (pending until first use, or without network address) are not covered. If no gateway is
+      connected at the time of the write, failed gateways are not written either: the vehicle is then
+      presumably not awake, and demoting the whole topology would force a full variant detection on the next
+      startup. As a consequence,
+      ECUs of such a gateway are not restored AssumedOnline on the next startup and get a regular variant
+      detection once their gateway is reachable again.
+    - Every later detection run (explicit re-detection, an ECU reconnecting, a gateway announcing itself) and
+      every gateway reported unreachable after a failed connect is persisted the same way as soon as no
+      variant detection is queued or running. Writes are sequential; detection runs that finish during a write
+      are combined into one further write.
+    - A write is skipped if it would only change ``last_seen`` timestamps, which are written back at shutdown
+      instead (see :need:`arch~dt-ecu-list-persistence-shutdown`), to minimize writes to flash storage.
+    - Disabling communication cancels a pending write.
+    - Starting, restarting and cancelling the write task, a clear and the shutdown write-back are serialized
+      by one lock, and every read-modify-write of the ``ecu-topology`` bucket runs to its commit even if its
+      caller is dropped, so a cleared topology cannot be written back by a concurrent write. No write task
+      is started after the shutdown write-back; a clear that arrives afterwards is still executed. A clear
+      counts the detection results so far as written, so only later runs are persisted; after a failed
+      clear the results that were not written yet are still due.
+    - Before each write, entries that are no longer in the loaded diagnostic databases are pruned: gateway
+      entries whose logical address is not a physical database gateway, and ECUs no longer reached through
+      their gateway. This is independent of the upsert rule: an entry is pruned because it is missing from the
+      databases, never because it was not seen by the last detection run. Nothing is written if nothing is
+      pruned. Pruned entries are not restored by a later rollback of a runtime database update; the affected
+      gateways are then detected again.
+
     **Read Timing**
 
     The persisted topology is read once, early during the Vehicle Data Loading Phase of
@@ -952,12 +1142,20 @@ ECU List Persistence
     registered in the AssumedOnline state (see :need:`arch~dt-ecu-states`), with its ``last_seen``
     timestamp initialized from the persisted value.
 
+    With ``init_mode = Always``, only the persisted ``last_seen`` timestamps are restored. ECU states and
+    variants are not restored and the AssumedOnline state is not entered, because an assumed state would
+    suppress the full detection run that ``Always`` guarantees at every startup.
+    This follows :need:`req~dt-deferred-initialization`, which forbids using the persisted topology to skip any
+    detection with ``Always``; it takes precedence over the AssumedOnline registration of
+    :need:`req~dt-ecu-list-persistence`.
+
 
 ECU List Persistence - Shutdown Update
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. arch:: ECU List Persistence - Shutdown Update
     :id: arch~dt-ecu-list-persistence-shutdown
+    :links: dimpl~ecu-topology-persist-after-detection, itest~ecu-list-persistence-shutdown, test~ecu-list-persistence-shutdown-serialized-with-clear, test~ecu-list-persistence-failed-clear-keeps-unwritten, test~ecu-list-persistence-clear-restores-task, test~ecu-list-persistence-shutdown-after-clear-does-not-recreate-entries, test~ecu-list-persistence-shutdown-with-running-detection-writes-last-seen-only, test~ecu-list-persistence-shutdown-snapshot
     :status: draft
 
     The ``last_seen`` timestamp maintained per ECU (see :need:`arch~dt-ecu-states`) changes far more
@@ -971,6 +1169,13 @@ ECU List Persistence - Shutdown Update
     entirely when ``communication.ecu_list_persistence.enabled`` is ``false`` (see
     :need:`arch~dt-ecu-list-persistence`), since there is no persisted bucket to update in that
     configuration.
+
+    Only ECUs contacted since their entry was last written are updated, and the ``last_seen`` update never
+    creates entries, so a cleared topology stays empty. The write-back runs before communication is shut
+    down (and so before the persistence provider is closed). Detection results that were not written yet
+    (and no detection is still running) are written as a full snapshot in addition, so a detection run
+    finished shortly before shutdown is not lost; results up to a clear do not count as unwritten. The write
+    is not time-bounded, like the other shutdown steps.
 
     .. uml::
         :caption: last_seen Persistence at Shutdown

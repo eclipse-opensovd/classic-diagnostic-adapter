@@ -139,6 +139,7 @@ where
         Arc::clone(&infra.lock_provider)
             as Arc<dyn cda_interfaces::request_authorization::RequestLockProvider>,
         Arc::clone(&infra.communication_access),
+        Arc::clone(&infra.topology.runtime),
     ));
 
     let reloader_infra = ReloaderContext {

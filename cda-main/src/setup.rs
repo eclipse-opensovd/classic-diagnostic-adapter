@@ -29,16 +29,19 @@ use cda_comm_can::CanDiagGateway;
 use cda_comm_doip::DoipDiagGateway;
 use cda_core::EcuManager;
 use cda_interfaces::{
-    HashMap, ShutdownSignal,
+    DetectionTracker, HashMap, ShutdownSignal,
     communication_control::{
-        ActivationCause, CommunicationAccess, CommunicationInitMode, CommunicationLifecycle,
-        CommunicationVariantDetection, PostUpdateCommunicationMode, VariantDetectionMode,
-        error::CommControlError,
+        ActivationCause, CommunicationAccess, CommunicationError, CommunicationGuard,
+        CommunicationInitMode, CommunicationLifecycle, CommunicationState,
+        CommunicationVariantDetection, PostUpdateCommunicationMode, TransportGate,
+        VariantDetectionMode, error::CommControlError, quiesce::QuiesceCommunication,
     },
     component_slot::{ComponentSlot, ReplaceComponent},
     health::HealthProvider,
     http_protection::registry::HttpProtectionRegistry,
     lock_priority_api::LockPriorityPolicy,
+    runtime_update_api::LockStateProvider,
+    topology::{EcuTopologyEntry, TopologyRuntime, VehicleTopologyPlugin},
 };
 use cda_plugin_communication_management::{
     lifecycle::{
@@ -46,12 +49,14 @@ use cda_plugin_communication_management::{
         access::CommunicationAccessView,
         build_communication_runtime,
         disable::{CommunicationDisableView, DisableCommunication},
+        rediscovery::CommunicationRediscoveryView,
     },
     plugin::{
         CommunicationPlugin, CommunicationPluginBuilder, default::DefaultCommunicationPluginBuilder,
     },
 };
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
+use cda_plugin_vehicle_topology::{DefaultVehicleTopologyPlugin, VehicleTopologyDeps};
 use cda_storage::LocalStorage;
 use cda_transport_router::DiagnosticTransportRouter;
 use futures::future::BoxFuture;
@@ -61,6 +66,7 @@ use crate::{
     ApplicationState,
     config::configfile::Configuration,
     error::AppError,
+    topology::{EcuTopologySource, TopologyContext, reset::TopologyResetAdapter},
     update::{UpdatePluginBuilder, add_runtime_update_routes},
     vehicle::{UdsManagerType, VehicleData},
 };
@@ -110,6 +116,8 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
     /// Retry hint surfaced on the HTTP `Retry-After` header while a runtime
     /// update holds communication exclusively.
     pub update_retry_after: Duration,
+    /// ECU list persistence: store, discovery plan and persistence hook.
+    pub topology: Arc<TopologyContext>,
 }
 
 /// Bridges the `RwLock`-wrapped `UdsManager` to both communication-framework
@@ -146,6 +154,10 @@ impl<SP: SecurityPlugin> CommunicationVariantDetection for UdsCommunicationHooks
 
     async fn detect(&self) -> Result<(), CommControlError> {
         self.uds_manager.read().await.detect().await
+    }
+
+    async fn detect_if_needed(&self) -> Result<(), CommControlError> {
+        self.uds_manager.read().await.detect_if_needed().await
     }
 }
 
@@ -202,7 +214,14 @@ pub struct Setup<
     pub(crate) shutdown_signal: Option<ShutdownSignal>,
     /// Lock-priority policy fixed for the lifetime of the lock store.
     pub(crate) lock_priority_policy: Arc<dyn LockPriorityPolicy>,
+    /// Builds the vehicle topology (`networkreset`) plugin. `None` uses
+    /// [`DefaultVehicleTopologyPlugin`].
+    pub(crate) build_vehicle_topology_plugin: Option<VehicleTopologyPluginBuilder>,
 }
+
+/// Builds a custom vehicle topology plugin from the CDA dependencies.
+pub type VehicleTopologyPluginBuilder =
+    Box<dyn FnOnce(VehicleTopologyDeps) -> Arc<dyn VehicleTopologyPlugin> + Send>;
 
 impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Default for Setup<SP, SL> {
     fn default() -> Self {
@@ -222,6 +241,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Setup<SP, SL> {
             initialize_tracing: true,
             shutdown_signal: None,
             lock_priority_policy: Arc::new(cda_plugin_lock_priority::NoPreemptionPolicy),
+            build_vehicle_topology_plugin: None,
         }
     }
 }
@@ -293,7 +313,18 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
             initialize_tracing: self.initialize_tracing,
             shutdown_signal: self.shutdown_signal,
             lock_priority_policy: self.lock_priority_policy,
+            build_vehicle_topology_plugin: self.build_vehicle_topology_plugin,
         }
+    }
+
+    /// Replaces the default vehicle topology (`networkreset`) plugin.
+    #[must_use]
+    pub fn with_vehicle_topology_plugin(
+        mut self,
+        builder: impl FnOnce(VehicleTopologyDeps) -> Arc<dyn VehicleTopologyPlugin> + Send + 'static,
+    ) -> Self {
+        self.build_vehicle_topology_plugin = Some(Box::new(builder));
+        self
     }
 
     /// Replaces the default communication plugin factory.
@@ -311,6 +342,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
             initialize_tracing: self.initialize_tracing,
             shutdown_signal: self.shutdown_signal,
             lock_priority_policy: self.lock_priority_policy,
+            build_vehicle_topology_plugin: self.build_vehicle_topology_plugin,
         }
     }
 
@@ -329,6 +361,24 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
     }
 }
 
+/// Settings the communication runtime is built with.
+struct CommunicationPolicy {
+    init_mode: CommunicationInitMode,
+    variant_detection: VariantDetectionMode,
+    /// The retry hint of requests deferred while communication starts.
+    retry_after: Duration,
+}
+
+impl From<&Configuration> for CommunicationPolicy {
+    fn from(config: &Configuration) -> Self {
+        Self {
+            init_mode: config.communication.init_mode,
+            variant_detection: config.communication.variant_detection,
+            retry_after: config.deferred_retry_after(),
+        }
+    }
+}
+
 /// Installs the global HTTP protection guard, builds the authoritative communication plugin
 /// runtime, and derives a narrow access view for UDS manager construction.
 ///
@@ -341,9 +391,8 @@ async fn build_communication_runtime_and_access<SP, CPB>(
         DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
     >,
     communication_plugin: CPB,
-    init_mode: CommunicationInitMode,
-    variant_detection: VariantDetectionMode,
-    retry_after: Duration,
+    transport_gate: TransportGate,
+    policy: CommunicationPolicy,
     http_protections: &HttpProtectionRegistry,
 ) -> Result<(CommunicationRuntime, Arc<dyn CommunicationAccess>), AppError>
 where
@@ -360,17 +409,115 @@ where
     let communication_runtime = build_communication_runtime(
         communication_plugin,
         transport_control,
-        init_mode,
-        variant_detection,
+        Some(gateway.pending_gateways()),
+        transport_gate,
+        policy.init_mode,
+        policy.variant_detection,
     )
     .await
     .map_err(|error| AppError::InitializationFailed(error.to_string()))?;
 
-    let communication_access: Arc<dyn CommunicationAccess> = Arc::new(
-        CommunicationAccessView::new(Arc::clone(&communication_runtime.plugin), retry_after),
-    );
+    let communication_access: Arc<dyn CommunicationAccess> =
+        Arc::new(CommunicationAccessView::new(
+            Arc::clone(&communication_runtime.plugin),
+            policy.retry_after,
+        ));
 
     Ok((communication_runtime, communication_access))
+}
+
+/// Records diagnostic-request activations for the `OnDemand` per-gateway scope:
+/// with a persisted topology, such an activation connects each gateway only on
+/// its first use instead of all gateways at once.
+struct LazyActivationAccess {
+    inner: Arc<dyn CommunicationAccess>,
+    topology: Arc<TopologyRuntime>,
+}
+
+impl CommunicationAccess for LazyActivationAccess {
+    fn state(&self) -> CommunicationState {
+        self.inner.state()
+    }
+
+    fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+        self.inner.acquire()
+    }
+
+    fn request_activate(&self, cause: ActivationCause) -> CommunicationState {
+        let lazy = cause == ActivationCause::DiagnosticRequest
+            && self.topology.has_persisted()
+            && self.inner.state() == CommunicationState::Disabled;
+        if lazy {
+            self.topology.request_lazy_start();
+        }
+        let state = self.inner.request_activate(cause);
+        if lazy
+            && !matches!(
+                state,
+                CommunicationState::Enabling(_) | CommunicationState::Enabled
+            )
+        {
+            // Refused (e.g. a quiesce): a stale request must not make a later start lazy.
+            // A concurrent request that was accepted between the two calls loses its
+            // lazy start here, so its start connects all gateways. The window is
+            // narrow and the outcome correct, only not lazy.
+            let _ = self.topology.take_lazy_start();
+        }
+        state
+    }
+
+    fn retry_after(&self) -> Duration {
+        self.inner.retry_after()
+    }
+
+    fn variant_detection(&self) -> VariantDetectionMode {
+        self.inner.variant_detection()
+    }
+}
+
+/// Reads the live ECUs from the current UDS manager, so a manager replaced by a
+/// runtime update is picked up.
+struct UdsTopologySource<SP: SecurityPlugin> {
+    uds_manager: ComponentSlot<UdsManagerType<SP>>,
+}
+
+#[async_trait::async_trait]
+impl<SP: SecurityPlugin> EcuTopologySource for UdsTopologySource<SP> {
+    async fn ecu_topology_entries(&self) -> Vec<EcuTopologyEntry> {
+        self.uds_manager.read().await.ecu_topology_entries().await
+    }
+
+    async fn detection_tracker(&self) -> DetectionTracker {
+        self.uds_manager.read().await.detection_tracker().clone()
+    }
+
+    async fn reset_ecu_states(&self, only_assumed_online: bool) {
+        self.uds_manager
+            .read()
+            .await
+            .reset_ecu_states(only_assumed_online)
+            .await;
+    }
+}
+
+/// Registers the topology persistence hook after the UDS manager hooks, if ECU
+/// list persistence is enabled. Persistence requires `DoIP`, which
+/// `TopologyContext` already accounts for in `is_enabled`.
+async fn register_topology_persistence(
+    plugin: &Arc<dyn CommunicationPlugin>,
+    source: Arc<dyn EcuTopologySource>,
+    topology: &TopologyContext,
+) -> Result<(), AppError> {
+    if !topology.is_enabled() {
+        return Ok(());
+    }
+    let Some(persistence) = topology.create_persistence(source) else {
+        return Ok(());
+    };
+    plugin
+        .register_lifecycle_hook(persistence as Arc<dyn CommunicationLifecycle>)
+        .await
+        .map_err(|error| AppError::InitializationFailed(error.to_string()))
 }
 
 /// Registers the UDS manager's two communication hooks through the authoritative
@@ -399,7 +546,8 @@ where
         .map_err(|error| AppError::InitializationFailed(error.to_string()))
 }
 
-/// `Always` initializes whole-vehicle communication eagerly at startup and propagates
+/// `Always` and `WhenNotPersisted` initialize whole-vehicle communication eagerly at
+/// startup (they differ only in how gateways are discovered) and propagate
 /// failure according to existing application-start semantics. `OnDemand` and `Disabled`
 /// leave it uninitialized, with HTTP/SOVD already served by the routes registered
 /// beforehand. Under `OnDemand` an explicit `activate()` or a qualifying ECU request
@@ -410,7 +558,7 @@ async fn activate_communication_per_init_mode(
     init_mode: CommunicationInitMode,
 ) -> Result<(), AppError> {
     match init_mode {
-        CommunicationInitMode::Always => plugin
+        CommunicationInitMode::Always | CommunicationInitMode::WhenNotPersisted => plugin
             .activate(ActivationCause::Startup)
             .await
             .map(|_| ())
@@ -450,17 +598,63 @@ where
     Ok(())
 }
 
+/// Everything `setup_runtime_routes` consumes besides the application state.
+pub(crate) struct RuntimeRoutesInput<SP: SecurityPlugin, UPB, CPB> {
+    pub(crate) config: Configuration,
+    pub(crate) vehicle_data: VehicleData<SP>,
+    pub(crate) build_update_plugin: Option<UPB>,
+    pub(crate) build_communication_plugin: CPB,
+    pub(crate) storage: Arc<LocalStorage>,
+    pub(crate) topology: Arc<TopologyContext>,
+    pub(crate) build_vehicle_topology_plugin: Option<VehicleTopologyPluginBuilder>,
+}
+
+/// Wraps `access` so the first qualifying request activates the lazily started
+/// transport, if persistence and `OnDemand` initialization are in effect.
+fn with_lazy_activation(
+    access: Arc<dyn CommunicationAccess>,
+    topology: &TopologyContext,
+    init_mode: CommunicationInitMode,
+) -> Arc<dyn CommunicationAccess> {
+    if topology.is_enabled() && init_mode == CommunicationInitMode::OnDemand {
+        Arc::new(LazyActivationAccess {
+            inner: access,
+            topology: Arc::clone(&topology.runtime),
+        })
+    } else {
+        access
+    }
+}
+
+/// Builds the vehicle topology plugin (a vendor builder takes precedence) and
+/// mounts its routes.
+async fn add_topology_routes<SL: SecurityPluginLoader>(
+    ws: &ApplicationState,
+    deps: VehicleTopologyDeps,
+    build: Option<VehicleTopologyPluginBuilder>,
+    lock_provider: &Arc<cda_sovd::SovdLockStateProvider>,
+    update_retry_after: Duration,
+) {
+    let plugin: Arc<dyn VehicleTopologyPlugin> = match build {
+        Some(build) => build(deps),
+        None => Arc::new(DefaultVehicleTopologyPlugin::new(deps)),
+    };
+    cda_sovd::add_vehicle_topology_routes::<SL>(
+        &ws.dynamic_router,
+        plugin,
+        Arc::clone(lock_provider) as Arc<dyn LockStateProvider>,
+        update_retry_after,
+    )
+    .await;
+}
+
 /// Registers all SOVD routes, the runtime-update plugin, `OpenAPI` routes, and the update guard.
 ///
 /// This is called after vehicle data has been loaded. The `build_update_plugin` optional
 /// builder is consumed here; when `None` the runtime-update endpoints are simply not mounted.
 pub(crate) async fn setup_runtime_routes<SP, SL, UPB, CPB>(
-    config: Configuration,
-    vehicle_data: VehicleData<SP>,
     ws: &ApplicationState,
-    build_update_plugin: Option<UPB>,
-    communication_plugin: CPB,
-    storage: Arc<LocalStorage>,
+    input: RuntimeRoutesInput<SP, UPB, CPB>,
 ) -> Result<CommunicationRuntime, AppError>
 where
     SP: SecurityPlugin,
@@ -468,6 +662,15 @@ where
     UPB: UpdatePluginBuilder<SP>,
     CPB: CommunicationPluginBuilder,
 {
+    let RuntimeRoutesInput {
+        config,
+        vehicle_data,
+        build_update_plugin,
+        build_communication_plugin: communication_plugin,
+        storage,
+        topology,
+        build_vehicle_topology_plugin,
+    } = input;
     let flash_files_path = config.flash_files_path.clone();
     let flash_functional_class_default = config.flash_functional_class_default.clone();
     let components_config = config.components.clone();
@@ -475,8 +678,6 @@ where
 
     let runtime_update_config = config.runtime_update_config.clone();
     let update_retry_after = Duration::from_secs(runtime_update_config.retry_after_seconds);
-    let communication_retry_after =
-        Duration::from_secs(config.communication.deferred_retry_after_seconds);
     let post_update_mode = config.communication.post_update_mode.clone();
 
     let lock_provider: Arc<cda_sovd::SovdLockStateProvider> = Arc::new(
@@ -491,13 +692,17 @@ where
         ws,
         vehicle_data.diagnostic_gateway.clone(),
         communication_plugin,
-        config.communication.init_mode,
-        config.communication.variant_detection,
-        communication_retry_after,
+        topology.runtime.transport_gate(),
+        CommunicationPolicy::from(&config),
         &http_protections,
     )
     .await?;
     let plugin = Arc::clone(&communication_runtime.plugin);
+    let communication_access = with_lazy_activation(
+        communication_access,
+        &topology,
+        config.communication.init_mode,
+    );
 
     let components = crate::vehicle::finish_vehicle_components(
         vehicle_data.prepared,
@@ -510,8 +715,14 @@ where
     let file_managers = components.file_managers;
 
     register_communication_hooks(&plugin, &uds_manager).await?;
+    let topology_source: Arc<dyn EcuTopologySource> = Arc::new(UdsTopologySource {
+        uds_manager: uds_manager.clone(),
+    });
+    register_topology_persistence(&plugin, Arc::clone(&topology_source), &topology).await?;
 
     let communication_disable: Arc<dyn DisableCommunication> =
+        Arc::new(CommunicationDisableView::new(Arc::clone(&plugin)));
+    let communication_quiesce: Arc<dyn QuiesceCommunication> =
         Arc::new(CommunicationDisableView::new(Arc::clone(&plugin)));
 
     // Routes are published only after the plugin, initializers, and narrow views are ready.
@@ -531,6 +742,28 @@ where
         },
     )
     .await?;
+
+    let topology_plugin_deps = VehicleTopologyDeps {
+        backend: Arc::new(TopologyResetAdapter::new(
+            Arc::clone(&topology),
+            topology_source,
+            gateway.pending_gateways(),
+        )),
+        rediscovery: Arc::new(CommunicationRediscoveryView::new(Arc::clone(&plugin))),
+        communication_disable: Arc::clone(&communication_disable),
+        communication_quiesce,
+        locks: Arc::clone(&lock_provider) as Arc<dyn LockStateProvider>,
+        http_protections: http_protections.clone(),
+        rediscovery_timeout: topology.settle_timeout,
+    };
+    add_topology_routes::<SL>(
+        ws,
+        topology_plugin_deps,
+        build_vehicle_topology_plugin,
+        &lock_provider,
+        update_retry_after,
+    )
+    .await;
 
     activate_communication_per_init_mode(&plugin, config.communication.init_mode).await?;
 
@@ -553,6 +786,7 @@ where
         health: vehicle_data.health_providers,
         storage,
         mdd_decompress,
+        topology,
     };
 
     setup_update_plugin::<SP, SL, _>(
@@ -575,7 +809,7 @@ mod tests {
     use async_trait::async_trait;
     use cda_interfaces::{
         communication_control::{
-            CommControlError, CommunicationState, TransportControl, TransportState,
+            CommControlError, CommunicationState, TransportControl, TransportGate, TransportState,
         },
         runtime_update_api::{
             BulkDataCreatedList, BulkDataList, ExecutionMode, RuntimeFilesQuery,
@@ -589,6 +823,45 @@ mod tests {
 
     use super::*;
     use crate::update::{UpdatePluginFn, update_plugin_fn};
+
+    /// Reports `0` as its state and answers an activation request with `1`.
+    struct FixedAccess(CommunicationState, CommunicationState);
+
+    impl CommunicationAccess for FixedAccess {
+        fn state(&self) -> CommunicationState {
+            self.0.clone()
+        }
+
+        fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+            Err(CommunicationError::Disabled)
+        }
+
+        fn request_activate(&self, _cause: ActivationCause) -> CommunicationState {
+            self.1.clone()
+        }
+
+        fn variant_detection(&self) -> VariantDetectionMode {
+            VariantDetectionMode::Always
+        }
+    }
+
+    /// [[ test~lazy-start-flag-dropped-when-refused, A refused diagnostic request activation leaves no lazy start behind, test ]]
+    #[test]
+    fn refused_activation_drops_the_lazy_start_request() {
+        for (answer, lazy) in [
+            (CommunicationState::Disabled, false),
+            (CommunicationState::Enabled, true),
+        ] {
+            let topology = TopologyRuntime::new(cda_interfaces::topology::DiscoveryPlan::Broadcast);
+            topology.set_has_persisted(true);
+            let access = LazyActivationAccess {
+                inner: Arc::new(FixedAccess(CommunicationState::Disabled, answer.clone())),
+                topology: Arc::clone(&topology),
+            };
+            access.request_activate(ActivationCause::DiagnosticRequest);
+            assert_eq!(topology.take_lazy_start(), lazy, "{answer:?}");
+        }
+    }
 
     // Minimal no-op plugin for type-checking.
     struct NoOpPlugin;
@@ -676,6 +949,10 @@ mod tests {
         for (mode, expected) in [
             (CommunicationInitMode::Always, CommunicationState::Enabled),
             (
+                CommunicationInitMode::WhenNotPersisted,
+                CommunicationState::Enabled,
+            ),
+            (
                 CommunicationInitMode::OnDemand,
                 CommunicationState::Disabled,
             ),
@@ -687,6 +964,8 @@ mod tests {
             let runtime = build_communication_runtime(
                 DefaultCommunicationPluginBuilder,
                 Arc::new(NoopTransport),
+                None,
+                TransportGate::new(),
                 mode,
                 VariantDetectionMode::Always,
             )

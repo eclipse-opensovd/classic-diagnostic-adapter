@@ -136,6 +136,12 @@ pub trait NetworkTopology: Send + Sync {
     ) -> impl Future<Output = Option<String>> + Send {
         std::future::ready(None)
     }
+
+    /// `true` if the route to the ECU waits for its first use (a gateway pending
+    /// after a lazy start), so a request has to trigger its connect.
+    fn route_pending(&self, _ecu_name: &str) -> impl Future<Output = bool> + Send {
+        std::future::ready(false)
+    }
 }
 
 /// Core gateway supertrait: physical and functional sends + topology queries.

@@ -220,8 +220,8 @@ Spontaneous VAM Handling Mode
     - **persisted-only** -- spontaneous VAMs are only acted upon while a persisted ECU topology exists (see
       :need:`req~dt-ecu-list-persistence`). This includes VAMs from entities not yet present in the
       persisted topology; such new ECUs/gateways are discovered and added to the topology like in
-      **always** mode. When no persisted topology exists, spontaneous VAMs must be ignored until an
-      explicit ``networkreset`` is executed and a topology has been persisted. When ECU list persistence
+      **always** mode. When no persisted topology exists, spontaneous VAMs must be ignored until a
+      topology has been persisted. When ECU list persistence
       is configured as disabled (see :need:`req~dt-ecu-list-persistence`), a persisted topology can never
       exist, so **persisted-only** behaves identically to **never** in that configuration.
     - **never** -- spontaneous VAM listening must be disabled entirely; reconnection to gateways is only

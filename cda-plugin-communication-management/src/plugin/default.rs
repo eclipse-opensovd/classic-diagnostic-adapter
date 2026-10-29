@@ -19,15 +19,21 @@
 //!
 //! Required mode semantics:
 //!
-//! | Mode        | `activate()`                   | first ECU request               | `trigger_detection()`   |
-//! |-------------|--------------------------------|---------------------------------|-------------------------|
-//! | `Always`    | joins or repeats current state | requests use current readiness  | detect while enabled    |
-//! | `OnDemand`  | initializes the whole vehicle  | returns pending, triggers once  | detect while enabled    |
-//! | `Disabled`  | rejected, no network activity  | returns pending, never triggers | detect while enabled    |
+//! | Mode               | `activate()`                   | first ECU request               | `trigger_detection()`   |
+//! |--------------------|--------------------------------|---------------------------------|-------------------------|
+//! | `Always`           | joins or repeats current state | requests use current readiness  | detect while enabled    |
+//! | `WhenNotPersisted` | joins or repeats current state | requests use current readiness  | detect while enabled    |
+//! | `OnDemand`         | initializes the whole vehicle  | returns pending, triggers once  | detect while enabled    |
+//! | `Disabled`         | rejected, no network activity  | returns pending, never triggers | detect while enabled    |
+//!
+//! `WhenNotPersisted` differs from `Always` only in how the transport discovers
+//! gateways, which is not a plugin concern.
 //!
 //! Only the first two columns vary by mode. `trigger_detection()` never
-//! consults `init_mode`, so under `Disabled` communication has to be enabled out
-//! of band before anything can detect.
+//! consults `init_mode`: an explicit detection request (`DetectionCause::Explicit`
+//! or `DetectionCause::TopologyRediscovery`, a `networkreset` execution) enables
+//! a down transport with a full initialization in every mode, including
+//! `Disabled`.
 //!
 //! Other plugins can be substituted via `Setup::with_communication_plugin`.
 
@@ -43,8 +49,22 @@ use cda_interfaces::communication_control::{
 use super::{CommunicationPlugin, CommunicationPluginBuilder};
 use crate::lifecycle::{
     controller::CommunicationHandle,
-    disable::{DisableError, DisableLease, DisableReason},
+    disable::{DisableError, DisableLease, DisableReason, QuiesceLease},
 };
+
+/// Completes an explicit activation after a lazy start: connects all pending
+/// gateways, then runs the variant detection of an activation. No-op without
+/// pending gateways.
+async fn complete_lazy_activation(
+    handle: &CommunicationHandle,
+) -> Result<(), CommunicationOperationFailure> {
+    if !handle.has_pending_gateways().await {
+        return Ok(());
+    }
+    tracing::debug!("Explicit activation connects the gateways pending after a lazy start");
+    handle.connect_pending_gateways().await;
+    handle.detect_if_needed().await.map(|_| ())
+}
 
 /// Default communication plugin: applies `init_mode` policy on top of the
 /// framework-serialized lifecycle handle.
@@ -73,14 +93,25 @@ impl CommunicationPlugin for DefaultCommunicationPlugin {
         self.handle.acquire()
     }
 
+    /// Enables communication and detects. After a lazy start the pending gateways
+    /// are connected and detected as well.
+    ///
+    /// If that follow-up detection is refused, the error is returned although
+    /// pending gateways may already be connected.
     async fn activate(
         &self,
         cause: ActivationCause,
     ) -> Result<CommunicationState, CommunicationOperationFailure> {
         match self.mode {
-            CommunicationInitMode::Always | CommunicationInitMode::OnDemand => {
+            CommunicationInitMode::Always
+            | CommunicationInitMode::WhenNotPersisted
+            | CommunicationInitMode::OnDemand => {
                 tracing::debug!(?cause, mode = ?self.mode, "Activating communication");
-                self.handle.enable_and_detect().await
+                let state = self.handle.enable_and_detect().await?;
+                // A lazy start left gateways pending: an activation that is not
+                // a diagnostic request initializes all of them.
+                complete_lazy_activation(&self.handle).await?;
+                Ok(state)
             }
             // `Disabled` authorizes no bring-up through this plugin.
             CommunicationInitMode::Disabled => {
@@ -94,9 +125,29 @@ impl CommunicationPlugin for DefaultCommunicationPlugin {
 
     fn request_activate(&self, cause: ActivationCause) -> CommunicationState {
         match self.mode {
-            CommunicationInitMode::Always | CommunicationInitMode::OnDemand => {
+            CommunicationInitMode::Always
+            | CommunicationInitMode::WhenNotPersisted
+            | CommunicationInitMode::OnDemand => {
                 tracing::debug!(?cause, mode = ?self.mode, "Requesting activation (non-blocking)");
-                self.handle.request_enable_and_detect()
+                let state = self.handle.request_enable_and_detect();
+                if cause != ActivationCause::DiagnosticRequest
+                    && matches!(
+                        state,
+                        CommunicationState::Enabled | CommunicationState::Enabling(_)
+                    )
+                {
+                    // Joins an activation in flight, then connects the gateways a
+                    // lazy start left pending.
+                    let handle = self.handle.clone();
+                    cda_interfaces::spawn_named!("communication-activate-pending", async move {
+                        if handle.enable_and_detect().await.is_ok()
+                            && let Err(error) = complete_lazy_activation(&handle).await
+                        {
+                            tracing::warn!(%error, "Connecting pending gateways failed");
+                        }
+                    });
+                }
+                state
             }
             // See the `Disabled` arm of `activate` above.
             CommunicationInitMode::Disabled => {
@@ -110,7 +161,17 @@ impl CommunicationPlugin for DefaultCommunicationPlugin {
         &self,
         cause: DetectionCause,
     ) -> Result<CommunicationState, CommunicationOperationFailure> {
-        // TODO: topology rediscovery (#490).
+        // Both causes are an explicit authorization to communicate: they bring
+        // a down transport up (with a fresh discovery) in every mode. The match
+        // is exhaustive so a future cause has to be decided consciously.
+        // [[ dimpl~communication-explicit-detection-enables, Explicit detection brings a stopped transport up, dimpl ]]
+        let brings_transport_up = match cause {
+            DetectionCause::Explicit | DetectionCause::TopologyRediscovery => true,
+        };
+        if brings_transport_up && self.handle.state() != CommunicationState::Enabled {
+            tracing::debug!(?cause, mode = ?self.mode, "Enabling communication for detection");
+            return self.handle.enable_and_detect().await;
+        }
 
         tracing::debug!(?cause, mode = ?self.mode, "Triggering whole-vehicle detection");
 
@@ -119,6 +180,10 @@ impl CommunicationPlugin for DefaultCommunicationPlugin {
 
     async fn disable(&self, reason: DisableReason) -> Result<DisableLease, DisableError> {
         self.handle.disable(reason).await
+    }
+
+    fn quiesce(&self, reason: DisableReason) -> Result<QuiesceLease, DisableError> {
+        self.handle.quiesce(reason)
     }
 
     async fn register_lifecycle_hook(
@@ -174,7 +239,9 @@ mod tests {
     };
 
     use super::*;
-    use crate::lifecycle::controller::test_utils::communication_handle_new;
+    use crate::lifecycle::controller::test_utils::{
+        communication_handle_new, communication_handle_with_pending_gateways,
+    };
 
     struct RecordingControl {
         enable_count: AtomicUsize,
@@ -233,6 +300,10 @@ mod tests {
     async fn admitting_modes_activate_the_transport() {
         for (mode, cause) in [
             (CommunicationInitMode::Always, ActivationCause::Startup),
+            (
+                CommunicationInitMode::WhenNotPersisted,
+                ActivationCause::Startup,
+            ),
             (CommunicationInitMode::OnDemand, ActivationCause::Explicit),
         ] {
             let (plugin, control, _handle) = plugin_with_mode(mode);
@@ -270,6 +341,7 @@ mod tests {
     async fn request_activate_follows_init_mode() {
         for mode in [
             CommunicationInitMode::Always,
+            CommunicationInitMode::WhenNotPersisted,
             CommunicationInitMode::OnDemand,
         ] {
             let (plugin, control, handle) = plugin_with_mode(mode);
@@ -297,40 +369,55 @@ mod tests {
         assert_eq!(control.enable_count.load(Ordering::Relaxed), 0);
     }
 
-    /// `trigger_detection()` never brings a transport up, so `Disabled` mode is
-    /// inert on every path this plugin exposes: widening a detection request
-    /// into an activation would produce exactly the unauthorized network traffic
-    /// the mode exists to prevent.
+    /// An explicit or rediscovery detection request brings a stopped transport
+    /// up with a full initialization in every `init_mode`.
+    /// [[ test~communication-explicit-detection-enables, Explicit detection brings a stopped transport up, test ]]
     #[tokio::test]
-    async fn disabled_mode_is_inert_on_every_path_including_detection() {
-        let (plugin, control, handle) = plugin_with_mode(CommunicationInitMode::Disabled);
+    async fn explicit_detection_enables_a_stopped_transport() {
+        for mode in [
+            CommunicationInitMode::Always,
+            CommunicationInitMode::WhenNotPersisted,
+            CommunicationInitMode::OnDemand,
+            CommunicationInitMode::Disabled,
+        ] {
+            for cause in [
+                DetectionCause::Explicit,
+                DetectionCause::TopologyRediscovery,
+            ] {
+                let (plugin, control, _handle) = plugin_with_mode(mode);
+                let detector = Arc::new(CountingDetector::default());
+                plugin
+                    .register_variant_detection(Arc::clone(&detector) as _)
+                    .await
+                    .unwrap();
+                assert_eq!(plugin.state(), CommunicationState::Disabled);
+                assert_eq!(
+                    plugin.trigger_detection(cause).await,
+                    Ok(CommunicationState::Enabled),
+                    "{mode:?} {cause:?}"
+                );
+                assert_eq!(
+                    detector.runs(),
+                    1,
+                    "{mode:?} {cause:?}: the registered detector must have run"
+                );
+                assert_eq!(
+                    control.enable_count.load(Ordering::Relaxed),
+                    1,
+                    "{mode:?} {cause:?}: the detector must have run once"
+                );
+                assert_eq!(plugin.state(), CommunicationState::Enabled);
 
-        // Ordinary activation is inert.
-        assert!(plugin.activate(ActivationCause::Explicit).await.is_err());
-        assert_eq!(control.enable_count.load(Ordering::Relaxed), 0);
-        assert_eq!(plugin.state(), CommunicationState::Disabled);
-
-        // So is detection: refused without touching the transport.
-        assert_eq!(
-            plugin.trigger_detection(DetectionCause::Explicit).await,
-            Err(CommunicationOperationFailure::TransitionFailure {
-                operation: CommunicationOperation::Detect
-            })
-        );
-        assert_eq!(
-            control.enable_count.load(Ordering::Relaxed),
-            0,
-            "a detection request must never enable the transport"
-        );
-        assert_eq!(plugin.state(), CommunicationState::Disabled);
-
-        // Once something else enables communication, detection is served.
-        assert_eq!(handle.enable().await, Ok(CommunicationState::Enabled));
-        assert_eq!(
-            plugin.trigger_detection(DetectionCause::Explicit).await,
-            Ok(CommunicationState::Enabled)
-        );
-        assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
+                // Enabled now: a second request re-detects without re-enabling.
+                assert_eq!(
+                    plugin.trigger_detection(cause).await,
+                    Ok(CommunicationState::Enabled),
+                    "{mode:?} {cause:?}"
+                );
+                assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
+                assert_eq!(detector.runs(), 2, "{mode:?} {cause:?}: re-detected");
+            }
+        }
     }
 
     /// From `Enabled`, `trigger_detection` detects without touching the
@@ -365,10 +452,10 @@ mod tests {
         }
     }
 
-    /// `Error(_)` is a downed transport too, so detection is refused there as
-    /// well. Recovery is an activation, which only `activate()` performs.
+    /// `Error(_)` is a stopped transport too: an explicit detection request
+    /// recovers it, in every `init_mode`.
     #[tokio::test]
-    async fn trigger_detection_refused_from_error_in_every_init_mode() {
+    async fn explicit_detection_recovers_from_error_in_every_init_mode() {
         for mode in [
             CommunicationInitMode::Always,
             CommunicationInitMode::OnDemand,
@@ -382,16 +469,10 @@ mod tests {
             control.fail_enable.store(false, Ordering::Relaxed);
             assert_eq!(
                 plugin.trigger_detection(DetectionCause::Explicit).await,
-                Err(CommunicationOperationFailure::TransitionFailure {
-                    operation: CommunicationOperation::Detect
-                }),
-                "{mode:?}: detection must not recover a broken transport"
+                Ok(CommunicationState::Enabled),
+                "{mode:?}"
             );
-            assert_eq!(
-                control.enable_count.load(Ordering::Relaxed),
-                0,
-                "{mode:?}: no successful enable may have happened"
-            );
+            assert_eq!(control.enable_count.load(Ordering::Relaxed), 1, "{mode:?}");
         }
     }
 
@@ -409,7 +490,7 @@ mod tests {
         assert_eq!(
             plugin.trigger_detection(DetectionCause::Explicit).await,
             Err(CommunicationOperationFailure::DisableLeaseHeld {
-                operation: CommunicationOperation::Detect
+                operation: CommunicationOperation::EnableAndDetect
             })
         );
         assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
@@ -439,5 +520,156 @@ mod tests {
         assert_eq!(a.await.unwrap(), Ok(CommunicationState::Enabled));
         assert_eq!(b.await.unwrap(), Ok(CommunicationState::Enabled));
         assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
+    }
+
+    /// Fake transport view: `connect_all_pending` clears the pending flag.
+    struct FakePending {
+        pending: AtomicBool,
+        connects: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl cda_interfaces::topology::PendingGateways for FakePending {
+        async fn has_pending(&self) -> bool {
+            self.pending.load(Ordering::Relaxed)
+        }
+
+        async fn connect_all_pending(&self) {
+            self.connects.fetch_add(1, Ordering::Relaxed);
+            self.pending.store(false, Ordering::Relaxed);
+        }
+
+        async fn forget_pending_addresses(&self) {}
+    }
+
+    /// Counts the two kinds of detection.
+    #[derive(Default)]
+    struct CountingDetector {
+        detects: AtomicUsize,
+        if_needed: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl CommunicationVariantDetection for CountingDetector {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+
+        async fn detect(&self) -> Result<(), CommControlError> {
+            self.detects.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn detect_if_needed(&self) -> Result<(), CommControlError> {
+            self.if_needed.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    impl CountingDetector {
+        /// Detections of either kind.
+        fn runs(&self) -> usize {
+            self.detects
+                .load(Ordering::Relaxed)
+                .saturating_add(self.if_needed.load(Ordering::Relaxed))
+        }
+    }
+
+    /// An enabled plugin with a fake pending-gateway view and a counting detector
+    /// registered after the initial activation.
+    async fn enabled_plugin_with_pending(
+        pending: bool,
+    ) -> (
+        DefaultCommunicationPlugin,
+        Arc<FakePending>,
+        Arc<CountingDetector>,
+    ) {
+        let control = Arc::new(RecordingControl {
+            enable_count: AtomicUsize::new(0),
+            disable_count: AtomicUsize::new(0),
+            fail_enable: AtomicBool::new(false),
+        });
+        let fake = Arc::new(FakePending {
+            pending: AtomicBool::new(pending),
+            connects: AtomicUsize::new(0),
+        });
+        let handle = communication_handle_with_pending_gateways(
+            control as Arc<dyn TransportControl>,
+            Arc::clone(&fake) as Arc<dyn cda_interfaces::topology::PendingGateways>,
+        );
+        // The lazy start: communication is enabled without connecting everything.
+        assert_eq!(handle.enable().await, Ok(CommunicationState::Enabled));
+        let detector = Arc::new(CountingDetector::default());
+        handle
+            .register_variant_detection(
+                Arc::clone(&detector) as Arc<dyn CommunicationVariantDetection>
+            )
+            .await
+            .unwrap();
+        (
+            DefaultCommunicationPlugin::new(handle, CommunicationInitMode::OnDemand),
+            fake,
+            detector,
+        )
+    }
+
+    /// An explicit activation of an enabled runtime with pending gateways
+    /// connects them once and runs the activation's detection, not the explicit
+    /// re-detection. Without pending gateways it does neither.
+    /// [[ test~communication-explicit-activation-connects-pending-gateways-and-detects-if-needed, An explicit activation after a lazy start connects all pending gateways and runs the activation's detection, test ]]
+    #[tokio::test]
+    async fn explicit_activation_connects_pending_gateways_and_detects_if_needed() {
+        let (plugin, fake, detector) = enabled_plugin_with_pending(true).await;
+        assert_eq!(
+            plugin.activate(ActivationCause::Explicit).await,
+            Ok(CommunicationState::Enabled)
+        );
+        assert_eq!(fake.connects.load(Ordering::Relaxed), 1);
+        assert_eq!(detector.if_needed.load(Ordering::Relaxed), 1);
+        assert_eq!(detector.detects.load(Ordering::Relaxed), 0);
+
+        // Nothing is pending any more: a repeated activation is a no-op.
+        assert_eq!(
+            plugin.activate(ActivationCause::Explicit).await,
+            Ok(CommunicationState::Enabled)
+        );
+        assert_eq!(fake.connects.load(Ordering::Relaxed), 1);
+        assert_eq!(detector.if_needed.load(Ordering::Relaxed), 1);
+
+        let (plugin, fake, detector) = enabled_plugin_with_pending(false).await;
+        assert_eq!(
+            plugin.activate(ActivationCause::Explicit).await,
+            Ok(CommunicationState::Enabled)
+        );
+        assert_eq!(fake.connects.load(Ordering::Relaxed), 0);
+        assert_eq!(detector.if_needed.load(Ordering::Relaxed), 0);
+        assert_eq!(detector.detects.load(Ordering::Relaxed), 0);
+    }
+
+    /// The non-awaiting explicit activation does the same work in the
+    /// background. A diagnostic-request activation never does.
+    #[tokio::test]
+    async fn request_activate_connects_pending_gateways_only_for_explicit_causes() {
+        let (plugin, fake, detector) = enabled_plugin_with_pending(true).await;
+        assert_eq!(
+            plugin.request_activate(ActivationCause::DiagnosticRequest),
+            CommunicationState::Enabled
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(fake.connects.load(Ordering::Relaxed), 0);
+
+        assert_eq!(
+            plugin.request_activate(ActivationCause::Explicit),
+            CommunicationState::Enabled
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while detector.if_needed.load(Ordering::Relaxed) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background activation did not finish");
+        assert_eq!(fake.connects.load(Ordering::Relaxed), 1);
+        assert_eq!(detector.detects.load(Ordering::Relaxed), 0);
     }
 }

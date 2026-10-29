@@ -64,5 +64,5 @@ openssl-vendored = ["openssl", "openssl/vendored"]
 dlt-tracing = ["cda-interfaces/dlt-tracing"]
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "time", "sync", "test-util"] }
+tokio = { workspace = true, features = ["macros", "rt", "time", "sync", "net", "io-util", "test-util"] }
 serde_json = { workspace = true }

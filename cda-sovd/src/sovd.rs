@@ -92,9 +92,17 @@ impl IntoSovd for cda_interfaces::EcuState {
     fn into_sovd(self) -> Self::SovdType {
         match (&self.connectivity, &self.variant_state) {
             (_, VariantState::Duplicate) => sovd_ecu::State::Duplicate,
-            (Connectivity::Online, VariantState::Detected { .. }) => sovd_ecu::State::Online,
-            (Connectivity::Online, VariantState::NotDetected) => sovd_ecu::State::NoVariantDetected,
-            (Connectivity::Online, VariantState::NotTested) => sovd_ecu::State::NotTested,
+            // AssumedOnline is internal-only and reported like Online; `last_seen`
+            // tells clients how current that is.
+            (Connectivity::Online | Connectivity::AssumedOnline, VariantState::Detected { .. }) => {
+                sovd_ecu::State::Online
+            }
+            (Connectivity::Online | Connectivity::AssumedOnline, VariantState::NotDetected) => {
+                sovd_ecu::State::NoVariantDetected
+            }
+            (Connectivity::Online | Connectivity::AssumedOnline, VariantState::NotTested) => {
+                sovd_ecu::State::NotTested
+            }
             (Connectivity::Offline, VariantState::NotTested) => sovd_ecu::State::Offline,
             (Connectivity::Offline, VariantState::Detected { .. } | VariantState::NotDetected) => {
                 sovd_ecu::State::Disconnected
@@ -749,7 +757,7 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
         .route("/vehicle/v15/authorize", routing::post(S::authorize))
         .with_state(state)
         .api_route(
-            "/vehicle/v15/apps/sovd2uds/data/networkstructure",
+            cda_interfaces::topology::NETWORK_STRUCTURE_ROUTE,
             routing::get_with(
                 apps::sovd2uds::data::networkstructure::get::<T>,
                 apps::sovd2uds::data::networkstructure::docs_get,

@@ -20,6 +20,7 @@ use cda_interfaces::{
 use doip_definitions::payload::{ActivationType, DoipPayload, RoutingActivationRequest};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     ConnectionError, ConnectionTasks, DiagnosticResponse, DiscoveredGateway, DoipConnection,
@@ -39,6 +40,8 @@ pub(crate) struct GatewayState<T> {
     pub ecus: Arc<HashMap<String, RwLock<T>>>,
     pub gateway_ecu_map: HashMap<u16, Vec<u16>>,
     pub connection_tasks: Arc<ConnectionTasks>,
+    /// Cancelled when the transport start this connect belongs to ends.
+    pub cancel: CancellationToken,
 }
 
 struct GatewayConnectionHandles {
@@ -197,6 +200,12 @@ where
             }
         };
 
+    // The transport start ended meanwhile: its tasks are aborted by the shutdown,
+    // and the connection must not appear in the maps of the next start.
+    if state.cancel.is_cancelled() {
+        return Err(EcuError::EcuConnectionError(ConnectionError::Closed));
+    }
+
     let doip_ecus = create_ecu_receiver_map(ecu_ids, &sender, &receivers);
 
     tracing::info!("Connected to gateway");
@@ -208,6 +217,10 @@ where
             ecus: doip_ecus,
             ip: discovered_gateway.ip,
         }));
+
+    if state.cancel.is_cancelled() {
+        return Err(EcuError::EcuConnectionError(ConnectionError::Closed));
+    }
 
     // Notify connectivity handler that ECUs behind this gateway are now online.
     // This sets their state to Online so the pre-send variant detection guard works correctly.
@@ -300,36 +313,30 @@ async fn connection_handler(
     // task to handle connection resets and reconnects
     let conn_reset = Arc::<EcuConnectionTarget>::clone(&gateway_conn);
 
-    connection_tasks
-        .push(spawn_connection_reset_task(
-            gateway.clone(),
-            conn_reset_rx,
-            conn_reset,
-        ))
-        .await;
+    connection_tasks.push(spawn_connection_reset_task(
+        gateway.clone(),
+        conn_reset_rx,
+        conn_reset,
+    ));
 
     // communication between send / receiver task to unlock the connection in the receiver task
     // when sender task wants to send something
     let (send_pending_tx, send_pending_rx) = watch::channel::<bool>(false);
-    connection_tasks
-        .push(spawn_gateway_sender_task(
-            Arc::<EcuConnectionTarget>::clone(&gateway_conn),
-            inrx,
-            conn_reset_tx.clone(),
-            send_pending_tx.clone(),
-        ))
-        .await;
-    connection_tasks
-        .push(spawn_gateway_receiver_task(
-            gateway,
-            outtx,
-            Arc::<EcuConnectionTarget>::clone(&gateway_conn),
-            ReceiverChannels {
-                send_pending_rx,
-                reset_tx: conn_reset_tx,
-            },
-        ))
-        .await;
+    connection_tasks.push(spawn_gateway_sender_task(
+        Arc::<EcuConnectionTarget>::clone(&gateway_conn),
+        inrx,
+        conn_reset_tx.clone(),
+        send_pending_tx.clone(),
+    ));
+    connection_tasks.push(spawn_gateway_receiver_task(
+        gateway,
+        outtx,
+        Arc::<EcuConnectionTarget>::clone(&gateway_conn),
+        ReceiverChannels {
+            send_pending_rx,
+            reset_tx: conn_reset_tx,
+        },
+    ));
     // no need to wait until the connection is alive, we will reconnect automatically anyway
     Ok(GatewayConnectionHandles {
         sender: intx,

@@ -105,6 +105,7 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
                 variant: ecu.ecu_status(),
                 logical_address: logical_address_string,
                 logical_link: format!("{}_on_{}", ecu_name, ecu.protocol()),
+                last_seen: ecu.runtime_state().last_seen(),
             }
         }
 

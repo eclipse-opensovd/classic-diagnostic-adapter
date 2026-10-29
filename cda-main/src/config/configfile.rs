@@ -11,6 +11,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::time::Duration;
+
 // `CanConfig` is always available: the `config` module of cda-comm-can is not
 // gated on the `can` feature, only the SocketCAN transport code is. This keeps
 // the configuration schema (and all public function signatures that mention
@@ -329,6 +331,9 @@ impl Default for Configuration {
     }
 }
 
+/// Upper bound of `communication.ecu_list_persistence.detection_settle_timeout_seconds`.
+const MAX_DETECTION_SETTLE_TIMEOUT_SECONDS: u64 = 3600;
+
 impl Configuration {
     /// A CDA without any transport cannot talk to a single ECU; refuse to
     /// start instead of serving a healthy-looking API that can do nothing.
@@ -441,6 +446,25 @@ impl Configuration {
         }
         Ok(())
     }
+
+    /// A zero settle timeout would persist before discovery and detection can
+    /// finish, and make every `networkreset` rediscovery time out immediately.
+    /// A huge one would keep the persistence and a `networkreset` waiting for
+    /// hours behind a hung detection.
+    fn validate_detection_settle_timeout(&self) -> Result<(), ConfigSanityError> {
+        let seconds = self
+            .communication
+            .ecu_list_persistence
+            .detection_settle_timeout_seconds;
+        if !(1..=MAX_DETECTION_SETTLE_TIMEOUT_SECONDS).contains(&seconds) {
+            return Err(ConfigSanityError::InvalidValue {
+                field: "communication.ecu_list_persistence.detection_settle_timeout_seconds"
+                    .to_owned(),
+                reason: format!("must be between 1 and {MAX_DETECTION_SETTLE_TIMEOUT_SECONDS}"),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl ConfigSanity for Configuration {
@@ -453,8 +477,46 @@ impl ConfigSanity for Configuration {
         self.validate_transport_overrides()?;
         self.locks.validate_sanity()?;
         self.validate_flash_functional_class_default()?;
+        self.validate_detection_settle_timeout()?;
+        self.warn_ineffective_communication_settings();
         // Add more checks for Configuration fields here if needed
         Ok(())
+    }
+}
+
+impl Configuration {
+    /// The retry hint of requests refused while communication is deferred or paused.
+    pub(crate) fn deferred_retry_after(&self) -> Duration {
+        Duration::from_secs(self.communication.deferred_retry_after_seconds)
+    }
+
+    /// Whether the ECU list persistence is requested but cannot take effect.
+    fn persistence_ineffective_without_doip(&self) -> bool {
+        self.communication.ecu_list_persistence.enabled && !self.doip.enabled
+    }
+
+    /// Whether `WhenNotPersisted` behaves like `Always` because persistence
+    /// is effectively disabled.
+    fn when_not_persisted_is_ineffective(&self) -> bool {
+        self.communication.init_mode == CommunicationInitMode::WhenNotPersisted
+            && !(self.communication.ecu_list_persistence.enabled && self.doip.enabled)
+    }
+
+    /// Logs settings that are valid but have no effect in combination.
+    fn warn_ineffective_communication_settings(&self) {
+        if self.persistence_ineffective_without_doip() {
+            tracing::warn!(
+                "communication.ecu_list_persistence.enabled has no effect while doip.enabled is \
+                 false; the persisted topology covers DoIP gateways only"
+            );
+        }
+        if self.when_not_persisted_is_ineffective() {
+            tracing::warn!(
+                "communication.init_mode = \"WhenNotPersisted\" behaves like \"Always\" while \
+                 communication.ecu_list_persistence is effectively disabled (disabled or \
+                 doip.enabled is false)"
+            );
+        }
     }
 }
 
@@ -1063,6 +1125,10 @@ parameter_validation = true
         assert_eq!(
             defaults.communication.post_update_mode,
             PostUpdateCommunicationMode::Enabled
+        );
+        assert!(
+            !defaults.communication.ecu_list_persistence.enabled,
+            "ECU list persistence must be disabled by default"
         );
 
         for init_mode in ["OnDemand", "Disabled"] {

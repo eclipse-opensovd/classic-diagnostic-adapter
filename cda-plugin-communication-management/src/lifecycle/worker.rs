@@ -70,6 +70,9 @@ pub(crate) enum LifecycleCommand {
     Redetect {
         /// `None` is a successful no-op.
         detector: Option<Arc<dyn CommunicationVariantDetection>>,
+        /// Detect like an activation (skip ECUs that need no new detection)
+        /// instead of as an explicit re-detection.
+        if_needed: bool,
         reply: ActivationReply,
     },
     /// Disables transport for the exclusive lease `id`.
@@ -192,9 +195,15 @@ async fn run_activation(
 /// Runs the registered variant detector. No detector is a successful no-op.
 async fn run_redetection(
     detector: Option<Arc<dyn CommunicationVariantDetection>>,
+    if_needed: bool,
 ) -> Result<CommunicationState, CommunicationOperationFailure> {
+    let result = match &detector {
+        Some(detector) if if_needed => detector.detect_if_needed().await,
+        Some(detector) => detector.detect().await,
+        None => Ok(()),
+    };
     if let Some(detector) = &detector
-        && let Err(error) = detector.detect().await
+        && let Err(error) = result
     {
         return Err(CommunicationOperationFailure::DetectionFailure {
             detector: detector.name().to_owned(),
@@ -339,8 +348,12 @@ impl LifecycleWorker {
                 }
                 let _ = reply.send(result);
             }
-            LifecycleCommand::Redetect { detector, reply } => {
-                let result = run_redetection(detector).await;
+            LifecycleCommand::Redetect {
+                detector,
+                if_needed,
+                reply,
+            } => {
+                let result = run_redetection(detector, if_needed).await;
                 let _ = reply.send(result);
             }
             LifecycleCommand::Disable { id, reason, reply } => {

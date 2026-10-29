@@ -22,6 +22,7 @@ use cda_interfaces::{
     health::HealthProvider,
     request_authorization::RequestLockProvider,
     runtime_update_api::{ReloadError, VehicleComponentFactory, VehicleComponents},
+    topology::TopologyRuntime,
 };
 use cda_plugin_security::SecurityPlugin;
 use cda_transport_router::DiagnosticTransportRouter;
@@ -40,6 +41,9 @@ where
     health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
     request_lock_provider: Arc<dyn RequestLockProvider>,
     communication_access: Arc<dyn CommunicationAccess>,
+    /// Shared with the replaced gateway, so a rebuilt gateway reconnects to the
+    /// persisted gateways too.
+    topology_runtime: Arc<TopologyRuntime>,
     _phantom: std::marker::PhantomData<SP>,
 }
 
@@ -52,11 +56,13 @@ where
         health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
         request_lock_provider: Arc<dyn RequestLockProvider>,
         communication_access: Arc<dyn CommunicationAccess>,
+        topology_runtime: Arc<TopologyRuntime>,
     ) -> Self {
         Self {
             health_providers,
             request_lock_provider,
             communication_access,
+            topology_runtime,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -92,6 +98,7 @@ where
             self.health_providers.as_ref(),
             Arc::clone(&self.request_lock_provider),
             Arc::clone(&self.communication_access),
+            &self.topology_runtime,
         )
         .await
         .map_err(|e| {

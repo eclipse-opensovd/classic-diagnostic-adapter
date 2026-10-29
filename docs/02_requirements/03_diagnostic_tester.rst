@@ -310,7 +310,9 @@ Variant Detection
 
     The following requirements apply:
 
-    - Variant detection must be initiated automatically after startup (unless deferred initialization is enabled)
+    - Variant detection must be initiated automatically after startup (unless deferred initialization is
+      enabled, or the ECU's last known variant is restored from a persisted topology, see
+      :need:`req~dt-ecu-list-persistence`)
     - Variant detection requests must be sent as defined in the MDD variant detection configuration
     - Responses must be evaluated against variant patterns defined in the MDD
     - For ECUs with duplicate definitions (same logical address), variant detection must determine which definition applies
