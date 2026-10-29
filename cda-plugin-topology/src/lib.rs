@@ -23,11 +23,13 @@
 //!   plugin needs from the loaded databases and the live ECUs
 //! - [`persist::TopologyPersistence`]: the communication hook writing the
 //!   detected topology
+//! - [`reset`]: the topology operations of a `networkreset`
 //! - [`restore`]: restoring ECU states at startup
 //! - [`store::PersistentEcuTopologyStore`]: the storage-backed store
 
 pub mod persist;
 pub mod plugin;
+pub mod reset;
 pub mod restore;
 pub mod store;
 

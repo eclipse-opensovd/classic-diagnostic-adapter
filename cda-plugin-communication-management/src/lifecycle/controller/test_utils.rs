@@ -39,7 +39,7 @@ impl TransportControl for TestTransport {
 use crate::lifecycle::{
     CommunicationHandle,
     disable::{DisableError, DisableReason},
-    state::CommunicationStateStore,
+    state::{CommunicationStateStore, EnabledActivity, LifecyclePhase},
     worker,
 };
 
@@ -66,11 +66,11 @@ pub(crate) fn communication_handle_with_detection_mode(
     variant_detection: VariantDetectionMode,
 ) -> CommunicationHandle {
     let resources = worker::new_resources(transport_control);
-    communication_handle_from_resources(CommunicationState::Disabled, resources, variant_detection)
+    communication_handle_from_resources(LifecyclePhase::Disabled, resources, variant_detection)
 }
 
 fn communication_handle_from_resources(
-    initial_state: CommunicationState,
+    initial_state: LifecyclePhase,
     resources: worker::WorkerResources,
     variant_detection: VariantDetectionMode,
 ) -> CommunicationHandle {
@@ -142,7 +142,7 @@ pub fn enabled_communication_for_test()
 
     let resources = worker::new_resources(Arc::new(TestTransport(TransportState::Enabled)));
     let handle = communication_handle_from_resources(
-        CommunicationState::Enabled,
+        LifecyclePhase::Enabled(EnabledActivity::Idle),
         resources,
         VariantDetectionMode::Always,
     );
@@ -156,7 +156,7 @@ pub fn communication_disable_for_test(
     let handle = if initially_enabled {
         let resources = worker::new_resources(transport_control);
         communication_handle_from_resources(
-            CommunicationState::Enabled,
+            LifecyclePhase::Enabled(EnabledActivity::Idle),
             resources,
             VariantDetectionMode::Always,
         )

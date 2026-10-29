@@ -79,6 +79,25 @@ pub trait DisableGuard: Send + Sync + std::fmt::Debug {
     /// Returns an error when lifecycle finalization fails, this guard is stale,
     /// or the lifecycle worker is shutting down.
     async fn finish(self: Box<Self>) -> Result<(), CommunicationOperationFailure>;
+
+    /// Consumes this guard and hands communication over directly to a full
+    /// activation with variant detection.
+    ///
+    /// A guard granted through the communication plugin hands over through the
+    /// plugin's `release_with_detection` hook, which may refuse the hand-over or
+    /// add work around it. The default plugin forwards it unchanged: whatever the
+    /// guard displaced and whatever variant detection policy is configured,
+    /// exclusivity then ends only as the activation starts, so nothing else can
+    /// bring communication up in between. That is the only bring-up, with one
+    /// discovery and, if a variant detector is registered, one detection run.
+    ///
+    /// # Errors
+    /// Returns an error when enabling the transport, an initializer or the
+    /// variant detection fails, this guard is stale, the lifecycle worker is
+    /// shutting down, or the communication plugin refuses the hand-over.
+    async fn release_with_detection(
+        self: Box<Self>,
+    ) -> Result<CommunicationState, CommunicationOperationFailure>;
 }
 
 /// Exclusive transport-disable capability.

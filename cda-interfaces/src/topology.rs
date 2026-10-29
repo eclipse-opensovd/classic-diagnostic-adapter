@@ -17,13 +17,30 @@
 //! full VIR/VAM discovery and variant detection again. The serialized form of the
 //! persisted types is the on-disk format of the storage-backed [`EcuTopologyStore`].
 
-use std::{sync::RwLock, time::SystemTime};
+use std::{
+    sync::RwLock,
+    time::{Duration, SystemTime},
+};
 
 use async_trait::async_trait;
+use futures::future::BoxFuture;
 
 use crate::{
     HashMap, communication_control::VamHandlingMode, storage_api::StorageError, util::std_ext,
 };
+
+/// Path of the network structure endpoint. The vehicle topology plugin blocks it
+/// while a reset runs.
+pub const NETWORK_STRUCTURE_ROUTE: &str = "/vehicle/v15/apps/sovd2uds/data/networkstructure";
+
+/// Which physical ECUs to reset before rediscovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EcuStateResetScope {
+    /// Only ECUs restored from persisted topology and not yet confirmed online.
+    AssumedOnlineOnly,
+    /// All physical ECUs, regardless of connectivity.
+    AllPhysical,
+}
 
 /// Returns the storage key of a persisted gateway entry, e.g. `0x1000`.
 #[must_use]
@@ -381,6 +398,12 @@ impl TopologyState {
         generation
     }
 
+    /// Current discovery generation, including an in-progress discovery.
+    #[must_use]
+    pub fn discovery_generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Records a gateway connected during or after the discovery.
     /// A later connect wins over an earlier failure of the same gateway.
     pub fn record_connected(&self, gateway: KnownGateway) {
@@ -452,7 +475,14 @@ impl TopologyState {
         *std_ext::lock_write(&self.vam_policy) = policy;
     }
 
-    /// Records that a persisted topology is available. Stays set for the lifetime of the state.
+    /// Records that the persisted topology was cleared.
+    pub fn clear_persisted_topology_available(&self) {
+        self.persisted_topology_available
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Records that a persisted topology is available, until it is cleared
+    /// with [`clear_persisted_topology_available`](Self::clear_persisted_topology_available).
     pub fn set_persisted_topology_available(&self) {
         self.persisted_topology_available
             .store(true, std::sync::atomic::Ordering::Release);
@@ -569,6 +599,12 @@ pub trait EcuTopologyStore: Send + Sync + 'static {
         last_seen: &HashMap<String, SystemTime>,
     ) -> Result<(), TopologyStoreError>;
 
+    /// Removes all persisted entries.
+    ///
+    /// # Errors
+    /// Returns an error if the entries cannot be removed.
+    async fn clear(&self) -> Result<(), TopologyStoreError>;
+
     /// Removes what is no longer in the databases and then writes `gateways` like
     /// [`persist_gateways`](Self::persist_gateways), both in one transaction.
     ///
@@ -585,6 +621,228 @@ pub trait EcuTopologyStore: Send + Sync + 'static {
         keep: &HashMap<u16, crate::HashSet<String>>,
         gateways: &[PersistedGateway],
     ) -> Result<usize, TopologyStoreError>;
+}
+
+/// Input flags of a `networkreset` execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetworkResetFlags {
+    /// Clear the persisted topology.
+    pub clear_persisted: bool,
+    /// Run a full live detection (VIR/VAM discovery and variant detection).
+    pub trigger_detection: bool,
+}
+
+impl Default for NetworkResetFlags {
+    fn default() -> Self {
+        Self {
+            clear_persisted: true,
+            trigger_detection: true,
+        }
+    }
+}
+
+/// State of a `networkreset` execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetworkResetStatus {
+    /// The execution is running.
+    Running,
+    /// The execution completed successfully.
+    Completed,
+    /// The execution failed.
+    Failed(NetworkResetFailure),
+    /// The execution was terminated before it completed.
+    Stopped,
+}
+
+/// Why a `networkreset` execution failed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NetworkResetFailure {
+    /// The store failed to clear the persisted topology. Communication returned
+    /// to what it was before the reset.
+    #[error("Clearing the persisted topology failed: {0}")]
+    Clear(String),
+    /// Clearing the persisted topology panicked or was cancelled before it
+    /// completed. Communication returned to what it was before the reset.
+    #[error("Clearing the persisted topology was aborted")]
+    ClearAborted,
+    /// Ending the exclusive disable lease after a clear-only reset failed.
+    #[error("Ending the exclusive disable after the clear failed: {0}")]
+    EndLease(crate::communication_control::CommunicationOperationFailure),
+    /// The rediscovery did not come up within the rediscovery timeout; it keeps
+    /// running in the background.
+    #[error("Rediscovery did not complete within {0:?}")]
+    DeadlineElapsed(std::time::Duration),
+    /// The rediscovery failed: bringing communication up, its variant detection,
+    /// or handing the lease over (e.g. while shutting down). The transport may
+    /// have come up and only the detection failed, so the state of communication
+    /// is not known.
+    #[error(
+        "Rediscovery failed: {0}. Communication may not be fully available; execute networkreset \
+         with trigger_detection=true to bring it up again"
+    )]
+    Rediscovery(crate::communication_control::CommunicationOperationFailure),
+    /// The communication plugin refused the hand-over to the rediscovery. The ECU
+    /// states were already reset, so communication may not be fully available;
+    /// retrying would be refused again.
+    #[error(
+        "Rediscovery refused by the communication plugin. Communication may not be fully available"
+    )]
+    RediscoveryRefused(crate::communication_control::CommunicationOperationFailure),
+    /// The task running the rediscovery failed after the lease was handed over, so
+    /// the state of communication is not known.
+    #[error(
+        "Rediscovery task failed. Communication may not be fully available; execute networkreset \
+         with trigger_detection=true to bring it up again"
+    )]
+    RediscoveryTaskFailed,
+    /// The rediscovery came up but did not settle within its wait bound.
+    #[error("Rediscovery did not settle in time")]
+    SettleTimedOut,
+    /// The rediscovery settled, but persisting its topology failed.
+    #[error("Persisting the rediscovered topology failed: {0}")]
+    Persist(String),
+    /// The execution task panicked.
+    #[error("Internal error")]
+    Internal,
+}
+
+/// A `networkreset` execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkResetExecution {
+    /// Execution identifier.
+    pub id: String,
+    /// The requested flags.
+    pub flags: NetworkResetFlags,
+    /// Current state.
+    pub status: NetworkResetStatus,
+}
+
+/// Errors of starting a `networkreset` execution.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NetworkResetError {
+    /// The request is invalid, e.g. both flags are `false`.
+    #[error("Invalid network reset request: {0}")]
+    InvalidRequest(String),
+    /// Another execution is running.
+    #[error("A network reset is already running")]
+    ExecutionConflict,
+    /// Diagnostic operations or locks prevent the reset.
+    #[error("Operations in progress: {0}")]
+    OperationsInProgress(String),
+    /// The reset could not be started.
+    #[error("Network reset failed: {0}")]
+    Failed(String),
+}
+
+/// The vehicle topology plugin: resets the network structure (`networkreset`).
+#[async_trait]
+pub trait VehicleTopologyPlugin: Send + Sync + 'static {
+    /// Starts an execution and returns its identifier. The caller must hold the
+    /// exclusive vehicle lock (checked by the HTTP layer).
+    ///
+    /// With a `timeout` (SOVD execution `timeout`), an execution still running
+    /// when it elapses is stopped like by [`delete_reset`](Self::delete_reset),
+    /// but kept with status [`NetworkResetStatus::Stopped`]. `None` requests no
+    /// timeout.
+    ///
+    /// # Errors
+    /// Returns an error if the flags are invalid, another execution is running,
+    /// or diagnostic operations are in progress.
+    async fn start_reset(
+        &self,
+        flags: NetworkResetFlags,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<String, NetworkResetError>;
+
+    /// The current executions (at most one).
+    async fn list_resets(&self) -> Vec<NetworkResetExecution>;
+
+    /// The execution with `id`, if any.
+    async fn get_reset(&self, id: &str) -> Option<NetworkResetExecution>;
+
+    /// Terminates the execution with `id` if it is still running and removes it.
+    /// Returns `false` if there is no such execution.
+    async fn delete_reset(&self, id: &str) -> bool;
+}
+
+/// Result of [`RediscoveryTicket::wait`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RediscoveryWait {
+    /// The rediscovery settled and its result is persisted (if persistence is enabled).
+    Settled,
+    /// The rediscovery did not settle within the network reset's wait bound.
+    TimedOut,
+    /// The rediscovery settled, but writing it to the persisted topology failed.
+    PersistFailed(String),
+}
+
+/// Single-use wait handle returned before triggering a topology rediscovery.
+///
+/// Captures the completion observation so callers do not need to track discovery
+/// generations. Dropping the ticket or its wait stops waiting, not the rediscovery.
+#[must_use = "Wait on the ticket after triggering the rediscovery"]
+pub struct RediscoveryTicket {
+    completion: BoxFuture<'static, RediscoveryWait>,
+    timeout: Duration,
+}
+
+impl RediscoveryTicket {
+    /// Creates a ticket for an already captured completion observation.
+    /// `timeout` bounds the wait, starting when [`wait`](Self::wait) is polled,
+    /// not when the ticket is created.
+    pub fn new(
+        timeout: Duration,
+        completion: impl Future<Output = RediscoveryWait> + Send + 'static,
+    ) -> Self {
+        Self {
+            completion: Box::pin(completion),
+            timeout,
+        }
+    }
+
+    /// Waits until rediscovery has settled and, if enabled, been persisted.
+    /// Returns [`RediscoveryWait::TimedOut`] if the configured wait bound expires.
+    pub async fn wait(self) -> RediscoveryWait {
+        tokio::time::timeout(self.timeout, self.completion)
+            .await
+            .unwrap_or(RediscoveryWait::TimedOut)
+    }
+}
+
+/// Errors of [`NetworkReset::clear_persisted`].
+#[derive(Debug, thiserror::Error)]
+pub enum TopologyClearError {
+    /// The store failed to clear the persisted topology.
+    #[error(transparent)]
+    Store(#[from] TopologyStoreError),
+    /// The clear panicked or was cancelled before it completed.
+    #[error("Clearing the persisted topology was aborted")]
+    Aborted,
+}
+
+/// Topology operations a `networkreset` needs from the core.
+#[async_trait]
+pub trait NetworkReset: Send + Sync + 'static {
+    /// Clears the persisted topology (a no-op if persistence is disabled). The
+    /// next transport start runs a full broadcast discovery, and ECUs still
+    /// assumed online from the cleared topology are no longer reported Online.
+    ///
+    /// # Errors
+    /// Returns an error if the persisted topology cannot be cleared, or if the
+    /// clear was aborted.
+    async fn clear_persisted(&self) -> Result<(), TopologyClearError>;
+
+    /// Prepares a full rediscovery while communication is disabled: the next
+    /// transport start broadcasts, and all ECU states are reset (keeping
+    /// `last_seen`). Returns a ticket to wait for the new rediscovery to settle
+    /// and, if persistence is enabled, be persisted. Trigger the rediscovery
+    /// after preparation, then call [`RediscoveryTicket::wait`].
+    ///
+    /// The network reset bounds the wait through
+    /// `communication.network_reset_rediscovery_timeout_seconds` and always
+    /// returns a verdict; a rediscovery that does not settle within that bound
+    /// is [`RediscoveryWait::TimedOut`].
+    async fn prepare_rediscovery(&self) -> RediscoveryTicket;
 }
 
 /// No-op store used when ECU list persistence is disabled: nothing is ever
@@ -612,6 +870,10 @@ impl EcuTopologyStore for DisabledTopologyStore {
         Ok(())
     }
 
+    async fn clear(&self) -> Result<(), TopologyStoreError> {
+        Ok(())
+    }
+
     async fn prune_and_persist_gateways(
         &self,
         _keep: &HashMap<u16, crate::HashSet<String>>,
@@ -623,9 +885,26 @@ impl EcuTopologyStore for DisabledTopologyStore {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
+
+    #[tokio::test]
+    async fn rediscovery_ticket_returns_its_completion_verdict() {
+        for verdict in [
+            RediscoveryWait::Settled,
+            RediscoveryWait::TimedOut,
+            RediscoveryWait::PersistFailed("Disk full".to_owned()),
+        ] {
+            let completion = std::future::ready(verdict.clone());
+            let ticket = RediscoveryTicket::new(Duration::from_secs(5), completion);
+            assert_eq!(ticket.wait().await, verdict);
+        }
+    }
+
+    #[tokio::test]
+    async fn rediscovery_ticket_bounds_a_pending_completion() {
+        let ticket = RediscoveryTicket::new(Duration::from_millis(10), std::future::pending());
+        assert_eq!(ticket.wait().await, RediscoveryWait::TimedOut);
+    }
 
     fn known(logical_address: u16) -> KnownGateway {
         KnownGateway {

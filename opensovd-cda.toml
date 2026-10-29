@@ -482,9 +482,14 @@
 # - "OnDemand": HTTP/SOVD starts first. The first qualifying ECU diagnostic
 #   request, or an explicit `activate()` call, triggers initialization.
 # - "Disabled": HTTP/SOVD starts first. The default communication plugin
-#   provides no activation path, and `trigger_detection()` needs an
-#   already-enabled transport.
+#   provides no activation path. Only an explicit detection request
+#   (`trigger_detection()`) or a `networkreset` rediscovery brings the
+#   transport up.
 # init_mode = "Always"
+# Upper bound in seconds of each `networkreset` wait, must be greater than 0: first for
+# the bring-up of the rediscovery, including its variant detection, then for the
+# resulting rediscovery to settle (and be persisted, if enabled).
+# network_reset_rediscovery_timeout_seconds = 60
 # Controls transport behavior after a runtime database update:
 # - "Enabled": resume the transport the update displaced, requesting
 #   activation if it started from a deferred runtime, subject to `init_mode`
