@@ -980,6 +980,14 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
         let ecu = self.ecus.get(ecu_name)?;
         Some(ecu.read().await.runtime_state().variant_state_rx())
     }
+
+    async fn get_last_seen(
+        &self,
+        ecu_name: &str,
+    ) -> Result<Option<std::time::SystemTime>, DiagServiceError> {
+        let ecu = self.uds_ecu_db(ecu_name)?;
+        Ok(ecu.read().await.runtime_state().last_seen())
+    }
 }
 
 #[async_trait::async_trait]
