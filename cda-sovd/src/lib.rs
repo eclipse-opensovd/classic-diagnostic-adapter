@@ -214,25 +214,20 @@ where
     S: SecurityPluginLoader,
 {
     #[cfg(feature = "doip-direct-connect")]
-    let doip_connect_enabled = resources.doip_connect.is_some();
+    sovd::apps::sovd2uds::operations::doip_connect_ecu::register_operation(
+        dynamic_router,
+        resources.doip_connect.as_ref(),
+    )
+    .await;
     let vehicle_router = build_vehicle_routes::<T, M, S>(config, resources).await;
 
     dynamic_router
         .register_bulk_data_category(sovd::apps::sovd2uds::bulk_data::FLASHFILES_PATH)
         .await;
-    #[cfg(feature = "doip-direct-connect")]
-    if doip_connect_enabled {
-        dynamic_router
-            .register_operation(
-                sovd::apps::sovd2uds::operations::doip_connect_ecu::PATH,
-                false,
-            )
-            .await;
-    }
 
     dynamic_router
         .register_data_resource(
-            sovd::apps::sovd2uds::data::NETWORKSTRUCTURE_PATH,
+            cda_interfaces::topology::NETWORK_STRUCTURE_ROUTE,
             sovd::apps::sovd2uds::data::NETWORKSTRUCTURE_CATEGORY,
         )
         .await;
@@ -309,6 +304,31 @@ where
         )
         .await;
     tracing::info!("Runtime update routes added to webserver");
+    handle
+}
+
+/// Mounts the vehicle topology (`networkreset`) routes onto the dynamic router and lists
+/// the operation in the `/apps/sovd2uds/operations` collection.
+///
+/// `retry_after` is sent as `Retry-After` when a running execution or operations in
+/// progress prevent a reset.
+pub async fn add_vehicle_topology_routes<S: SecurityPluginLoader>(
+    dynamic_router: &DynamicRouter,
+    plugin: Arc<dyn cda_interfaces::topology::VehicleTopologyPlugin>,
+    locks: Arc<SovdLockStateProvider>,
+    retry_after: Duration,
+) -> RouteHandle {
+    let state = sovd::apps::sovd2uds::operations::networkreset::VehicleTopologyRouteState {
+        plugin,
+        locks,
+        retry_after,
+    };
+    let router = sovd::apps::sovd2uds::operations::networkreset::routes::<S>(state);
+    let handle = dynamic_router.add_routes(router).await;
+    dynamic_router
+        .register_operation(sovd::apps::sovd2uds::operations::networkreset::PATH, true)
+        .await;
+    tracing::info!("Vehicle topology routes added to webserver");
     handle
 }
 

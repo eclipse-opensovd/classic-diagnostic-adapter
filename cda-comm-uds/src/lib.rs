@@ -22,7 +22,7 @@ use cda_interfaces::{
     datatypes::FaultConfig,
     diagservices::UdsPayloadData,
     request_authorization::RequestLockProvider,
-    topology::EcuTopologyEntry,
+    topology::{EcuStateResetScope, EcuTopologyEntry},
 };
 use tokio::{
     sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore},
@@ -254,10 +254,9 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         &self.variant_detection.activity
     }
 
-    /// Resets the physical ECUs that are still assumed online from a persisted
-    /// topology to `NotTested` (keeping `last_seen`), e.g. before an explicit
-    /// re-detection.
-    pub async fn reset_ecu_states(&self)
+    /// Resets physical ECUs to `NotTested` (keeping `last_seen`), e.g. before a
+    /// full rediscovery. The scope selects which physical ECUs are reset.
+    pub async fn reset_ecu_states(&self, scope: EcuStateResetScope)
     where
         T: EcuManager,
     {
@@ -269,7 +268,14 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             let runtime_state = ecu.runtime_state();
             {
                 let mut state = cda_interfaces::util::std_ext::lock_write(&runtime_state.ecu_state);
-                if state.connectivity != Connectivity::AssumedOnline {
+                // Exhaustive, so a new scope has to decide which ECUs it resets.
+                let in_scope = match scope {
+                    EcuStateResetScope::AssumedOnlineOnly => {
+                        state.connectivity == Connectivity::AssumedOnline
+                    }
+                    EcuStateResetScope::AllPhysical => true,
+                };
+                if !in_scope {
                     continue;
                 }
                 *state = cda_interfaces::EcuState::default();

@@ -50,27 +50,57 @@ pub(crate) fn lock_created_example() -> sovd_interfaces::locking::post_put::Resp
     }
 }
 
+/// Documents a `Location` header with the URI of a created resource.
+pub(crate) fn location_header(description: &str, example: &str) -> ReferenceOr<Header> {
+    response_header(
+        description,
+        true,
+        schemars::json_schema!({ "type": "string", "format": "uri-reference" }),
+        serde_json::json!(example),
+    )
+}
+
+/// Documents a `Retry-After` header with the delay in seconds.
+pub(crate) fn retry_after_header() -> ReferenceOr<Header> {
+    response_header(
+        "Seconds after which the request may be retried.",
+        false,
+        schemars::json_schema!({ "type": "integer", "minimum": 0 }),
+        serde_json::json!(5),
+    )
+}
+
+fn response_header(
+    description: &str,
+    required: bool,
+    schema: schemars::Schema,
+    example: serde_json::Value,
+) -> ReferenceOr<Header> {
+    ReferenceOr::Item(Header {
+        description: Some(description.to_owned()),
+        style: HeaderStyle::Simple,
+        required,
+        deprecated: None,
+        format: ParameterSchemaOrContent::Schema(SchemaObject {
+            json_schema: schema,
+            external_docs: None,
+            example: Some(example),
+        }),
+        example: None,
+        examples: IndexMap::default(),
+        extensions: IndexMap::default(),
+    })
+}
+
 pub(crate) fn lock_created_response<T>(
     mut response: TransformResponse<'_, T>,
 ) -> TransformResponse<'_, T> {
     response.inner().headers.insert(
         "Location".to_owned(),
-        ReferenceOr::Item(Header {
-            description: Some("URI of the created lock resource.".to_owned()),
-            style: HeaderStyle::Simple,
-            required: true,
-            deprecated: None,
-            format: ParameterSchemaOrContent::Schema(SchemaObject {
-                json_schema: schemars::json_schema!({ "type": "string", "format": "uri-reference" }),
-                external_docs: None,
-                example: Some(serde_json::json!(
-                    "/vehicle/v15/locks/550e8400-e29b-41d4-a716-446655440000"
-                )),
-            }),
-            example: None,
-            examples: IndexMap::default(),
-            extensions: IndexMap::default(),
-        }),
+        location_header(
+            "URI of the created lock resource.",
+            "/vehicle/v15/locks/550e8400-e29b-41d4-a716-446655440000",
+        ),
     );
     response
 }

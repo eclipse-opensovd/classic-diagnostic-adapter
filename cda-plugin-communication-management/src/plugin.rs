@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use cda_interfaces::communication_control::{
     ActivationCause, CommunicationError, CommunicationGuard, CommunicationInitMode,
     CommunicationLifecycle, CommunicationOperationFailure, CommunicationState,
-    CommunicationVariantDetection, DetectionCause, VariantDetectionMode,
+    CommunicationVariantDetection, VariantDetectionMode,
 };
 
 // Re-export CommunicationHandle for plugin builders
@@ -81,25 +81,27 @@ pub trait CommunicationPlugin: cda_interfaces::Shutdown {
 
     /// Requests whole-vehicle (re-)detection.
     ///
-    /// Detection runs against a live transport and never brings one up. Every
-    /// row below holds identically in all three `init_mode`s:
+    /// The request is an explicit authorization to communicate. The default
+    /// plugin holds the following in every `init_mode`:
     ///
-    /// | State                            | Effect                                          |
-    /// |----------------------------------|-------------------------------------------------|
-    /// | `Enabled`                        | run the detector; transport and hooks untouched |
-    /// | `Disabled` / `Error`             | `TransitionFailure`                             |
-    /// | `Enabling(_)`                    | join the in-flight operation                    |
-    /// | `Disabling` / `DisabledExclusive`| `DisableLeaseHeld`                              |
+    /// | State                             | Effect                                            |
+    /// |-----------------------------------|---------------------------------------------------|
+    /// | `Enabled`                         | run the detector; transport and hooks untouched   |
+    /// | `Disabled` / `Error`              | enable the transport with a full initialization   |
+    /// | `Enabling(_)`                     | join the in-flight operation, which also detects  |
+    /// | `Disabling` / `DisabledExclusive` | `DisableLeaseHeld`                                |
+    /// | `RecoveryRequired`                | `TransitionFailure` (recover via exclusive lease) |
     ///
     /// # Errors
     ///
-    /// Returns [`TransitionFailure`](CommunicationOperationFailure::TransitionFailure)
-    /// whenever communication is not `Enabled`, and an error when detection
-    /// itself fails.
-    async fn trigger_detection(
-        &self,
-        cause: DetectionCause,
-    ) -> Result<CommunicationState, CommunicationOperationFailure>;
+    /// Returns an error when enabling or detection itself fails, or while an
+    /// exclusive disable lease is held.
+    ///
+    /// The `RecoveryRequired` refusal is labeled `EnableAndDetect`. A joined
+    /// operation's failure is returned unchanged, so it carries that
+    /// operation's label (e.g. `Enable` or `Resume`) rather than
+    /// `EnableAndDetect`.
+    async fn trigger_detection(&self) -> Result<CommunicationState, CommunicationOperationFailure>;
 
     /// Acquires exclusive disable ownership, which makes sure the communication cannot
     /// be re-enabled as long as the [`DisableLease`] is held.
@@ -109,6 +111,37 @@ pub trait CommunicationPlugin: cda_interfaces::Shutdown {
     /// Returns an error when communication is in use, a disable lease is
     /// already held, or disabling the transport fails.
     async fn disable(&self, reason: DisableReason) -> Result<DisableLease, DisableError>;
+
+    /// Hands an exclusive disable lease granted by [`disable`](Self::disable) over to a
+    /// full activation with variant detection. A `networkreset` rediscovery ends its
+    /// lease this way. The hook applies to leases obtained through
+    /// [`CommunicationDisableView`](crate::lifecycle::disable::CommunicationDisableView),
+    /// which the framework uses for every lease; a caller holding a concrete
+    /// [`DisableLease`] can call [`DisableLease::release_with_detection`] directly.
+    ///
+    /// The hook for a plugin's policy on that bring-up. The default forwards to
+    /// [`DisableLease::release_with_detection`], which ends exclusivity only as the
+    /// activation starts, so nothing else can bring communication up in between and it
+    /// detects whatever the automatic detection policy.
+    ///
+    /// An override may add work around the hand-over or refuse it, but must use the
+    /// lease up within the call: forward it, `release` or `finish` it, or drop it. It
+    /// must not keep the lease (stored or moved into a task), which would keep every
+    /// later activation and lease out. If it ends the lease without forwarding it, it
+    /// must not then bring communication up another way, which would reopen the window
+    /// the hand-over closes. Refuse with
+    /// [`CommunicationOperationFailure::PermissionFailure`] for `EnableAndDetect`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the hand-over fails, the lease is stale, the lifecycle
+    /// worker is shutting down, or the plugin refuses the hand-over.
+    async fn release_with_detection(
+        &self,
+        lease: DisableLease,
+    ) -> Result<CommunicationState, CommunicationOperationFailure> {
+        lease.release_with_detection().await
+    }
 
     /// Registers a framework-enforced lifecycle hook (initialization and deinitialization).
     ///

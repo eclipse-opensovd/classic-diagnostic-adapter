@@ -24,7 +24,7 @@ use cda_interfaces::communication_control::{
     CommunicationOperation, CommunicationOperationFailure, CommunicationState,
 };
 
-use super::controller::CommunicationHandle;
+use super::{controller::CommunicationHandle, transition::LifecycleRequest};
 use crate::plugin::CommunicationPlugin;
 
 /// Cloneable narrow disable view forwarding to the authoritative plugin, so
@@ -46,10 +46,51 @@ impl CommunicationDisableView {
 #[async_trait]
 impl DisableCommunication for CommunicationDisableView {
     async fn disable(&self, reason: DisableReason) -> Result<Box<dyn DisableGuard>, DisableError> {
-        self.plugin
-            .disable(reason)
-            .await
-            .map(|lease| Box::new(lease) as Box<dyn DisableGuard>)
+        let lease = self.plugin.disable(reason).await?;
+        Ok(Box::new(PluginLease {
+            lease,
+            plugin: Arc::clone(&self.plugin),
+        }))
+    }
+}
+
+/// A lease granted through [`CommunicationDisableView`]. Its hand-over to an
+/// activation with detection goes through the plugin's
+/// [`release_with_detection`](CommunicationPlugin::release_with_detection) hook,
+/// so a plugin can apply its policy to that bring-up.
+///
+/// `release` and `finish` go straight to the lease: `finish` never brings
+/// communication up, and `release` only restores what the lease displaced, which
+/// the plugin already authorized when it granted the lease.
+struct PluginLease {
+    lease: DisableLease,
+    plugin: Arc<dyn CommunicationPlugin>,
+}
+
+impl std::fmt::Debug for PluginLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PluginLease")
+            .field("lease", &self.lease)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl DisableGuard for PluginLease {
+    async fn release(self: Box<Self>) -> Result<CommunicationState, CommunicationOperationFailure> {
+        self.lease.release().await
+    }
+
+    async fn finish(self: Box<Self>) -> Result<(), CommunicationOperationFailure> {
+        self.lease.finish().await
+    }
+
+    async fn release_with_detection(
+        self: Box<Self>,
+    ) -> Result<CommunicationState, CommunicationOperationFailure> {
+        let Self { lease, plugin } = *self;
+        plugin.release_with_detection(lease).await
     }
 }
 
@@ -78,6 +119,12 @@ pub(crate) struct DisableOwner {
     /// If false, releasing the lease returns to `Disabled` without activating
     /// communication.
     pub(crate) resumes_transport: bool,
+    /// Whether granting this lease takes hooks and transport down.
+    ///
+    /// True when the transport was enabled, and when its state is unknown
+    /// after a failed activation (`Error`), so the lease always starts from a
+    /// torn down transport.
+    pub(crate) tears_down: bool,
     /// Whether resuming the displaced runtime runs variant detection.
     ///
     /// Captured from the effective
@@ -151,11 +198,35 @@ impl DisableLease {
     /// Returns an error when re-activating the transport or an initializer
     /// fails, this lease is stale (already released), or the lifecycle worker
     /// is shutting down.
-    pub async fn release(mut self) -> Result<CommunicationState, CommunicationOperationFailure> {
+    pub async fn release(self) -> Result<CommunicationState, CommunicationOperationFailure> {
+        self.submit_release(LifecycleRequest::Resume).await
+    }
+
+    /// Consumes this lease and hands communication over directly to a full
+    /// activation with variant detection. Inherent, so a concrete lease needs no
+    /// boxing. See [`DisableGuard::release_with_detection`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when enabling the transport, an initializer or the
+    /// variant detection fails, this lease is stale, or the lifecycle worker is
+    /// shutting down.
+    pub async fn release_with_detection(
+        self,
+    ) -> Result<CommunicationState, CommunicationOperationFailure> {
+        self.submit_release(LifecycleRequest::ResumeAndDetect).await
+    }
+
+    /// `request` is [`LifecycleRequest::Resume`] or
+    /// [`LifecycleRequest::ResumeAndDetect`].
+    async fn submit_release(
+        mut self,
+        request: LifecycleRequest,
+    ) -> Result<CommunicationState, CommunicationOperationFailure> {
         let Some(id) = self.id else {
-            return Err(stale_resume_failure());
+            return Err(stale_release_failure(request));
         };
-        let reply = match self.handle.submit_release(id).await {
+        let reply = match self.handle.submit_release(id, request).await {
             Ok(reply) => reply,
             // Not accepted into the worker mailbox (shutdown). `self.id` stays
             // `Some`, so `Drop` performs the synchronous defer.
@@ -164,7 +235,9 @@ impl DisableLease {
         // The worker now owns this release and finishes it even if this task is
         // canceled below, so clear `id` to make a racing `Drop` a no-op.
         self.id = None;
-        reply.await.unwrap_or_else(|_| Err(stale_resume_failure()))
+        reply
+            .await
+            .unwrap_or_else(|_| Err(stale_release_failure(request)))
     }
 
     /// Consumes this lease, running the reconfiguration phase without resuming
@@ -209,6 +282,12 @@ impl DisableGuard for DisableLease {
     async fn finish(self: Box<Self>) -> Result<(), CommunicationOperationFailure> {
         DisableLease::finish(*self).await
     }
+
+    async fn release_with_detection(
+        self: Box<Self>,
+    ) -> Result<CommunicationState, CommunicationOperationFailure> {
+        DisableLease::release_with_detection(*self).await
+    }
 }
 
 /// Dropping a lease without calling [`release`](DisableLease::release) releases exclusive disable
@@ -225,9 +304,10 @@ impl Drop for DisableLease {
     }
 }
 
-pub(crate) fn stale_resume_failure() -> CommunicationOperationFailure {
+/// The failure of a release `request` whose lease is stale.
+pub(crate) fn stale_release_failure(request: LifecycleRequest) -> CommunicationOperationFailure {
     CommunicationOperationFailure::TransitionFailure {
-        operation: CommunicationOperation::Resume,
+        operation: request.operation(),
     }
 }
 

@@ -217,6 +217,20 @@ impl LockState {
         self.active_by_id.get(lock_id)
     }
 
+    /// Returns whether `lock` grants anything at `now`: it is not past its expiration and,
+    /// for a child lock, neither is its vehicle parent. A lock past its expiration that
+    /// the expiration task has not removed yet is not effective.
+    pub(super) fn is_effective(&self, lock: &ActiveLock, now: SystemTime) -> bool {
+        lock.expires_at > now
+            && lock
+                .parent_vehicle_lock_id
+                .as_deref()
+                .is_none_or(|parent_id| {
+                    self.active_by_id(parent_id)
+                        .is_some_and(|parent| parent.expires_at > now)
+                })
+    }
+
     /// Finds a defunct lock by ID.
     pub(super) fn defunct_by_id(&self, lock_id: &str) -> Option<&DefunctLock> {
         self.defunct_by_id.get(lock_id)

@@ -32,22 +32,6 @@ pub enum ActivationCause {
     DisableRelease,
 }
 
-/// Why whole-vehicle (re-)detection was requested via a communication
-/// plugin's `trigger_detection`.
-///
-/// The framework attaches no authorization meaning to a cause. Which ones are
-/// admitted in a given
-/// [`CommunicationInitMode`](crate::communication_control::CommunicationInitMode)
-/// is the selected plugin's policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DetectionCause {
-    /// An application or custom plugin explicitly requested (re-)detection.
-    Explicit,
-    // TODO(networkreset-endpoint, #490): add TopologyRediscovery variant for
-    // the `networkreset(trigger_detection=true)` request once the endpoint
-    // exists.
-}
-
 /// The stage of communication control that runs a variant detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetectionPhase {

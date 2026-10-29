@@ -33,7 +33,10 @@ use tokio::{
 use super::{
     disable::{DisableError, DisableLease, DisableLeaseId, DisableOwner, DisableReason},
     guard::ActiveGuard,
-    state::{CommunicationStateStore, EnablingResultReceiver, detection_mode},
+    state::{
+        ActivationKind, CommunicationStateStore, LifecyclePhase, OperationResultReceiver,
+        detection_mode,
+    },
     transition::{self, LifecycleDecision, LifecycleRequest},
     worker::{self, LifecycleCommand, WorkerSender},
 };
@@ -57,7 +60,7 @@ enum ClaimOutcome {
     ///
     /// The receiver also identifies the attempt, via
     /// [`watch::Receiver::same_channel`].
-    Pending(EnablingResultReceiver),
+    Pending(OperationResultReceiver),
 }
 
 /// The capability a [`CommunicationPlugin`] uses to perform lifecycle
@@ -83,7 +86,7 @@ impl CommunicationHandle {
     /// Returns the current authoritative communication lifecycle state.
     #[must_use]
     pub fn state(&self) -> CommunicationState {
-        self.state.lock().state.clone()
+        self.state.lock().state()
     }
 
     /// Acquires diagnostic communication while it is enabled.
@@ -96,7 +99,7 @@ impl CommunicationHandle {
     /// Returns an error when communication is not enabled.
     pub fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
         let mut state = self.state.lock();
-        transition::guard_admission(&state.state)?;
+        transition::guard_admission(state.phase())?;
         // Must be atomic with the admission check above. Otherwise a
         // `disable()` could claim `Enabled -> Disabling` in the gap.
         Ok(ActiveGuard::register(&mut state, Arc::clone(&self.state)))
@@ -278,6 +281,29 @@ impl CommunicationHandle {
         self.run_claimed(LifecycleRequest::Detect).await
     }
 
+    /// Ensures communication is enabled and runs explicit variant detection.
+    ///
+    /// This ignores the automatic detection policy. It joins a running
+    /// detection. It also joins a running activation (including a lease
+    /// `Resume`), and makes that activation run the detection stage if it was
+    /// not going to, so the joined result covers detection. If no detector is
+    /// registered, detection is a successful no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when activation or detection fails, a lease or guard
+    /// prevents the operation, or the lifecycle worker is shutting down.
+    ///
+    /// A failure of a joined operation is returned unchanged, so it carries
+    /// that operation's label (e.g. `Enable` or `Resume`) rather than
+    /// `EnableAndDetect`. A joined `Resume` that fails leaves the runtime in
+    /// `RecoveryRequired`.
+    pub async fn ensure_detected(
+        &self,
+    ) -> Result<CommunicationState, CommunicationOperationFailure> {
+        self.run_claimed(LifecycleRequest::EnsureDetected).await
+    }
+
     /// Returns the effective detection policy for the runtime that is currently
     /// enabled, or being enabled.
     ///
@@ -329,14 +355,20 @@ impl CommunicationHandle {
         let operation = request.operation();
         let mut state = self.state.lock();
         match transition::decide(&state, self.worker.is_shutting_down(), request) {
-            // Detection leaves transport and hooks untouched and writes its own
-            // slot rather than `state.state`.
+            // Detection leaves transport, hooks and the public state untouched.
             LifecycleDecision::ClaimDetection => self.spawn_redetect(&mut state),
             LifecycleDecision::JoinDetection => Self::join_detection(&mut state),
-            LifecycleDecision::Claim(shape) => self.spawn_enabling(&mut state, shape),
-            LifecycleDecision::Join(in_flight) => {
-                Self::join_in_flight(&mut state, in_flight, operation)
-            }
+            LifecycleDecision::Claim(shape) => self.spawn_enabling(
+                &mut state,
+                shape,
+                request == LifecycleRequest::EnsureDetected,
+            ),
+            LifecycleDecision::Join(in_flight) => Self::join_in_flight(
+                &mut state,
+                in_flight,
+                operation,
+                request == LifecycleRequest::EnsureDetected,
+            ),
             LifecycleDecision::AlreadyEnabled => {
                 ClaimOutcome::Settled(Ok(CommunicationState::Enabled))
             }
@@ -350,7 +382,7 @@ impl CommunicationHandle {
                 }))
             }
             // `NotEnabled` covers a `Detect` against a down transport. The
-            // other three are lease verdicts that `decide` never returns here.
+            // remaining verdicts belong to lease requests, never activation.
             LifecycleDecision::NotEnabled
             | LifecycleDecision::ClaimDisable { .. }
             | LifecycleDecision::SettleDisabled
@@ -362,22 +394,33 @@ impl CommunicationHandle {
         }
     }
 
+    /// Joins the in-flight activation. With `detects`, the joined attempt also
+    /// runs the detection stage, so the shared result covers detection.
     fn join_in_flight(
         state: &mut std::sync::MutexGuard<'_, super::state::CommunicationStateData>,
-        in_flight: CommunicationOperation,
+        in_flight: ActivationKind,
         requested: CommunicationOperation,
+        detects: bool,
     ) -> ClaimOutcome {
-        match state.enabling_result.as_ref() {
-            Some(rx) if rx.has_changed().is_ok() => ClaimOutcome::Pending(rx.clone()),
-            Some(_) => {
+        match state.activation().map(|attempt| attempt.result.clone()) {
+            Some(rx) if rx.has_changed().is_ok() => {
+                // Detecting within the joined attempt rather than retrying
+                // after it settled: a guard taken in between, e.g. by any UDS
+                // send, would refuse the retry although the transport is up.
+                if detects {
+                    state.request_activation_detection();
+                }
+                ClaimOutcome::Pending(rx)
+            }
+            Some(rx) => {
                 let failure = CommunicationOperationFailure::WorkerUnavailable {
-                    operation: in_flight,
+                    operation: in_flight.operation(),
                 };
-                state.state = CommunicationState::Error(failure.clone());
-                state.enabling_result = None;
+                let _ = state.publish_enabling_result(Err(failure.clone()), in_flight, &rx);
                 ClaimOutcome::Settled(Err(failure))
             }
-            // Only shutdown clears the result slot while `Enabling`.
+            // Unreachable: `decide` returned `Join` under this same lock, so the
+            // phase is `Enabling`. Kept as a non-panicking fallback.
             None => ClaimOutcome::Settled(Err(CommunicationOperationFailure::ShuttingDown {
                 operation: requested,
             })),
@@ -387,17 +430,20 @@ impl CommunicationHandle {
     fn spawn_enabling(
         &self,
         state: &mut std::sync::MutexGuard<'_, super::state::CommunicationStateData>,
-        operation: CommunicationOperation,
+        kind: ActivationKind,
+        explicit_detection: bool,
     ) -> ClaimOutcome {
+        let operation = kind.operation();
         let (tx, rx) = watch::channel(None);
-        let detector = state
-            .runs_detection_for(operation)
+        let detector = (explicit_detection || state.runs_detection_for(operation))
             .then(|| state.variant_detector())
             .flatten();
 
-        state.state = CommunicationState::Enabling(operation);
-        state.enabling_result = Some(rx.clone());
-        state.variant_detection = detection_mode(detector.as_ref());
+        if let Err(failure) =
+            state.claim_activation(kind, rx.clone(), detection_mode(detector.as_ref()))
+        {
+            return ClaimOutcome::Settled(Err(failure));
+        }
 
         let handle = self.clone();
         let attempt = rx.clone();
@@ -405,7 +451,7 @@ impl CommunicationHandle {
             &format!("communication-enabling-{operation:?}"),
             async move {
                 let result = handle
-                    .run_enabling_operation(operation, detector, &attempt)
+                    .run_enabling_operation(kind, detector, &attempt)
                     .await;
                 let _ = tx.send(Some(result));
             }
@@ -413,7 +459,7 @@ impl CommunicationHandle {
         ClaimOutcome::Pending(rx)
     }
 
-    /// Claims the detection slot and leaves `state.state` alone. The runtime
+    /// Claims detection without changing the public state. The runtime
     /// stays `Enabled` throughout, so communication that does not depend on the
     /// variant remains available.
     fn spawn_redetect(
@@ -423,13 +469,18 @@ impl CommunicationHandle {
         let (tx, rx) = watch::channel(None);
         let detector = state.variant_detector();
 
-        state.detection_in_flight = Some(rx.clone());
-        state.variant_detection = detection_mode(detector.as_ref());
+        if let Err(failure) = state.claim_detection(rx.clone(), detection_mode(detector.as_ref())) {
+            return ClaimOutcome::Settled(Err(failure));
+        }
 
         let handle = self.clone();
+        let attempt = rx.clone();
         cda_interfaces::spawn_named!("communication-redetect", async move {
-            let result = handle.run_redetect_operation(detector).await;
-            let result = handle.finish_detection(result);
+            let result = handle.run_redetect_operation(detector, &attempt).await;
+            let result = handle
+                .state
+                .lock()
+                .publish_detection_result(result, &attempt);
             let _ = tx.send(Some(result));
         });
         ClaimOutcome::Pending(rx)
@@ -443,22 +494,14 @@ impl CommunicationHandle {
     fn join_detection(
         state: &mut std::sync::MutexGuard<'_, super::state::CommunicationStateData>,
     ) -> ClaimOutcome {
-        if let Some(rx) = state
-            .detection_in_flight
-            .as_ref()
-            .filter(|rx| rx.has_changed().is_ok())
-            .cloned()
-        {
-            return ClaimOutcome::Pending(rx);
-        }
-
-        // The sender died without publishing. Clear the slot so the next caller
-        // claims a fresh detection instead of joining a dead one.
-        state.detection_in_flight = None;
-        state.variant_detection = VariantDetectionMode::Never;
-        ClaimOutcome::Settled(Err(CommunicationOperationFailure::WorkerUnavailable {
+        let failure = CommunicationOperationFailure::WorkerUnavailable {
             operation: CommunicationOperation::Detect,
-        }))
+        };
+        match state.detection().cloned() {
+            Some(rx) if rx.has_changed().is_ok() => ClaimOutcome::Pending(rx),
+            Some(rx) => ClaimOutcome::Settled(state.publish_detection_result(Err(failure), &rx)),
+            None => ClaimOutcome::Settled(Err(failure)),
+        }
     }
 
     /// Runs the physical operation on the worker, isolating the caller from a
@@ -469,16 +512,18 @@ impl CommunicationHandle {
     /// is returned unchanged. When the worker cannot be reached (a send
     /// failure, or a reply channel dropped without an answer), the attempt is
     /// failed via [`fail_closed_enabling_attempt`](Self::fail_closed_enabling_attempt),
-    /// which only publishes `Error` while `attempt` still owns the state.
+    /// which only publishes failure while `attempt` still owns the state.
     async fn run_enabling_operation(
         &self,
-        operation: CommunicationOperation,
+        kind: ActivationKind,
         detector: Option<Arc<dyn CommunicationVariantDetection>>,
-        attempt: &EnablingResultReceiver,
+        attempt: &OperationResultReceiver,
     ) -> Result<CommunicationState, CommunicationOperationFailure> {
+        let operation = kind.operation();
         let Ok(rx) = self
             .submit(operation, |reply| LifecycleCommand::Activate {
-                operation,
+                kind,
+                attempt: attempt.clone(),
                 detector,
                 reply,
             })
@@ -495,33 +540,16 @@ impl CommunicationHandle {
     async fn run_redetect_operation(
         &self,
         detector: Option<Arc<dyn CommunicationVariantDetection>>,
+        attempt: &OperationResultReceiver,
     ) -> Result<CommunicationState, CommunicationOperationFailure> {
         self.submit_and_await(CommunicationOperation::Detect, |reply| {
-            LifecycleCommand::Redetect { detector, reply }
+            LifecycleCommand::Redetect {
+                detector,
+                attempt: attempt.clone(),
+                reply,
+            }
         })
         .await
-    }
-
-    /// Clears the detection slot and returns the result unchanged, without
-    /// changing the lifecycle state. On failure it also resets the effective
-    /// detection mode.
-    fn finish_detection(
-        &self,
-        result: Result<CommunicationState, CommunicationOperationFailure>,
-    ) -> Result<CommunicationState, CommunicationOperationFailure> {
-        let mut state = self.state.lock();
-        // Shutdown publishes the terminal state. A detection finishing
-        // alongside it must not overwrite that.
-        if state.shutting_down {
-            return Err(CommunicationOperationFailure::ShuttingDown {
-                operation: CommunicationOperation::Detect,
-            });
-        }
-        state.detection_in_flight = None;
-        if result.is_err() {
-            state.variant_detection = VariantDetectionMode::Never;
-        }
-        result
     }
 
     /// Fails the current enabling attempt when the worker could not be reached,
@@ -534,30 +562,30 @@ impl CommunicationHandle {
     fn fail_closed_enabling_attempt(
         &self,
         operation: CommunicationOperation,
-        failed: &EnablingResultReceiver,
+        failed: &OperationResultReceiver,
     ) -> CommunicationOperationFailure {
-        let failure = self.construct_worker_failure(operation);
         let mut state = self.state.lock();
+        let kind = state
+            .activation()
+            .filter(|attempt| attempt.result.same_channel(failed))
+            .map(|attempt| attempt.kind);
+        let operation = if state
+            .detection()
+            .is_some_and(|attempt| attempt.same_channel(failed))
+        {
+            CommunicationOperation::Detect
+        } else {
+            kind.map_or(operation, ActivationKind::operation)
+        };
+        let failure = self.construct_worker_failure(operation);
         // Detection changes nothing physical and publishes no lifecycle state,
         // not even a failed one.
         if operation == CommunicationOperation::Detect {
-            if state
-                .detection_in_flight
-                .as_ref()
-                .is_some_and(|current| current.same_channel(failed))
-            {
-                state.detection_in_flight = None;
-                state.variant_detection = VariantDetectionMode::Never;
-            }
+            let _ = state.publish_detection_result(Err(failure.clone()), failed);
             return failure;
         }
-        if state
-            .enabling_result
-            .as_ref()
-            .is_some_and(|current| current.same_channel(failed))
-        {
-            state.state = CommunicationState::Error(failure.clone());
-            state.enabling_result = None;
+        if let Some(kind) = kind {
+            let _ = state.publish_enabling_result(Err(failure.clone()), kind, failed);
         }
         failure
     }
@@ -565,18 +593,17 @@ impl CommunicationHandle {
     /// Acquires the sole exclusive disable lease, taking the physical transport
     /// offline if it was up.
     ///
-    /// Granted from `Enabled` and from `Disabled`. The lease is exclusive
-    /// ownership of the runtime, not an operation on the transport, so a
-    /// consumer such as a runtime update does not have to bring the vehicle
-    /// network up to become eligible.
+    /// Granted from `Enabled`, `Disabled`, `RecoveryRequired(_)` and
+    /// `Error(_)`. The lease is exclusive ownership of the runtime, not an
+    /// operation on the transport, so a consumer such as a runtime update does
+    /// not have to bring the vehicle network up to become eligible.
     ///
     /// `DisableOwner::resumes_transport` records what `release()` means. A lease
-    /// taken from `Enabled` resumes, one taken from `Disabled` returns to
-    /// `Disabled`.
+    /// taken from `Enabled` resumes, one taken from any other state returns to
+    /// `Disabled`. `Error(_)` has an unknown transport state, so its lease
+    /// tears hooks and transport down defensively before it is granted.
     ///
-    /// `Enabling(_)`, `Disabling`, `DisabledExclusive` and `Error(_)` are
-    /// conflicts. `Error(_)` has an unknown transport state, so neither resume
-    /// shape can be chosen.
+    /// `Enabling(_)`, `Disabling` and `DisabledExclusive` are conflicts.
     ///
     /// # Errors
     ///
@@ -591,16 +618,19 @@ impl CommunicationHandle {
                 self.worker.is_shutting_down(),
                 LifecycleRequest::Disable,
             ) {
-                LifecycleDecision::ClaimDisable { resumes_transport } => {
+                LifecycleDecision::ClaimDisable {
+                    resumes_transport,
+                    tears_down,
+                } => {
                     // Decide under one lock whether releasing brings the
                     // transport back, and whether it detects when it does.
                     let resume_detects = state.variant_detection == VariantDetectionMode::Always;
-                    state.state = CommunicationState::Disabling;
-                    state.disable_owner = Some(DisableOwner {
+                    state.claim_disable(DisableOwner {
                         id,
                         resumes_transport,
+                        tears_down,
                         resume_detects,
-                    });
+                    })?;
                 }
                 LifecycleDecision::GuardsHeld => return Err(DisableError::InUse),
                 LifecycleDecision::ShuttingDown => {
@@ -622,7 +652,7 @@ impl CommunicationHandle {
                 | LifecycleDecision::LeaseHeld(_)
                 | LifecycleDecision::NotEnabled => {
                     tracing::debug!(
-                        state = ?state.state,
+                        phase = ?state.phase(),
                         ?reason,
                         "Disable rejected: current state does not permit an exclusive lease"
                     );
@@ -696,7 +726,7 @@ impl CommunicationHandle {
 
     /// Publishes `Error` for a claimed disable whose outcome is unknown because
     /// the worker could not be reached. A transport failure the worker did
-    /// report is published by `finish_failed_disable` instead.
+    /// report is published by the worker instead.
     fn finish_failed_disable_locally(
         &self,
         id: DisableLeaseId,
@@ -706,21 +736,19 @@ impl CommunicationHandle {
         if state.shutting_down {
             return;
         }
-        if DisableOwner::owns(state.disable_owner, id) {
-            state.disable_owner = None;
-            state.state = CommunicationState::Error(failure);
-        }
+        let _ = state.publish_disable_result(id, Err(failure));
     }
 
     pub(super) async fn submit_release(
         &self,
         id: DisableLeaseId,
+        request: LifecycleRequest,
     ) -> Result<
         oneshot::Receiver<Result<CommunicationState, CommunicationOperationFailure>>,
         CommunicationOperationFailure,
     > {
-        self.submit(CommunicationOperation::Resume, |reply| {
-            LifecycleCommand::ReleaseDisableLease { id, reply }
+        self.submit(request.operation(), |reply| {
+            LifecycleCommand::ReleaseDisableLease { id, request, reply }
         })
         .await
     }
@@ -751,7 +779,7 @@ impl CommunicationHandle {
         }
 
         // Not disabled -> no-op
-        let Some(owner) = state.disable_owner else {
+        let Some(owner) = state.disable_owner() else {
             return Ok(());
         };
 
@@ -762,8 +790,7 @@ impl CommunicationHandle {
             });
         }
 
-        state.disable_owner = None;
-        state.state = CommunicationState::Disabled;
+        state.settle_disabled(id);
         Ok(())
     }
 
@@ -784,7 +811,7 @@ impl CommunicationHandle {
             let mut state = self.state.lock();
             // Only `Enabling` names its own operation. From every other state
             // the teardown that just failed was the disable-shaped one.
-            let operation = match state.state {
+            let operation = match state.state() {
                 CommunicationState::Enabling(operation) => operation,
                 CommunicationState::Enabled
                 | CommunicationState::Disabled
@@ -793,13 +820,9 @@ impl CommunicationHandle {
                 | CommunicationState::RecoveryRequired(_)
                 | CommunicationState::Error(_) => CommunicationOperation::Disable,
             };
-            state.disable_owner = None;
-            state.enabling_result = None;
-            state.detection_in_flight = None;
-            state.state =
-                CommunicationState::Error(CommunicationOperationFailure::WorkerUnavailable {
-                    operation,
-                });
+            state.publish_shutdown(Err(CommunicationOperationFailure::WorkerUnavailable {
+                operation,
+            }));
         }
     }
 }
@@ -842,7 +865,7 @@ where
 {
     let resources = worker::new_resources(transport_control);
     let state = Arc::new(CommunicationStateStore::new(
-        CommunicationState::Disabled,
+        LifecyclePhase::Disabled,
         variant_detection,
     ));
     let (sender, receivers) = worker::channel();
@@ -965,6 +988,40 @@ mod tests {
         }
     }
 
+    /// An activation whose attempt was failed closed while the worker brought
+    /// communication up must not leave hooks and transport up under `Error`.
+    #[tokio::test]
+    async fn activation_completing_for_a_failed_closed_attempt_is_torn_down() {
+        let control = Arc::new(BlockingEnableControl::default());
+        let handle = communication_handle_new(Arc::clone(&control) as Arc<dyn TransportControl>);
+        let initializer = Arc::new(DeinitTrackingInitializer::default());
+        handle
+            .register_lifecycle_hook(Arc::clone(&initializer) as Arc<dyn CommunicationLifecycle>)
+            .await
+            .expect("registration must succeed");
+
+        let activation = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.enable().await }
+        });
+        control.entered.notified().await;
+
+        // A joiner whose channel died fails the attempt closed meanwhile.
+        let ClaimOutcome::Pending(joined) = handle.claim_or_join(LifecycleRequest::Enable) else {
+            panic!("enable must join the running activation");
+        };
+        let failure = handle.fail_closed_enabling_attempt(CommunicationOperation::Enable, &joined);
+        assert_eq!(handle.state(), CommunicationState::Error(failure));
+
+        control.proceed.notify_one();
+        assert!(activation.await.unwrap().is_err());
+
+        assert!(matches!(handle.state(), CommunicationState::Error(_)));
+        assert_eq!(initializer.init_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(initializer.deinit_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(control.disable_count.load(Ordering::Relaxed), 1);
+    }
+
     /// A detached fallback write must not overwrite the worker's
     /// shutdown-sequence write, which would leave `state == Enabled` on a
     /// torn-down transport.
@@ -1020,6 +1077,7 @@ mod tests {
         resume_proceed: Notify,
         enable_count: AtomicUsize,
         disable_count: AtomicUsize,
+        fail_resume: AtomicBool,
     }
 
     #[async_trait]
@@ -1028,6 +1086,9 @@ mod tests {
             if self.enable_count.fetch_add(1, Ordering::Relaxed) == 1 {
                 self.resume_entered.notify_one();
                 self.resume_proceed.notified().await;
+                if self.fail_resume.load(Ordering::Relaxed) {
+                    return Err(CommControlError::InitFailed("resume failed".to_owned()));
+                }
             }
             Ok(())
         }
@@ -1079,6 +1140,251 @@ mod tests {
         assert_eq!(release.await.unwrap(), Ok(CommunicationState::Enabled));
         assert_eq!(activation.await.unwrap(), Ok(CommunicationState::Enabled));
         assert_eq!(control.enable_count.load(Ordering::Relaxed), 2);
+    }
+
+    /// Explicit detection joining a lease `Resume` that would not detect makes
+    /// it detect, so a guard taken after it settled cannot refuse detection.
+    #[tokio::test]
+    async fn ensure_detected_joining_a_non_detecting_resume_detects_within_it() {
+        let (handle, control, lease) = enabled_lease_with_blocked_resume().await;
+        let detector = with_detector(&handle).await;
+        let release = tokio::spawn(async move { lease.release().await });
+        control.resume_entered.notified().await;
+        assert_eq!(handle.variant_detection(), VariantDetectionMode::Never);
+
+        let detection = handle.ensure_detected();
+        tokio::pin!(detection);
+        assert_detection_joins_blocked_activation(detection.as_mut()).await;
+        assert_eq!(handle.variant_detection(), VariantDetectionMode::Always);
+        control.resume_proceed.notify_one();
+
+        assert_eq!(release.await.unwrap(), Ok(CommunicationState::Enabled));
+        let guard = handle.acquire().expect("guard on an enabled runtime");
+        assert_eq!(detection.await, Ok(CommunicationState::Enabled));
+        assert_eq!(detector.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 2);
+        drop(guard);
+    }
+
+    /// Explicit detection joining a lease `Resume` that fails gets the
+    /// `Resume` failure, and the runtime requires recovery.
+    #[tokio::test]
+    async fn ensure_detected_joining_a_failed_resume_reports_the_resume_failure() {
+        let (handle, control, lease) = enabled_lease_with_blocked_resume().await;
+        let detector = with_detector(&handle).await;
+        control.fail_resume.store(true, Ordering::Relaxed);
+        let release = tokio::spawn(async move { lease.release().await });
+        control.resume_entered.notified().await;
+
+        let detection = handle.ensure_detected();
+        tokio::pin!(detection);
+        assert_detection_joins_blocked_activation(detection.as_mut()).await;
+        control.resume_proceed.notify_one();
+
+        let failure = release.await.unwrap().unwrap_err();
+        assert!(matches!(
+            failure,
+            CommunicationOperationFailure::TransportFailure {
+                operation: CommunicationOperation::Resume,
+                ..
+            }
+        ));
+        assert_eq!(detection.await, Err(failure.clone()));
+        assert_eq!(
+            handle.state(),
+            CommunicationState::RecoveryRequired(failure)
+        );
+        assert_eq!(detector.calls.load(Ordering::Relaxed), 0);
+    }
+
+    async fn enabled_lease_with_blocked_resume() -> (
+        CommunicationHandle,
+        Arc<BlockingDisableControl>,
+        DisableLease,
+    ) {
+        let control = Arc::new(BlockingDisableControl::default());
+        let handle = communication_handle_new(Arc::clone(&control) as Arc<dyn TransportControl>);
+        handle.enable().await.unwrap();
+        control.proceed.notify_one();
+        let lease = handle.disable(DisableReason::RuntimeUpdate).await.unwrap();
+        (handle, control, lease)
+    }
+
+    #[tokio::test]
+    async fn failed_resume_and_its_joiners_require_an_exclusive_recovery_lease() {
+        for finish_recovery in [true, false] {
+            let (handle, control, lease) = enabled_lease_with_blocked_resume().await;
+            control.fail_resume.store(true, Ordering::Relaxed);
+            let release = tokio::spawn(async move { lease.release().await });
+            control.resume_entered.notified().await;
+            let ClaimOutcome::Pending(joined) =
+                handle.claim_or_join(LifecycleRequest::EnableAndDetect)
+            else {
+                panic!("activation must join the running resume");
+            };
+
+            control.resume_proceed.notify_one();
+            let failure = release.await.unwrap().unwrap_err();
+            assert_eq!(joined.borrow().clone(), Some(Err(failure.clone())));
+            assert_eq!(
+                handle.state(),
+                CommunicationState::RecoveryRequired(failure)
+            );
+            assert!(handle.enable().await.is_err());
+            assert!(handle.enable_and_detect().await.is_err());
+            assert_eq!(control.enable_count.load(Ordering::Relaxed), 2);
+
+            let recovery = handle.disable(DisableReason::RuntimeUpdate).await.unwrap();
+            if finish_recovery {
+                recovery.finish().await.unwrap();
+            } else {
+                assert_eq!(recovery.release().await, Ok(CommunicationState::Disabled));
+            }
+            assert_eq!(handle.state(), CommunicationState::Disabled);
+            assert_eq!(control.enable_count.load(Ordering::Relaxed), 2);
+            assert_eq!(control.disable_count.load(Ordering::Relaxed), 1);
+            control.fail_resume.store(false, Ordering::Relaxed);
+            assert_eq!(handle.enable().await, Ok(CommunicationState::Enabled));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dead_resume_channel_also_enters_fail_closed_recovery() {
+        let (handle, control) = handle();
+        let (tx, rx) = watch::channel(None);
+        {
+            // Reach `DisabledExclusive` the way a granted lease does, so the
+            // resume claim starts from a phase `decide` admits it from.
+            let mut state = handle.state.lock();
+            let id = DisableLeaseId::new();
+            state
+                .claim_disable(DisableOwner {
+                    id,
+                    resumes_transport: true,
+                    tears_down: true,
+                    resume_detects: false,
+                })
+                .unwrap();
+            state.publish_disable_result(id, Ok(())).unwrap();
+            state
+                .claim_activation(ActivationKind::Resume, rx, VariantDetectionMode::Never)
+                .unwrap();
+        }
+        drop(tx);
+        assert!(matches!(
+            handle.claim_or_join(LifecycleRequest::Enable),
+            ClaimOutcome::Settled(Err(CommunicationOperationFailure::WorkerUnavailable {
+                operation: CommunicationOperation::Resume
+            }))
+        ));
+        assert!(matches!(
+            handle.state(),
+            CommunicationState::RecoveryRequired(_)
+        ));
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_racing_failed_resume_does_not_publish_recovery_after_shutdown() {
+        let (handle, control, lease) = enabled_lease_with_blocked_resume().await;
+        control.fail_resume.store(true, Ordering::Relaxed);
+        let release = tokio::spawn(async move { lease.release().await });
+        control.resume_entered.notified().await;
+
+        // Establish shutdown's barrier before allowing the failed completion.
+        handle.state.lock().shutting_down = true;
+        let shutdown = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.shutdown().await }
+        });
+        control.proceed.notify_one();
+        control.resume_proceed.notify_one();
+        assert!(matches!(
+            release.await.unwrap(),
+            Err(CommunicationOperationFailure::ShuttingDown {
+                operation: CommunicationOperation::Resume,
+            })
+        ));
+        shutdown.await.unwrap();
+        assert_eq!(handle.state(), CommunicationState::Disabled);
+        assert!(handle.state.lock().activation().is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_accepted_release_does_not_cancel_worker_owned_resume() {
+        let (handle, control, lease) = enabled_lease_with_blocked_resume().await;
+        let release = tokio::spawn(async move { lease.release().await });
+        control.resume_entered.notified().await;
+        release.abort();
+        assert!(release.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            handle.state(),
+            CommunicationState::Enabling(CommunicationOperation::Resume)
+        );
+        control.resume_proceed.notify_one();
+        // A subsequent command is served only after the accepted resume finishes.
+        handle
+            .register_lifecycle_hook(Arc::new(CountingInitializer))
+            .await
+            .unwrap();
+        assert_eq!(handle.state(), CommunicationState::Enabled);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_accepted_disable_eventually_defers_its_abandoned_lease() {
+        let control = Arc::new(BlockingDisableControl::default());
+        let handle = communication_handle_new(Arc::clone(&control) as Arc<dyn TransportControl>);
+        handle.enable().await.unwrap();
+        let disable = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.disable(DisableReason::RuntimeUpdate).await }
+        });
+        control.entered.notified().await;
+        disable.abort();
+        assert!(disable.await.unwrap_err().is_cancelled());
+        control.proceed.notify_one();
+        poll_until_state(&handle, CommunicationState::Disabled).await;
+        assert!(handle.state.lock().disable_owner().is_none());
+        assert_eq!(control.disable_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_accepted_finish_leaves_finalization_to_the_worker() {
+        let (handle, _) = handle();
+        let lease = handle.disable(DisableReason::RuntimeUpdate).await.unwrap();
+        {
+            let finish = lease.finish();
+            tokio::pin!(finish);
+            // The empty mailbox accepts Finish immediately, but its reply needs
+            // the worker to run. Cancel at that pending receive, not before send.
+            tokio::select! {
+                biased;
+                result = &mut finish => panic!("worker has not run yet: {result:?}"),
+                () = std::future::ready(()) => {}
+            }
+        }
+        assert_eq!(handle.state(), CommunicationState::DisabledExclusive);
+        handle
+            .register_lifecycle_hook(Arc::new(CountingInitializer))
+            .await
+            .unwrap();
+        assert_eq!(handle.state(), CommunicationState::Disabled);
+    }
+
+    #[tokio::test]
+    async fn disable_rejected_during_shutdown_reports_the_requested_operation() {
+        let (handle, _) = handle();
+        handle.shutdown().await;
+
+        assert_eq!(
+            handle.disable(DisableReason::RuntimeUpdate).await.err(),
+            Some(DisableError::Failed(
+                CommunicationOperationFailure::ShuttingDown {
+                    operation: CommunicationOperation::Disable,
+                }
+            ))
+        );
     }
 
     /// A lease is granted from `Disabled` too, and releasing it returns to
@@ -1163,21 +1469,6 @@ mod tests {
         assert_eq!(control.disable_count.load(Ordering::Relaxed), 0);
     }
 
-    /// `Error(_)` has an unknown transport state, so no lease is granted from
-    /// it.
-    #[tokio::test]
-    async fn lease_refused_from_error() {
-        let (handle, control) = handle();
-        control.fail_enable.store(true, Ordering::Relaxed);
-        assert!(handle.enable_and_detect().await.is_err());
-        assert!(matches!(handle.state(), CommunicationState::Error(_)));
-
-        assert!(matches!(
-            handle.disable(DisableReason::RuntimeUpdate).await,
-            Err(DisableError::Conflict)
-        ));
-    }
-
     #[tokio::test]
     async fn stale_lease_cannot_resume_a_later_disable() {
         let (handle, _) = handle();
@@ -1190,15 +1481,19 @@ mod tests {
         assert_eq!(first.release().await, Ok(CommunicationState::Enabled));
 
         let second = handle.disable(DisableReason::RuntimeUpdate).await.unwrap();
-        // The stale id must be rejected without disturbing the current lease.
-        let reply = handle.submit_release(stale_id).await.unwrap();
-        assert_eq!(
-            reply.await.unwrap(),
-            Err(CommunicationOperationFailure::TransitionFailure {
-                operation: CommunicationOperation::Resume,
-            })
-        );
-        assert_eq!(handle.state(), CommunicationState::DisabledExclusive);
+        // The stale id must be rejected without disturbing the current lease,
+        // also when it asks for a hand-over with detection.
+        for request in [LifecycleRequest::Resume, LifecycleRequest::ResumeAndDetect] {
+            let reply = handle.submit_release(stale_id, request).await.unwrap();
+            assert_eq!(
+                reply.await.unwrap(),
+                Err(CommunicationOperationFailure::TransitionFailure {
+                    operation: request.operation(),
+                }),
+                "{request:?}"
+            );
+            assert_eq!(handle.state(), CommunicationState::DisabledExclusive);
+        }
         assert_eq!(second.release().await, Ok(CommunicationState::Enabled));
     }
 
@@ -1703,6 +1998,237 @@ mod tests {
             .await
             .expect("detector registration must succeed");
         detector
+    }
+
+    async fn blocked_activation_fixture(
+        mode: VariantDetectionMode,
+    ) -> (
+        Arc<BlockingEnableControl>,
+        CommunicationHandle,
+        Arc<FailingDetector>,
+    ) {
+        let control = Arc::new(BlockingEnableControl::default());
+        let handle = communication_handle_with_detection_mode(Arc::clone(&control) as _, mode);
+        let detector = with_detector(&handle).await;
+        (control, handle, detector)
+    }
+
+    async fn assert_detection_joins_blocked_activation(
+        detection: impl Future<Output = Result<CommunicationState, CommunicationOperationFailure>>,
+    ) {
+        tokio::pin!(detection);
+        // Poll once while activation is blocked to establish the join before release.
+        tokio::select! {
+            biased;
+            result = &mut detection => panic!("activation is still blocked: {result:?}"),
+            () = std::future::ready(()) => {}
+        }
+    }
+
+    /// [[ test~communication-ensure-detection-joins-enable, Explicit detection follows an in-flight plain activation, test ]]
+    #[tokio::test]
+    async fn ensure_detected_joins_plain_enable_then_detects() {
+        let (control, handle, detector) =
+            blocked_activation_fixture(VariantDetectionMode::Always).await;
+        let activation = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.enable().await }
+        });
+        control.entered.notified().await;
+
+        let detection = handle.ensure_detected();
+        tokio::pin!(detection);
+        assert_detection_joins_blocked_activation(detection.as_mut()).await;
+        assert_eq!(detector.calls.load(Ordering::Relaxed), 0);
+        control.proceed.notify_one();
+        assert_eq!(detection.await, Ok(CommunicationState::Enabled));
+        assert_eq!(
+            activation.await.expect("activation task"),
+            Ok(CommunicationState::Enabled)
+        );
+        assert_eq!(detector.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
+    }
+
+    /// [[ test~communication-ensure-detection-joins-never, Explicit detection follows an activation suppressed by Never, test ]]
+    #[tokio::test]
+    async fn ensure_detected_joins_automatic_enable_with_never_policy() {
+        let (control, handle, detector) =
+            blocked_activation_fixture(VariantDetectionMode::Never).await;
+        let activation = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.enable_and_detect().await }
+        });
+        control.entered.notified().await;
+        let detection = handle.ensure_detected();
+        tokio::pin!(detection);
+        assert_detection_joins_blocked_activation(detection.as_mut()).await;
+        control.proceed.notify_one();
+        assert_eq!(detection.await, Ok(CommunicationState::Enabled));
+        assert_eq!(
+            activation.await.expect("activation task"),
+            Ok(CommunicationState::Enabled)
+        );
+        assert_eq!(detector.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
+    }
+
+    /// [[ test~communication-ensure-detection-joins-detecting-activation, Explicit detection joins an activation already detecting, test ]]
+    #[tokio::test]
+    async fn ensure_detected_joins_activation_that_detects() {
+        let (control, handle, detector) =
+            blocked_activation_fixture(VariantDetectionMode::Always).await;
+        let activation = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.enable_and_detect().await }
+        });
+        control.entered.notified().await;
+        let detection = handle.ensure_detected();
+        tokio::pin!(detection);
+        assert_detection_joins_blocked_activation(detection.as_mut()).await;
+        control.proceed.notify_one();
+        assert_eq!(detection.await, Ok(CommunicationState::Enabled));
+        assert_eq!(
+            activation.await.expect("activation task"),
+            Ok(CommunicationState::Enabled)
+        );
+        assert_eq!(detector.calls.load(Ordering::Relaxed), 1);
+    }
+
+    /// [[ test~communication-ensure-detection-after-plain-enable, Explicit detection detects after a completed plain activation, test ]]
+    #[tokio::test]
+    async fn ensure_detected_after_plain_enable_detects() {
+        let (handle, control) = handle();
+        let detector = with_detector(&handle).await;
+        assert_eq!(handle.state(), CommunicationState::Disabled);
+        assert_eq!(handle.enable().await, Ok(CommunicationState::Enabled));
+        assert_eq!(
+            handle.ensure_detected().await,
+            Ok(CommunicationState::Enabled)
+        );
+        assert_eq!(detector.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
+    }
+
+    /// [[ test~communication-ensure-detection-disabled-race, Explicit detection is refused while a lease is held and re-enables after it finishes, test ]]
+    #[tokio::test]
+    async fn ensure_detected_refused_while_leased_then_reenables_after_finish() {
+        let (handle, control) = handle();
+        let detector = with_detector(&handle).await;
+        assert_eq!(handle.enable().await, Ok(CommunicationState::Enabled));
+        assert_eq!(handle.state(), CommunicationState::Enabled);
+        let lease = handle
+            .disable(DisableReason::RuntimeUpdate)
+            .await
+            .expect("disable");
+        assert!(matches!(
+            handle.ensure_detected().await,
+            Err(CommunicationOperationFailure::DisableLeaseHeld { .. })
+        ));
+        lease.finish().await.expect("finish disable");
+        assert_eq!(
+            handle.ensure_detected().await,
+            Ok(CommunicationState::Enabled)
+        );
+        assert_eq!(detector.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 2);
+    }
+
+    /// [[ test~communication-ensure-detection-join-state-change, Joined detection completes within the activation and ignores later state changes, test ]]
+    #[tokio::test]
+    async fn ensure_detected_joined_enable_ignores_later_state_changes() {
+        let (control, handle, detector) =
+            blocked_activation_fixture(VariantDetectionMode::Always).await;
+        let activation = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.enable().await }
+        });
+        control.entered.notified().await;
+        let detection = handle.ensure_detected();
+        tokio::pin!(detection);
+        assert_detection_joins_blocked_activation(detection.as_mut()).await;
+        control.proceed.notify_one();
+        assert_eq!(
+            activation.await.expect("activation task"),
+            Ok(CommunicationState::Enabled)
+        );
+        // The joined activation already ran the detector before it settled.
+        assert_eq!(detector.calls.load(Ordering::Relaxed), 1);
+        let lease = handle
+            .disable(DisableReason::RuntimeUpdate)
+            .await
+            .expect("disable");
+        lease.finish().await.expect("finish disable");
+        assert_eq!(detection.await, Ok(CommunicationState::Enabled));
+        assert_eq!(detector.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
+        assert_eq!(handle.state(), CommunicationState::Disabled);
+    }
+
+    /// A guard taken after the joined activation settled, as every UDS send
+    /// does, must not refuse the joined detection (the `networkreset`
+    /// rediscovery path).
+    #[tokio::test]
+    async fn ensure_detected_joined_enable_survives_a_guard_taken_after_it_settled() {
+        for mode in [VariantDetectionMode::Always, VariantDetectionMode::Never] {
+            let (control, handle, detector) = blocked_activation_fixture(mode).await;
+            // Plain `Enable`, and `EnableAndDetect` suppressed by `Never`: both
+            // claim an activation that would not detect on its own.
+            let activation = tokio::spawn({
+                let handle = handle.clone();
+                async move {
+                    if mode == VariantDetectionMode::Always {
+                        handle.enable().await
+                    } else {
+                        handle.enable_and_detect().await
+                    }
+                }
+            });
+            control.entered.notified().await;
+            assert_eq!(handle.variant_detection(), VariantDetectionMode::Never);
+            let detection = handle.ensure_detected();
+            tokio::pin!(detection);
+            assert_detection_joins_blocked_activation(detection.as_mut()).await;
+            assert_eq!(
+                handle.variant_detection(),
+                VariantDetectionMode::Always,
+                "the join must publish that the activation now settles a variant"
+            );
+            control.proceed.notify_one();
+            assert_eq!(
+                activation.await.expect("activation task"),
+                Ok(CommunicationState::Enabled)
+            );
+
+            let guard = handle.acquire().expect("guard on an enabled runtime");
+            assert_eq!(detection.await, Ok(CommunicationState::Enabled), "{mode:?}");
+            assert_eq!(detector.calls.load(Ordering::Relaxed), 1, "{mode:?}");
+            assert_eq!(control.enable_count.load(Ordering::Relaxed), 1, "{mode:?}");
+            drop(guard);
+        }
+    }
+
+    /// [[ test~communication-ensure-detection-dead-sweep, A failed explicit detection waiter clears its detection slot, test ]]
+    #[tokio::test]
+    async fn ensure_detected_clears_a_dead_detection_attempt() {
+        let (handle, _) = handle();
+        assert_eq!(handle.enable().await, Ok(CommunicationState::Enabled));
+        let (tx, rx) = watch::channel(None);
+        handle
+            .state
+            .lock()
+            .claim_detection(rx.clone(), VariantDetectionMode::Always)
+            .expect("detection claim");
+        drop(tx);
+        assert_eq!(
+            handle.fail_closed_enabling_attempt(CommunicationOperation::EnableAndDetect, &rx),
+            CommunicationOperationFailure::WorkerUnavailable {
+                operation: CommunicationOperation::Detect
+            }
+        );
+        assert!(handle.state.lock().detection().is_none());
+        assert_eq!(handle.state(), CommunicationState::Enabled);
+        assert_eq!(handle.variant_detection(), VariantDetectionMode::Never);
     }
 
     /// `enable()` brings the transport up and initializes the lifecycle hooks, but runs no detection.
@@ -2708,6 +3234,171 @@ mod tests {
             handle.state(),
             CommunicationState::Enabled,
             "the fallback must not overwrite the result the worker published"
+        );
+    }
+
+    /// A failed activation leaves `Error`, whose transport state is unknown. An
+    /// exclusive lease is still granted from there, tearing hooks and transport
+    /// down first, so a network reset (handing the lease over with detection)
+    /// brings communication back, and a released lease settles to `Disabled`.
+    #[tokio::test]
+    async fn lease_from_error_tears_down_and_recovers_communication() {
+        for hand_over in [true, false] {
+            let (handle, control) = handle();
+            control.fail_enable.store(true, Ordering::Relaxed);
+            assert!(handle.enable().await.is_err());
+            assert!(
+                matches!(handle.state(), CommunicationState::Error(_)),
+                "{:?}",
+                handle.state()
+            );
+            control.fail_enable.store(false, Ordering::Relaxed);
+            let disabled_before = control.disable_count.load(Ordering::Relaxed);
+
+            let lease = handle
+                .disable(DisableReason::Custom("networkreset".to_owned()))
+                .await
+                .expect("a lease must be granted from Error");
+            assert_eq!(
+                control.disable_count.load(Ordering::Relaxed),
+                disabled_before.saturating_add(1),
+                "the lease must tear the transport down defensively"
+            );
+            assert_eq!(handle.state(), CommunicationState::DisabledExclusive);
+
+            if hand_over {
+                // The networkreset rediscovery hands the lease over directly.
+                assert_eq!(
+                    lease.release_with_detection().await,
+                    Ok(CommunicationState::Enabled)
+                );
+                assert_eq!(handle.state(), CommunicationState::Enabled);
+            } else {
+                assert_eq!(lease.release().await, Ok(CommunicationState::Disabled));
+                assert_eq!(handle.state(), CommunicationState::Disabled);
+            }
+        }
+    }
+
+    /// Handing a lease over with detection brings communication up and detects,
+    /// whatever the lease displaced and whatever the detection policy is.
+    /// [[ test~communication-release-with-detection-detects, Handing a lease over with detection detects whatever the lease displaced and the policy, test ]]
+    #[tokio::test]
+    async fn release_with_detection_detects_whatever_the_lease_displaced() {
+        for mode in [VariantDetectionMode::Always, VariantDetectionMode::Never] {
+            for enabled_before in [true, false] {
+                let control = Arc::new(RecordingControl {
+                    enable_count: AtomicUsize::new(0),
+                    disable_count: AtomicUsize::new(0),
+                    fail_enable: AtomicBool::new(false),
+                });
+                let handle = communication_handle_with_detection_mode(
+                    Arc::clone(&control) as Arc<dyn TransportControl>,
+                    mode,
+                );
+                let detector = with_detector(&handle).await;
+                if enabled_before {
+                    assert_eq!(handle.enable().await, Ok(CommunicationState::Enabled));
+                }
+                let enabled = control.enable_count.load(Ordering::Relaxed);
+                let lease = handle
+                    .disable(DisableReason::Custom("networkreset".to_owned()))
+                    .await
+                    .expect("lease");
+
+                assert_eq!(
+                    lease.release_with_detection().await,
+                    Ok(CommunicationState::Enabled),
+                    "{mode:?} enabled_before {enabled_before}"
+                );
+                assert_eq!(handle.state(), CommunicationState::Enabled);
+                assert_eq!(
+                    control.enable_count.load(Ordering::Relaxed),
+                    enabled.saturating_add(1)
+                );
+                assert_eq!(
+                    detector.calls.load(Ordering::Relaxed),
+                    1,
+                    "{mode:?} enabled_before {enabled_before}"
+                );
+                assert_eq!(handle.variant_detection(), VariantDetectionMode::Always);
+            }
+        }
+    }
+
+    /// Exclusivity ends only as the activation starts: the lease goes straight to
+    /// the activation, so while the hand-over brings the transport up no
+    /// diagnostic guard can be acquired, and another activation request joins it
+    /// instead of bringing communication up a second time.
+    /// [[ test~communication-release-with-detection-no-window, Handing a lease over with detection leaves no window for another bring-up or a guard, test ]]
+    #[tokio::test]
+    async fn release_with_detection_leaves_no_window_for_guards() {
+        let control = Arc::new(BlockingEnableControl::default());
+        let handle = communication_handle_new(Arc::clone(&control) as Arc<dyn TransportControl>);
+        let detector = with_detector(&handle).await;
+        let lease = handle
+            .disable(DisableReason::Custom("networkreset".to_owned()))
+            .await
+            .expect("lease");
+
+        let handover = tokio::spawn(lease.release_with_detection());
+        control.entered.notified().await;
+        assert!(
+            matches!(handle.state(), CommunicationState::Enabling(_)),
+            "{:?}",
+            handle.state()
+        );
+        assert!(handle.acquire().is_err());
+        // The activation is already claimed: an enable joins it.
+        let joined = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.enable().await }
+        });
+        tokio::task::yield_now().await;
+
+        control.proceed.notify_one();
+        assert_eq!(handover.await.unwrap(), Ok(CommunicationState::Enabled));
+        assert_eq!(joined.await.unwrap(), Ok(CommunicationState::Enabled));
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
+        assert_eq!(detector.calls.load(Ordering::Relaxed), 1);
+        assert!(handle.acquire().is_ok());
+    }
+
+    /// A failed hand-over is an ordinary failed activation: `Error`, from which a
+    /// new lease recovers.
+    /// [[ test~communication-release-with-detection-failure, A failed hand-over with detection is an ordinary failed activation, test ]]
+    #[tokio::test]
+    async fn failed_release_with_detection_is_a_failed_activation() {
+        let (handle, control) = handle();
+        with_detector(&handle).await;
+        let lease = handle
+            .disable(DisableReason::Custom("networkreset".to_owned()))
+            .await
+            .expect("lease");
+        control.fail_enable.store(true, Ordering::Relaxed);
+
+        assert!(matches!(
+            lease.release_with_detection().await,
+            Err(CommunicationOperationFailure::TransportFailure {
+                operation: CommunicationOperation::EnableAndDetect,
+                ..
+            })
+        ));
+        assert!(
+            matches!(handle.state(), CommunicationState::Error(_)),
+            "{:?}",
+            handle.state()
+        );
+        assert_eq!(handle.variant_detection(), VariantDetectionMode::Never);
+
+        control.fail_enable.store(false, Ordering::Relaxed);
+        let lease = handle
+            .disable(DisableReason::Custom("networkreset".to_owned()))
+            .await
+            .expect("a new lease recovers from Error");
+        assert_eq!(
+            lease.release_with_detection().await,
+            Ok(CommunicationState::Enabled)
         );
     }
 }

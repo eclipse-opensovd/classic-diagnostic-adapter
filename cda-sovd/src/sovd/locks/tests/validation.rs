@@ -245,68 +245,137 @@ async fn elapsed_locks_do_not_authorize_or_block_communication() {
     );
 }
 
-#[cfg(feature = "doip-direct-connect")]
+/// [[ test~plugin-vehicle-topology-reset-exclusive-lock-state, Only an unexpired exclusive vehicle lock is accepted, test ]]
 #[tokio::test]
 async fn vehicle_write_requires_the_callers_vehicle_lock() {
+    use crate::sovd::locks::VehicleLockRequirement::{Any, Exclusive};
+
+    struct Case {
+        name: &'static str,
+        locks: Vec<ActiveLock>,
+        any: Option<(StatusCode, String)>,
+        exclusive: Option<(StatusCode, String)>,
+    }
+
     let caller = TestClaims {
         subject: "caller".to_owned(),
         attributes: serde_json::Map::new(),
     };
-    let status =
-        |result: Result<(), ErrorWrapper>| result.err().map(|error| error.into_response().status());
+    let elapsed = SystemTime::now()
+        .checked_sub(Duration::from_secs(1))
+        .expect("now is after the epoch");
+    let outcome = |result: Result<(), ErrorWrapper>| {
+        result.err().map(|error| {
+            let message = match &error.error {
+                ApiError::LockRequired(message)
+                | ApiError::Locked(message)
+                | ApiError::LockBroken { message, .. } => message.clone(),
+                other => panic!("Unexpected error {other:?}"),
+            };
+            (error.into_response().status(), message)
+        })
+    };
+    let conflict = |message: &str| Some((StatusCode::CONFLICT, message.to_owned()));
 
-    let locks = Locks::new();
-    assert_eq!(
-        status(validate_vehicle_write(&caller, &locks, false).await),
-        Some(StatusCode::CONFLICT),
-        "no vehicle lock"
-    );
+    let cases = [
+        Case {
+            name: "no vehicle lock",
+            locks: vec![],
+            any: conflict("Vehicle lock required"),
+            exclusive: conflict("Exclusive vehicle lock required"),
+        },
+        Case {
+            name: "an ECU lock is not a vehicle lock",
+            locks: vec![test_lock("ecu-lock").owner("caller").build()],
+            any: conflict("Vehicle lock required"),
+            exclusive: conflict("Exclusive vehicle lock required"),
+        },
+        Case {
+            name: "own exclusive vehicle lock",
+            locks: vec![test_lock("vehicle-lock").owner("caller").vehicle().build()],
+            any: None,
+            exclusive: None,
+        },
+        Case {
+            name: "own non-exclusive vehicle lock",
+            locks: vec![
+                test_lock("vehicle-lock")
+                    .owner("caller")
+                    .vehicle()
+                    .exclusive(false)
+                    .build(),
+            ],
+            any: None,
+            exclusive: conflict("Exclusive vehicle lock required"),
+        },
+        Case {
+            name: "foreign vehicle lock",
+            locks: vec![test_lock("vehicle-lock").owner("other").vehicle().build()],
+            any: Some((
+                StatusCode::LOCKED,
+                "Vehicle lock is held by another client".to_owned(),
+            )),
+            exclusive: Some((
+                StatusCode::LOCKED,
+                "Vehicle lock is held by another client".to_owned(),
+            )),
+        },
+        Case {
+            name: "elapsed own vehicle lock",
+            locks: vec![
+                test_lock("vehicle-lock")
+                    .owner("caller")
+                    .vehicle()
+                    .expires_at(elapsed)
+                    .build(),
+            ],
+            any: conflict("Vehicle lock expired"),
+            exclusive: conflict("Vehicle lock expired"),
+        },
+        Case {
+            name: "elapsed foreign vehicle lock",
+            locks: vec![
+                test_lock("vehicle-lock")
+                    .owner("other")
+                    .vehicle()
+                    .expires_at(elapsed)
+                    .build(),
+            ],
+            any: conflict("Vehicle lock required"),
+            exclusive: conflict("Exclusive vehicle lock required"),
+        },
+    ];
 
-    let locks = Locks::new();
-    locks
-        .test_insert_active(test_lock("ecu-lock").owner("caller").build())
-        .await;
-    assert_eq!(
-        status(validate_vehicle_write(&caller, &locks, false).await),
-        Some(StatusCode::CONFLICT),
-        "an ECU lock is not a vehicle lock"
-    );
+    for case in cases {
+        let locks = Locks::new();
+        for lock in case.locks {
+            locks.test_insert_active(lock).await;
+        }
+        assert_eq!(
+            outcome(validate_vehicle_write(&caller, &locks, false, Any).await),
+            case.any,
+            "{} (any)",
+            case.name
+        );
+        assert_eq!(
+            outcome(validate_vehicle_write(&caller, &locks, false, Exclusive).await),
+            case.exclusive,
+            "{} (exclusive)",
+            case.name
+        );
+    }
 
+    // A preempted own vehicle lock reports that it was broken.
     let locks = Locks::new();
-    locks
-        .test_insert_active(test_lock("vehicle-lock").owner("caller").vehicle().build())
-        .await;
-    assert_eq!(
-        status(validate_vehicle_write(&caller, &locks, false).await),
-        None,
-        "own vehicle lock"
-    );
-
-    let locks = Locks::new();
-    locks
-        .test_insert_active(test_lock("vehicle-lock").owner("other").vehicle().build())
-        .await;
-    assert_eq!(
-        status(validate_vehicle_write(&caller, &locks, false).await),
-        Some(StatusCode::LOCKED),
-        "foreign vehicle lock"
-    );
-
-    let locks = Locks::new();
-    locks
-        .test_insert_active(
-            test_lock("vehicle-lock")
-                .owner("caller")
-                .vehicle()
-                .expires_at(SystemTime::now() - Duration::from_secs(1))
-                .build(),
-        )
-        .await;
-    assert_eq!(
-        status(validate_vehicle_write(&caller, &locks, false).await),
-        Some(StatusCode::CONFLICT),
-        "elapsed vehicle lock"
-    );
+    insert_test_vehicle_lock(&locks, "caller").await;
+    break_test_vehicle_lock(&locks, "other").await;
+    for requirement in [Any, Exclusive] {
+        assert_eq!(
+            outcome(validate_vehicle_write(&caller, &locks, false, requirement).await),
+            conflict("Client lock was broken"),
+            "broken vehicle lock ({requirement:?})"
+        );
+    }
 }
 
 #[tokio::test]
@@ -480,6 +549,66 @@ async fn acquisition_policy_controls_child_locks_without_vehicle_lock() {
     };
     assert!(matches!(
         validate_vehicle_owner(&required, &other).await,
+        Err(ApiError::Conflict(_))
+    ));
+
+    // An expired own vehicle lock not removed yet no longer satisfies the precondition,
+    // and an expired foreign one still blocks until it is removed.
+    let expired = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(1))
+        .expect("now is after the epoch");
+    required
+        .test_mutate_store(|store| {
+            store.state.delete("vehicle").expect("lock exists");
+        })
+        .await;
+    required
+        .test_insert_active(
+            test_lock("vehicle")
+                .owner("requester")
+                .vehicle()
+                .expires_at(expired)
+                .build(),
+        )
+        .await;
+    for claims in [&requester, &other] {
+        assert!(matches!(
+            validate_vehicle_owner(&required, claims).await,
+            Err(ApiError::Conflict(_))
+        ));
+    }
+}
+
+/// Without the `VehicleLockRequired` policy an expired own vehicle lock that is not
+/// removed yet does not block child locks of its owner, while an expired foreign one
+/// still blocks until it is removed.
+#[tokio::test]
+async fn expired_own_vehicle_lock_does_not_block_without_required_policy() {
+    let requester = TestClaims {
+        subject: "requester".to_owned(),
+        attributes: serde_json::Map::new(),
+    };
+    let other = TestClaims {
+        subject: "other".to_owned(),
+        attributes: serde_json::Map::new(),
+    };
+    let expired = SystemTime::now()
+        .checked_sub(Duration::from_secs(1))
+        .expect("now is after the epoch");
+    let locks = Locks::new();
+    locks
+        .test_insert_active(
+            test_lock("vehicle")
+                .owner("requester")
+                .vehicle()
+                .expires_at(expired)
+                .build(),
+        )
+        .await;
+
+    assert!(validate_vehicle_owner(&locks, &requester).await.is_ok());
+    assert!(matches!(
+        validate_vehicle_owner(&locks, &other).await,
         Err(ApiError::Conflict(_))
     ));
 }

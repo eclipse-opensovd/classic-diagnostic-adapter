@@ -22,7 +22,7 @@ use cda_interfaces::communication_control::{
     CommunicationError, CommunicationOperation, CommunicationState,
 };
 
-use super::state::CommunicationStateData;
+use super::state::{ActivationKind, CommunicationStateData, EnabledActivity, LifecyclePhase};
 
 /// A lifecycle transition a caller can ask the state machine to admit.
 ///
@@ -36,12 +36,19 @@ pub(crate) enum LifecycleRequest {
     EnableAndDetect,
     /// Variant detection only, without touching transport or hooks.
     Detect,
+    /// Ensure transport is up and run explicit variant detection.
+    EnsureDetected,
     /// Take the sole exclusive disable lease.
     Disable,
     /// Re-activate after an exclusive disable lease is released.
     ///
     /// The caller verifies that its lease owns the current disable.
     Resume,
+    /// Hand an exclusive disable lease over directly to a full activation with
+    /// variant detection, whatever the lease displaced.
+    ///
+    /// The caller verifies that its lease owns the current disable.
+    ResumeAndDetect,
 }
 
 impl LifecycleRequest {
@@ -49,7 +56,9 @@ impl LifecycleRequest {
     pub(crate) const fn operation(self) -> CommunicationOperation {
         match self {
             Self::Enable => CommunicationOperation::Enable,
-            Self::EnableAndDetect => CommunicationOperation::EnableAndDetect,
+            Self::EnableAndDetect | Self::EnsureDetected | Self::ResumeAndDetect => {
+                CommunicationOperation::EnableAndDetect
+            }
             Self::Detect => CommunicationOperation::Detect,
             Self::Disable => CommunicationOperation::Disable,
             Self::Resume => CommunicationOperation::Resume,
@@ -61,21 +70,25 @@ impl LifecycleRequest {
 /// update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LifecycleDecision {
-    /// Claim `Enabling(operation)` and run that activation sequence.
-    Claim(CommunicationOperation),
-    /// Claim the detection slot while leaving the state `Enabled`.
+    /// Claim `Enabling` for this activation kind and run its sequence.
+    Claim(ActivationKind),
+    /// Claim `Enabled(Detecting)`, leaving the public state `Enabled`.
     ClaimDetection,
     /// Join an in-flight detection instead of starting another one.
     JoinDetection,
-    /// Join an in-flight activation. The operation identifies the operation
+    /// Join an in-flight activation. The kind identifies the activation
     /// being joined, not the operation that requested the join.
-    Join(CommunicationOperation),
+    Join(ActivationKind),
     /// Communication is already enabled, so no stage runs. Use
     /// [`Detect`](CommunicationOperation::Detect) to detect.
     AlreadyEnabled,
     /// Claim `Disabling` and grant the lease. `resumes_transport` records
-    /// whether releasing the lease must restore the transport.
-    ClaimDisable { resumes_transport: bool },
+    /// whether releasing the lease must restore the transport, `tears_down`
+    /// whether granting it must take hooks and transport down first.
+    ClaimDisable {
+        resumes_transport: bool,
+        tears_down: bool,
+    },
     /// The released lease displaced no transport, so settle straight back to
     /// `Disabled` without activating anything.
     SettleDisabled,
@@ -103,118 +116,133 @@ pub(crate) fn decide(
     worker_shutting_down: bool,
     request: LifecycleRequest,
 ) -> LifecycleDecision {
-    // Reject all new requests once shutdown begins.
+    // Reject all new requests once shutdown begins. `publish_shutdown` sets
+    // `shutting_down` before entering `Stopped`, so this covers that phase too.
     if worker_shutting_down || state.shutting_down {
         return LifecycleDecision::ShuttingDown;
     }
 
     let guards_held = !state.active_guards.is_empty();
 
-    // Guards and in-flight detection prevent disable from every state.
-    if request == LifecycleRequest::Disable && (guards_held || state.detection_in_flight.is_some())
-    {
+    // Guards and in-flight detection prevent disable, so the transport cannot
+    // be torn down underneath them.
+    if request == LifecycleRequest::Disable && (guards_held || state.detection().is_some()) {
         return LifecycleDecision::GuardsHeld;
     }
 
-    match (&state.state, request) {
+    match (state.phase(), request) {
         // Already satisfied, and they do not trigger detection.
         (
-            CommunicationState::Enabled,
+            LifecyclePhase::Enabled(_),
             LifecycleRequest::Enable | LifecycleRequest::EnableAndDetect,
         ) => LifecycleDecision::AlreadyEnabled,
-        // Detection uses its own in-flight slot and leaves the state enabled.
-        (CommunicationState::Enabled, LifecycleRequest::Detect) => {
-            if state.detection_in_flight.is_some() {
-                LifecycleDecision::JoinDetection
-            } else if guards_held {
+        // Detection has its own in-flight slot and leaves the state enabled.
+        (
+            LifecyclePhase::Enabled(EnabledActivity::Detecting(_)),
+            LifecycleRequest::Detect | LifecycleRequest::EnsureDetected,
+        ) => LifecycleDecision::JoinDetection,
+        (
+            LifecyclePhase::Enabled(EnabledActivity::Idle),
+            LifecycleRequest::Detect | LifecycleRequest::EnsureDetected,
+        ) => {
+            if guards_held {
                 LifecycleDecision::GuardsHeld
             } else {
                 LifecycleDecision::ClaimDetection
             }
         }
         // Releasing this lease restores the live transport.
-        (CommunicationState::Enabled, LifecycleRequest::Disable) => claim_disable(state, true),
-
-        // Releasing a lease from a disabled or fail-closed runtime remains disabled.
-        (
-            CommunicationState::Disabled | CommunicationState::RecoveryRequired(_),
-            LifecycleRequest::Disable,
-        ) => claim_disable(state, false),
-
-        // Recovery from an ordinary error starts a new activation.
-        (CommunicationState::Disabled | CommunicationState::Error(_), LifecycleRequest::Enable) => {
-            LifecycleDecision::Claim(CommunicationOperation::Enable)
-        }
-        (
-            CommunicationState::Disabled | CommunicationState::Error(_),
-            LifecycleRequest::EnableAndDetect,
-        ) => LifecycleDecision::Claim(CommunicationOperation::EnableAndDetect),
-        // Detection needs an enabled transport and never brings one up.
-        (
-            CommunicationState::Disabled
-            | CommunicationState::RecoveryRequired(_)
-            | CommunicationState::Error(_)
-            | CommunicationState::Enabling(_),
-            LifecycleRequest::Detect,
-        ) => LifecycleDecision::NotEnabled,
-
-        // Activation requests join the in-flight activation.
-        (
-            CommunicationState::Enabling(in_flight),
-            LifecycleRequest::Enable | LifecycleRequest::EnableAndDetect,
-        ) => LifecycleDecision::Join(*in_flight),
-
-        // Disabling / DisabledExclusive:
-        (
-            current @ (CommunicationState::Disabling | CommunicationState::DisabledExclusive),
-            LifecycleRequest::Enable | LifecycleRequest::EnableAndDetect | LifecycleRequest::Detect,
-        ) => LifecycleDecision::LeaseHeld(current.clone()),
-
-        // The disable owner determines whether release resumes the transport.
-        (CommunicationState::DisabledExclusive, LifecycleRequest::Resume) => {
-            match state.disable_owner {
-                Some(owner) if owner.resumes_transport => {
-                    LifecycleDecision::Claim(CommunicationOperation::Resume)
-                }
-                Some(_) => LifecycleDecision::SettleDisabled,
-                None => LifecycleDecision::Conflict,
+        (LifecyclePhase::Enabled(EnabledActivity::Idle), LifecycleRequest::Disable) => {
+            LifecycleDecision::ClaimDisable {
+                resumes_transport: true,
+                tears_down: true,
             }
         }
-
+        // Releasing a lease from a disabled or fail-closed runtime remains disabled.
+        (
+            LifecyclePhase::Disabled | LifecyclePhase::RecoveryRequired(_),
+            LifecycleRequest::Disable,
+        ) => LifecycleDecision::ClaimDisable {
+            resumes_transport: false,
+            tears_down: false,
+        },
+        // A failed activation may have left hooks or transport partially up, so
+        // the lease tears down defensively and releasing it settles to `Disabled`.
+        // Without this, an exclusive owner (e.g. a network reset) could never
+        // recover communication from an ordinary error.
+        (LifecyclePhase::Error(_), LifecycleRequest::Disable) => LifecycleDecision::ClaimDisable {
+            resumes_transport: false,
+            tears_down: true,
+        },
+        // Recovery from an ordinary error starts a new activation.
+        (LifecyclePhase::Disabled | LifecyclePhase::Error(_), LifecycleRequest::Enable) => {
+            LifecycleDecision::Claim(ActivationKind::Enable)
+        }
+        (
+            LifecyclePhase::Disabled | LifecyclePhase::Error(_),
+            LifecycleRequest::EnableAndDetect | LifecycleRequest::EnsureDetected,
+        ) => LifecycleDecision::Claim(ActivationKind::EnableAndDetect),
+        // Detection needs an enabled transport and never brings one up.
+        (
+            LifecyclePhase::Disabled
+            | LifecyclePhase::RecoveryRequired(_)
+            | LifecyclePhase::Error(_)
+            | LifecyclePhase::Enabling(_),
+            LifecycleRequest::Detect,
+        ) => LifecycleDecision::NotEnabled,
+        // Activation requests join the in-flight activation.
+        (
+            LifecyclePhase::Enabling(attempt),
+            LifecycleRequest::Enable
+            | LifecycleRequest::EnableAndDetect
+            | LifecycleRequest::EnsureDetected,
+        ) => LifecycleDecision::Join(attempt.kind),
+        // The exclusive disable lease blocks activation and detection.
+        (
+            current @ (LifecyclePhase::Disabling(_) | LifecyclePhase::DisabledExclusive(_)),
+            LifecycleRequest::Enable
+            | LifecycleRequest::EnableAndDetect
+            | LifecycleRequest::Detect
+            | LifecycleRequest::EnsureDetected,
+        ) => LifecycleDecision::LeaseHeld(current.state()),
+        // The disable owner determines whether release resumes the transport.
+        (LifecyclePhase::DisabledExclusive(owner), LifecycleRequest::Resume) => {
+            if owner.resumes_transport {
+                LifecycleDecision::Claim(ActivationKind::Resume)
+            } else {
+                LifecycleDecision::SettleDisabled
+            }
+        }
+        // The lease ends only as the activation starts, so nothing else can bring
+        // communication up in between. A failure is an ordinary failed activation.
+        (LifecyclePhase::DisabledExclusive(_), LifecycleRequest::ResumeAndDetect) => {
+            LifecycleDecision::Claim(ActivationKind::EnableAndDetect)
+        }
+        // Only for exhaustiveness: the early return already rejects `Stopped`.
+        (LifecyclePhase::Stopped(_), _) => LifecycleDecision::ShuttingDown,
         // No activation, unrelated lease, or resume can escape fail-closed recovery.
         (
-            CommunicationState::RecoveryRequired(_),
-            LifecycleRequest::Enable | LifecycleRequest::EnableAndDetect,
+            LifecyclePhase::RecoveryRequired(_),
+            LifecycleRequest::Enable
+            | LifecycleRequest::EnableAndDetect
+            | LifecycleRequest::EnsureDetected,
         )
         | (
-            CommunicationState::Error(_)
-            | CommunicationState::Enabling(_)
-            | CommunicationState::Disabling
-            | CommunicationState::DisabledExclusive,
+            LifecyclePhase::Enabling(_)
+            | LifecyclePhase::Disabling(_)
+            | LifecyclePhase::DisabledExclusive(_)
+            | LifecyclePhase::Enabled(EnabledActivity::Detecting(_)),
             LifecycleRequest::Disable,
         )
         | (
-            CommunicationState::Enabled
-            | CommunicationState::Disabled
-            | CommunicationState::RecoveryRequired(_)
-            | CommunicationState::Enabling(_)
-            | CommunicationState::Disabling
-            | CommunicationState::Error(_),
-            LifecycleRequest::Resume,
+            LifecyclePhase::Enabled(_)
+            | LifecyclePhase::Disabled
+            | LifecyclePhase::RecoveryRequired(_)
+            | LifecyclePhase::Enabling(_)
+            | LifecyclePhase::Disabling(_)
+            | LifecyclePhase::Error(_),
+            LifecycleRequest::Resume | LifecycleRequest::ResumeAndDetect,
         ) => LifecycleDecision::Conflict,
-    }
-}
-
-/// The `Disable` cell shared by `Enabled` and `Disabled`, which differ only in
-/// what releasing the resulting lease means.
-///
-/// [`decide`] has already rejected held guards, so only exclusivity is left to
-/// check.
-fn claim_disable(state: &CommunicationStateData, resumes_transport: bool) -> LifecycleDecision {
-    if state.disable_owner.is_some() {
-        LifecycleDecision::Conflict
-    } else {
-        LifecycleDecision::ClaimDisable { resumes_transport }
     }
 }
 
@@ -223,40 +251,290 @@ fn claim_disable(state: &CommunicationStateData, resumes_transport: bool) -> Lif
 /// Guard acquisition is separate from lifecycle transitions. Variant detection
 /// does not affect guard admission, because communication remains enabled while
 /// it runs.
-pub(crate) fn guard_admission(state: &CommunicationState) -> Result<(), CommunicationError> {
-    match state {
+pub(crate) fn guard_admission(phase: &LifecyclePhase) -> Result<(), CommunicationError> {
+    match phase.state() {
         CommunicationState::Enabled => Ok(()),
         CommunicationState::Disabled => Err(CommunicationError::Disabled),
         CommunicationState::Enabling(_) => Err(CommunicationError::Enabling),
         CommunicationState::Disabling => Err(CommunicationError::Disabling),
         CommunicationState::DisabledExclusive => Err(CommunicationError::DisabledExclusive),
         CommunicationState::RecoveryRequired(failure) | CommunicationState::Error(failure) => {
-            Err(CommunicationError::Failed(failure.clone()))
+            Err(CommunicationError::Failed(failure))
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::{
-        HashSet,
-        communication_control::{CommunicationOperationFailure, VariantDetectionMode},
+    use cda_interfaces::communication_control::{
+        CommunicationOperationFailure, VariantDetectionMode,
     };
 
-    use super::{super::guard::CommunicationGuardId, *};
+    use super::{
+        super::{guard::CommunicationGuardId, state::ActivationAttempt},
+        *,
+    };
 
     /// A default lifecycle state with no active guards, detection, or lease.
-    fn data(state: CommunicationState) -> CommunicationStateData {
-        CommunicationStateData {
-            state,
-            active_guards: HashSet::default(),
-            disable_owner: None,
-            enabling_result: None,
-            detection_in_flight: None,
-            configured_variant_detection: VariantDetectionMode::Always,
-            variant_detector: None,
-            variant_detection: VariantDetectionMode::Never,
-            shutting_down: false,
+    fn data(phase: LifecyclePhase) -> CommunicationStateData {
+        CommunicationStateData::new(phase, VariantDetectionMode::Always)
+    }
+
+    fn enabling(kind: ActivationKind) -> LifecyclePhase {
+        LifecyclePhase::Enabling(ActivationAttempt {
+            kind,
+            result: tokio::sync::watch::channel(None).1,
+            detects: false,
+        })
+    }
+
+    fn owner() -> super::super::disable::DisableOwner {
+        super::super::disable::DisableOwner {
+            id: super::super::disable::DisableLeaseId::new(),
+            resumes_transport: true,
+            tears_down: true,
+            resume_detects: false,
+        }
+    }
+
+    fn assert_decisions(phase: LifecyclePhase, expected: [LifecycleDecision; 5]) {
+        let state = data(phase);
+        let actual = [
+            LifecycleRequest::Enable,
+            LifecycleRequest::EnableAndDetect,
+            LifecycleRequest::Detect,
+            LifecycleRequest::Disable,
+            LifecycleRequest::Resume,
+        ]
+        .map(|request| decide(&state, false, request));
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert_eq!(actual, expected, "phase {:?}", state.phase());
+        }
+        for request in [
+            LifecycleRequest::Enable,
+            LifecycleRequest::Detect,
+            LifecycleRequest::Disable,
+        ] {
+            assert_eq!(
+                decide(&state, true, request),
+                LifecycleDecision::ShuttingDown
+            );
+        }
+    }
+
+    #[test]
+    fn enabled_activity_admission_matrix() {
+        use LifecycleDecision::*;
+
+        assert_decisions(
+            LifecyclePhase::Enabled(EnabledActivity::Idle),
+            [
+                AlreadyEnabled,
+                AlreadyEnabled,
+                ClaimDetection,
+                ClaimDisable {
+                    resumes_transport: true,
+                    tears_down: true,
+                },
+                Conflict,
+            ],
+        );
+        assert_decisions(
+            LifecyclePhase::Enabled(EnabledActivity::Detecting(
+                tokio::sync::watch::channel(None).1,
+            )),
+            [
+                AlreadyEnabled,
+                AlreadyEnabled,
+                JoinDetection,
+                GuardsHeld,
+                Conflict,
+            ],
+        );
+    }
+
+    /// [[ test~communication-ensure-detection-admission, Explicit detection admission follows lifecycle state, test ]]
+    #[test]
+    fn ensure_detected_admission() {
+        use LifecycleDecision::*;
+
+        let cases = [
+            (
+                LifecyclePhase::Disabled,
+                Claim(ActivationKind::EnableAndDetect),
+            ),
+            (
+                LifecyclePhase::Enabled(EnabledActivity::Idle),
+                ClaimDetection,
+            ),
+            (
+                LifecyclePhase::Enabled(EnabledActivity::Detecting(
+                    tokio::sync::watch::channel(None).1,
+                )),
+                JoinDetection,
+            ),
+            (
+                enabling(ActivationKind::Enable),
+                Join(ActivationKind::Enable),
+            ),
+            (
+                LifecyclePhase::DisabledExclusive(owner()),
+                LeaseHeld(CommunicationState::DisabledExclusive),
+            ),
+        ];
+        for (phase, expected) in cases {
+            let state = data(phase);
+            assert_eq!(
+                decide(&state, false, LifecycleRequest::EnsureDetected),
+                expected
+            );
+        }
+        let mut guarded = data(LifecyclePhase::Enabled(EnabledActivity::Idle));
+        guarded
+            .active_guards
+            .insert(CommunicationGuardId(uuid::Uuid::new_v4()));
+        assert_eq!(
+            decide(&guarded, false, LifecycleRequest::EnsureDetected),
+            GuardsHeld
+        );
+    }
+
+    /// Only the lease holder's own `DisabledExclusive` phase hands over to an
+    /// activation with detection, whatever the lease displaced.
+    /// [[ test~communication-resume-and-detect-admission, A hand-over with detection is admitted only from the exclusive lease, test ]]
+    #[test]
+    fn resume_and_detect_admission() {
+        use LifecycleDecision::*;
+
+        for resumes_transport in [true, false] {
+            let state = data(LifecyclePhase::DisabledExclusive(
+                super::super::disable::DisableOwner {
+                    resumes_transport,
+                    ..owner()
+                },
+            ));
+            assert_eq!(
+                decide(&state, false, LifecycleRequest::ResumeAndDetect),
+                Claim(ActivationKind::EnableAndDetect),
+                "resumes_transport {resumes_transport}"
+            );
+            assert_eq!(
+                decide(&state, true, LifecycleRequest::ResumeAndDetect),
+                ShuttingDown
+            );
+        }
+        let failure = CommunicationOperationFailure::WorkerUnavailable {
+            operation: CommunicationOperation::EnableAndDetect,
+        };
+        for phase in [
+            LifecyclePhase::Disabled,
+            LifecyclePhase::Enabled(EnabledActivity::Idle),
+            enabling(ActivationKind::Enable),
+            LifecyclePhase::Disabling(owner()),
+            LifecyclePhase::Error(failure.clone()),
+            LifecyclePhase::RecoveryRequired(failure.clone()),
+        ] {
+            let state = data(phase);
+            assert_eq!(
+                decide(&state, false, LifecycleRequest::ResumeAndDetect),
+                Conflict,
+                "phase {:?}",
+                state.phase()
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_and_failure_admission_matrix() {
+        use LifecycleDecision::*;
+
+        let failure = CommunicationOperationFailure::WorkerUnavailable {
+            operation: CommunicationOperation::Resume,
+        };
+        assert_decisions(
+            LifecyclePhase::Disabled,
+            [
+                Claim(ActivationKind::Enable),
+                Claim(ActivationKind::EnableAndDetect),
+                NotEnabled,
+                ClaimDisable {
+                    resumes_transport: false,
+                    tears_down: false,
+                },
+                Conflict,
+            ],
+        );
+        assert_decisions(
+            LifecyclePhase::RecoveryRequired(failure.clone()),
+            [
+                Conflict,
+                Conflict,
+                NotEnabled,
+                ClaimDisable {
+                    resumes_transport: false,
+                    tears_down: false,
+                },
+                Conflict,
+            ],
+        );
+        assert_decisions(
+            LifecyclePhase::Error(failure),
+            [
+                Claim(ActivationKind::Enable),
+                Claim(ActivationKind::EnableAndDetect),
+                NotEnabled,
+                ClaimDisable {
+                    resumes_transport: false,
+                    tears_down: true,
+                },
+                Conflict,
+            ],
+        );
+    }
+
+    #[test]
+    fn activation_and_exclusive_lease_admission_matrix() {
+        use LifecycleDecision::*;
+
+        for kind in [
+            ActivationKind::Enable,
+            ActivationKind::EnableAndDetect,
+            ActivationKind::Resume,
+        ] {
+            assert_decisions(
+                enabling(kind),
+                [Join(kind), Join(kind), NotEnabled, Conflict, Conflict],
+            );
+        }
+        assert_decisions(
+            LifecyclePhase::Disabling(owner()),
+            [
+                LeaseHeld(CommunicationState::Disabling),
+                LeaseHeld(CommunicationState::Disabling),
+                LeaseHeld(CommunicationState::Disabling),
+                Conflict,
+                Conflict,
+            ],
+        );
+        for resumes_transport in [true, false] {
+            let resume = if resumes_transport {
+                Claim(ActivationKind::Resume)
+            } else {
+                SettleDisabled
+            };
+            assert_decisions(
+                LifecyclePhase::DisabledExclusive(super::super::disable::DisableOwner {
+                    resumes_transport,
+                    ..owner()
+                }),
+                [
+                    LeaseHeld(CommunicationState::DisabledExclusive),
+                    LeaseHeld(CommunicationState::DisabledExclusive),
+                    LeaseHeld(CommunicationState::DisabledExclusive),
+                    Conflict,
+                    resume,
+                ],
+            );
         }
     }
 
@@ -265,46 +543,45 @@ mod tests {
     #[test]
     fn held_guards_refuse_disable_from_every_state() {
         let states = [
-            CommunicationState::Enabled,
-            CommunicationState::Disabled,
-            CommunicationState::Enabling(CommunicationOperation::Enable),
-            CommunicationState::Disabling,
-            CommunicationState::DisabledExclusive,
-            CommunicationState::Error(CommunicationOperationFailure::TransitionFailure {
+            LifecyclePhase::Enabled(EnabledActivity::Idle),
+            LifecyclePhase::Disabled,
+            enabling(ActivationKind::Enable),
+            LifecyclePhase::Disabling(owner()),
+            LifecyclePhase::DisabledExclusive(owner()),
+            LifecyclePhase::RecoveryRequired(CommunicationOperationFailure::TransitionFailure {
+                operation: CommunicationOperation::Resume,
+            }),
+            LifecyclePhase::Error(CommunicationOperationFailure::TransitionFailure {
                 operation: CommunicationOperation::Enable,
             }),
         ];
 
         for state in states {
-            let mut guarded = data(state.clone());
+            let mut guarded = data(state);
             guarded
                 .active_guards
                 .insert(CommunicationGuardId(uuid::Uuid::new_v4()));
             assert_eq!(
                 decide(&guarded, false, LifecycleRequest::Disable),
                 LifecycleDecision::GuardsHeld,
-                "state {state:?}"
+                "state {:?}",
+                guarded.phase()
             );
         }
     }
 
     #[test]
     fn diagnostic_guards_require_settled_enabled_state() {
-        assert!(guard_admission(&CommunicationState::Enabled).is_ok());
-        assert!(guard_admission(&CommunicationState::Disabled).is_err());
-        assert!(
-            guard_admission(&CommunicationState::Enabling(
-                CommunicationOperation::EnableAndDetect
-            ))
-            .is_err()
-        );
-        assert!(guard_admission(&CommunicationState::Disabling).is_err());
-        assert!(guard_admission(&CommunicationState::DisabledExclusive).is_err());
+        assert!(guard_admission(&LifecyclePhase::Enabled(EnabledActivity::Idle)).is_ok());
+        assert!(guard_admission(&LifecyclePhase::Disabled).is_err());
+        assert!(guard_admission(&enabling(ActivationKind::EnableAndDetect)).is_err());
+        assert!(guard_admission(&LifecyclePhase::Disabling(owner())).is_err());
+        assert!(guard_admission(&LifecyclePhase::DisabledExclusive(owner())).is_err());
     }
 
     #[test]
     fn disable_conflicts_with_an_in_flight_activation() {
-        let enabling = data(CommunicationState::Enabling(CommunicationOperation::Enable));
+        let enabling = data(enabling(ActivationKind::Enable));
         assert_eq!(
             decide(&enabling, false, LifecycleRequest::Disable),
             LifecycleDecision::Conflict
@@ -315,16 +592,12 @@ mod tests {
     #[test]
     fn detect_is_refused_while_an_activation_is_in_flight() {
         for in_flight in [
-            CommunicationOperation::Enable,
-            CommunicationOperation::EnableAndDetect,
-            CommunicationOperation::Resume,
+            ActivationKind::Enable,
+            ActivationKind::EnableAndDetect,
+            ActivationKind::Resume,
         ] {
             assert_eq!(
-                decide(
-                    &data(CommunicationState::Enabling(in_flight)),
-                    false,
-                    LifecycleRequest::Detect
-                ),
+                decide(&data(enabling(in_flight)), false, LifecycleRequest::Detect),
                 LifecycleDecision::NotEnabled,
                 "in flight {in_flight:?}"
             );
@@ -334,7 +607,7 @@ mod tests {
     /// Guards block new detection, but detection does not block new guards.
     #[test]
     fn a_sweep_in_flight_still_admits_guards() {
-        let mut held = data(CommunicationState::Enabled);
+        let mut held = data(LifecyclePhase::Enabled(EnabledActivity::Idle));
         held.active_guards
             .insert(CommunicationGuardId(uuid::Uuid::new_v4()));
         assert_eq!(
@@ -343,10 +616,11 @@ mod tests {
             "a held guard must still hold off a new sweep"
         );
 
-        let mut sweeping = data(CommunicationState::Enabled);
-        sweeping.detection_in_flight = Some(tokio::sync::watch::channel(None).1);
+        let sweeping = data(LifecyclePhase::Enabled(EnabledActivity::Detecting(
+            tokio::sync::watch::channel(None).1,
+        )));
         assert_eq!(
-            guard_admission(&sweeping.state),
+            guard_admission(sweeping.phase()),
             Ok(()),
             "a sweep must not close the diagnostic surface over a live transport"
         );
