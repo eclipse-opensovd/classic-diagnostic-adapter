@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! ECU list persistence: storing and reusing the vehicle topology.
+//! ECU list persistence: storing, reusing and resetting the vehicle topology.
 
 use std::time::Duration;
 
@@ -23,18 +23,21 @@ use http::{Method, StatusCode};
 use opensovd_cda_lib::config::configfile::{Configuration, TransportOverride, TransportType};
 
 use crate::{
-    sovd::{COMPONENTS_FLXC1000_BASE, COMPONENTS_FSNR2000_BASE, force_variant_detection},
+    sovd::{
+        COMPONENTS_FLXC1000_BASE, COMPONENTS_FSNR2000_BASE, force_variant_detection, runtimefiles,
+    },
     util::{
         TestingError,
         config::CDA_STORAGE_DIR,
         ecusim,
-        http::{CdaClient, poll_until, send_authenticated_cda_request},
+        http::{CdaClient, poll_until, response_to_t, send_authenticated_cda_request},
         locks::{COMPONENTS_FLXC1000_LOCKS, Lock, default_timeout},
         test_containers::unix_time_secs,
         test_env::{Lease, TestEnv, Transport, skip_unless, wait_for_ecus_online},
     },
 };
 
+const NETWORK_RESET: &str = "apps/sovd2uds/operations/networkreset/executions";
 const FLXC1000_APP_VARIANT: &str = "FLXC1000_App_0101";
 
 /// The collection of the persisted topology in the storage of the CDA.
@@ -348,6 +351,230 @@ async fn last_seen_is_written_back_at_shutdown() {
     );
 }
 
+async fn start_reset(cda: &impl CdaClient, body: &str, expected: StatusCode) -> Option<String> {
+    let response = send_authenticated_cda_request(
+        cda,
+        NETWORK_RESET,
+        expected,
+        Method::POST,
+        Some(body),
+        None,
+    )
+    .await
+    .expect("networkreset request failed");
+    (expected == StatusCode::ACCEPTED).then(|| {
+        response_to_t::<sovd_interfaces::common::operations::ExecutionCreatedResponse>(&response)
+            .expect("Invalid networkreset response")
+            .id
+    })
+}
+
+async fn wait_reset_completed(cda: &impl CdaClient, id: &str) {
+    use sovd_interfaces::apps::sovd2uds::operations::networkreset::{
+        ExecutionResponse, ExecutionStatusKind,
+    };
+    poll_until(
+        Duration::from_secs(60),
+        Duration::from_millis(500),
+        || async {
+            let response = send_authenticated_cda_request(
+                cda,
+                &format!("{NETWORK_RESET}/{id}?include-schema=true"),
+                StatusCode::OK,
+                Method::GET,
+                None,
+                None,
+            )
+            .await?;
+            let execution: ExecutionResponse = response_to_t(&response)?;
+            assert!(execution.schema.is_some(), "include-schema must be honored");
+            let execution_json =
+                serde_json::to_value(&execution).expect("Invalid execution status");
+            assert_eq!(
+                execution_json.get("capability"),
+                Some(&serde_json::json!("execute"))
+            );
+            match &execution.status {
+                ExecutionStatusKind::Completed => Ok(Ok(())),
+                ExecutionStatusKind::Running => Ok(Err("networkreset is running".to_owned())),
+                status => panic!("networkreset ended with {status:?}: {execution:?}"),
+            }
+        },
+    )
+    .await
+    .unwrap_or_else(|e| panic!("networkreset did not complete: {e:?}"));
+}
+
+/// Works on both `DoIP` and CAN-only configurations, without a persistence hook.
+/// [[ itest~plugin-vehicle-topology-reset-networkreset-without-persistence-completes, Networkreset without persistence completes, itest ]]
+#[tokio::test]
+async fn networkreset_without_persistence_completes() {
+    let env = TestEnv::builder()
+        .await
+        .expect("Failed to set up the test environment");
+    assert!(
+        !env.config
+            .communication
+            .topology
+            .ecu_list_persistence
+            .enabled
+    );
+    wait_for_ecus_online(&env.config)
+        .await
+        .expect("ECUs did not come online");
+    let lock_id = runtimefiles::setup_with_lock(&env).await;
+    let id = start_reset(
+        &env,
+        r#"{"parameters":{"clear_persisted":false}}"#,
+        StatusCode::ACCEPTED,
+    )
+    .await
+    .expect("execution id");
+    wait_reset_completed(&env, &id).await;
+    wait_for_ecus_online(&env.config)
+        .await
+        .expect("Rediscovered ECUs did not come online");
+    runtimefiles::teardown_lock(&env, &lock_id).await;
+}
+
+async fn assert_networkreset_discoverable(cda: &impl CdaClient) {
+    let collection = send_authenticated_cda_request(
+        cda,
+        "apps/sovd2uds/operations",
+        StatusCode::OK,
+        Method::GET,
+        None,
+        None,
+    )
+    .await
+    .expect("Operation discovery failed");
+    let collection: serde_json::Value =
+        response_to_t(&collection).expect("Invalid operations collection");
+    let operation = collection
+        .get("items")
+        .expect("Operation collection items missing")
+        .as_array()
+        .expect("Operation collection items must be an array")
+        .iter()
+        .find(|item| item.get("id").and_then(serde_json::Value::as_str) == Some("networkreset"))
+        .expect("networkreset must be advertised");
+    let operation_id = operation
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .expect("Operation id missing");
+    let details = send_authenticated_cda_request(
+        cda,
+        &format!("apps/sovd2uds/operations/{operation_id}?include-schema=true"),
+        StatusCode::OK,
+        Method::GET,
+        None,
+        None,
+    )
+    .await
+    .expect("Operation details failed");
+    let details: serde_json::Value = response_to_t(&details).expect("Invalid operation details");
+    let capabilities = details.get("schema").expect("Capability PathItem missing");
+    assert!(capabilities.get("post").is_some());
+    assert!(capabilities.get("get").is_some());
+    assert!(capabilities.get("delete").is_some());
+    assert!(
+        capabilities.get("put").is_none(),
+        "Reset cannot be adjusted"
+    );
+    for name in ["clear_persisted", "trigger_detection"] {
+        let parameter = capabilities
+            .pointer(&format!(
+                "/post/requestBody/content/application~1json/schema/properties/parameters/\
+                 properties/{name}"
+            ))
+            .expect("Parameter schema missing");
+        assert_eq!(parameter.get("default"), Some(&serde_json::json!(true)));
+    }
+}
+
+/// `networkreset` clears the persisted topology and rediscovers it.
+/// [[ itest~plugin-vehicle-topology-reset, networkreset clears and rediscovers the topology, itest ]]
+#[tokio::test]
+async fn networkreset_clears_and_rediscovers_the_topology() {
+    if skip_unless(Transport::uses_doip, "DoIP topology only") {
+        return;
+    }
+    let env = persistence_env(CommunicationInitMode::WhenNotPersisted).await;
+    wait_for(
+        "the persisted topology",
+        Duration::from_secs(30),
+        || async { !persisted_topology(&env).await.is_empty() },
+    )
+    .await;
+
+    assert_networkreset_discoverable(&env).await;
+
+    // A vehicle lock is required.
+    start_reset(&env, "{}", StatusCode::FORBIDDEN).await;
+    let lock_id = runtimefiles::setup_with_lock(&env).await;
+
+    // Both flags false is no operation.
+    start_reset(
+        &env,
+        r#"{"parameters":{"clear_persisted":false,"trigger_detection":false}}"#,
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+
+    // Clear only: nothing is persisted afterwards.
+    let id = start_reset(
+        &env,
+        r#"{"parameters":{"trigger_detection":false}}"#,
+        StatusCode::ACCEPTED,
+    )
+    .await
+    .expect("execution id");
+    wait_reset_completed(&env, &id).await;
+    assert!(
+        persisted_topology(&env).await.is_empty(),
+        "the topology must be cleared"
+    );
+
+    // Clear and detect (default): the topology is rediscovered and persisted.
+    let id = start_reset(&env, "{}", StatusCode::ACCEPTED)
+        .await
+        .expect("execution id");
+    wait_reset_completed(&env, &id).await;
+    assert!(
+        persisted_topology(&env)
+            .await
+            .contains(FLXC1000_APP_VARIANT)
+    );
+
+    let list = send_authenticated_cda_request(
+        &env,
+        NETWORK_RESET,
+        StatusCode::OK,
+        Method::GET,
+        None,
+        None,
+    )
+    .await
+    .expect("Failed to list executions");
+    let list: serde_json::Value = response_to_t(&list).expect("Invalid execution list");
+    let first_id = list
+        .get("items")
+        .and_then(|items| items.get(0))
+        .and_then(|item| item.get("id"));
+    assert_eq!(first_id, Some(&serde_json::json!(id)));
+    send_authenticated_cda_request(
+        &env,
+        &format!("{NETWORK_RESET}/{id}"),
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        None,
+        None,
+    )
+    .await
+    .expect("Failed to delete the execution");
+
+    runtimefiles::teardown_lock(&env, &lock_id).await;
+}
 /// [[ itest~ecu-list-persistence-unreachable, No gateway connected keeps the persisted states, itest ]]
 #[tokio::test]
 async fn all_gateways_unreachable_keeps_persisted_states() {
