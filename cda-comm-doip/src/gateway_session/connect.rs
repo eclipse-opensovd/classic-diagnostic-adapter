@@ -22,7 +22,9 @@
 //! A connect does not search a gateway it could not reach: the caller decides
 //! what a failure means (the persisted reconnect searches by one VIR, an
 //! announcement reports the gateway unreachable). A cancelled session fails
-//! the attempt, even if it connected.
+//! the attempt, even if it connected. While the transport gate is closed a
+//! connect is refused, which says nothing about the gateway: the caller does
+//! not report it.
 
 use std::sync::Arc;
 
@@ -56,6 +58,9 @@ pub(crate) enum ConnectFailure {
     /// The session was cancelled (transport stop or restart).
     #[error("Gateway connection was cancelled")]
     Cancelled,
+    /// The transport gate is closed: communication is quiesced.
+    #[error("Gateway connection was refused while communication is quiesced")]
+    Refused,
     /// The connection could not be established.
     #[error(transparent)]
     Error(#[from] EcuError),
@@ -71,6 +76,8 @@ pub(crate) enum DirectRejection {
     Connected,
     /// A connect of the gateway is in flight.
     Connecting,
+    /// The transport gate is closed: communication is quiesced.
+    Refused,
 }
 
 /// The outcome of a connect started by [`DoipGatewayState::spawn_gateway_connect`].
@@ -176,8 +183,18 @@ impl<T: EcuAddresses + DoipComParams> DoipGatewayState<T> {
         if self.has_connection(gateway.logical_address).await {
             return Ok(());
         }
-        self.open_gateway(held, gateway, ConnectRequest::Discovered)
+        if !self.gate.is_open() {
+            return Err(ConnectFailure::Refused);
+        }
+        match self
+            .open_gateway(held, gateway, ConnectRequest::Discovered)
             .await
+        {
+            // The gate closed during the connect, e.g. while the gateway is
+            // going down for the reset: nothing is known about the gateway.
+            Err(ConnectFailure::Error(_)) if !self.gate.is_open() => Err(ConnectFailure::Refused),
+            result => result,
+        }
     }
 
     /// Marks the ECUs behind the gateways as not reachable and records the
@@ -344,10 +361,11 @@ impl<T: EcuAddresses + DoipComParams> DoipGatewayState<T> {
     }
 
     /// Starts a direct connect (`doip-connect-ecu`) of `gateway` in a task of
-    /// the session. Rejected if a connect of the gateway holds its lock, or the
-    /// gateway is connected. A connect waiting for the lock meanwhile connects
-    /// itself if this one did not connect. The task goes on if the caller
-    /// drops the receiver; the transport stop aborts it.
+    /// the session. Rejected if a connect of the gateway holds its lock, the
+    /// gateway is connected, or the transport gate is closed. A connect waiting
+    /// for the lock meanwhile connects itself if this one did not connect. The
+    /// task goes on if the caller drops the receiver; the transport stop aborts it.
+    /// [[ dimpl~doip-gate-refuses-direct-connect, No direct connect starts while the transport gate is closed, dimpl ]]
     pub(crate) async fn start_direct_connect(
         &self,
         session: &Arc<GatewaySession>,
@@ -360,6 +378,9 @@ impl<T: EcuAddresses + DoipComParams> DoipGatewayState<T> {
         };
         if self.has_connection(logical_address).await {
             return Err(DirectRejection::Connected);
+        }
+        if !self.gate.is_open() {
+            return Err(DirectRejection::Refused);
         }
         let (result_sender, result_receiver) = oneshot::channel();
         let state = self.clone();
@@ -390,9 +411,7 @@ mod tests {
     use cda_interfaces::util::test_utils::wait_until;
     use tokio::sync::oneshot;
 
-    #[cfg(not(windows))]
-    use super::ConnectFailure;
-    use super::GatewaySession;
+    use super::{ConnectFailure, GatewaySession};
     use crate::{
         DiscoveredGateway, DoipDiagGateway,
         config::DiscoveryMode,
@@ -499,6 +518,67 @@ mod tests {
         .await;
         assert_eq!(gateway.state.topology.unreachable(), [0x1000]);
         assert_eq!(fake.connects(), 1);
+        session.connection_tasks.shutdown().await;
+    }
+
+    /// A closed transport gate refuses a connect before it reaches the gateway,
+    /// and a connected gateway stays connected.
+    /// [[ test~doip-gate-refuses-connect-while-quiesced, No gateway connects while the transport gate is closed, test ]]
+    #[tokio::test]
+    async fn closed_gate_refuses_a_connect() {
+        let (fake, gateway, session, _) = blocked_gateway(DiscoveryMode::Full).await;
+        fake.release_connects();
+        gateway.state.gate.close();
+
+        let connect = gateway
+            .state
+            .spawn_gateway_connect(&session, discovered("gw", 0x1000));
+
+        assert!(matches!(connect.wait().await, Err(ConnectFailure::Refused)));
+        assert_eq!(fake.connects(), 0);
+        session.connection_tasks.shutdown().await;
+    }
+
+    /// [[ test~doip-gate-closed-during-connect, A connect that fails after the transport gate closed is refused, test ]]
+    #[tokio::test]
+    async fn connect_failing_after_the_gate_closed_reports_nothing() {
+        let (fake, gateway, session, _) = blocked_gateway(DiscoveryMode::Full).await;
+        let connect = gateway
+            .state
+            .spawn_gateway_connect(&session, discovered("gw", 0x1000));
+        wait_until("the connect to reach the fake gateway", || async {
+            fake.connects() == 1
+        })
+        .await;
+        gateway.state.gate.close();
+        // Ends the held routing activation without an answer, so the connect fails.
+        drop(fake);
+
+        assert!(matches!(connect.wait().await, Err(ConnectFailure::Refused)));
+        assert!(gateway.state.topology.unreachable().is_empty());
+        session.connection_tasks.shutdown().await;
+    }
+
+    /// An announcement refused by the closed transport gate says nothing about
+    /// the gateway, which is not reported unreachable.
+    /// [[ test~doip-refused-announcement-not-reported, An announcement refused by the transport gate is not reported, test ]]
+    #[tokio::test]
+    async fn refused_announcement_is_not_reported_unreachable() {
+        let (fake, gateway, session, _) = blocked_gateway(DiscoveryMode::Full).await;
+        fake.release_connects();
+        gateway.state.gate.close();
+
+        announce(&gateway, &session, discovered("gw", 0x1000)).await;
+
+        // The announcement holds the gateway's connect lock until it is done.
+        assert!(
+            !gateway
+                .state
+                .is_connected_after_in_flight(&session, 0x1000)
+                .await
+        );
+        assert!(gateway.state.topology.unreachable().is_empty());
+        assert_eq!(fake.connects(), 0);
         session.connection_tasks.shutdown().await;
     }
 

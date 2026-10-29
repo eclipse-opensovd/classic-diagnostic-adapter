@@ -26,7 +26,7 @@ use cda_interfaces::communication_control::{
 
 // Re-export CommunicationHandle for plugin builders
 pub use crate::lifecycle::controller::CommunicationHandle;
-use crate::lifecycle::disable::{DisableError, DisableLease, DisableReason};
+use crate::lifecycle::disable::{DisableError, DisableLease, DisableReason, QuiesceLease};
 
 /// A replaceable communication plugin wired into the CDA runtime.
 ///
@@ -81,21 +81,20 @@ pub trait CommunicationPlugin: cda_interfaces::Shutdown {
 
     /// Requests whole-vehicle (re-)detection.
     ///
-    /// Detection runs against a live transport and never brings one up. Every
-    /// row below holds identically in all three `init_mode`s:
+    /// Both causes are an explicit authorization to communicate. The default
+    /// plugin holds the following in every `init_mode`:
     ///
     /// | State                            | Effect                                          |
     /// |----------------------------------|-------------------------------------------------|
     /// | `Enabled`                        | run the detector; transport and hooks untouched |
-    /// | `Disabled` / `Error`             | `TransitionFailure`                             |
+    /// | `Disabled` / `Error`             | enable the transport with a full initialization |
     /// | `Enabling(_)`                    | join the in-flight operation                    |
     /// | `Disabling` / `DisabledExclusive`| `DisableLeaseHeld`                              |
     ///
     /// # Errors
     ///
-    /// Returns [`TransitionFailure`](CommunicationOperationFailure::TransitionFailure)
-    /// whenever communication is not `Enabled`, and an error when detection
-    /// itself fails.
+    /// Returns an error when enabling or detection itself fails, or while an
+    /// exclusive disable lease is held.
     async fn trigger_detection(
         &self,
         cause: DetectionCause,
@@ -109,6 +108,16 @@ pub trait CommunicationPlugin: cda_interfaces::Shutdown {
     /// Returns an error when communication is in use, a disable lease is
     /// already held, or disabling the transport fails.
     async fn disable(&self, reason: DisableReason) -> Result<DisableLease, DisableError>;
+
+    /// Acquires the exclusive quiesce lease: new communication guards are
+    /// refused while it is held, and the transport is not touched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DisableError::InUse`] when communication is in use and
+    /// [`DisableError::Conflict`] when another exclusive lease is held or a
+    /// lifecycle transition or detection is in flight.
+    fn quiesce(&self, reason: DisableReason) -> Result<QuiesceLease, DisableError>;
 
     /// Registers a framework-enforced lifecycle hook (initialization and deinitialization).
     ///

@@ -203,9 +203,17 @@ where
     M: FileManager + Send + Sync + 'static,
     S: SecurityPluginLoader,
 {
+    #[cfg(feature = "doip-direct-connect")]
+    let doip_connect = resources.doip_connect.clone();
     let vehicle_router = build_vehicle_routes::<T, M, S>(config, resources).await;
 
     let handle = dynamic_router.add_routes(vehicle_router).await;
+    #[cfg(feature = "doip-direct-connect")]
+    sovd::apps::sovd2uds::operations::doip_connect_ecu::register_in_collection::<S>(
+        dynamic_router,
+        doip_connect.as_ref(),
+    )
+    .await;
 
     tracing::info!("Vehicle routes added to webserver");
     Ok(handle)
@@ -268,7 +276,44 @@ where
         sovd::apps::sovd2uds::operations::runtimefilesupdate::routes::<S, P, L>(route_state);
     let router = bulk_data_router.merge(operations_router);
     let handle = dynamic_router.add_routes(router.into()).await;
+    dynamic_router
+        .operations()
+        .register::<S>(
+            dynamic_router,
+            sovd::apps::sovd2uds::operations::runtimefilesupdate::OPERATION_ID,
+            sovd::apps::sovd2uds::operations::runtimefilesupdate::COLLECTION_NAME,
+            true,
+        )
+        .await;
     tracing::info!("Runtime update routes added to webserver");
+    handle
+}
+
+/// Mounts the vehicle topology (`networkreset`) routes onto the dynamic router and lists
+/// the operation in the `/apps/sovd2uds/operations` collection.
+pub async fn add_vehicle_topology_routes<S: SecurityPluginLoader>(
+    dynamic_router: &DynamicRouter,
+    plugin: Arc<dyn cda_interfaces::topology::VehicleTopologyPlugin>,
+    locks: Arc<dyn cda_interfaces::runtime_update_api::LockStateProvider>,
+    retry_after: Duration,
+) -> RouteHandle {
+    let state = sovd::apps::sovd2uds::operations::networkreset::VehicleTopologyRouteState {
+        plugin,
+        locks,
+        retry_after,
+    };
+    let router = sovd::apps::sovd2uds::operations::networkreset::routes::<S>(state);
+    let handle = dynamic_router.add_routes(router).await;
+    dynamic_router
+        .operations()
+        .register::<S>(
+            dynamic_router,
+            sovd::apps::sovd2uds::operations::networkreset::OPERATION_ID,
+            sovd::apps::sovd2uds::operations::networkreset::COLLECTION_NAME,
+            true,
+        )
+        .await;
+    tracing::info!("Vehicle topology routes added to webserver");
     handle
 }
 

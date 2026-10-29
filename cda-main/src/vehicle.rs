@@ -317,7 +317,7 @@ pub(crate) fn finish_vehicle_components<S: SecurityPlugin>(
         config.faults.clone(),
         request_lock_provider,
         communication_access,
-        Duration::from_secs(config.communication.deferred_retry_after_seconds),
+        config.deferred_retry_after(),
     );
     VehicleComponents {
         uds_manager,
@@ -370,7 +370,8 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     let mut gateway =
         DiagnosticTransportRouter::<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>::new(
             transport_overrides,
-        );
+        )
+        .with_gate(topology_state.transport_gate());
 
     // Fail clearly when CAN is configured on a build without CAN support.
     // (validate_sanity rejects this too; kept as defense in depth for direct

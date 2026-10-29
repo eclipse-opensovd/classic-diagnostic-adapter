@@ -108,6 +108,18 @@ pub(crate) fn decide(
         return LifecycleDecision::ShuttingDown;
     }
 
+    // A quiesce pauses every transition and detection. Activation from
+    // `Enabled` stays a no-op, since it changes nothing.
+    if state.quiesce_owner.is_some()
+        && !(state.state == CommunicationState::Enabled
+            && matches!(
+                request,
+                LifecycleRequest::Enable | LifecycleRequest::EnableAndDetect
+            ))
+    {
+        return LifecycleDecision::Conflict;
+    }
+
     let guards_held = !state.active_guards.is_empty();
 
     // Guards and in-flight detection prevent disable from every state.
@@ -251,6 +263,7 @@ mod tests {
             state,
             active_guards: HashSet::default(),
             disable_owner: None,
+            quiesce_owner: None,
             enabling_result: None,
             detection_in_flight: None,
             configured_variant_detection: VariantDetectionMode::Always,

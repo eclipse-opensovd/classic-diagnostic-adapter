@@ -25,7 +25,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     DiscoveredGateway, DoipGatewaySetupError, DoipGatewayState, DoipTransportConfig,
-    gateway_session::{GatewaySession, ecu_names_by_gateway},
+    gateway_session::{ConnectFailure, GatewaySession, ecu_names_by_gateway},
     socket::DoIPUdpSocket,
     spawn_connection_task,
 };
@@ -202,11 +202,8 @@ fn connect_announced<T: EcuAddresses + DoipComParams>(
                 warn_if_other_address(&state, &announced).await;
                 return;
             }
-            if state
-                .connect_locked(&connection_guard, announced)
-                .await
-                .is_err()
-            {
+            let result = state.connect_locked(&connection_guard, announced).await;
+            if result.is_err() && !matches!(result, Err(ConnectFailure::Refused)) {
                 state
                     .report_unreachable(&task_session, [logical_address])
                     .await;
