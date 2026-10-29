@@ -107,6 +107,12 @@ jobs:
       - build_rustdoc_security_plugin
     # only run on `main` and `gh-pages` branches and do not run on forks
     if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-pages/')) && github.event_name == 'push' && github.repository_owner == 'eclipse-opensovd'
+    # Only one Pages deployment may be in progress at a time. Serialize deployments
+    # across all runs; do not cancel an in-progress deployment, newer queued ones
+    # replace older pending ones.
+    concurrency:
+      group: github-pages-deployment
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
