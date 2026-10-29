@@ -19,7 +19,6 @@ use cda_interfaces::{
     lock_priority_api::{LockId, LockPriorityPolicy, LockScope},
 };
 use cda_plugin_security::Claims;
-use chrono::{DateTime, SecondsFormat, Utc};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::{
@@ -27,6 +26,7 @@ use crate::{
     sovd::{
         error::{ApiError, ErrorWrapper},
         lock_state::{ActiveLock, DefunctLock, LockCoverage, LockState, ScopeKey, StateError},
+        timestamp::system_time_to_rfc3339,
     },
 };
 
@@ -396,16 +396,11 @@ impl DefunctLock {
     fn to_sovd_lock(&self, claims: &impl Claims) -> sovd_interfaces::locking::Lock {
         sovd_interfaces::locking::Lock {
             id: self.id.to_string(),
-            lock_expiration: Some(
-                DateTime::<Utc>::from(self.original_expires_at)
-                    .to_rfc3339_opts(SecondsFormat::Secs, true),
-            ),
+            lock_expiration: Some(system_time_to_rfc3339(self.original_expires_at)),
             owned: self.principal.subject == claims.sub(),
             x_sovd2uds_isexclusive: self.exclusive,
             x_sovd2uds_broken_by: Some(self.broken_by.clone()),
-            x_sovd2uds_broken_at: Some(
-                DateTime::<Utc>::from(self.broken_at).to_rfc3339_opts(SecondsFormat::Secs, true),
-            ),
+            x_sovd2uds_broken_at: Some(system_time_to_rfc3339(self.broken_at)),
             x_sovd2uds_current_holder: None,
             schema: None,
         }
@@ -413,14 +408,11 @@ impl DefunctLock {
 
     fn details(&self, claims: &impl Claims) -> sovd_interfaces::locking::id::get::Response {
         sovd_interfaces::locking::id::get::Response {
-            lock_expiration: DateTime::<Utc>::from(self.original_expires_at)
-                .to_rfc3339_opts(SecondsFormat::Secs, true),
+            lock_expiration: system_time_to_rfc3339(self.original_expires_at),
             owned: self.principal.subject == claims.sub(),
             x_sovd2uds_isexclusive: self.exclusive,
             x_sovd2uds_broken_by: Some(self.broken_by.clone()),
-            x_sovd2uds_broken_at: Some(
-                DateTime::<Utc>::from(self.broken_at).to_rfc3339_opts(SecondsFormat::Secs, true),
-            ),
+            x_sovd2uds_broken_at: Some(system_time_to_rfc3339(self.broken_at)),
             x_sovd2uds_current_holder: None,
             schema: None,
         }
@@ -434,9 +426,7 @@ impl DefunctLock {
         );
         parameters.insert(
             "broken_at".to_owned(),
-            serde_json::Value::String(
-                DateTime::<Utc>::from(self.broken_at).to_rfc3339_opts(SecondsFormat::Secs, true),
-            ),
+            serde_json::Value::String(system_time_to_rfc3339(self.broken_at)),
         );
         parameters.insert(
             "current_holder".to_owned(),

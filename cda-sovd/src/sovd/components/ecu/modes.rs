@@ -603,7 +603,6 @@ pub(crate) mod security {
 }
 
 pub(crate) mod authentication {
-    use std::time::SystemTime;
 
     use aide::UseApi;
     use cda_interfaces::{
@@ -612,10 +611,12 @@ pub(crate) mod authentication {
         diagservices::{DiagServiceJsonResponse, UdsPayloadData},
     };
     use cda_plugin_security::Secured;
-    use chrono::{DateTime, SecondsFormat, Utc};
 
     use super::*;
-    use crate::{openapi, sovd::error::ErrorWrapper};
+    use crate::{
+        openapi,
+        sovd::{error::ErrorWrapper, timestamp::system_time_to_rfc3339},
+    };
 
     const OFFLINE: &str = "offline";
 
@@ -625,10 +626,6 @@ pub(crate) mod authentication {
             include_schema,
         }
         .into_response()
-    }
-
-    fn format_time(time: SystemTime) -> String {
-        DateTime::<Utc>::from(time).to_rfc3339_opts(SecondsFormat::Secs, true)
     }
 
     /// Builds the GET response from the tracked state.
@@ -646,7 +643,7 @@ pub(crate) mod authentication {
                 state.status.name().to_owned()
             },
             last_subfunction: state.last_subfunction.map(|sf| sf.name().to_owned()),
-            expires_at: state.expires_at.map(format_time),
+            expires_at: state.expires_at.map(system_time_to_rfc3339),
             schema,
         }
     }
