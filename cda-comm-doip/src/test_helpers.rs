@@ -10,9 +10,66 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{sync::OnceLock, time::Duration};
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
-use cda_interfaces::{DoipComParams, EcuAddresses, HashMap, HashMapExtensions};
+use cda_interfaces::{
+    DoipComParams, EcuAddresses, EcuConnectivityHandler, HashMap, HashMapExtensions,
+};
+
+use crate::EcuActivityReporter;
+
+/// Connectivity handler that records the ECUs reported as replied.
+#[derive(Default)]
+pub(crate) struct RecordingConnectivityHandler {
+    replied: std::sync::Mutex<Vec<String>>,
+}
+
+impl RecordingConnectivityHandler {
+    /// The ECU names reported through `on_ecu_replied`, in order.
+    pub(crate) fn replied(&self) -> Vec<String> {
+        self.replied.lock().expect("lock replied").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl EcuConnectivityHandler for RecordingConnectivityHandler {
+    async fn on_gateway_connected(&self, _ecu_names: &[String]) {}
+
+    async fn on_gateway_disconnected(&self, _ecu_names: &[String]) {}
+
+    async fn on_ecu_replied(&self, ecu_name: &str) {
+        self.replied
+            .lock()
+            .expect("lock replied")
+            .push(ecu_name.to_owned());
+    }
+}
+
+/// A reply reporter that knows no ECU.
+pub(crate) fn no_activity() -> EcuActivityReporter {
+    activity_reporter(&Arc::new(RecordingConnectivityHandler::default()), &[])
+}
+
+/// A reply reporter for the ECUs `(logical address, name)` that records into
+/// `handler`.
+pub(crate) fn activity_reporter(
+    handler: &Arc<RecordingConnectivityHandler>,
+    ecus: &[(u16, &str)],
+) -> EcuActivityReporter {
+    let mut ecu_names_by_address: HashMap<u16, Vec<String>> = HashMap::new();
+    for (address, name) in ecus {
+        ecu_names_by_address
+            .entry(*address)
+            .or_default()
+            .push((*name).to_owned());
+    }
+    let handler: Arc<dyn EcuConnectivityHandler> =
+        Arc::<RecordingConnectivityHandler>::clone(handler);
+    EcuActivityReporter::new(handler, ecu_names_by_address)
+}
 
 /// Lightweight ECU fixture for `DoIP` unit tests.
 #[derive(Clone, Debug)]

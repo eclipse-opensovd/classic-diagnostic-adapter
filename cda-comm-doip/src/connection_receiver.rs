@@ -20,7 +20,7 @@ use tokio::{
 };
 
 use crate::{
-    ConnectionError, DiagnosticResponse, GatewaySetup,
+    ConnectionError, DiagnosticResponse, EcuActivityReporter, GatewaySetup,
     connections::{ConnectionResetReason, EcuError, ReceiverChannels, try_read},
     ecu_connection::EcuConnectionTarget,
 };
@@ -125,6 +125,7 @@ pub(super) async fn handle_response(
     gateway_ip: &str,
     outtx: &HashMap<u16, broadcast::Sender<Result<DiagnosticResponse, EcuError>>>,
     reset_tx: &mpsc::Sender<ConnectionResetReason>,
+    activity: &EcuActivityReporter,
     response: Option<Result<DiagnosticResponse, ConnectionError>>,
 ) {
     let Some(result) = response else {
@@ -132,7 +133,7 @@ pub(super) async fn handle_response(
     };
     match result {
         Ok(response) => {
-            handle_ok_response(gateway_name, gateway_ip, outtx, response).await;
+            handle_ok_response(gateway_name, gateway_ip, outtx, activity, response).await;
         }
         Err(err) => {
             handle_connection_error(gateway_name, gateway_ip, reset_tx, err).await;
@@ -149,6 +150,7 @@ async fn handle_ok_response(
     gateway_name: &str,
     gateway_ip: &str,
     outtx: &HashMap<u16, broadcast::Sender<Result<DiagnosticResponse, EcuError>>>,
+    activity: &EcuActivityReporter,
     response: DiagnosticResponse,
 ) {
     match response {
@@ -183,8 +185,13 @@ async fn handle_ok_response(
         DiagnosticResponse::AliveCheckResponse => {
             handle_alive_check_request();
         }
-        DiagnosticResponse::TesterPresentNRC(c) => {
-            tracing::debug!(nrc = ?c, "Received Tester Present NRC");
+        DiagnosticResponse::TesterPresentNRC {
+            source_address,
+            nrc,
+        } => {
+            tracing::debug!(nrc = ?nrc, ecu_address = %source_address, "Received Tester Present NRC");
+            // Not routed to the ECU's channel, but still a reply of the ECU.
+            activity.report_activity_for_address(source_address).await;
         }
     }
 }
@@ -254,6 +261,7 @@ pub(crate) fn spawn_gateway_receiver_task<T>(
 where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let activity = gateway.activity_reporter;
     let gateway_id = GatewayIdentity {
         ip: gateway.connection.doip.gateway_ip,
         name: gateway.connection.doip.name,
@@ -303,6 +311,7 @@ where
                             &gateway_id.ip,
                             &outtx,
                             &reset_tx,
+                            &activity,
                             response,
                         ).await;
                     }
@@ -325,6 +334,7 @@ mod tests {
     use tokio::sync::broadcast;
 
     use super::*;
+    use crate::test_helpers::{RecordingConnectivityHandler, activity_reporter, no_activity};
 
     type EcuResponse = Result<DiagnosticResponse, EcuError>;
     type OutTxMap = HashMap<u16, broadcast::Sender<EcuResponse>>;
@@ -347,6 +357,7 @@ mod tests {
             "gw",
             "1.2.3.4",
             &outtx,
+            &no_activity(),
             DiagnosticResponse::Msg {
                 source_address: source,
                 target_address: target,
@@ -370,6 +381,7 @@ mod tests {
             "gw",
             "1.2.3.4",
             &outtx,
+            &no_activity(),
             DiagnosticResponse::Msg {
                 source_address: addr,
                 target_address: 0x0001,
@@ -393,9 +405,41 @@ mod tests {
             target_address: 0x0001u16.to_be_bytes(),
             nack_code: DiagnosticNackCode::ReservedByIso13400_00,
         };
-        handle_ok_response("gw", "1.2.3.4", &outtx, DiagnosticResponse::Nack(nack)).await;
+        handle_ok_response(
+            "gw",
+            "1.2.3.4",
+            &outtx,
+            &no_activity(),
+            DiagnosticResponse::Nack(nack),
+        )
+        .await;
 
         let msg = rx.try_recv().expect("expected Nack on channel");
         assert!(matches!(msg, Ok(DiagnosticResponse::Nack(_))));
+    }
+
+    /// A tester present NRC is not routed to the ECU's channel, but it is
+    /// reported as a reply of the ECU with its source address.
+    #[tokio::test]
+    async fn tester_present_nrc_is_reported_as_reply_and_not_routed() {
+        let addr: u16 = 0x0050;
+        let (outtx, mut rx) = make_outtx(addr);
+        let handler = Arc::new(RecordingConnectivityHandler::default());
+        let activity = activity_reporter(&handler, &[(addr, "ecu-a"), (0x0060, "ecu-b")]);
+
+        handle_ok_response(
+            "gw",
+            "1.2.3.4",
+            &outtx,
+            &activity,
+            DiagnosticResponse::TesterPresentNRC {
+                source_address: addr,
+                nrc: 0x12,
+            },
+        )
+        .await;
+
+        assert!(rx.try_recv().is_err(), "the NRC must not be routed");
+        assert_eq!(handler.replied(), vec!["ecu-a".to_owned()]);
     }
 }

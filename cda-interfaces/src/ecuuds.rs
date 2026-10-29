@@ -687,6 +687,16 @@ pub trait UdsVariant {
         &self,
         ecu_name: &str,
     ) -> Option<tokio::sync::watch::Receiver<VariantState>>;
+
+    /// Get the time of the last reply of the given ECU,
+    /// from the current or, if restored from a persisted topology, a previous
+    /// session. `None` if the ECU was never contacted.
+    /// # Errors
+    /// Will return Err if the ECU does not exist.
+    async fn get_last_seen(
+        &self,
+        ecu_name: &str,
+    ) -> Result<Option<std::time::SystemTime>, DiagServiceError>;
 }
 
 /// UDS communication interface - composite supertrait combining all UDS subtraits.
@@ -1105,6 +1115,10 @@ pub mod mock {
                 &self,
                 ecu_name: &str,
             ) -> Option<tokio::sync::watch::Receiver<crate::VariantState>>;
+            async fn get_last_seen(
+                &self,
+                ecu_name: &str,
+            ) -> Result<Option<std::time::SystemTime>, DiagServiceError>;
         }
 
         #[async_trait]
