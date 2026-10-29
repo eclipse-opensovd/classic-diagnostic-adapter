@@ -30,7 +30,7 @@ use crate::{
     socket::DoIPUdpSocket,
 };
 
-fn is_gateway(ecu: &impl EcuAddresses) -> bool {
+pub(crate) fn is_gateway(ecu: &impl EcuAddresses) -> bool {
     ecu.logical_gateway_address() == ecu.logical_address()
 }
 
@@ -184,6 +184,10 @@ where
                     logical_address = %format!("{:#06x}", doip_target.logical_address),
                     "VAM received"
                 );
+                // A VAM can be the only announcement in a new lifecycle. Wait
+                // for an older connect to finish instead of dropping it; then
+                // recheck whether the gateway is already connected.
+                let _claim = state.claim(doip_target.logical_address).await;
                 if state
                     .logical_address_to_connection
                     .read()
@@ -191,6 +195,20 @@ where
                     .get(&doip_target.logical_address)
                     .is_some()
                 {
+                    // A VAM never replaces a connection, but the operator should know if
+                    // it contradicts one, e.g. a direct connect to the wrong address.
+                    if let Some(connected_ip) =
+                        state.connection_ip(doip_target.logical_address).await
+                        && connected_ip != doip_target.ip
+                    {
+                        tracing::warn!(
+                            ecu_name = %doip_target.ecu_name,
+                            %connected_ip,
+                            vam_ip = %doip_target.ip,
+                            "VAM received from a different address than the existing connection, \
+                             the connection is kept"
+                        );
+                    }
                     // sending variant detection, will update the ECU state
                     // (i.e. disconnected -> connected)
                     send_variant_detection(
@@ -212,14 +230,12 @@ where
                             connection_tasks: Arc::clone(connection_tasks),
                         },
                         vam_notifications.connectivity_handler,
+                        None,
                     )
                     .await
                     {
                         Ok(logical_address) => {
-                            state.logical_address_to_connection.write().await.insert(
-                                logical_address,
-                                state.doip_connections.read().await.len().saturating_sub(1),
-                            );
+                            state.register_connection(logical_address).await;
                             send_variant_detection(
                                 gateway_ecu_name_map,
                                 &vam_notifications.variant_detection,

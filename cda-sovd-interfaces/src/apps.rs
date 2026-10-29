@@ -29,6 +29,72 @@ pub mod sovd2uds {
     }
 
     pub mod operations {
+        /// Operation to connect an ECU's `DoIP` entity directly to an IP address,
+        /// instead of waiting for it to be discovered via VIR/VAM.
+        ///
+        /// Preliminary: this is expected to move into the topology plugin.
+        pub mod doip_connect_ecu {
+            fn default_protocol_version() -> u8 {
+                // ISO 13400-2:2012
+                0x02
+            }
+
+            /// The operation-specific parameters of an execution.
+            #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+            pub struct ExecutionParameters {
+                /// Identifier of the ECU to connect, as used in `/components/{ecu}`.
+                pub ecu: String,
+                /// IP address of the `DoIP` entity of the ECU.
+                pub ip: String,
+                /// Raw `DoIP` protocol version byte, defaults to `0x02` (ISO 13400-2:2012).
+                #[serde(default = "default_protocol_version")]
+                pub protocol_version: u8,
+            }
+
+            /// Request body for an execution.
+            ///
+            /// Follows the standard operations convention of wrapping the
+            /// operation-specific inputs in a `parameters` field.
+            #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+            #[schemars(rename = "DoipConnectEcuRequest")]
+            pub struct ExecutionRequest {
+                pub parameters: ExecutionParameters,
+            }
+
+            /// Operation-specific values reported for a finished execution.
+            #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+            pub struct ExecutionResponseParameters {
+                /// The ECU that was connected.
+                pub ecu: String,
+                /// The IP address the ECU was connected to.
+                pub ip: String,
+            }
+
+            /// Response body of the synchronous execution.
+            #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+            #[schemars(rename = "DoipConnectEcuResponse")]
+            pub struct ExecutionResponse {
+                pub parameters: ExecutionResponseParameters,
+                #[schemars(skip)]
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                pub schema: Option<schemars::Schema>,
+            }
+
+            #[cfg(test)]
+            mod tests {
+                use super::ExecutionRequest;
+
+                #[test]
+                fn protocol_version_defaults_to_iso_13400_2012() {
+                    let request: ExecutionRequest = serde_json::from_value(serde_json::json!({
+                        "parameters": { "ecu": "my_ecu", "ip": "10.0.0.5" }
+                    }))
+                    .unwrap();
+                    assert_eq!(request.parameters.protocol_version, 0x02);
+                }
+            }
+        }
+
         pub mod runtimefilesupdate {
             pub use cda_interfaces::runtime_update_api::{
                 ExecutionMode, ExecutionStatus, UpdateExecution,

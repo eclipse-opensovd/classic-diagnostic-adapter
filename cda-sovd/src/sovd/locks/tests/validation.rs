@@ -245,6 +245,70 @@ async fn elapsed_locks_do_not_authorize_or_block_communication() {
     );
 }
 
+#[cfg(feature = "doip-direct-connect")]
+#[tokio::test]
+async fn vehicle_write_requires_the_callers_vehicle_lock() {
+    let caller = TestClaims {
+        subject: "caller".to_owned(),
+        attributes: serde_json::Map::new(),
+    };
+    let status =
+        |result: Result<(), ErrorWrapper>| result.err().map(|error| error.into_response().status());
+
+    let locks = Locks::new();
+    assert_eq!(
+        status(validate_vehicle_write(&caller, &locks, false).await),
+        Some(StatusCode::CONFLICT),
+        "no vehicle lock"
+    );
+
+    let locks = Locks::new();
+    locks
+        .test_insert_active(test_lock("ecu-lock").owner("caller").build())
+        .await;
+    assert_eq!(
+        status(validate_vehicle_write(&caller, &locks, false).await),
+        Some(StatusCode::CONFLICT),
+        "an ECU lock is not a vehicle lock"
+    );
+
+    let locks = Locks::new();
+    locks
+        .test_insert_active(test_lock("vehicle-lock").owner("caller").vehicle().build())
+        .await;
+    assert_eq!(
+        status(validate_vehicle_write(&caller, &locks, false).await),
+        None,
+        "own vehicle lock"
+    );
+
+    let locks = Locks::new();
+    locks
+        .test_insert_active(test_lock("vehicle-lock").owner("other").vehicle().build())
+        .await;
+    assert_eq!(
+        status(validate_vehicle_write(&caller, &locks, false).await),
+        Some(StatusCode::LOCKED),
+        "foreign vehicle lock"
+    );
+
+    let locks = Locks::new();
+    locks
+        .test_insert_active(
+            test_lock("vehicle-lock")
+                .owner("caller")
+                .vehicle()
+                .expires_at(SystemTime::now() - Duration::from_secs(1))
+                .build(),
+        )
+        .await;
+    assert_eq!(
+        status(validate_vehicle_write(&caller, &locks, false).await),
+        Some(StatusCode::CONFLICT),
+        "elapsed vehicle lock"
+    );
+}
+
 #[tokio::test]
 async fn ecu_access_includes_functional_group_coverage() {
     let locks = Locks::new();
