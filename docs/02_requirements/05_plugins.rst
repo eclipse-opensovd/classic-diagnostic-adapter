@@ -291,8 +291,10 @@ Vehicle Topology Plugin
     the execution terminable and removable via ``DELETE
     /apps/sovd2uds/operations/networkreset/executions/{id}``).
 
-    Executing the ``networkreset`` operation must require the caller to already hold an exclusive vehicle
-    lock, and no diagnostic operations may be in progress while the network structure is being reset.
+    Starting a ``networkreset`` execution requires the caller to already hold an exclusive vehicle lock,
+    acquired independently beforehand. Diagnostic operations in progress prevent the reset from starting,
+    including operations under functional or component locks. Functional or component locks held by the
+    vehicle lock owner do not themselves prevent the reset from starting.
 
 
 .. req:: Vehicle Topology Plugin - Reset with Persisted List Control
@@ -315,7 +317,10 @@ Vehicle Topology Plugin
       defined ``networkreset`` behavior.
     - ``clear_persisted=true``, ``trigger_detection=false``: the persisted topology is cleared without
       performing any live detection or vehicle communication. Subsequent behavior is governed by
-      :need:`req~dt-deferred-initialization` (``init_mode``) as if no persisted topology had ever existed.
+      :need:`req~dt-deferred-initialization` (``init_mode``) as if no persisted topology had ever existed:
+      communication is taken down for the clear and only brought up again by the ``init_mode``, i.e.
+      right after the clear in **Always** and **WhenNotPersisted** mode, and not before the respective
+      trigger in **OnDemand** and **Disabled** mode.
     - ``clear_persisted=false``, ``trigger_detection=true``: a live detection run is performed and its
       results are merged (persisted) into the existing persisted topology, without first removing entries
       for gateways/ECUs not seen during this run.

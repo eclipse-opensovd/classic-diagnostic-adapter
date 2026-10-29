@@ -14,7 +14,7 @@ Vehicle Topology Plugin
 
 .. arch:: Vehicle Topology Plugin - Retrieval
     :id: arch~plugin-vehicle-topology-retrieval
-    :links: dimpl~networkstructure-last-seen
+    :links: dimpl~plugin-vehicle-topology-retrieval-protection, dimpl~networkstructure-last-seen, testset~plugin-vehicle-topology-retrieval
     :status: draft
 
     The vehicle topology plugin provides the SOVD API with information about the network structure of the
@@ -41,11 +41,13 @@ Vehicle Topology Plugin
       address, and logical link name, for each ECU listed under a functional group or a gateway.
       The timestamp as RFC 3339 in UTC with second precision, and omitted for an ECU that was never contacted.
 
-    While a ``networkreset`` execution is in progress, this endpoint must respond with ``409 Conflict``, to
-    avoid returning stale or partially updated topology data during the reset.
+    While a ``networkreset`` execution is in progress, and until a rediscovery it started has finished, this
+    endpoint must respond with ``409 Conflict``, to avoid returning stale or partially updated topology data
+    during the reset.
 
 .. arch:: Vehicle Topology Plugin - Reset
     :id: arch~plugin-vehicle-topology-reset
+    :links: dimpl~plugin-vehicle-topology-reset, dimpl~plugin-vehicle-topology-reset-http, testset~plugin-vehicle-topology-reset
     :status: draft
 
     The plugin must provide a ``networkreset`` operation, following the standard SOVD operations semantics
@@ -63,29 +65,50 @@ Vehicle Topology Plugin
          - Includes ``networkreset`` in the list of available operations.
 
        * - GET
+         - ``/apps/sovd2uds/operations/networkreset``
+         - Returns the operation description. With ``include-schema=true``, includes the response
+           schema.
+
+       * - GET
+         - ``/apps/sovd2uds/operations/networkreset/docs``
+         - Returns the online capability description, a self-contained OpenAPI document describing
+           execution, status and termination, including parameter defaults.
+
+       * - GET
          - ``/apps/sovd2uds/operations/networkreset/executions``
          - Returns the list of current execution identifiers. Always contains at most one entry.
 
        * - POST
          - ``/apps/sovd2uds/operations/networkreset/executions``
-         - Starts a new execution of the network reset. Returns 202 Accepted with the execution ID.
+         - Starts a new execution of the network reset. Returns 202 Accepted with the execution ID and
+           its URI in ``Location``. Requires the caller's independently acquired, unexpired exclusive
+           vehicle lock, like ``doip-connect-ecu``: ``409`` (``lock-required``) without it, ``409``
+           (``lock-broken``) if it was preempted, ``423`` if another client holds the vehicle lock.
+           In-progress diagnostic operations, including those under component or functional group locks,
+           or a running execution prevent the reset from starting (``409`` with ``Retry-After``); locks
+           held by the vehicle lock owner do not themselves prevent it.
 
        * - GET
          - ``/apps/sovd2uds/operations/networkreset/executions/{id}``
-         - Returns the status of a specific execution by its ID.
+         - Returns the status and current capability (``execute``) of a specific execution. Failures
+           include a standard ``error`` array with path ``/``. With ``include-schema=true``, includes
+           the response schema. An unknown ID returns ``404`` with an SOVD error body.
 
        * - DELETE
          - ``/apps/sovd2uds/operations/networkreset/executions/{id}``
          - Terminates the execution (if possible, and not yet stopped) and removes it. Returns 204 No Content.
+           Requires the caller's exclusive vehicle lock (``409``/``423`` otherwise, as for POST). An
+           unknown ID returns ``404`` with an SOVD error body.
 
-    Triggering a reset must cause the plugin to start re-discovering/re-reporting the vehicle's network
-    structure, so that subsequent reads of ``GET /apps/sovd2uds/data/networkstructure`` reflect the
-    up-to-date topology once the execution has completed.
+    A reset with detection causes the plugin to re-discover and re-report the vehicle's network structure,
+    so that subsequent reads of ``GET /apps/sovd2uds/data/networkstructure`` reflect the up-to-date
+    topology once the execution has completed.
 
-    Starting a ``networkreset`` execution requires the caller to already hold an exclusive vehicle lock,
-    acquired independently beforehand, to ensure that no diagnostic operations are in progress while the
-    network structure is being reset. This includes functional and component locks -- the reset must not be
-    started while any diagnostic operation is in progress.
+    The vehicle lock is checked again after admission. If it was lost or changed owner during admission,
+    the execution is stopped and removed and the request returns the lock error of the current lock state
+    (``409`` ``lock-broken`` after a takeover by priority, ``409`` with the vendor code ``lock-required``
+    without a lock, ``423`` when another client holds it), noting that steps already started may not be
+    reversible, so the persisted topology may already have been cleared.
 
     .. uml::
 
@@ -124,10 +147,11 @@ Vehicle Topology Plugin
 
 .. arch:: Vehicle Topology Plugin - Reset with Persisted List Control
     :id: arch~plugin-vehicle-topology-reset-persistence
+    :links: dimpl~plugin-vehicle-topology-reset, testset~plugin-vehicle-topology-reset-persistence
     :status: draft
 
-    The ``POST /apps/sovd2uds/operations/networkreset/executions`` request body accepts two independent,
-    optional boolean fields, both defaulting to ``true``:
+    The ``parameters`` object in the ``POST /apps/sovd2uds/operations/networkreset/executions`` request
+    body accepts two independent, optional boolean fields, both defaulting to ``true``:
 
     .. list-table:: networkreset Request Body
        :header-rows: 1
@@ -144,6 +168,19 @@ Vehicle Topology Plugin
          - Perform a live ECU detection run (VIR/VAM discovery and variant detection) as part of this
            execution.
 
+    Without ``Content-Type`` an empty or whitespace only body is treated as no body and the defaults
+    apply; a non-empty body without ``Content-Type`` is rejected with ``400``, so a body that is not
+    understood never selects the destructive defaults. With a JSON ``Content-Type`` the body is parsed;
+    omitted fields use the defaults; unknown fields, invalid JSON and wrong types are rejected with
+    ``400``. An empty body with a JSON ``Content-Type``, and any other ``Content-Type``, are rejected with
+    ``400`` before execution. The standard SOVD field ``timeout`` (at least 1 second, ``0`` is
+    rejected with ``400``) stops a running execution when it elapses (see
+    :need:`arch~plugin-vehicle-topology-reset`); a timeout too large to represent as a deadline is
+    rejected with ``400``. ``proximity_response`` is accepted and ignored. The body is checked
+    completely before the vehicle lock, including the flag combination and the timeout, so a caller
+    without the lock gets ``400`` and not ``409`` for an invalid body; the plugin repeats the flag and
+    timeout checks on admission.
+
     Handling of the four flag combinations:
 
     - ``clear_persisted=true``, ``trigger_detection=true``: the persisted "ecu-topology" bucket is cleared
@@ -156,12 +193,77 @@ Vehicle Topology Plugin
     - ``clear_persisted=false``, ``trigger_detection=true``: a detection run is performed and its results
       are written per-gateway into the existing persisted topology; entries for gateways/ECUs not observed
       during this run are left unchanged in the persisted bucket.
-    - ``clear_persisted=false``, ``trigger_detection=false``: rejected with an error response, as this
+    - ``clear_persisted=false``, ``trigger_detection=false``: rejected with ``400``, as this
       combination would perform no observable action.
 
     When ``communication.ecu_list_persistence.enabled`` is ``false`` (see :need:`arch~dt-ecu-list-persistence`), there is
-    no ``ecu-topology`` bucket to operate on; ``clear_persisted`` is then a no-op regardless of its value,
+    no ``ecu-topology`` bucket to operate on (also when DoIP is disabled, which persistence requires);
+    ``clear_persisted`` is then a no-op regardless of its value,
     and only ``trigger_detection`` has an observable effect (running or skipping a live detection).
+
+    **Clearing**
+
+    Clearing cancels a pending topology write first, so it cannot bring the cleared data back. The next
+    transport start runs a full broadcast discovery, unless a later detection has been persisted again meanwhile
+    (e.g. by a reconnect that resumed after the clear). ECUs still assumed online from the cleared topology (not
+    contacted since startup) are reset to NotTested, so they are no longer reported Online, as if the topology
+    had never been persisted. The persist task restarted after the clear does not write the results the clear
+    removed; later detection runs are persisted again as usual.
+
+    Every execution takes the exclusive disable lease first, which stops communication and guarantees that no
+    diagnostic operation is in progress (``409`` otherwise, see :need:`arch~plugin-vehicle-topology-reset`).
+    The clear therefore runs with the transport down: no diagnostic request, gateway connect or discovery can
+    overlap it. A clear-only execution then ends the lease depending on ``init_mode``, so communication
+    continues as if no topology had ever been persisted:
+
+    - **Always** / **WhenNotPersisted**: the lease is released and communication returns to its state before
+      the reset. If it was up, it is brought up again right away with a full broadcast discovery.
+    - **OnDemand** / **Disabled**: the lease is finished without resuming. Communication stays down until the
+      trigger of the respective mode (see :need:`arch~dt-deferred-initialization`) brings it up.
+
+    A ``DELETE`` or an expired ``timeout`` during the clear of a clear-only execution takes effect once the
+    clear has finished: the lease ends as above and the execution reports ``stopped``.
+
+    **Detection**
+
+    A detection run first takes the exclusive disable lease, which stops communication and guarantees that
+    no diagnostic operation is in progress. It then resets all ECU states (keeping ``last_seen``), plans a full
+    broadcast discovery, and hands the lease over directly to a full activation with variant detection
+    (``DisableGuard::release_with_detection``, through the communication plugin's ``release_with_detection``
+    hook, which the default plugin forwards), in every ``init_mode`` (including ``Disabled``) and whatever
+    the automatic detection policy. Exclusivity ends only as that activation starts, so nothing else can
+    bring communication up in between and no diagnostic guard can hold off the detection: communication comes
+    up exactly once, with one broadcast and one detection run. The execution
+    completes when the discovery and variant detection have settled and, with persistence enabled, the result
+    has been persisted.
+
+    Completion is tied to the new discovery generation, not to an arbitrary storage write. If the requested
+    run does not settle within the rediscovery timeout, or writing its result fails, the execution reports
+    ``failed``. On CAN-only configurations, no DoIP gateway discovery is awaited: completion follows
+    the current UDS detector.
+
+    The rediscovery timeout (``communication.network_reset_rediscovery_timeout_seconds``, default 60 seconds,
+    must be greater than 0) applies twice. It first bounds the hand-over to the activation, including its
+    variant detection, and starts right before the lease is handed over. It then bounds the settling of the
+    rediscovery: the persist task
+    publishes its verdict on the new discovery generation (settled or persist failed) and the network reset
+    waits for that verdict, which nothing else bounds. Without persistence the network reset waits for the
+    discovery and detection itself, bounded by the same timeout. The SOVD ``timeout`` of an execution starts
+    when it is admitted, so it also covers waiting for the exclusive disable lease.
+    If the clear fails, the lease is given back (communication returns to its previous state) and the
+    execution fails. ``DELETE`` interrupts both phases; steps already started (clearing, the lifecycle
+    worker's enable) complete in the background. A ``DELETE`` or expired timeout during the clear gives the
+    lease back before the ECU states are reset; once they are reset, the execution always hands the lease over
+    to the rediscovery, which alone restores a consistent state. A rediscovery started by the
+    execution always runs to its end, also after a ``DELETE`` or an expired timeout, and keeps the network
+    structure protected (``409``) until it has settled. A rediscovery that has not returned after four times
+    the rediscovery timeout is given up, so it cannot keep the network structure protected forever. If the
+    rediscovery fails, communication is usually in a failed state (unless the CDA is shutting down) and
+    may not be fully available; a new ``networkreset`` with ``trigger_detection=true`` brings it up in
+    every ``init_mode``, also from a failed communication state, whose lease tears the transport down first.
+    If the communication plugin refuses the hand-over, the execution reports the refusal without that
+    retry hint, since a new ``networkreset`` would be refused again. A failed execution carries a typed
+    reason (``NetworkResetFailure``), reported as the execution's error message.
 
     .. uml::
         :caption: networkreset with Persisted List Control
@@ -172,7 +274,7 @@ Vehicle Topology Plugin
         participant "Persistence API\n(ecu-topology bucket)" as Persist
         participant "DoIP/UDS Detection" as Detect
 
-        Client -> plugin : POST .../executions\n{clear_persisted, trigger_detection}
+        Client -> plugin : POST .../executions\n{parameters: {clear_persisted, trigger_detection}}
         plugin -> plugin : validate flag combination
         alt clear_persisted = false and trigger_detection = false
             plugin --> Client : error (no-op combination rejected)
@@ -208,6 +310,16 @@ Vehicle Topology Plugin
        * - Method
          - Path
          - Description
+
+       * - GET
+         - ``/apps/sovd2uds/operations/doip-connect-ecu``
+         - Describes the operation (its collection entry, with a synchronous execution; with
+           ``include-schema=true`` also the response schema).
+
+       * - GET
+         - ``/apps/sovd2uds/operations/doip-connect-ecu/docs``
+         - Returns the online capability description, a self-contained OpenAPI document describing
+           the synchronous ``POST`` of an execution with its request and response parameters.
 
        * - POST
          - ``/apps/sovd2uds/operations/doip-connect-ecu/executions``

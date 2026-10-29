@@ -23,10 +23,11 @@ Diagnostic Tester
 
 .. testset:: Deferred Communication Activation
     :id: testset~deferred-communication-activation
-    :links: test~deferred-admitting-modes-activate, test~deferred-disabled-rejects-activation, test~deferred-request-activation-policy, test~deferred-activation-retry, test~deferred-sovd-admission
+    :links: test~deferred-admitting-modes-activate, test~deferred-disabled-rejects-activation, test~deferred-request-activation-policy, test~deferred-activation-retry, test~deferred-sovd-admission, test~communication-explicit-detection-enables, test~communication-explicit-detection-never, test~communication-ensure-detection-admission, test~communication-ensure-detection-joins-enable, test~communication-ensure-detection-joins-never, test~communication-ensure-detection-joins-detecting-activation, test~communication-ensure-detection-after-plain-enable, test~communication-ensure-detection-disabled-race, test~communication-ensure-detection-join-state-change, test~communication-ensure-detection-dead-sweep
     :status: draft
 
-    Verifies admission and activation of deferred communication triggered by SOVD requests.
+    Verifies admission and activation of deferred communication triggered by SOVD requests,
+    and explicit detection across lifecycle states and concurrent activations.
 
 .. testset:: Post-Update Deferred Communication
     :id: testset~deferred-post-update
@@ -70,7 +71,7 @@ Diagnostic Tester
 
 .. testset:: ECU List Persistence
     :id: testset~ecu-list-persistence
-    :links: test~doip-direct-connect-not-recorded, test~ecu-topology-store-cancelled-call-keeps-lock, test~detection-activity-running-work-keeps-busy, test~detection-activity-idle-wakes-when-last-work-ends, test~ecu-list-persistence-snapshot-name-case, test~ecu-list-persistence-unreachable-not-reached-is-offline, test~ecu-topology-persist-after-detection, test~ecu-topology-prune, test~ecu-topology-persist-serialized, itest~ecu-list-persistence-unreachable, itest~ecu-list-persistence-unreachable-gateway, test~ecu-list-persistence-requires-doip, itest~ecu-list-persistence-disabled, itest~ecu-list-persistence-reuse, test~ecu-list-persistence-reuse-plan, test~detection-activity-finished-work-visible-through-generation, test~ecu-list-persistence-runs-during-write-coalesce-into-one-more-write, test~ecu-list-persistence-waits-for-discovery-and-detection, test~ecu-list-persistence-persisted-state-follows-sovd-mapping, test~ecu-topology-store-unreadable-entries-are-skipped, test~ecu-topology-store-persist-gateways-keeps-other-entries, test~ecu-list-persistence-unchanged-restart-writes-nothing, test~ecu-list-persistence-only-changed-gateways-written
+    :links: test~doip-direct-connect-not-recorded, test~ecu-topology-store-cancelled-call-keeps-lock, test~detection-activity-running-work-keeps-busy, test~detection-activity-idle-wakes-when-last-work-ends, test~ecu-list-persistence-snapshot-name-case, test~ecu-list-persistence-unreachable-not-reached-is-offline, test~ecu-topology-persist-after-detection, test~ecu-topology-prune, test~ecu-topology-persist-serialized, itest~ecu-list-persistence-unreachable, itest~ecu-list-persistence-unreachable-gateway, test~ecu-list-persistence-requires-doip, itest~ecu-list-persistence-disabled, itest~ecu-list-persistence-reuse, test~ecu-list-persistence-reuse-plan, test~detection-activity-finished-work-visible-through-generation, test~ecu-list-persistence-runs-during-write-coalesce-into-one-more-write, test~ecu-list-persistence-waits-for-discovery-and-detection, test~ecu-list-persistence-persisted-state-follows-sovd-mapping, test~ecu-topology-store-unreadable-entries-are-skipped, test~ecu-topology-store-persist-gateways-keeps-other-entries, test~ecu-list-persistence-unchanged-restart-writes-nothing, test~ecu-list-persistence-only-changed-gateways-written, test~ecu-topology-store-serialized
     :status: draft
 
     Verifies storing, pruning and reusing the persisted ECU topology after discovery
@@ -78,8 +79,31 @@ Diagnostic Tester
 
 .. testset:: ECU List Persistence Shutdown Update
     :id: testset~ecu-list-persistence-shutdown
-    :links: itest~ecu-list-persistence-shutdown, test~ecu-list-persistence-shutdown-with-running-detection-writes-last-seen-only, test~ecu-list-persistence-shutdown-snapshot
+    :links: itest~ecu-list-persistence-shutdown, test~ecu-list-persistence-shutdown-with-running-detection-writes-last-seen-only, test~ecu-list-persistence-shutdown-snapshot, test~ecu-list-persistence-shutdown-serialized-with-clear, test~ecu-list-persistence-failed-clear-keeps-unwritten, test~ecu-list-persistence-clear-restores-task, test~ecu-list-persistence-clear-skips-initial-write, test~ecu-list-persistence-shutdown-after-clear-does-not-recreate-entries
     :status: draft
 
     Verifies that the persisted ECU states and ``last_seen`` timestamps are updated at a
     graceful shutdown.
+
+.. testset:: Vehicle Topology Plugin - Retrieval
+    :id: testset~plugin-vehicle-topology-retrieval
+    :links: test~networkstructure-conflict-during-reset
+    :status: draft
+
+    Verifies that the network structure is not served while a ``networkreset`` runs.
+
+.. testset:: Vehicle Topology Plugin - Reset
+    :id: testset~plugin-vehicle-topology-reset
+    :links: test~plugin-vehicle-topology-reset-single-execution, test~plugin-vehicle-topology-reset-deadline, test~plugin-vehicle-topology-reset-delete-during-clear, test~plugin-vehicle-topology-reset-verdict-from-persistence, test~plugin-vehicle-topology-reset-persist-timeout, test~plugin-vehicle-topology-reset-delete-lock, test~plugin-vehicle-topology-reset-post-lock, test~plugin-vehicle-topology-reset-exclusive-lock-state, test~plugin-vehicle-topology-reset-failed-rediscover-reports-disabled-communication, test~plugin-vehicle-topology-reset-refused-rediscovery-reports-the-refusal, test~plugin-vehicle-topology-reset-clear-only-end-lease-failure, test~plugin-vehicle-topology-reset-delete-interrupts-hanging-rediscover, test~communication-release-with-detection-detects, test~communication-release-with-detection-no-window, test~communication-release-with-detection-failure, test~communication-release-with-detection-plugin-hook, test~communication-resume-and-detect-admission, test~plugin-vehicle-topology-reset-panicking-reset-reports-failed, test~plugin-vehicle-topology-reset-dropped-delete-still-removes-the-execution, test~plugin-vehicle-topology-reset-diagnostics-in-progress-reject-the-reset, test~plugin-vehicle-topology-reset-http-post-maps-plugin-conflicts-to-409, itest~plugin-vehicle-topology-reset-without-persistence-completes, test~plugin-vehicle-topology-reset-failed-clear-gives-the-lease-back, test~plugin-vehicle-topology-reset-timeout-stops-the-execution, test~plugin-vehicle-topology-reset-http-timeout, test~plugin-vehicle-topology-reset-invalid-timeout, test~plugin-vehicle-topology-reset-post-admission-lock, test~plugin-vehicle-topology-reset-http-errors, test~plugin-vehicle-topology-reset-openapi-failure
+    :status: draft
+
+    Verifies the ``networkreset`` operation: single execution, deadlines, the HTTP
+    interface and the rediscovery after the reset.
+
+.. testset:: Vehicle Topology Plugin - Reset with Persisted List Control
+    :id: testset~plugin-vehicle-topology-reset-persistence
+    :links: itest~plugin-vehicle-topology-reset-clears-and-rediscovers, test~plugin-vehicle-topology-reset-request-body, test~plugin-vehicle-topology-reset-doip-reset-requires-a-new-settled-discovery, test~ecu-list-persistence-failed-write-of-a-settled-rediscovery-is-reported, test~ecu-list-persistence-rediscovery-verdict, test~plugin-vehicle-topology-reset-failed-persisting-of-the-rediscovered-topology-is-reported, test~plugin-vehicle-topology-reset-clear-and-detect-runs-one-rediscovery-and-blocks-network-structure, test~plugin-vehicle-topology-reset-clear-only-follows-init-mode, test~plugin-vehicle-topology-reset-http-misunderstood-bodies-are-rejected-without-executing
+    :status: draft
+
+    Verifies clearing and rewriting the persisted ECU topology by a ``networkreset``
+    and the verdict reported from it.
