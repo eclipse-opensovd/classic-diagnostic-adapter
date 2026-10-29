@@ -647,6 +647,7 @@ name = "cda-interfaces"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "foldhash 0.2.0",
  "futures",

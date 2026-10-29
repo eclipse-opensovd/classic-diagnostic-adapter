@@ -169,6 +169,7 @@ async fn test_custom_demo_endpoint() {
         address: host,
         port: test_port,
         unix_socket: None,
+        binary_encoding: cda_interfaces::BinaryEncoding::Hex,
     })
     .await
     .expect("Webserver did not start in time");

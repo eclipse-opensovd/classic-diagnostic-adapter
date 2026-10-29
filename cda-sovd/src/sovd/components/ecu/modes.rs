@@ -21,8 +21,8 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    HashMap, UdsEcu,
-    diagservices::{DiagServiceResponse, DiagServiceResponseType},
+    BinaryEncoding, HashMap, UdsEcu,
+    diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     file_manager::FileManager,
 };
 use schemars::Schema;
@@ -38,7 +38,9 @@ use sovd_interfaces::{
 use crate::{
     Locks,
     sovd::{
-        WebserverEcuState, create_schema,
+        WebserverEcuState,
+        binary_encoding::BinaryEncodingParam,
+        create_schema,
         error::{ApiError, ErrorWrapper, api_error_from_diag_response},
         locks::require_ecu_access,
     },
@@ -146,6 +148,7 @@ async fn handle_mode_change<T: UdsEcu + Clone>(
     parameters: Option<HashMap<String, serde_json::Value>>,
     mode_id: &str,
     include_schema: bool,
+    binary_encoding: BinaryEncoding,
 ) -> Response {
     require_ecu_access!(write, security_plugin, ecu_name, locks, include_schema);
     match uds
@@ -154,7 +157,7 @@ async fn handle_mode_change<T: UdsEcu + Clone>(
             &(security_plugin as cda_interfaces::DynamicPlugin),
             service_id,
             value,
-            parameters,
+            parameters.map(|p| UdsPayloadData::ParameterMap(p, binary_encoding)),
             false,
         )
         .await
@@ -450,6 +453,7 @@ pub(crate) mod security {
     pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverEcuState {
             ecu_name,
             uds,
@@ -505,11 +509,14 @@ pub(crate) mod security {
                 }
             };
             data.insert(param_name, value);
-            (None, Some(UdsPayloadData::ParameterMap(data)))
+            (
+                None,
+                Some(UdsPayloadData::ParameterMap(data, binary_encoding)),
+            )
         } else {
             let seed_payload = request_body
                 .parameters
-                .map(|p| UdsPayloadData::ParameterMap(p.into_iter().collect()));
+                .map(|p| UdsPayloadData::ParameterMap(p.into_iter().collect(), binary_encoding));
             (seed_payload, None)
         };
 
@@ -532,12 +539,7 @@ pub(crate) mod security {
                         } else {
                             None
                         };
-                        let seed = response
-                            .get_raw()
-                            .iter()
-                            .map(|byte| format!("0x{byte:02x}"))
-                            .collect::<Vec<String>>()
-                            .join(" ");
+                        let seed = binary_encoding.encode(response.get_raw());
 
                         (
                             StatusCode::OK,
@@ -704,11 +706,12 @@ pub(crate) mod authentication {
     /// Extracts the decoded response parameters.
     fn response_parameters<R: DiagServiceResponse>(
         response: R,
+        binary_encoding: BinaryEncoding,
     ) -> Result<serde_json::Map<String, serde_json::Value>, ApiError> {
         if response.is_empty() {
             return Ok(serde_json::Map::new());
         }
-        match response.into_json() {
+        match response.into_json(binary_encoding) {
             Ok(DiagServiceJsonResponse { data, errors }) => {
                 if !errors.is_empty() {
                     tracing::warn!(
@@ -739,6 +742,7 @@ pub(crate) mod authentication {
     pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverEcuState {
             ecu_name,
             uds,
@@ -772,6 +776,7 @@ pub(crate) mod authentication {
                 security_plugin as DynamicPlugin,
                 request_body,
                 include_schema,
+                binary_encoding,
             )
             .await
         });
@@ -794,6 +799,7 @@ pub(crate) mod authentication {
         security_plugin: DynamicPlugin,
         request_body: sovd_modes::authentication::put::Request,
         include_schema: bool,
+        binary_encoding: BinaryEncoding,
     ) -> Response {
         let sub_function = match request_body.value.parse::<AuthenticationSubFunction>() {
             Ok(sf) => sf,
@@ -810,7 +816,7 @@ pub(crate) mod authentication {
 
         let parameters = request_body
             .parameters
-            .map(|p| UdsPayloadData::ParameterMap(p.into_iter().collect()));
+            .map(|p| UdsPayloadData::ParameterMap(p.into_iter().collect(), binary_encoding));
 
         let response = match uds
             .authenticate(
@@ -830,7 +836,7 @@ pub(crate) mod authentication {
             return api_error_from_diag_response(&response, include_schema);
         }
 
-        let parameters = match response_parameters(response) {
+        let parameters = match response_parameters(response, binary_encoding) {
             Ok(p) => p,
             Err(e) => return error_response(e, include_schema),
         };
@@ -896,6 +902,7 @@ pub(crate) mod commctrl {
         openapi,
         sovd::{
             WebserverEcuState,
+            binary_encoding::BinaryEncodingParam,
             components::ecu::modes::{handle_mode_change, handle_mode_get},
             error::ApiError,
         },
@@ -945,6 +952,7 @@ pub(crate) mod commctrl {
     pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverEcuState {
             ecu_name,
             uds,
@@ -966,6 +974,7 @@ pub(crate) mod commctrl {
             request_body.parameters,
             COMM_CONTROL_ID,
             query.include_schema,
+            binary_encoding,
         )
         .await
     }
@@ -1009,6 +1018,7 @@ pub(crate) mod dtcsetting {
         openapi,
         sovd::{
             WebserverEcuState,
+            binary_encoding::BinaryEncodingParam,
             components::ecu::modes::{handle_mode_change, handle_mode_get},
             error::ApiError,
         },
@@ -1058,6 +1068,7 @@ pub(crate) mod dtcsetting {
     pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverEcuState {
             ecu_name,
             uds,
@@ -1079,6 +1090,7 @@ pub(crate) mod dtcsetting {
             request_body.parameters,
             DTC_SETTING_ID,
             query.include_schema,
+            binary_encoding,
         )
         .await
     }
@@ -1153,7 +1165,15 @@ mod tests {
         uds: &MockUdsEcu,
         body: sovd_modes::authentication::put::Request,
     ) -> axum::response::Response {
-        authentication::execute_put(uds, ECU, Box::new(()), body, false).await
+        authentication::execute_put(
+            uds,
+            ECU,
+            Box::new(()),
+            body,
+            false,
+            cda_interfaces::BinaryEncoding::Hex,
+        )
+        .await
     }
 
     fn positive_response() -> MockDiagServiceResponse {
@@ -1162,7 +1182,7 @@ mod tests {
             .expect_response_type()
             .returning(|| DiagServiceResponseType::Positive);
         response.expect_is_empty().returning(|| false);
-        response.expect_into_json().returning(|| {
+        response.expect_into_json().returning(|_| {
             Ok(DiagServiceJsonResponse {
                 data: serde_json::json!({"challengeServer": "0x01 0x02"}),
                 errors: vec![],
@@ -1347,6 +1367,7 @@ mod tests {
                 }),
                 std::marker::PhantomData,
             ),
+            crate::sovd::binary_encoding::BinaryEncodingParam(cda_interfaces::BinaryEncoding::Hex),
             State(state),
             WithRejection(
                 Json(request("deAuthenticate", None)),

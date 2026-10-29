@@ -151,7 +151,10 @@ impl DiagServiceResponse for TestResponse {
         &self.data
     }
 
-    fn into_json(self) -> Result<DiagServiceJsonResponse, DiagServiceError> {
+    fn into_json(
+        self,
+        _binary_encoding: cda_interfaces::BinaryEncoding,
+    ) -> Result<DiagServiceJsonResponse, DiagServiceError> {
         unimplemented!()
     }
 

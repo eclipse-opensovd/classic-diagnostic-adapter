@@ -463,7 +463,7 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         sid: u8,
         service_name: &str,
-        params: Option<HashMap<String, serde_json::Value>>,
+        params: Option<UdsPayloadData>,
         map_to_json: bool,
     ) -> Result<Self::Response, DiagServiceError> {
         let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
@@ -477,7 +477,7 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
                 ecu_name,
                 service.clone(),
                 security_plugin,
-                params.map(UdsPayloadData::ParameterMap),
+                params,
                 map_to_json,
             )
             .await;
@@ -500,7 +500,7 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         sid: u8,
         service_name: &str,
-        params: Option<HashMap<String, serde_json::Value>>,
+        params: Option<UdsPayloadData>,
         mode_expiration: Option<Duration>,
         map_to_json: bool,
     ) -> Result<HashMap<String, Result<Self::Response, DiagServiceError>>, DiagServiceError> {
@@ -512,13 +512,7 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
         )?;
 
         let response = self
-            .send_functional_group(
-                group_name,
-                service,
-                security_plugin,
-                params.map(UdsPayloadData::ParameterMap),
-                map_to_json,
-            )
+            .send_functional_group(group_name, service, security_plugin, params, map_to_json)
             .await;
 
         for (ecu, response) in &response {

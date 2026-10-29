@@ -323,6 +323,7 @@ impl TestEnv {
             address: self.default_config.server.address().to_owned(),
             port,
             unix_socket: None,
+            binary_encoding: self.default_config.server.binary_encoding(),
         };
         self.config.server = self.default_config.server.clone();
     }
@@ -468,6 +469,7 @@ impl TestEnv {
             address: sim_host.clone(),
             port: default_config.server.port(),
             unix_socket: None,
+            binary_encoding: default_config.server.binary_encoding(),
         };
         Ok(Self {
             config: default_config.clone(),

@@ -344,6 +344,7 @@ pub trait UdsDtc: UdsTransport {
         include_snapshot: bool,
         include_schema: bool,
         memory_selection: Option<u8>,
+        binary_encoding: crate::BinaryEncoding,
     ) -> Result<DtcExtendedInfo, DiagServiceError>;
 
     /// Clear the faults for the given ECU
@@ -602,7 +603,7 @@ pub trait UdsFunctionalGroup: UdsTransport {
     /// * `security_plugin` - Security plugin to validate the request against
     /// * `sid` - Service identifier (SID) for the diagnostic service
     /// * `service_name` - Human-readable name of the service
-    /// * `params` - Optional parameters for the service as key-value pairs
+    /// * `params` - Optional parameters for the service
     /// * `map_to_json` - Whether to map the response to JSON format
     ///
     /// # Returns
@@ -617,7 +618,7 @@ pub trait UdsFunctionalGroup: UdsTransport {
         security_plugin: &DynamicPlugin,
         sid: u8,
         service_name: &str,
-        params: Option<HashMap<String, serde_json::Value>>,
+        params: Option<UdsPayloadData>,
         map_to_json: bool,
     ) -> Result<Self::Response, DiagServiceError>;
 
@@ -635,7 +636,7 @@ pub trait UdsFunctionalGroup: UdsTransport {
     /// * `security_plugin` - Security plugin to validate the request against
     /// * `sid` - Service identifier (SID) for the diagnostic service
     /// * `service_name` - Human-readable name of the service
-    /// * `params` - Optional parameters for the service as key-value pairs
+    /// * `params` - Optional parameters for the service
     /// * `map_to_json` - Whether to map the response to JSON format
     ///
     /// # Returns
@@ -653,7 +654,7 @@ pub trait UdsFunctionalGroup: UdsTransport {
         security_plugin: &DynamicPlugin,
         sid: u8,
         service_name: &str,
-        params: Option<HashMap<String, serde_json::Value>>,
+        params: Option<UdsPayloadData>,
         mode_expiration: Option<Duration>,
         map_to_json: bool,
     ) -> Result<HashMap<String, Result<Self::Response, DiagServiceError>>, DiagServiceError>;
@@ -935,6 +936,7 @@ pub mod mock {
                 include_snapshot: bool,
                 include_schema: bool,
                 memory_selection: Option<u8>,
+                binary_encoding: crate::BinaryEncoding,
             ) -> Result<DtcExtendedInfo, DiagServiceError>;
             async fn delete_dtcs(
                 &self,
@@ -1071,7 +1073,7 @@ pub mod mock {
                 security_plugin: &DynamicPlugin,
                 sid: u8,
                 service_name: &str,
-                params: Option<HashMap<String, serde_json::Value>>,
+                params: Option<UdsPayloadData>,
                 map_to_json: bool,
             ) -> Result<<MockUdsEcu as UdsTransport>::Response, DiagServiceError>;
              async fn set_functional_state(
@@ -1080,7 +1082,7 @@ pub mod mock {
                 security_plugin: &DynamicPlugin,
                 sid: u8,
                 service_name: &str,
-                params: Option<HashMap<String, serde_json::Value>>,
+                params: Option<UdsPayloadData>,
                 mode_expiration: Option<Duration>,
                 map_to_json: bool,
             ) -> Result<HashMap<String, Result<<MockUdsEcu as UdsTransport>::Response,

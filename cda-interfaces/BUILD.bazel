@@ -15,6 +15,7 @@ workspace_rust_library(
     name = "cda_interfaces",
     srcs = glob(["src/**/*.rs"]),
     crate_deps = [
+        "base64",
         "bytes",
         "foldhash",
         "futures",
