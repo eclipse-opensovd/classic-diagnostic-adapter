@@ -581,3 +581,174 @@ fn lock_create_response_includes_exclusivity_and_requested_schema() {
     assert!(response.schema.is_some());
     assert!(sovd_lock_response("lock-id", true, false).schema.is_none());
 }
+
+/// [[ test~sovd-api-lock-acquisition-policy-handlers, ECU and functional group lock POST handlers enforce the acquisition policy, test ]]
+mod acquisition_policy {
+    use aide::UseApi;
+    use axum::{
+        Json,
+        extract::{OriginalUri, Query, State},
+        http::Uri,
+        response::Response,
+    };
+    use axum_extra::extract::WithRejection;
+    use cda_interfaces::{
+        file_manager::mock::MockFileManager,
+        lock_config::{LockAcquisitionPolicy, LockConfig},
+    };
+    use cda_plugin_security::Secured;
+
+    use super::*;
+    use crate::sovd::{
+        WebserverEcuState,
+        functions::functional_groups::{
+            locks::post as fg_post, tests::create_test_fg_state_with_locks,
+        },
+        locks::handlers::ecu::post as ecu_post,
+        tests::create_test_webserver_state,
+    };
+
+    fn vehicle_lock_required() -> Arc<Locks> {
+        Arc::new(Locks::new_with_config(LockConfig {
+            lock_acquisition_policy: LockAcquisitionPolicy::VehicleLockRequired,
+            ..LockConfig::default()
+        }))
+    }
+
+    fn lock_request() -> sovd_interfaces::locking::Request {
+        sovd_interfaces::locking::Request {
+            lock_expiration: 60,
+            break_lock: false,
+            x_sovd2uds_isexclusive: None,
+            metadata: serde_json::Map::new(),
+        }
+    }
+
+    async fn post_ecu_lock(uds: MockUdsEcu, ecu_name: &str, locks: &Arc<Locks>) -> Response {
+        let state = WebserverEcuState {
+            locks: Arc::clone(locks),
+            ..create_test_webserver_state::<MockUdsEcu, MockFileManager>(
+                ecu_name.to_owned(),
+                uds,
+                MockFileManager::new(),
+            )
+        };
+        ecu_post(
+            UseApi(
+                Secured(Box::new(TestSecurityPlugin)),
+                std::marker::PhantomData,
+            ),
+            State(state),
+            Query(sovd_interfaces::IncludeSchemaQuery {
+                include_schema: false,
+            }),
+            OriginalUri(Uri::from_static("/vehicle/v15/components/test_ecu/locks")),
+            WithRejection(Json(lock_request()), std::marker::PhantomData),
+        )
+        .await
+        .into_response()
+    }
+
+    async fn post_fg_lock(uds: MockUdsEcu, fg_name: &str, locks: &Arc<Locks>) -> Response {
+        fg_post(
+            UseApi(
+                Secured(Box::new(TestSecurityPlugin)),
+                std::marker::PhantomData,
+            ),
+            State(create_test_fg_state_with_locks(
+                uds,
+                fg_name.to_owned(),
+                Arc::clone(locks),
+            )),
+            Query(sovd_interfaces::IncludeSchemaQuery {
+                include_schema: false,
+            }),
+            OriginalUri(Uri::from_static(
+                "/vehicle/v15/functions/functionalgroups/test_fg/locks",
+            )),
+            WithRejection(Json(lock_request()), std::marker::PhantomData),
+        )
+        .await
+    }
+
+    fn with_fg_coverage(mut uds: MockUdsEcu) -> MockUdsEcu {
+        uds.expect_ecus_for_functional_group()
+            .returning(|_, _| vec!["ecu1".to_owned(), "ecu2".to_owned()]);
+        uds
+    }
+
+    async fn insert_vehicle_lock(locks: &Locks) {
+        locks
+            .test_insert_active(test_lock("vehicle").owner("test_user").vehicle().build())
+            .await;
+    }
+
+    #[tokio::test]
+    async fn ecu_lock_post_without_vehicle_lock_is_rejected() {
+        let locks = vehicle_lock_required();
+
+        let response = post_ecu_lock(MockUdsEcu::default(), "test_ecu", &locks).await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(locks.open_locks().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ecu_lock_post_with_vehicle_lock_is_created() {
+        let (mut uds, ecu_name, _, _, _) = super::super::cleanup::setup_ecu_lock_test();
+        uds.expect_get_ecu_state()
+            .returning(|_| Ok(cda_interfaces::mock::mock_ecu_state_online_variant_detected()));
+        let locks = vehicle_lock_required();
+        insert_vehicle_lock(&locks).await;
+
+        let response = post_ecu_lock(uds, &ecu_name, &locks).await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let lock: sovd_interfaces::locking::post_put::Response = axum_response_into(response)
+            .await
+            .expect("failed to extract response");
+        let response = delete_handler(
+            &locks,
+            LockScope::Ecu { name: ecu_name },
+            &lock.id,
+            &TestSecurityPlugin.claims(),
+            false,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn functional_group_lock_post_without_vehicle_lock_is_rejected() {
+        let locks = vehicle_lock_required();
+
+        let response =
+            post_fg_lock(with_fg_coverage(MockUdsEcu::default()), "test_fg", &locks).await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(locks.open_locks().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn functional_group_lock_post_with_vehicle_lock_is_created() {
+        let (uds, fg_name, _) = super::super::cleanup::setup_functional_group_lock_test();
+        let locks = vehicle_lock_required();
+        insert_vehicle_lock(&locks).await;
+
+        let response = post_fg_lock(with_fg_coverage(uds), &fg_name, &locks).await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let lock: sovd_interfaces::locking::post_put::Response = axum_response_into(response)
+            .await
+            .expect("failed to extract response");
+        let response = delete_handler(
+            &locks,
+            LockScope::FunctionalGroup { name: fg_name },
+            &lock.id,
+            &TestSecurityPlugin.claims(),
+            false,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+}

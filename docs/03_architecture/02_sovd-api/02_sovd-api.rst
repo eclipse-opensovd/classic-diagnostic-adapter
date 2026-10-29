@@ -1376,6 +1376,7 @@ Locks
 .. arch:: Lock Acquisition Policy
     :id: arch~sovd-api-lock-acquisition-policy
     :status: draft
+    :links: dimpl~sovd-api-lock-acquisition-policy, dimpl~sovd-api-lock-acquisition-policy-config, test~sovd-api-lock-acquisition-policy-config, test~sovd-api-lock-acquisition-policy-validation, test~sovd-api-lock-acquisition-policy-handlers, itest~sovd-api-lock-acquisition-policy
 
     The ECU lock POST handler and the functional group lock POST handler each evaluate the
     configured ``lock_acquisition_policy`` before creating the child lock, in addition to

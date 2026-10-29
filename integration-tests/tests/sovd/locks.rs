@@ -681,3 +681,73 @@ async fn lock_when_ecu_offline() -> Result<(), TestingError> {
     .await;
     Ok(())
 }
+
+/// With `lock_acquisition_policy = "vehicle_lock_required"`, ECU and functional-group
+/// locks can only be acquired while a vehicle lock exists.
+/// [[ itest~sovd-api-lock-acquisition-policy, Child locks require a vehicle lock, itest ]]
+#[tokio::test]
+async fn vehicle_lock_required_acquisition_policy() -> Result<(), TestingError> {
+    let mut test_env = TestEnv::builder().await?;
+    let mut config = test_env.default_config().clone();
+    config.locks.lock_acquisition_policy =
+        cda_interfaces::lock_config::LockAcquisitionPolicy::VehicleLockRequired;
+    test_env.replace_cda(&config).await?;
+    wait_for_ecus_online(&test_env.config).await?;
+
+    let other = bearer_token_header(NON_OWNER_BEARER_TOKEN);
+
+    for endpoint in [
+        COMPONENTS_FLXC1000_LOCKS,
+        FUNCTIONS_FUNCTIONALGROUPS_DOIP_LOCKS,
+    ] {
+        create_lock(default_timeout(), endpoint, StatusCode::CONFLICT, &test_env).await;
+    }
+
+    let vehicle_lock = create_lock(default_timeout(), LOCKS, StatusCode::CREATED, &test_env).await;
+    let vehicle_lock_id: String = response_to_json_to_field(&vehicle_lock, "id")?;
+
+    // A vehicle lock of another client satisfies the policy, but still blocks
+    // foreign child locks.
+    create_lock(
+        default_timeout(),
+        COMPONENTS_FLXC1000_LOCKS,
+        StatusCode::CONFLICT,
+        &test_env.with_headers(&other),
+    )
+    .await;
+
+    for endpoint in [
+        COMPONENTS_FLXC1000_LOCKS,
+        FUNCTIONS_FUNCTIONALGROUPS_DOIP_LOCKS,
+    ] {
+        let child = create_lock(default_timeout(), endpoint, StatusCode::CREATED, &test_env).await;
+        let child_id: String = response_to_json_to_field(&child, "id")?;
+        lock_operation(
+            endpoint,
+            Some(&child_id),
+            &test_env,
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+        )
+        .await;
+    }
+
+    lock_operation(
+        LOCKS,
+        Some(&vehicle_lock_id),
+        &test_env,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    // Releasing the vehicle lock makes child locks unavailable again.
+    create_lock(
+        default_timeout(),
+        COMPONENTS_FLXC1000_LOCKS,
+        StatusCode::CONFLICT,
+        &test_env,
+    )
+    .await;
+    Ok(())
+}
