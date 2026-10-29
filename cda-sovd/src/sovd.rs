@@ -77,7 +77,6 @@ pub(crate) mod error;
 pub(crate) mod functions;
 mod lock_state;
 pub(crate) mod locks;
-pub(crate) mod timestamp;
 
 trait IntoSovd {
     type SovdType;

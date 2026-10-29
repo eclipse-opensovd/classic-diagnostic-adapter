@@ -42,6 +42,11 @@ pub struct Ecu {
     pub id: String,
     pub name: String,
     pub variant: Variant,
+    /// Time of the last reply of the ECU (RFC 3339, UTC), from the
+    /// current or a previous session. Absent if the ECU was never contacted.
+    // [[ dimpl~sovd-ecu-last-seen, A component reports the last contact of its ECU, dimpl ]]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_seen: Option<String>,
     pub locks: String,
     pub operations: String,
     pub data: String,
