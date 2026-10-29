@@ -15,10 +15,22 @@ CARGO_DENY_VERSION := 0.20.2
 CARGO_LLVM_COV_VERSION := 0.9.1
 PROTOC_VERSION := 34.1
 
+# on macOS the xcode tools cause a build failure in bazel due to a fullpath being used
+# this selects the macOS bazel targets if it detects the platform
+HOST_OS := $(if $(filter Windows_NT,$(OS)),Windows,$(shell uname -s))
+BAZEL_BUILD_CONFIG :=
+BAZEL_CAN_BUILD_CONFIG :=
+ifeq ($(HOST_OS),Darwin)
+BAZEL_BUILD_CONFIG := --config=macos-clt
+else ifeq ($(HOST_OS),Linux)
+BAZEL_CAN_BUILD_CONFIG := --config=can
+endif
+
 .DEFAULT_GOAL := build
 
 .PHONY: build release check test integration-test integration-test-can integration-test-mixed \
 	build-all-features build-mbedtls build-minimal build-minimal-cda \
+	bazel-build bazel-check bazel-update-lockfile \
 	lint lint-all-features lint-nightly lint-nightly-all-features fmt fmt-check \
 	precommit precommit-all-features \
 	coverage coverage-can integration-coverage deny \
@@ -35,7 +47,7 @@ check:
 	cargo +$(STABLE) check --workspace
 
 test:
-	cargo +$(STABLE) test --locked --workspace $(ARGS)
+	cargo +$(STABLE) test --locked --workspace --features opensovd-cda/doip-direct-connect $(ARGS)
 
 integration-test:
 	cargo +$(STABLE) test --locked -p integration-tests --features integration-tests -- --show-output
@@ -57,6 +69,29 @@ build-minimal:
 
 build-minimal-cda:
 	$(MAKE) build ARGS="--no-default-features --package opensovd-cda $(ARGS)"
+
+bazel-build:
+	bazel build $(BAZEL_BUILD_CONFIG) //:cda_mbedtls //:opensovd-cda
+ifneq ($(BAZEL_CAN_BUILD_CONFIG),)
+	bazel build $(BAZEL_BUILD_CONFIG) $(BAZEL_CAN_BUILD_CONFIG) //:opensovd-cda
+endif
+	cd bazel/vendor-consumer-test && bazel build $(BAZEL_BUILD_CONFIG) //:fancy-cda
+ifneq ($(BAZEL_CAN_BUILD_CONFIG),)
+	cd bazel/vendor-consumer-test && bazel build $(BAZEL_BUILD_CONFIG) $(BAZEL_CAN_BUILD_CONFIG) //:fancy-cda
+endif
+
+bazel-check:
+	python3 bazel/check_mbedtls_revision.py
+	bazel query //...
+	@openssl_targets="$$(bazel cquery 'filter("openssl", deps(//:cda_mbedtls))' --output=label)" || exit $$?; \
+	if [ -n "$$openssl_targets" ]; then \
+		printf '%s\n' '::error::mbedTLS target graph contains OpenSSL targets:' "$$openssl_targets"; \
+		exit 1; \
+	fi
+
+bazel-update-lockfile:
+	bazel mod deps --lockfile_mode=update
+	cd bazel/vendor-consumer-test && bazel mod deps --lockfile_mode=update
 
 lint:
 	cargo +$(STABLE) clippy --all-targets $(ARGS) -- --deny=warnings
@@ -83,7 +118,7 @@ precommit-all-features:
 	uv run --locked --group tools prek run --all-files --group CI --group @ungrouped --show-diff-on-failure
 
 coverage:
-	cargo +$(STABLE) llvm-cov --workspace --lcov --output-path lcov.info -- --show-output
+	cargo +$(STABLE) llvm-cov --workspace --features opensovd-cda/doip-direct-connect --lcov --output-path lcov.info -- --show-output
 
 coverage-can:
 	cargo +$(STABLE) llvm-cov -p opensovd-cda -p cda-comm-can --features opensovd-cda/can-socketcand,cda-comm-can/can-socketcand --lcov --output-path lcov-can-unit.info -- --show-output
@@ -202,6 +237,9 @@ help:
 		'build-mbedtls                Build CDA with only mbedTLS' \
 		'build-minimal                Build the workspace without default features' \
 		'build-minimal-cda            Build CDA without default features' \
+		'bazel-build                  Build platform-supported primary and vendor targets' \
+		'bazel-check                  Validate the Bazel configuration and target graph' \
+		'bazel-update-lockfile        Update root and vendor Bazel lockfiles' \
 		'lint ARGS="..."              Run stable Clippy' \
 		'lint-all-features            Run stable Clippy with all features' \
 		'lint-nightly ARGS="..."      Run pinned-nightly Clippy' \

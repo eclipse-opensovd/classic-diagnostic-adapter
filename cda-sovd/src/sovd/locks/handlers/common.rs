@@ -25,7 +25,7 @@ use cda_interfaces::{
     },
 };
 use cda_plugin_security::{Claims, SecurityPlugin};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::Utc;
 use tokio::{sync::oneshot, time::Instant};
 
 use super::super::{
@@ -33,7 +33,10 @@ use super::super::{
     LockCoverage, LockState, Locks, PendingPreemption, ScopeKey, StateError, TransitionReservation,
     active_snapshot, create_lock, map_state_error, rollback_preemption, validate_claim,
 };
-use crate::sovd::locks::cleanup::{run_cleanups, take_cleanups};
+use crate::sovd::{
+    locks::cleanup::{run_cleanups, take_cleanups},
+    timestamp::system_time_to_rfc3339,
+};
 
 pub(in crate::sovd::locks) struct ValidatedLockRequest {
     pub(in crate::sovd::locks) metadata: serde_json::Map<String, serde_json::Value>,
@@ -726,8 +729,7 @@ fn lock_details_schema(include_schema: bool) -> Option<schemars::Schema> {
 
 fn active_to_sovd(lock: &ActiveLock, claims: &impl Claims) -> sovd_interfaces::locking::Lock {
     let mut response = sovd_lock(&lock.id, lock.exclusive);
-    response.lock_expiration =
-        Some(DateTime::<Utc>::from(lock.expires_at).to_rfc3339_opts(SecondsFormat::Secs, true));
+    response.lock_expiration = Some(system_time_to_rfc3339(lock.expires_at));
     response.owned = lock.principal.subject == claims.sub();
     response
 }
@@ -738,9 +740,7 @@ fn defunct_to_sovd(
     claims: &impl Claims,
 ) -> sovd_interfaces::locking::Lock {
     let mut response = lock.to_sovd_lock(claims);
-    response.lock_expiration = Some(
-        DateTime::<Utc>::from(lock.original_expires_at).to_rfc3339_opts(SecondsFormat::Secs, true),
-    );
+    response.lock_expiration = Some(system_time_to_rfc3339(lock.original_expires_at));
     response.x_sovd2uds_current_holder = Some(state.current_holder(lock).to_owned());
     response
 }
@@ -750,8 +750,7 @@ fn active_details(
     claims: &impl Claims,
 ) -> sovd_interfaces::locking::id::get::Response {
     sovd_interfaces::locking::id::get::Response {
-        lock_expiration: DateTime::<Utc>::from(lock.expires_at)
-            .to_rfc3339_opts(SecondsFormat::Secs, true),
+        lock_expiration: system_time_to_rfc3339(lock.expires_at),
         owned: lock.principal.subject == claims.sub(),
         x_sovd2uds_isexclusive: lock.exclusive,
         x_sovd2uds_broken_by: None,

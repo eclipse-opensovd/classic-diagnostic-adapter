@@ -37,7 +37,7 @@ copyright = "%Y, Eclipse OpenSOVD authors"
 version = "1.0"
 html_theme = "furo"
 html_static_path = ["_static"]
-html_css_files = ["force_light_theme.css"]
+html_css_files = ["force_light_theme.css", "wide_layout.css"]
 html_js_files = ["force_light_theme.js"]
 
 plantuml = (

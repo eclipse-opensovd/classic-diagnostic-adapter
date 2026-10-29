@@ -13,7 +13,13 @@
 
 //! Shared test doubles for `cda-comm-uds` tests.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use cda_interfaces::{
@@ -24,6 +30,7 @@ use cda_interfaces::{
     ResponseParameterInfo, SchemaDescription, SecurityAccess, ServiceParameterMetadata,
     ServicePayload, TransmissionParameters, TransportResponse, UDS_ID_RESPONSE_BITMASK,
     UdsComParams, VariantDetection, VariantState,
+    authentication::{AuthenticationState, AuthenticationSubFunction},
     datatypes::{
         AddressingMode, ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
         ComponentOperationsInfo, DtcLookup, DtcReadInformationFunction, RetryPolicy,
@@ -177,6 +184,8 @@ pub(crate) struct TestEcuDb {
     /// Pre-send authorization policy; `None` allows every request.
     request_send_policy: Option<Arc<RequestSendPolicy>>,
     service_states: tokio::sync::Mutex<std::collections::HashMap<u8, String>>,
+    variant_detection_requests: HashMap<String, DiagComm>,
+    authentication: std::sync::Mutex<AuthenticationState>,
     /// Configurable `CP_P6Max`-backed timeout, so tests can verify that
     /// callers fall back to this comparam-derived value instead of using a
     /// hardcoded literal. Defaults to 5s to match the previous fixed value.
@@ -188,6 +197,27 @@ pub(crate) struct TestEcuDb {
     repeat_req_count_app: u32,
     tester_present_message: Vec<u8>,
     tester_present_response_expected: bool,
+    /// Set once [`VariantDetection::set_base_variant_online`] was called.
+    pub(crate) base_variant_selected: AtomicBool,
+    duplicates: Option<HashSet<String>>,
+    status: std::sync::Mutex<EcuState>,
+    /// State applied by `detect_variant` for non-empty responses. `None`
+    /// keeps the current state.
+    detection_outcome: Option<EcuState>,
+}
+
+fn default_test_status() -> EcuState {
+    // Online with a detected variant, so senders skip the pre-send variant
+    // detection guard (see `transport::needs_variant_detection`).
+    EcuState {
+        connectivity: Connectivity::Online,
+        variant_state: VariantState::Detected {
+            name: "TestVariant".to_owned(),
+            is_base_variant: false,
+            is_fallback: false,
+        },
+        variant_index: Some(0),
+    }
 }
 
 impl TestEcuDb {
@@ -201,10 +231,16 @@ impl TestEcuDb {
         Self {
             request_send_policy: None,
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            variant_detection_requests: HashMap::new(),
+            authentication: std::sync::Mutex::new(AuthenticationState::default()),
             timeout_default: Duration::from_secs(5),
             repeat_req_count_app: 2,
             tester_present_message: vec![0x3E, 0x00],
             tester_present_response_expected: true,
+            base_variant_selected: AtomicBool::new(false),
+            duplicates: None,
+            status: std::sync::Mutex::new(default_test_status()),
+            detection_outcome: None,
         }
     }
 
@@ -213,10 +249,16 @@ impl TestEcuDb {
         Self {
             request_send_policy: None,
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            variant_detection_requests: HashMap::new(),
+            authentication: std::sync::Mutex::new(AuthenticationState::default()),
             timeout_default,
             repeat_req_count_app: 2,
             tester_present_message: vec![0x3E, 0x00],
             tester_present_response_expected: true,
+            base_variant_selected: AtomicBool::new(false),
+            duplicates: None,
+            status: std::sync::Mutex::new(default_test_status()),
+            detection_outcome: None,
         }
     }
 
@@ -229,10 +271,16 @@ impl TestEcuDb {
         Self {
             request_send_policy: None,
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            variant_detection_requests: HashMap::new(),
+            authentication: std::sync::Mutex::new(AuthenticationState::default()),
             timeout_default,
             repeat_req_count_app,
             tester_present_message: vec![0x3E, 0x00],
             tester_present_response_expected: true,
+            base_variant_selected: AtomicBool::new(false),
+            duplicates: None,
+            status: std::sync::Mutex::new(default_test_status()),
+            detection_outcome: None,
         }
     }
 
@@ -244,12 +292,63 @@ impl TestEcuDb {
         Self {
             request_send_policy: None,
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            variant_detection_requests: HashMap::new(),
+            authentication: std::sync::Mutex::new(AuthenticationState::default()),
             timeout_default: Duration::from_secs(5),
             repeat_req_count_app: 2,
             tester_present_message,
             tester_present_response_expected,
+            base_variant_selected: AtomicBool::new(false),
+            duplicates: None,
+            status: std::sync::Mutex::new(default_test_status()),
+            detection_outcome: None,
         }
     }
+
+    /// Create a test double with one session-control request used for variant detection.
+    pub fn with_variant_detection_request(timeout_default: Duration) -> Self {
+        Self::with_variant_detection_session(timeout_default, SESSION_SUBFUNCTION)
+    }
+
+    /// Create a detection request with a distinct service name and subfunction.
+    pub fn with_variant_detection_session(timeout_default: Duration, subfunction: u8) -> Self {
+        let (name, request) = detection_session(subfunction);
+        Self {
+            request_send_policy: None,
+            service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            variant_detection_requests: HashMap::from_iter([(name, request)]),
+            authentication: std::sync::Mutex::new(AuthenticationState::default()),
+            timeout_default,
+            repeat_req_count_app: 0,
+            tester_present_message: vec![0x3E, 0x00],
+            tester_present_response_expected: true,
+            base_variant_selected: AtomicBool::new(false),
+            duplicates: None,
+            status: std::sync::Mutex::new(default_test_status()),
+            detection_outcome: None,
+        }
+    }
+
+    pub fn with_additional_detection_session(mut self, subfunction: u8) -> Self {
+        let (name, request) = detection_session(subfunction);
+        self.variant_detection_requests.insert(name, request);
+        self
+    }
+}
+
+fn detection_session(subfunction: u8) -> (String, DiagComm) {
+    let name = if subfunction == SESSION_SUBFUNCTION {
+        "variant-detection-session".to_owned()
+    } else {
+        format!("variant-detection-session-{subfunction:02x}")
+    };
+    let request = DiagComm {
+        name: name.clone(),
+        type_: DiagCommType::Modes,
+        lookup_name: Some(name.clone()),
+        subfunction_id: Some(subfunction),
+    };
+    (name, request)
 }
 
 impl Default for TestEcuDb {
@@ -423,43 +522,94 @@ impl EcuStateManager for TestEcuDb {
     fn set_default_states(&self) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
         std::future::ready(Ok(()))
     }
+
+    fn authentication_state(&self) -> AuthenticationState {
+        self.authentication
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default()
+    }
+
+    fn set_authentication_state(&self, state: AuthenticationState) {
+        if let Ok(mut s) = self.authentication.lock() {
+            *s = state;
+        }
+    }
 }
 
 #[async_trait]
 impl VariantDetection for TestEcuDb {
     fn ecu_status(&self) -> EcuState {
-        // Online with a detected variant, so senders skip the pre-send variant
-        // detection guard (see `transport::needs_variant_detection`).
-        EcuState {
-            connectivity: Connectivity::Online,
-            variant_state: VariantState::Detected {
-                name: "TestVariant".to_owned(),
-                is_base_variant: false,
-                is_fallback: false,
-            },
-            variant_index: Some(0),
-        }
+        std::sync::Mutex::lock(&self.status)
+            .expect("test status lock")
+            .clone()
     }
 
     async fn detect_variant<T: DiagServiceResponse + Sized>(
         &mut self,
-        _service_responses: HashMap<String, T>,
+        service_responses: HashMap<String, T>,
     ) -> Result<(), DiagServiceError> {
-        unimplemented!()
+        if service_responses.is_empty() {
+            self.set_status(|status| status.connectivity = Connectivity::Offline);
+        } else if let Some(outcome) = self.detection_outcome.clone() {
+            if service_responses
+                .keys()
+                .any(|name| self.variant_detection_requests.contains_key(name))
+            {
+                self.set_status(|status| *status = outcome);
+            } else {
+                self.set_status(|status| status.variant_state = VariantState::NotDetected);
+            }
+        }
+        Ok(())
     }
 
     fn get_variant_detection_requests(&self) -> &HashMap<String, DiagComm> {
-        unimplemented!()
+        &self.variant_detection_requests
     }
 
     async fn mark_as_duplicate(&mut self) {
-        unimplemented!()
+        self.set_status(|status| status.variant_state = VariantState::Duplicate);
     }
 
     async fn mark_as_no_variant_detected(&mut self) {
-        unimplemented!()
+        self.set_status(|status| status.variant_state = VariantState::NotDetected);
+    }
+
+    async fn set_base_variant_online(&mut self) -> Result<(), DiagServiceError> {
+        self.base_variant_selected.store(true, Ordering::SeqCst);
+        self.set_status(|status| {
+            status.connectivity = Connectivity::Online;
+            status.variant_state = VariantState::Detected {
+                name: "BaseVariant".to_owned(),
+                is_base_variant: true,
+                is_fallback: false,
+            };
+        });
+        Ok(())
     }
 }
+
+impl TestEcuDb {
+    fn set_status(&self, update: impl FnOnce(&mut EcuState)) {
+        update(&mut std::sync::Mutex::lock(&self.status).expect("test status lock"));
+    }
+
+    /// Makes this ECU part of a duplicate group with the given members.
+    pub fn with_duplicates(mut self, names: &[&str]) -> Self {
+        self.duplicates = Some(names.iter().map(|name| (*name).to_owned()).collect());
+        self
+    }
+
+    /// Sets the state `detect_variant` applies for non-empty responses.
+    pub fn with_detection_outcome(mut self, outcome: EcuState) -> Self {
+        self.detection_outcome = Some(outcome);
+        self
+    }
+}
+
+/// Name prefix of the authentication services returned by [`TestEcuDb`].
+pub(crate) const AUTHENTICATION_SERVICE_PREFIX: &str = "Authentication_";
 
 /// Subfunction byte used for every session change encoded by [`TestEcuDb`].
 const SESSION_SUBFUNCTION: u8 = 0x02;
@@ -480,8 +630,21 @@ impl PayloadEncoder for TestEcuDb {
         _data: Option<UdsPayloadData>,
         _functional_group_name: Option<&str>,
     ) -> impl Future<Output = Result<ServicePayload, DiagServiceError>> + Send {
+        if let Some(sub_function) = diag_service
+            .name
+            .strip_prefix(AUTHENTICATION_SERVICE_PREFIX)
+            .and_then(|sf| sf.parse::<AuthenticationSubFunction>().ok())
+        {
+            return std::future::ready(Ok(ServicePayload {
+                data: vec![service_ids::AUTHENTICATION, sub_function.id()],
+                source_address: self.tester_address(),
+                target_address: self.logical_address(),
+                new_session: None,
+                new_security: None,
+            }));
+        }
         // This double has no database to encode against, so it only knows how
-        // to build session-control frames. Fail loudly rather than silently
+        // to build session-control and authentication frames. Fail loudly rather than silently
         // mis-encoding some other service as `10 xx`.
         assert!(
             matches!(diag_service.type_, DiagCommType::Modes),
@@ -575,6 +738,28 @@ impl EcuSecurity for TestEcuDb {
                 .as_ref()
                 .map_or(Ok(()), |policy| policy(context)),
         )
+    }
+
+    fn lookup_authentication_service(
+        &self,
+        sub_function: AuthenticationSubFunction,
+    ) -> Result<DiagComm, DiagServiceError> {
+        let name = format!("{AUTHENTICATION_SERVICE_PREFIX}{sub_function}");
+        Ok(DiagComm {
+            name: name.clone(),
+            type_: DiagCommType::Modes,
+            lookup_name: Some(name),
+            subfunction_id: Some(sub_function.id()),
+        })
+    }
+
+    /// The return parameter is the byte following SID and sub-function.
+    fn authentication_return_value(
+        &self,
+        _sub_function: AuthenticationSubFunction,
+        raw_response: &[u8],
+    ) -> Result<Option<u64>, DiagServiceError> {
+        Ok(raw_response.get(2).copied().map(u64::from))
     }
 }
 
@@ -763,7 +948,7 @@ impl cda_interfaces::EcuManager for TestEcuDb {
     }
 
     fn duplicating_ecu_names(&self) -> Option<&HashSet<String>> {
-        None
+        self.duplicates.as_ref()
     }
 
     fn revision(&self) -> String {

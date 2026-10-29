@@ -702,6 +702,18 @@
 # The alive check is only sent when no diagnostic communication has occurred
 # for this duration. Set to 0 to disable the alive check.
 # alive_check_interval_secs = 1800
+# Whether the SOVD operation `/apps/sovd2uds/operations/doip-connect-ecu` is offered,
+# which connects an ECU directly to a given IP address instead of discovering it
+# via VIR/VAM. Intended for ECU development, disabled by default.
+# Only available in builds with the `doip-direct-connect` feature. If set
+# without that feature, an error is logged and the operation remains unavailable.
+# direct_connect_enabled = false
+# How gateways are discovered on the network:
+# - `Disabled`: no discovery of any kind, ECUs are only connected through an
+#   explicit direct-connect request.
+# - `VamOnly`: only react to spontaneous VAMs, no VIR is broadcast.
+# - `Full`: broadcast a VIR on startup and react to the resulting and later VAMs.
+# discovery = "Full"
 # Whether the `DoIP` transport is enabled.
 # When `false`, CDA skips `DoIP` initialization entirely (useful for
 # CAN-only or DoIP-less test setups).

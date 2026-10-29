@@ -311,12 +311,21 @@ fn decode_numeric_val_from_str(
             let lowercase = value.to_lowercase();
             if lowercase.starts_with("0x") {
                 let decoded = decode_hex_with_optional_prefix(value)?;
-                let decoded = if decoded.len() < size_of::<u32>() {
-                    pad_msb_to_len(&decoded, size_of::<u32>())
-                } else {
-                    decoded
-                };
-                let u32_val = u32::from_be_bytes(decoded.try_into().expect("padded to u32 length"));
+                // Leading zero bytes do not change the value, strip them before
+                // checking that the value fits into an u32.
+                let significant = decoded
+                    .iter()
+                    .position(|&b| b != 0)
+                    .and_then(|start| decoded.get(start..))
+                    .unwrap_or_default();
+                let bytes: [u8; size_of::<u32>()] = pad_msb_to_len(significant, size_of::<u32>())
+                    .try_into()
+                    .map_err(|_| {
+                        DiagServiceError::ParameterConversionError(format!(
+                            "Input value {value} is too large for UInt32"
+                        ))
+                    })?;
+                let u32_val = u32::from_be_bytes(bytes);
                 validate_bit_len_unsigned(u32_val, diag_type.bit_len().unwrap_or(32))?;
                 Ok(u32_val.to_be_bytes().to_vec())
             } else if lowercase.starts_with("0o") {
@@ -697,11 +706,21 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
 ) -> Result<DiagDataTypeContainer, DiagServiceError> {
     let uds_payload = payload.data()?;
 
-    // Only a MinMaxLength parameter with a minimum length of zero may contain no data.
+    // Empty data is only valid for
+    // - a MinMaxLength parameter with a minimum length of zero (optional, may be absent), or
+    // - a LeadingLength parameter whose encoded length is zero.
+    // A missing leading length field itself is rejected by `decode`, and MinMaxLength has
+    // no length field, so `is_optional` never needs to skip leading length bytes.
     let is_optional = matches!(
         diag_type.type_(),
         DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType { min_length: 0, .. })
     );
+    // The leading length field is not part of the decoded data, but must be
+    // skipped as well. A leading length of zero is valid and yields no data.
+    let leading_length_bytes = match diag_type.type_() {
+        DiagCodedTypeVariant::LeadingLengthInfo(bits) => Some(bits.div_ceil(8) as usize),
+        _ => None,
+    };
 
     // An optional parameter whose start is at or beyond the payload is absent.
     let (data, bit_len) = if is_optional && param_byte_pos >= uds_payload.len() {
@@ -710,7 +729,7 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
         diag_type.decode(uds_payload, param_byte_pos, param_bit_pos)?
     };
 
-    if data.is_empty() && !is_optional {
+    if data.is_empty() && !is_optional && leading_length_bytes.is_none() {
         tracing::debug!(
             "Not enough data for parameter {:?} in extract_diag_data_container, expected at least \
              1 byte, payload length {}",
@@ -724,7 +743,11 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
     }
 
     let data_type = diag_type.base_datatype();
-    payload.set_last_read_byte_pos(param_byte_pos.saturating_add(data.len()));
+    payload.set_last_read_byte_pos(
+        param_byte_pos
+            .saturating_add(leading_length_bytes.unwrap_or(0))
+            .saturating_add(data.len()),
+    );
 
     Ok(DiagDataTypeContainer::RawContainer(
         DiagDataTypeContainerRaw {
@@ -898,7 +921,11 @@ fn process_physical_type_value(
                 let val = i32::from_be_bytes(
                     pad_msb_to_len(&data, size_of::<i32>())
                         .try_into()
-                        .expect("input bytes padded to i32 size"),
+                        .map_err(|_| {
+                            DiagServiceError::ParameterConversionError(format!(
+                                "Input value {value} is too large for i32"
+                            ))
+                        })?,
                 );
                 to_numeric_base_type(val, base_type)
             }
@@ -906,7 +933,11 @@ fn process_physical_type_value(
                 let val = u32::from_be_bytes(
                     pad_msb_to_len(&data, size_of::<u32>())
                         .try_into()
-                        .expect("input bytes padded to u32 size"),
+                        .map_err(|_| {
+                            DiagServiceError::ParameterConversionError(format!(
+                                "Input value {value} is too large for u32"
+                            ))
+                        })?,
                 );
                 to_numeric_base_type(val, base_type)
             }
@@ -914,7 +945,11 @@ fn process_physical_type_value(
                 let val = f32::from_be_bytes(
                     pad_msb_to_len(&data, size_of::<f32>())
                         .try_into()
-                        .expect("input bytes padded to f32 size"),
+                        .map_err(|_| {
+                            DiagServiceError::ParameterConversionError(format!(
+                                "Input value {value} is too large for f32"
+                            ))
+                        })?,
                 );
                 to_numeric_base_type(val, base_type)
             }
@@ -922,7 +957,11 @@ fn process_physical_type_value(
                 let val = f64::from_be_bytes(
                     pad_msb_to_len(&data, size_of::<f64>())
                         .try_into()
-                        .expect("input bytes padded to f64 size"),
+                        .map_err(|_| {
+                            DiagServiceError::ParameterConversionError(format!(
+                                "Input value {value} is too large for f64"
+                            ))
+                        })?,
                 );
                 to_numeric_base_type(val, base_type)
             }
@@ -1642,6 +1681,24 @@ mod tests {
         let value = "101010";
         let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
         assert_eq!(result, 101_010u32.to_be_bytes().to_vec());
+
+        // over-length hex value must be rejected, not panic
+        let value = "0x0102030405";
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type);
+        assert!(matches!(
+            result,
+            Err(super::DiagServiceError::ParameterConversionError(_))
+        ));
+
+        // leading zero bytes do not count towards the length
+        let value = "0x00000000FFFFFFFF";
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
+        assert_eq!(result, u32::MAX.to_be_bytes().to_vec());
+
+        // all-zero over-length value
+        let value = "0x0000000000";
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
+        assert_eq!(result, 0u32.to_be_bytes().to_vec());
     }
 
     #[test]
@@ -2297,6 +2354,82 @@ mod tests {
             "Expected a missing required MinMaxLength parameter to report insufficient data, got \
              {res:?}"
         );
+    }
+
+    // A parameter without byte position following a leading length parameter
+    // must start after the length field and the data of its predecessor.
+    #[test]
+    fn test_leading_length_advances_past_length_field() {
+        let dct = DiagCodedType::new(
+            DataType::ByteField,
+            DiagCodedTypeVariant::LeadingLengthInfo(16),
+            true,
+        )
+        .unwrap();
+        // first: length 2 + [0xaa, 0xbb], second: length 0, third: length 1 + [0xcc]
+        let data = [0x00, 0x02, 0xAA, 0xBB, 0x00, 0x00, 0x00, 0x01, 0xCC];
+        let mut payload = Payload::new(&data);
+
+        let mut decoded = Vec::new();
+        let mut byte_pos = 0;
+        for _ in 0..3 {
+            let res = extract_diag_data_container(
+                Some("test_param"),
+                byte_pos,
+                0,
+                &mut payload,
+                &dct,
+                None,
+                None,
+            )
+            .unwrap();
+            let crate::DiagDataTypeContainer::RawContainer(raw) = res else {
+                panic!("Expected raw container");
+            };
+            decoded.push(raw.data);
+            byte_pos = payload.last_read_byte_pos();
+        }
+        assert_eq!(decoded, vec![vec![0xAA, 0xBB], vec![], vec![0xCC]]);
+        assert_eq!(byte_pos, data.len());
+    }
+
+    // A leading length of zero is valid and yields no data, but the length
+    // field itself is mandatory: a payload ending before it is an error.
+    #[test]
+    fn test_leading_length_missing_length_field_is_error() {
+        let dct = DiagCodedType::new(
+            DataType::ByteField,
+            DiagCodedTypeVariant::LeadingLengthInfo(16),
+            true,
+        )
+        .unwrap();
+        for data in [&[0x69u8, 0x07][..], &[0x69, 0x07, 0x00][..]] {
+            let mut payload = Payload::new(data);
+            let res = extract_diag_data_container(
+                Some("test_param"),
+                2,
+                0,
+                &mut payload,
+                &dct,
+                None,
+                None,
+            );
+            assert!(
+                matches!(res, Err(cda_interfaces::DiagServiceError::BadPayload(_))),
+                "Expected a missing leading length field to be rejected, got {res:?}"
+            );
+        }
+
+        let data = [0x69, 0x07, 0x00, 0x00];
+        let mut payload = Payload::new(&data);
+        let res =
+            extract_diag_data_container(Some("test_param"), 2, 0, &mut payload, &dct, None, None)
+                .unwrap();
+        let crate::DiagDataTypeContainer::RawContainer(raw) = res else {
+            panic!("Expected raw container");
+        };
+        assert!(raw.data.is_empty());
+        assert_eq!(payload.last_read_byte_pos(), data.len());
     }
 
     // This test reproduces a response that contains only the RoutineControl header. The

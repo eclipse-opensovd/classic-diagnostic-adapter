@@ -14,6 +14,7 @@
 use cda_database::datatypes;
 use cda_interfaces::{
     DiagServiceError, DynamicPlugin, EcuSecurity, EcuStateManager, HashSet, SecurityAccess,
+    authentication::AuthenticationSubFunction,
     dlt_ctx,
     request_authorization::{UdsRequestSendContext, UdsRequestTarget},
     service_ids,
@@ -110,6 +111,39 @@ impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
             return check_request_send_plugin::<S>(security_plugin, &enriched);
         }
         check_request_send_plugin::<S>(security_plugin, context)
+    }
+
+    fn lookup_authentication_service(
+        &self,
+        sub_function: AuthenticationSubFunction,
+    ) -> Result<cda_interfaces::DiagComm, DiagServiceError> {
+        let service = self.find_authentication_service(sub_function)?;
+        let short_name = service
+            .diag_comm()
+            .and_then(|dc| dc.short_name())
+            .ok_or_else(|| {
+                DiagServiceError::InvalidDatabase(
+                    "Authentication service has no short name".to_owned(),
+                )
+            })?;
+        Ok(cda_interfaces::DiagComm {
+            name: self
+                .database_naming_convention
+                .trim_short_name_affixes(short_name),
+            type_: cda_interfaces::DiagCommType::Modes,
+            lookup_name: Some(short_name.to_owned()),
+            subfunction_id: None,
+        })
+    }
+
+    fn authentication_return_value(
+        &self,
+        sub_function: AuthenticationSubFunction,
+        raw_response: &[u8],
+    ) -> Result<Option<u64>, DiagServiceError> {
+        // The decoding is a SID 0x29 specific database lookup, it lives in
+        // `authentication.rs` together with the other Authentication lookups.
+        self.decode_authentication_return_value(sub_function, raw_response)
     }
 }
 
@@ -356,6 +390,25 @@ pub(in crate::diag_kernel) fn check_security_plugin<S: SecurityPlugin>(
         .map(SecurityPlugin::as_security_plugin)?;
 
     security_plugin.validate_service(service)
+}
+
+/// Asks the security plugin whether a raw request without a matching MDD service may be sent.
+///
+/// The void plugin `()` (CDA-internal traffic) never allows unmatched raw requests.
+pub(in crate::diag_kernel) fn check_raw_service_plugin<S: SecurityPlugin>(
+    security_plugin: &DynamicPlugin,
+    bytes: &[u8],
+) -> Result<(), DiagServiceError> {
+    if is_void_plugin(security_plugin) {
+        return Err(DiagServiceError::NotFound(format!(
+            "No matching generic service found for request prefix: {bytes:02X?}"
+        )));
+    }
+    security_plugin
+        .downcast_ref::<S>()
+        .ok_or(DiagServiceError::InvalidSecurityPlugin)
+        .map(SecurityPlugin::as_security_plugin)?
+        .check_raw_service(bytes)
 }
 
 /// Reports whether `security_plugin` is the void plugin used by CDA-internal traffic.

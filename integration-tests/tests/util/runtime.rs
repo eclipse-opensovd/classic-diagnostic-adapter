@@ -1051,6 +1051,48 @@ pub(crate) async fn wait_for_ecus_online(config: &Configuration) -> Result<(), T
     }
 }
 
+/// Poll CDA's stored network state until the specified ECU is reported offline.
+pub(crate) async fn wait_for_ecu_offline(
+    config: &Configuration,
+    ecu_name: &str,
+) -> Result<(), TestingError> {
+    const TIMEOUT: Duration = Duration::from_secs(10);
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+    let started = Instant::now();
+
+    loop {
+        let response = send_cda_request(
+            config,
+            "apps/sovd2uds/data/networkstructure",
+            StatusCode::OK,
+            Method::GET,
+            None,
+            None,
+            None,
+        )
+        .await?;
+        let network: NetworkStructureResponse = response_to_t(&response)?;
+        let disconnected = network
+            .data
+            .iter()
+            .flat_map(|network| &network.gateways)
+            .flat_map(|gateway| &gateway.ecus)
+            .any(|ecu| {
+                ecu.qualifier.eq_ignore_ascii_case(ecu_name)
+                    && matches!(ecu.state.as_str(), "Disconnected" | "Offline")
+            });
+        if disconnected {
+            return Ok(());
+        }
+        if started.elapsed() >= TIMEOUT {
+            return Err(TestingError::Timeout(format!(
+                "{ecu_name} did not become disconnected within {TIMEOUT:?}"
+            )));
+        }
+        cda_interfaces::util::tokio_ext::sleep_for(POLL_INTERVAL).await;
+    }
+}
+
 pub(crate) fn mdd_file_path() -> Result<String, TestingError> {
     fn mdd_files_exist(path: &std::path::Path) -> bool {
         std::fs::read_dir(path)

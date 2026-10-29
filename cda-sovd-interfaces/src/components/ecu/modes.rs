@@ -111,3 +111,71 @@ pub mod dtcsetting {
         pub type Response = crate::common::modes::put::Response<String>;
     }
 }
+
+/// UDS Authentication (SID 0x29), see ADR-007.
+pub mod authentication {
+    pub mod get {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+        #[schemars(rename = "AuthenticationModeResponse")]
+        pub struct Response {
+            /// The mode identifier, always `authentication`
+            pub id: String,
+            /// The name of the mode
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub name: Option<String>,
+            /// `authenticated`, `deAuthenticated` or `offline`
+            pub value: String,
+            /// The last sub-function that resulted in a positive response
+            #[serde(
+                rename = "x-sovd2uds-last-subfunction",
+                skip_serializing_if = "Option::is_none"
+            )]
+            pub last_subfunction: Option<String>,
+            /// ISO 8601 point in time at which the `mode_expiration` elapses
+            #[serde(
+                rename = "x-sovd2uds-expires-at",
+                skip_serializing_if = "Option::is_none"
+            )]
+            pub expires_at: Option<String>,
+            /// JSON schema of the response, only present if `include-schema` was requested
+            #[schemars(skip)]
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub schema: Option<schemars::Schema>,
+        }
+    }
+
+    pub mod put {
+        use cda_interfaces::HashMap;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+        #[schemars(rename = "UpdateAuthenticationModesRequest")]
+        pub struct Request {
+            /// Sub-function name as defined in ISO 14229-1 Table 74,
+            /// e.g. `verifyProofOfOwnershipBidirectional` (case-insensitive)
+            pub value: String,
+            /// Seconds after which `deAuthenticate` is sent, starting with the
+            /// request that completes the authentication
+            pub mode_expiration: Option<u64>,
+            /// Request parameters by their short names in the diagnostic description
+            pub parameters: Option<HashMap<String, serde_json::Value>>,
+        }
+
+        #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+        #[schemars(rename = "UpdateAuthenticationModesResponse")]
+        pub struct Response {
+            /// The mode identifier, always `authentication`
+            pub id: String,
+            /// The sub-function that was sent, as defined in ISO 14229-1 Table 74
+            pub value: String,
+            /// Decoded response parameters
+            pub parameters: serde_json::Map<String, serde_json::Value>,
+            /// JSON schema of the response, only present if `include-schema` was requested
+            #[schemars(skip)]
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub schema: Option<schemars::Schema>,
+        }
+    }
+}

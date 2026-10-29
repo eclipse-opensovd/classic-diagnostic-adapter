@@ -797,6 +797,77 @@ impl<'a> EcuDataBuilder<'a> {
         })
     }
 
+    /// Like [`Self::create_coded_const_param`], but without BYTE-POSITION, i.e.
+    /// the param directly follows the preceding (variable-length) param.
+    pub fn create_coded_const_param_no_byte_pos(
+        &mut self,
+        name: &'a str,
+        value: &str,
+        bit_len: u32,
+        coded_type: DataType,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let coded_value = Some(self.fbb.create_string(value));
+        let diag_coded_type =
+            Some(self.create_diag_coded_type_standard_length(bit_len, coded_type));
+        let specific_data = Some(
+            dataformat::ParamSpecificData::tag_as_coded_const(dataformat::CodedConst::create(
+                &mut self.fbb,
+                &dataformat::CodedConstArgs {
+                    coded_value,
+                    diag_coded_type,
+                },
+            ))
+            .value_offset(),
+        );
+
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::CODED_CONST,
+            short_name: Some(name),
+            semantic: None,
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: None,
+            bit_position: None,
+            specific_data_type: dataformat::ParamSpecificData::CodedConst,
+            specific_data,
+        })
+    }
+
+    /// Creates a MATCHING-REQUEST-PARAM at `byte_pos` referencing the request
+    /// param at `request_byte_pos`.
+    pub fn create_matching_request_param(
+        &mut self,
+        name: &'a str,
+        request_byte_pos: i32,
+        byte_length: u32,
+        byte_pos: u32,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let specific_data = Some(
+            dataformat::ParamSpecificData::tag_as_matching_request_param(
+                dataformat::MatchingRequestParam::create(
+                    &mut self.fbb,
+                    &dataformat::MatchingRequestParamArgs {
+                        request_byte_pos,
+                        byte_length,
+                    },
+                ),
+            )
+            .value_offset(),
+        );
+
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::MATCHING_REQUEST_PARAM,
+            short_name: Some(name),
+            semantic: None,
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: Some(byte_pos),
+            bit_position: Some(0),
+            specific_data_type: dataformat::ParamSpecificData::MatchingRequestParam,
+            specific_data,
+        })
+    }
+
     pub fn create_value_param(
         &mut self,
         name: &'a str,
@@ -840,6 +911,38 @@ impl<'a> EcuDataBuilder<'a> {
             physical_default_value: None,
             byte_position: Some(byte_pos),
             bit_position: Some(bit_pos),
+            specific_data_type: dataformat::ParamSpecificData::Value,
+            specific_data,
+        })
+    }
+
+    /// Like [`create_value_param`] but sets the SEMANTIC, e.g. `DATA`.
+    pub fn create_value_param_with_semantic(
+        &mut self,
+        name: &'a str,
+        semantic: &'a str,
+        dop: WIPOffset<dataformat::DOP>,
+        byte_pos: u32,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let specific_data = Some(
+            dataformat::ParamSpecificData::tag_as_value(dataformat::Value::create(
+                &mut self.fbb,
+                &dataformat::ValueArgs {
+                    physical_default_value: None,
+                    dop: Some(dop),
+                },
+            ))
+            .value_offset(),
+        );
+
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::VALUE,
+            short_name: Some(name),
+            semantic: Some(semantic),
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: Some(byte_pos),
+            bit_position: Some(0),
             specific_data_type: dataformat::ParamSpecificData::Value,
             specific_data,
         })
@@ -937,6 +1040,94 @@ impl<'a> EcuDataBuilder<'a> {
             bit_position: Some(bit_pos),
             specific_data_type: dataformat::ParamSpecificData::LengthKeyRef,
             specific_data,
+        })
+    }
+
+    /// Creates a TABLE-KEY param at `byte_pos` referencing a TABLE whose key
+    /// is coded with `key_dop`. Each row is `(short_name, key, structure)`.
+    pub fn create_table_key_param(
+        &mut self,
+        name: &'a str,
+        key_dop: WIPOffset<dataformat::DOP<'a>>,
+        rows: &[(&str, &str, Option<WIPOffset<dataformat::DOP<'a>>>)],
+        byte_pos: u32,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|(row_name, key, structure)| {
+                let short_name = Some(self.fbb.create_string(row_name));
+                let key = Some(self.fbb.create_string(key));
+                dataformat::TableRow::create(
+                    &mut self.fbb,
+                    &dataformat::TableRowArgs {
+                        short_name,
+                        key,
+                        structure: *structure,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        let rows = Some(self.fbb.create_vector(&rows));
+        let table_name = Some(self.fbb.create_string(name));
+        let table = dataformat::TableDop::create(
+            &mut self.fbb,
+            &dataformat::TableDopArgs {
+                short_name: table_name,
+                key_dop: Some(key_dop),
+                rows,
+                ..Default::default()
+            },
+        );
+        let table_key = dataformat::TableKey::create(
+            &mut self.fbb,
+            &dataformat::TableKeyArgs {
+                table_key_reference_type: dataformat::TableKeyReference::TableDop,
+                table_key_reference: Some(
+                    dataformat::TableKeyReference::tag_as_table_dop(table).value_offset(),
+                ),
+            },
+        );
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::TABLE_KEY,
+            short_name: Some(name),
+            semantic: None,
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: Some(byte_pos),
+            bit_position: Some(0),
+            specific_data_type: dataformat::ParamSpecificData::TableKey,
+            specific_data: Some(
+                dataformat::ParamSpecificData::tag_as_table_key(table_key).value_offset(),
+            ),
+        })
+    }
+
+    /// Creates a TABLE-STRUCT param at `byte_pos` referencing `table_key`.
+    pub fn create_table_struct_param(
+        &mut self,
+        name: &'a str,
+        table_key: WIPOffset<dataformat::Param<'a>>,
+        byte_pos: u32,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let table_struct = dataformat::TableStruct::create(
+            &mut self.fbb,
+            &dataformat::TableStructArgs {
+                table_key: Some(table_key),
+            },
+        );
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::TABLE_STRUCT,
+            short_name: Some(name),
+            semantic: None,
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: Some(byte_pos),
+            bit_position: Some(0),
+            specific_data_type: dataformat::ParamSpecificData::TableStruct,
+            specific_data: Some(
+                dataformat::ParamSpecificData::tag_as_table_struct(table_struct).value_offset(),
+            ),
         })
     }
 

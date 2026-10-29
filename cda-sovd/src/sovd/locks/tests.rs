@@ -362,6 +362,15 @@ pub(crate) async fn insert_test_ecu_lock(locks: &Locks, ecu_name: &str) {
     locks.test_insert_active(lock).await;
 }
 
+#[cfg(feature = "doip-direct-connect")]
+pub(crate) async fn insert_test_vehicle_lock(locks: &Locks, subject: &str) {
+    let lock = test_lock("test-vehicle-lock-id")
+        .owner(subject)
+        .vehicle()
+        .build();
+    locks.test_insert_active(lock).await;
+}
+
 async fn insert_policy_test_lock(locks: &Locks, cleanup_count: Arc<AtomicUsize>) -> String {
     let id = "existing-lock".to_owned();
     let lock = ActiveLock {

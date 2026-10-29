@@ -19,7 +19,6 @@ use cda_interfaces::{
     lock_priority_api::{LockId, LockPriorityPolicy, LockScope},
 };
 use cda_plugin_security::Claims;
-use chrono::{DateTime, SecondsFormat, Utc};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::{
@@ -27,6 +26,7 @@ use crate::{
     sovd::{
         error::{ApiError, ErrorWrapper},
         lock_state::{ActiveLock, DefunctLock, LockCoverage, LockState, ScopeKey, StateError},
+        timestamp::system_time_to_rfc3339,
     },
 };
 
@@ -53,8 +53,12 @@ pub(crate) use handlers::{
 use lifecycle::{LifecycleDelivery, enqueue_lock_event};
 pub(crate) use policy::rollback_preemption;
 use policy::{AcquisitionGuard, PendingPreemption, active_snapshot};
+#[cfg(all(test, feature = "doip-direct-connect"))]
+pub(crate) use tests::insert_test_vehicle_lock;
 #[cfg(test)]
 pub(crate) use tests::{insert_test_ecu_lock, insert_test_fg_lock};
+#[cfg(feature = "doip-direct-connect")]
+pub(crate) use validation::validate_vehicle_write;
 use validation::{validate_claim, validate_vehicle_children};
 pub(crate) use validation::{
     validate_ecu_read, validate_ecu_write, validate_fg_read, validate_fg_write,
@@ -161,6 +165,7 @@ use lock_core::{LockCore, TransitionReservation};
 
 pub struct Locks {
     core: LockCore,
+    authentication_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     priority_policy: Arc<dyn LockPriorityPolicy>,
     lifecycle_sender: mpsc::Sender<LifecycleDelivery>,
     lifecycle_receiver: Mutex<Option<mpsc::Receiver<LifecycleDelivery>>>,
@@ -209,10 +214,53 @@ impl Locks {
                 cleanups: HashMap::new(),
                 generation: 0,
             }),
+            authentication_gates: Mutex::new(HashMap::new()),
             priority_policy: policy,
             lifecycle_sender,
             lifecycle_receiver: Mutex::new(Some(lifecycle_receiver)),
             config,
+        }
+    }
+
+    async fn authentication_gate(&self, ecu_name: &str) -> Arc<Mutex<()>> {
+        let mut gates = self.authentication_gates.lock().await;
+        Arc::clone(
+            gates
+                .entry(ecu_name.to_ascii_lowercase())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
+
+    /// Serializes authentication requests with lock cleanup for one ECU.
+    pub(crate) async fn authentication_guard(
+        &self,
+        ecu_name: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.authentication_gate(ecu_name).await.lock_owned().await
+    }
+
+    /// Admits a write only while the caller's lock is effective and no cleanup
+    /// for this ECU is pending. The transition reservation prevents a lock
+    /// release between validating ownership and acquiring the ECU guard.
+    pub(crate) async fn authentication_write_guard(
+        &self,
+        claims: &impl Claims,
+        ecu_name: &str,
+        include_schema: bool,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, ErrorWrapper> {
+        let gate = self.authentication_gate(ecu_name).await;
+        loop {
+            let reservation = self.core.reserve_transition().await;
+            if let Ok(guard) = Arc::clone(&gate).try_lock_owned() {
+                let validation = validate_ecu_write(claims, ecu_name, self, include_schema).await;
+                reservation.finish();
+                validation?;
+                return Ok(guard);
+            }
+            // Never wait for an in-flight PUT while holding the global lock
+            // transition gate: its release may be waiting to clean up this ECU.
+            reservation.finish();
+            drop(Arc::clone(&gate).lock_owned().await);
         }
     }
 
@@ -352,16 +400,11 @@ impl DefunctLock {
     fn to_sovd_lock(&self, claims: &impl Claims) -> sovd_interfaces::locking::Lock {
         sovd_interfaces::locking::Lock {
             id: self.id.to_string(),
-            lock_expiration: Some(
-                DateTime::<Utc>::from(self.original_expires_at)
-                    .to_rfc3339_opts(SecondsFormat::Secs, true),
-            ),
+            lock_expiration: Some(system_time_to_rfc3339(self.original_expires_at)),
             owned: self.principal.subject == claims.sub(),
             x_sovd2uds_isexclusive: self.exclusive,
             x_sovd2uds_broken_by: Some(self.broken_by.clone()),
-            x_sovd2uds_broken_at: Some(
-                DateTime::<Utc>::from(self.broken_at).to_rfc3339_opts(SecondsFormat::Secs, true),
-            ),
+            x_sovd2uds_broken_at: Some(system_time_to_rfc3339(self.broken_at)),
             x_sovd2uds_current_holder: None,
             schema: None,
         }
@@ -369,14 +412,11 @@ impl DefunctLock {
 
     fn details(&self, claims: &impl Claims) -> sovd_interfaces::locking::id::get::Response {
         sovd_interfaces::locking::id::get::Response {
-            lock_expiration: DateTime::<Utc>::from(self.original_expires_at)
-                .to_rfc3339_opts(SecondsFormat::Secs, true),
+            lock_expiration: system_time_to_rfc3339(self.original_expires_at),
             owned: self.principal.subject == claims.sub(),
             x_sovd2uds_isexclusive: self.exclusive,
             x_sovd2uds_broken_by: Some(self.broken_by.clone()),
-            x_sovd2uds_broken_at: Some(
-                DateTime::<Utc>::from(self.broken_at).to_rfc3339_opts(SecondsFormat::Secs, true),
-            ),
+            x_sovd2uds_broken_at: Some(system_time_to_rfc3339(self.broken_at)),
             x_sovd2uds_current_holder: None,
             schema: None,
         }
@@ -390,9 +430,7 @@ impl DefunctLock {
         );
         parameters.insert(
             "broken_at".to_owned(),
-            serde_json::Value::String(
-                DateTime::<Utc>::from(self.broken_at).to_rfc3339_opts(SecondsFormat::Secs, true),
-            ),
+            serde_json::Value::String(system_time_to_rfc3339(self.broken_at)),
         );
         parameters.insert(
             "current_holder".to_owned(),

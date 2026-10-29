@@ -2511,7 +2511,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 [[package]]
 name = "mbedtls-rs"
 version = "0.1.0"
-source = "git+https://github.com/eclipse-opensovd/mbedtls-rs.git?rev=42e9b3c0652f716bee1aa2ad16fce275023a8727#42e9b3c0652f716bee1aa2ad16fce275023a8727"
+source = "git+https://github.com/eclipse-opensovd/mbedtls-rs.git?rev=e976dc7b45216022cab175a68c0ee387430ad874#e976dc7b45216022cab175a68c0ee387430ad874"
 dependencies = [
  "ed25519-dalek",
  "mbedtls-sys",
@@ -2522,7 +2522,7 @@ dependencies = [
 [[package]]
 name = "mbedtls-sys"
 version = "0.1.0"
-source = "git+https://github.com/eclipse-opensovd/mbedtls-rs.git?rev=42e9b3c0652f716bee1aa2ad16fce275023a8727#42e9b3c0652f716bee1aa2ad16fce275023a8727"
+source = "git+https://github.com/eclipse-opensovd/mbedtls-rs.git?rev=e976dc7b45216022cab175a68c0ee387430ad874#e976dc7b45216022cab175a68c0ee387430ad874"
 dependencies = [
  "cc",
  "cmake",
@@ -3771,9 +3771,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "once_cell",
  "ring",

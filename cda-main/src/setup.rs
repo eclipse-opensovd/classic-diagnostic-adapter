@@ -32,8 +32,8 @@ use cda_interfaces::{
     HashMap, ShutdownSignal,
     communication_control::{
         ActivationCause, CommunicationAccess, CommunicationInitMode, CommunicationLifecycle,
-        CommunicationVariantDetection, PostUpdateCommunicationMode, VariantDetectionMode,
-        error::CommControlError,
+        CommunicationVariantDetection, DoipConnect, PostUpdateCommunicationMode,
+        VariantDetectionMode, error::CommControlError,
     },
     component_slot::{ComponentSlot, ReplaceComponent},
     health::HealthProvider,
@@ -102,6 +102,10 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
     /// Narrow handle used by update plugins to request activation without
     /// gaining the full [`CommunicationPlugin`](CommunicationPlugin) lifecycle authority.
     pub communication_access: Arc<dyn CommunicationAccess>,
+    /// Connect-only handle the SOVD routes use to connect an ECU directly to an IP.
+    /// `None` when `doip.direct_connect_enabled` is false or the build lacks
+    /// the `doip-direct-connect` feature.
+    pub doip_connect: Option<Arc<dyn DoipConnect>>,
     /// Narrow handle used by update plugins to take exclusive ownership of
     /// communication for the duration of a runtime file update.
     pub communication_disable: Arc<dyn DisableCommunication>,
@@ -485,6 +489,21 @@ where
 
     let shutdown_signal = cda_interfaces::shutdown_signal(ws.shutdown_signal.clone());
     let gateway = vehicle_data.diagnostic_gateway.clone();
+    #[cfg(feature = "doip-direct-connect")]
+    let doip_connect = config
+        .doip
+        .direct_connect_enabled
+        .then(|| gateway.doip_connect());
+    #[cfg(not(feature = "doip-direct-connect"))]
+    let doip_connect: Option<Arc<dyn DoipConnect>> = {
+        if config.doip.direct_connect_enabled {
+            tracing::error!(
+                "doip.direct_connect_enabled is set, but this build lacks the \
+                 `doip-direct-connect` feature; direct connect is unavailable"
+            );
+        }
+        None
+    };
     let http_protections = HttpProtectionRegistry::new();
 
     let (communication_runtime, communication_access) = build_communication_runtime_and_access(
@@ -528,6 +547,7 @@ where
             file_managers,
             locks: Arc::clone(&vehicle_data.locks),
             communication_access: Arc::clone(&communication_access),
+            doip_connect: doip_connect.clone(),
         },
     )
     .await?;
@@ -545,6 +565,7 @@ where
         shutdown_signal,
         post_update_mode,
         communication_access,
+        doip_connect,
         communication_disable,
         http_protections,
         update_retry_after,

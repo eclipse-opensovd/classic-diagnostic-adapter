@@ -52,6 +52,7 @@ cda-build = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 flatbuffers = { workspace = true }
 cda-database = { workspace = true, features = ["database-builder"] }
+cda-plugin-security = { workspace = true, features = ["test-utils"] }
 
 [features]
 default = []

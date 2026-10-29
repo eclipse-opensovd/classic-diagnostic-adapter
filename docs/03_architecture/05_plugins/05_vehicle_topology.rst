@@ -189,3 +189,74 @@ Vehicle Topology Plugin
             plugin --> Client : 200 OK (status: completed)
         end
         @enduml
+
+
+.. arch:: Vehicle Topology Plugin - Connect ECU
+    :id: arch~plugin-vehicle-topology-connect-ecu
+    :status: draft
+
+    The plugin provides a ``doip-connect-ecu`` operation to connect an ECU directly to an IP address,
+    without waiting for it to be discovered via VIR/VAM. It follows the standard SOVD operations
+    semantics, with a synchronous execution:
+
+    .. list-table:: Vehicle Topology Connect ECU Operation
+       :header-rows: 1
+
+       * - Method
+         - Path
+         - Description
+
+       * - POST
+         - ``/apps/sovd2uds/operations/doip-connect-ecu/executions``
+         - Connects the given ECU to the given IP address. Returns 200 OK once the connection has been
+           established.
+
+    The request body contains the following ``parameters``:
+
+    .. list-table:: doip-connect-ecu Request Body
+       :header-rows: 1
+
+       * - Field
+         - Default
+         - Description
+       * - ``ecu``
+         - --
+         - Identifier of the ECU to connect, as used in ``/components/{ecu}``.
+       * - ``ip``
+         - --
+         - IP address of the DoIP entity of the ECU.
+       * - ``protocol_version``
+         - ``0x02``
+         - Raw DoIP protocol version byte (``0x02``: ISO 13400-2:2012).
+
+    The operation is only offered in builds with the ``doip-direct-connect`` feature, and if
+    ``doip.direct_connect_enabled`` is set, which is not the case by default. If it is set in a build
+    without the feature, the CDA logs an error and leaves the operation unavailable. Calling it
+    requires authentication and the vehicle lock, as it changes which ECUs are connected. Only
+    ECUs that are a gateway (their
+    logical address is also their gateway address) can be connected, other ECUs are rejected with
+    ``400 Bad Request``.
+
+    The operation only replaces the trigger of the connection: the logical addresses are taken from the
+    diagnostic database, and routing activation, TLS upgrade and ECU identification are performed as for a
+    gateway that was discovered via VIR/VAM.
+
+    The mechanism can never change an existing connection. If the ECU already has a connection, the request
+    is rejected with ``409 Conflict``, even if that connection is not active at the time of the call (e.g.
+    because the gateway is offline). The same applies if a connection for the ECU is being established at
+    that moment, be it by another direct connect or by VIR/VAM handling: only one connection attempt runs
+    per gateway at a time. A VAM that arrives for a directly connected gateway does not replace the
+    connection, a warning is logged if it comes from a different address. A direct connection is not
+    persisted, it is lost when the transport is disabled or the CDA is restarted.
+
+    The connection is established by a task of its own, so that a client that gives up on the request
+    (disconnect, HTTP timeout) cannot leave it half done. It is limited to the connect timeout plus the
+    routing activation timeout of the ECU plus a fixed margin, which covers the TLS handshake, and is
+    cancelled when communication is disabled. It does not hold the lifecycle lock of the transport while
+    connecting, so that disabling communication and shutdown do not have to wait for it.
+
+    The SOVD layer only has access to a connect-only capability of the transport, not to its lifecycle
+    control.
+
+    The operation is preliminary: it is implemented in the SOVD layer for now and expected to be taken over
+    by the vehicle topology plugin.

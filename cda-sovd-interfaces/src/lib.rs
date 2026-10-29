@@ -168,6 +168,8 @@ pub mod common {
 
         pub const DTC_SETTING_NAME: &str = "DTC setting";
         pub const DTC_SETTING_ID: &str = "dtcsetting";
+        pub const AUTHENTICATION_NAME: &str = "Authentication";
+        pub const AUTHENTICATION_ID: &str = "authentication";
 
         pub type Query = crate::IncludeSchemaQuery;
         pub mod get {

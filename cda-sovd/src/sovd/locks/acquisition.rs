@@ -70,6 +70,7 @@ pub(super) async fn create_lock<T: UdsEcu + Clone>(
             let locks = Arc::clone(locks);
             LockCleanupFnHelper::new(async move || {
                 stop_tester_present_unless_needed(&uds, &locks, tp_type).await;
+                let _authentication_guard = locks.authentication_guard(&ecu_name).await;
                 reset_ecu_session_and_security(&uds, &ecu_name, "ECU lock cleanup").await;
             })
         }
@@ -81,6 +82,7 @@ pub(super) async fn create_lock<T: UdsEcu + Clone>(
             LockCleanupFnHelper::new(async move || {
                 stop_tester_present_unless_needed(&uds, &locks, tp_type).await;
                 for ecu in covered_ecus {
+                    let _authentication_guard = locks.authentication_guard(&ecu).await;
                     reset_ecu_session_and_security(&uds, &ecu, "functional group lock cleanup")
                         .await;
                 }
@@ -88,8 +90,10 @@ pub(super) async fn create_lock<T: UdsEcu + Clone>(
         }
         ScopeKey::Vehicle => {
             let uds = (*uds).clone();
+            let locks = Arc::clone(locks);
             LockCleanupFnHelper::new(async move || {
                 for ecu in uds.get_ecus().await {
+                    let _authentication_guard = locks.authentication_guard(&ecu).await;
                     reset_ecu_session_and_security(&uds, &ecu, "vehicle lock cleanup").await;
                 }
             })

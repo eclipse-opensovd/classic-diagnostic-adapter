@@ -288,6 +288,53 @@ pub(super) fn validate_claim(
     Ok(())
 }
 
+/// Requires the caller to hold the effective vehicle lock.
+///
+/// Used by operations that change the vehicle topology and therefore must not run
+/// while any other client works on the vehicle. Fails with `LockRequired` if no
+/// vehicle lock is held, `Locked` if another client holds it and `LockBroken` if
+/// the caller's vehicle lock was preempted.
+#[cfg(feature = "doip-direct-connect")]
+pub(crate) async fn validate_vehicle_write(
+    claims: &impl Claims,
+    locks: &Locks,
+    include_schema: bool,
+) -> Result<(), ErrorWrapper> {
+    let now = SystemTime::now();
+    locks
+        .core
+        .read_store(|store| {
+            let state = &store.state;
+            if let Some(lock) = state
+                .defunct()
+                .find(|lock| {
+                    lock.original_expires_at > now
+                        && lock.principal.subject == claims.sub()
+                        && lock.scope == ScopeKey::Vehicle
+                })
+                .cloned()
+            {
+                let current_holder = state.current_holder(&lock).to_owned();
+                return Err(ErrorWrapper {
+                    error: lock.broken_error(&current_holder),
+                    include_schema,
+                });
+            }
+            validate_active_locks(
+                claims.sub(),
+                state.active().filter(|lock| {
+                    active_lock_is_effective(state, lock, now) && lock.scope == ScopeKey::Vehicle
+                }),
+                true,
+            )
+            .map_err(|error| ErrorWrapper {
+                error,
+                include_schema,
+            })
+        })
+        .await
+}
+
 pub(crate) async fn validate_vehicle_owner(
     locks: &Locks,
     claims: &impl Claims,
