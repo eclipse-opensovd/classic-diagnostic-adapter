@@ -23,13 +23,17 @@
 //!   plugin needs from the loaded databases and the live ECUs
 //! - [`persist::TopologyPersistence`]: the communication hook writing the
 //!   detected topology
+//! - [`reset`]: the topology operations of a `networkreset`
 //! - [`restore`]: restoring ECU states at startup
 //! - [`store::PersistentEcuTopologyStore`]: the storage-backed store
 
 pub mod persist;
 pub mod plugin;
+pub mod reset;
 pub mod restore;
 pub mod store;
+
+use std::time::Duration;
 
 pub use persist::TopologyPersistence;
 pub use plugin::{
@@ -39,3 +43,7 @@ pub use plugin::{
     topology_plugin_fn,
 };
 pub use store::PersistentEcuTopologyStore;
+
+/// Upper bound of a `networkreset` waiting for communication to come up, and
+/// then again for its rediscovery to settle. Nothing else bounds these waits.
+pub const REDISCOVERY_TIMEOUT: Duration = Duration::from_secs(60);

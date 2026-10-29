@@ -21,7 +21,7 @@ use axum::{
 use cda_interfaces::runtime_update_api::{
     LockStateProvider, RuntimeFilesUpdatePlugin, RuntimeUpdateError,
 };
-use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
+use sovd_interfaces::error::ErrorCode;
 
 use crate::VendorErrorCode;
 
@@ -59,18 +59,12 @@ impl IntoResponse for DbUpdateErrorResponse {
              error_code: ErrorCode,
              vendor_code: Option<VendorErrorCode>,
              retry_after: Option<Duration>| {
-                let resp = (
+                let resp = crate::sovd::error::api_error_response(
                     status_code,
-                    Json(ApiErrorResponse {
-                        message: self.error.to_string(),
-                        error_code,
-                        vendor_code,
-                        parameters: None,
-                        error_source: None,
-                        schema: None,
-                    }),
-                )
-                    .into_response();
+                    error_code,
+                    vendor_code,
+                    self.error.to_string(),
+                );
 
                 crate::sovd::with_retry_after(resp, retry_after)
             };

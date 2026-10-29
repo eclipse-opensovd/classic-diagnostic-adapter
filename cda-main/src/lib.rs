@@ -458,14 +458,17 @@ where
     // running until explicit shutdown.
     let Some(communication_runtime) = await_startup_stage(
         setup::setup_runtime_routes::<SP, SL, UPB, CPB>(
-            config,
-            vehicle_data,
             &webserver_state,
-            setup.build_update_plugin,
-            setup.build_communication_plugin,
-            storage,
-            http_protections,
-            Arc::clone(&topology),
+            setup::RuntimeRoutesInput {
+                config,
+                vehicle_data,
+                build_update_plugin: setup.build_update_plugin,
+                build_communication_plugin: setup.build_communication_plugin,
+                storage,
+                http_protections,
+                topology: Arc::clone(&topology),
+                build_vehicle_topology_plugin: setup.build_vehicle_topology_plugin,
+            },
         ),
         webserver_state.shutdown_signal.clone(),
     )

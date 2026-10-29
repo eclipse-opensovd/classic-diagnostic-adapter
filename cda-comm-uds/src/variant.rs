@@ -1153,7 +1153,7 @@ impl<S: EcuGateway, T: EcuManager> CommunicationVariantDetection for UdsManager<
             DetectionPhase::Activation => true,
             DetectionPhase::Redetection => {
                 // Explicit re-detection: AssumedOnline -> NotTested.
-                self.reset_ecu_states().await;
+                self.reset_ecu_states(true).await;
                 false
             }
         };

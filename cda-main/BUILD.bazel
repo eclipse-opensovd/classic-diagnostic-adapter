@@ -75,6 +75,7 @@ workspace_rust_library(
         "//cda-plugin-runtime-update:cda_plugin_runtime_update",
         "//cda-plugin-security:cda_plugin_security",
         "//cda-plugin-topology:cda_plugin_topology",
+        "//cda-plugin-vehicle-topology:cda_plugin_vehicle_topology",
         "//cda-sovd:cda_sovd",
         "//cda-storage:cda_storage",
         "//cda-tracing:cda_tracing",

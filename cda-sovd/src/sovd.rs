@@ -794,17 +794,7 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
     // Preliminary: ECU connection management is expected to move into the topology
     // plugin. Only offered if built with the feature, and enabled in the configuration.
     #[cfg(feature = "doip-direct-connect")]
-    let router = if state.doip_connect.is_some() {
-        router.api_route(
-            apps::sovd2uds::operations::doip_connect_ecu::EXECUTIONS_ROUTE,
-            routing::post_with(
-                apps::sovd2uds::operations::doip_connect_ecu::post::<T>,
-                apps::sovd2uds::operations::doip_connect_ecu::docs_post,
-            ),
-        )
-    } else {
-        router
-    };
+    let router = apps::sovd2uds::operations::doip_connect_ecu::add_routes(router, &state);
     router
         .api_route(
             "/vehicle/v15/locks",
@@ -839,7 +829,7 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
         .route("/vehicle/v15/authorize", routing::post(S::authorize))
         .with_state(state)
         .api_route(
-            "/vehicle/v15/apps/sovd2uds/data/networkstructure",
+            cda_interfaces::topology::NETWORK_STRUCTURE_ROUTE,
             routing::get_with(
                 apps::sovd2uds::data::networkstructure::get::<T>,
                 apps::sovd2uds::data::networkstructure::docs_get,

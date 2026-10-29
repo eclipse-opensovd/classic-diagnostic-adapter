@@ -319,8 +319,8 @@ pub(crate) async fn ecu_status(
 /// authenticated `PUT`, handled by `UdsVariant::detect_variant`).
 ///
 /// A direct UDS-level probe against one ECU, not
-/// `CommunicationPlugin::trigger_detection()`, which has no HTTP-reachable path
-/// yet. `variant_detection` does not gate it, because it only controls the
+/// `CommunicationPlugin::trigger_detection()`, which only a `networkreset`
+/// reaches over HTTP. `variant_detection` does not gate it, because it only controls the
 /// automatic whole-vehicle variant detection run as part of an activation.
 ///
 /// # Errors

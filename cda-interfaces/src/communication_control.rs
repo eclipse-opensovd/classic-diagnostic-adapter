@@ -17,6 +17,7 @@
 pub mod access;
 pub mod doip_connect;
 pub mod error;
+pub mod gate;
 pub mod operation;
 // Private: `SwappableGateway` is minted only via `ComponentSlot::transport_control`.
 mod swappable_gateway;
@@ -24,16 +25,19 @@ mod swappable_gateway;
 use std::time::Duration;
 
 pub mod disable;
+pub mod quiesce;
 
 pub use access::{CommunicationAccess, CommunicationError, CommunicationGuard, CommunicationState};
 use async_trait::async_trait;
 pub use disable::{DisableCommunication, DisableError, DisableGuard, DisableReason};
 pub use doip_connect::{DoipConnect, DoipEndpoint};
 pub use error::CommControlError;
+pub use gate::TransportGate;
 pub use operation::{
     ActivationCause, CommunicationOperation, CommunicationOperationFailure, DetectionCause,
     DetectionPhase,
 };
+pub use quiesce::{QuiesceCommunication, QuiesceGuard};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 
@@ -261,8 +265,8 @@ pub struct CommunicationSettings {
     /// - "OnDemand": HTTP/SOVD starts first. The first qualifying ECU diagnostic
     ///   request, or an explicit `activate()` call, triggers initialization.
     /// - "Disabled": HTTP/SOVD starts first. The default communication plugin
-    ///   provides no activation path, and `trigger_detection()` needs an
-    ///   already-enabled transport.
+    ///   provides no activation path. Only an explicit detection request
+    ///   (`trigger_detection()`, e.g. by a `networkreset`) brings the transport up.
     pub init_mode: CommunicationInitMode,
     /// Controls whether enabling communication also runs whole-vehicle variant
     /// detection:

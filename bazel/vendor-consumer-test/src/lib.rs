@@ -36,7 +36,7 @@ use cda_interfaces::{
 use cda_plugin_communication_management::{
     lifecycle::{
         CommunicationHandle,
-        disable::{DisableError, DisableLease, DisableReason},
+        disable::{DisableError, DisableLease, DisableReason, QuiesceLease},
     },
     plugin::{CommunicationPlugin, communication_plugin_fn},
 };
@@ -142,6 +142,13 @@ impl TopologyPlugin for FancyTopology {
     ) -> Option<Arc<dyn CommunicationLifecycle>> {
         self.inner.create_lifecycle_hook(source)
     }
+
+    fn reset_handle(
+        &self,
+        source: Arc<dyn TopologySource>,
+    ) -> Arc<dyn cda_interfaces::topology::NetworkReset> {
+        self.inner.reset_handle(source)
+    }
 }
 
 pub struct FancyCommunication {
@@ -190,6 +197,10 @@ impl CommunicationPlugin for FancyCommunication {
 
     async fn disable(&self, reason: DisableReason) -> Result<DisableLease, DisableError> {
         self.handle.disable(reason).await
+    }
+
+    fn quiesce(&self, reason: DisableReason) -> Result<QuiesceLease, DisableError> {
+        self.handle.quiesce(reason)
     }
 
     async fn register_lifecycle_hook(
