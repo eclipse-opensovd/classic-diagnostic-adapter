@@ -16,7 +16,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cda_interfaces::{
     EcuConnectivityHandler, EcuRuntimeState, HashMap, VariantDetectionRequest,
-    VariantDetectionSender, dlt_ctx,
+    VariantDetectionSender, VariantState, dlt_ctx,
 };
 
 use crate::coordinator::{
@@ -116,6 +116,16 @@ impl EcuStateCoordinator {
         }
     }
 
+    /// Records a reply of the ECU, positive or negative (including the pending
+    /// NRCs 0x78, 0x21 and 0x94, and a frame that does not answer the request),
+    /// regardless of the overall result of the request: updates `last_seen`.
+    pub(crate) fn handle_ecu_responded(&self, ecu_name: &str) {
+        let Some(handle) = self.handles.get(ecu_name) else {
+            return;
+        };
+        handle.state.update_last_seen();
+    }
+
     /// Get the coordinator handle for a specific ECU.
     #[must_use]
     pub fn get_handle(&self, ecu_name: &str) -> Option<&EcuCoordinatorHandle> {
@@ -155,6 +165,21 @@ impl EcuConnectivityHandler for EcuStateCoordinator {
         for ecu_name in ecu_names {
             self.handle_ecu_disconnected(ecu_name).await;
         }
+    }
+
+    /// A transport reports a frame by the ECU name it maps the frame to; for a
+    /// tester present NRC that is every ECU with the frame's source address. An
+    /// ECU in state Duplicate shares its address with the detected variant and
+    /// did not send the frame, so it is skipped.
+    async fn on_ecu_replied(&self, ecu_name: &str) {
+        if self
+            .handles
+            .get(ecu_name)
+            .is_some_and(|handle| handle.state.status().variant_state == VariantState::Duplicate)
+        {
+            return;
+        }
+        self.handle_ecu_responded(ecu_name);
     }
 }
 
@@ -251,5 +276,35 @@ mod tests {
             Connectivity::Online,
             "ECU should be marked as Online after connected event"
         );
+    }
+
+    /// A frame a transport reports updates `last_seen` of the ECU; an unknown
+    /// name is a no-op.
+    #[tokio::test]
+    async fn transport_reply_updates_last_seen() {
+        use cda_interfaces::EcuConnectivityHandler;
+
+        let (coordinator, runtime_state) = make_coordinator();
+        assert_eq!(runtime_state.last_seen(), None);
+
+        coordinator.on_ecu_replied("UnknownECU").await;
+        assert_eq!(runtime_state.last_seen(), None);
+
+        coordinator.on_ecu_replied("TestECU").await;
+        assert!(runtime_state.last_seen().is_some());
+    }
+
+    /// An ECU in state Duplicate does not get the replies a transport reports
+    /// by address.
+    #[tokio::test]
+    async fn transport_reply_skips_duplicate_ecu() {
+        use cda_interfaces::EcuConnectivityHandler;
+
+        let (coordinator, runtime_state) = make_coordinator();
+        runtime_state.ecu_state.write().unwrap().variant_state = VariantState::Duplicate;
+
+        coordinator.on_ecu_replied("TestECU").await;
+
+        assert_eq!(runtime_state.last_seen(), None);
     }
 }

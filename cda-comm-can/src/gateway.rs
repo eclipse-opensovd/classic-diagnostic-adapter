@@ -28,9 +28,9 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    CanComParamProvider, CanId, DiagServiceError, EcuAddresses, FunctionalTransport, HashMap,
-    NetworkTopology, PhysicalTransport, RouteStatus, ServicePayload, Shutdown,
-    TransmissionParameters, TransportProbe, TransportResponse, VariantDetectionRequest,
+    CanComParamProvider, CanId, DiagServiceError, EcuAddresses, EcuConnectivityHandler,
+    FunctionalTransport, HashMap, NetworkTopology, PhysicalTransport, RouteStatus, ServicePayload,
+    Shutdown, TransmissionParameters, TransportProbe, TransportResponse, VariantDetectionRequest,
     VariantDetectionSender,
     communication_control::{
         GatewayLifecycle, TransportControl, TransportState, error::CommControlError,
@@ -87,8 +87,34 @@ pub struct CanDiagGateway {
     keepalive_interval: Duration,
     /// Notifies variant detection after discovery and rediscovery.
     variant_detection: VariantDetectionSender,
+    /// Receives the frames of an ECU that are not passed on as answers, which
+    /// still count as replies of the ECU.
+    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     /// Shared restartable lifecycle state and retained task configuration.
     lifecycle: Arc<GatewayLifecycle<CanGatewayOperation>>,
+}
+
+/// Checks whether `data`, read on the exchange of `ecu_name`, answers the
+/// request with `sent_sid`. Returns `false` for a frame that does not, which
+/// the caller drops as an answer; such a frame is logged and reported here as
+/// a reply of the ECU (e.g. a late answer to an earlier request, or a tester
+/// present NRC).
+async fn check_answer_or_report(
+    connectivity_handler: &dyn EcuConnectivityHandler,
+    ecu_name: &str,
+    sent_sid: u8,
+    data: &[u8],
+) -> bool {
+    if cda_interfaces::util::uds_response_matches_request_sid(sent_sid, data) {
+        return true;
+    }
+    tracing::debug!(
+        data = %hex::encode(data),
+        request_sid = format_args!("{sent_sid:#04x}"),
+        "Dropping response not belonging to the pending request, continue reading"
+    );
+    connectivity_handler.on_ecu_replied(ecu_name).await;
+    false
 }
 
 /// Background tasks owned by the current enabled lifecycle.
@@ -113,11 +139,13 @@ impl CanDiagGateway {
     /// * `config` - CAN configuration
     /// * `ecus` - Map of ECU names to ECU managers (borrowed, not stored)
     /// * `variant_detection` - Channel to notify about discovered ECUs
+    /// * `connectivity_handler` - Receives the frames of an ECU that are not
+    ///   passed on as answers, which still count as replies of the ECU
     ///
     /// # Errors
     /// Returns error if the CAN interface cannot be opened or configured.
     #[tracing::instrument(
-        skip(config, ecus, variant_detection),
+        skip(config, ecus, variant_detection, connectivity_handler),
         fields(
             interface = %config.interface,
             ecu_count = ecus.len(),
@@ -128,6 +156,7 @@ impl CanDiagGateway {
         config: &CanConfig,
         ecus: &HashMap<String, RwLock<T>>,
         variant_detection: VariantDetectionSender,
+        connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     ) -> Result<Self, CanGatewaySetupError> {
         tracing::info!("Initializing CanDiagGateway");
 
@@ -237,6 +266,7 @@ impl CanDiagGateway {
             functional_id,
             keepalive_interval: Duration::from_millis(config.keepalive_interval_ms),
             variant_detection,
+            connectivity_handler,
             lifecycle: Arc::new(GatewayLifecycle::new(TransportState::Disabled)),
         };
 
@@ -473,6 +503,7 @@ impl PhysicalTransport for CanDiagGateway {
         let response_timeout = self.response_timeout;
         let probe_timeout = self.probe_timeout;
         let discovered_ecus = Arc::clone(&self.discovered_ecus);
+        let connectivity_handler = Arc::clone(&self.connectivity_handler);
         let ecu_map_key = ecu_name;
         let ecu_name = transmission_params.ecu_name.clone();
         let source_address = message.source_address;
@@ -561,15 +592,14 @@ impl PhysicalTransport for CanDiagGateway {
                                 continue;
                             }
 
-                            if !cda_interfaces::util::uds_response_matches_request_sid(
-                                sent_sid, &data,
-                            ) {
-                                tracing::debug!(
-                                    data = %hex::encode(&data),
-                                    request_sid = format_args!("{sent_sid:#04x}"),
-                                    "Dropping response not belonging to the pending \
-                                     request, continue reading"
-                                );
+                            if !check_answer_or_report(
+                                connectivity_handler.as_ref(),
+                                &ecu_map_key,
+                                sent_sid,
+                                &data,
+                            )
+                            .await
+                            {
                                 continue;
                             }
 
@@ -860,6 +890,7 @@ impl Clone for CanDiagGateway {
             functional_id: self.functional_id,
             keepalive_interval: self.keepalive_interval,
             variant_detection: self.variant_detection.clone(),
+            connectivity_handler: Arc::clone(&self.connectivity_handler),
             lifecycle: Arc::clone(&self.lifecycle),
         }
     }
@@ -878,6 +909,7 @@ impl CanDiagGateway {
     pub(crate) fn test_instance(
         connections: Vec<(&str, CanEcuConnection)>,
         discovered: Vec<&str>,
+        connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     ) -> Self {
         let connections: HashMap<String, Arc<CanEcuConnection>> = connections
             .into_iter()
@@ -898,6 +930,7 @@ impl CanDiagGateway {
             functional_id: CanId::try_from(0x7DF).expect("valid test CAN ID"),
             keepalive_interval: Duration::ZERO,
             variant_detection: VariantDetectionSender::new(mpsc::channel(1).0),
+            connectivity_handler,
             lifecycle: Arc::new(GatewayLifecycle::new(TransportState::Enabled)),
         }
     }
@@ -933,5 +966,17 @@ mod tests {
         assert!(CanDiagGateway::validate_can_id("ecu1", "request_id", 0x1FFF_FFFF).is_ok());
         assert!(CanDiagGateway::validate_can_id("ecu1", "request_id", 0x2000_0000).is_err());
         assert!(CanDiagGateway::validate_can_id("ecu1", "request_id", u32::MAX).is_err());
+    }
+
+    /// A frame with another SID (here a tester present NRC) is dropped as the
+    /// answer but reported as a reply of the ECU; the answer is not reported.
+    #[tokio::test]
+    async fn frame_with_other_sid_is_dropped_and_reported_as_reply() {
+        let handler = crate::test_helpers::RecordingConnectivityHandler::default();
+
+        assert!(!check_answer_or_report(&handler, "ecu1", 0x22, &[0x7F, 0x3E, 0x12]).await);
+        assert!(check_answer_or_report(&handler, "ecu1", 0x22, &[0x62, 0xF1, 0x90]).await);
+
+        assert_eq!(handler.replied(), vec!["ecu1".to_owned()]);
     }
 }

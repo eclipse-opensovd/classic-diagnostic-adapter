@@ -116,6 +116,11 @@ impl<S: EcuGateway, T: UdsEcuDb + PayloadDecoder + EcuSecurity> UdsManager<S, T>
                 for (ecu_name, uds_result) in uds_responses {
                     match uds_result {
                         Ok(msg) => {
+                            // Every response of this ECU is a reply: positive or negative,
+                            // a pending NRC (the gateway returns the first frame of each
+                            // ECU), one that does not answer this request, and also one
+                            // to a request with a suppressed positive response.
+                            self.state_coordinator.handle_ecu_responded(&ecu_name);
                             // Process the response using the ECU's convert_from_uds
                             let ecu_read = fgl_ecu.read().await;
                             let response = ecu_read
@@ -569,6 +574,7 @@ mod tests {
     #[derive(Clone)]
     struct RecordingGateway {
         functional_sends: Arc<AtomicUsize>,
+        functional_responses: Vec<(String, Result<ServicePayload, DiagServiceError>)>,
     }
 
     impl PhysicalTransport for RecordingGateway {
@@ -606,7 +612,7 @@ mod tests {
             >,
         > + Send {
             self.functional_sends.fetch_add(1, Ordering::SeqCst);
-            std::future::ready(Ok(HashMap::new()))
+            std::future::ready(Ok(self.functional_responses.iter().cloned().collect()))
         }
     }
 
@@ -644,6 +650,7 @@ mod tests {
             ecus,
             gateway: RecordingGateway {
                 functional_sends: Arc::new(AtomicUsize::new(0)),
+                functional_responses: Vec::new(),
             },
             data_transfers: Arc::new(Mutex::new(HashMap::new())),
             ecu_semaphores: Arc::new(Mutex::new(HashMap::new())),
@@ -763,6 +770,114 @@ mod tests {
         let _ = task.await;
         assert_eq!(gateway_gate.available_permits(), 1);
         drop(held_child);
+    }
+
+    fn response(data: Vec<u8>) -> ServicePayload {
+        ServicePayload {
+            data,
+            source_address: 0x0001,
+            target_address: 0x0E00,
+            new_session: None,
+            new_security: None,
+        }
+    }
+
+    /// Sends `request` functionally to the gateway and the child, which answer
+    /// with `responses`, and returns whether `last_seen` of the gateway and of
+    /// the child is set.
+    async fn contact_after_functional_send(
+        request: Vec<u8>,
+        responses: &[(&str, Vec<u8>)],
+    ) -> (bool, bool) {
+        let mut manager = manager();
+        manager.gateway.functional_responses = responses
+            .iter()
+            .map(|(ecu_name, data)| ((*ecu_name).to_owned(), Ok(response(data.clone()))))
+            .collect();
+        let (redetect_tx, _redetect_rx) = mpsc::channel(1);
+        manager.state_coordinator = EcuStateCoordinator::new(
+            HashMap::from_iter([
+                ("gateway".to_owned(), EcuRuntimeState::new()),
+                ("child".to_owned(), EcuRuntimeState::new()),
+            ]),
+            VariantDetectionSender::new(redetect_tx),
+        );
+
+        let results = manager
+            .send_functional_to_gateway(
+                transmission_params(),
+                HashMap::from_iter([(1, "gateway".to_owned()), (2, "child".to_owned())]),
+                DiagComm::new("read", DiagCommType::Data),
+                ServicePayload {
+                    data: request,
+                    ..payload()
+                },
+                false,
+                Duration::from_millis(10),
+                "group",
+                vec![GATEWAY_KEY.to_owned(), CHILD_KEY.to_owned()],
+                None,
+            )
+            .await;
+
+        assert_eq!(results.len(), responses.len());
+        let seen = |ecu_name: &str| {
+            manager
+                .state_coordinator
+                .get_handle(ecu_name)
+                .expect("handle exists")
+                .state
+                .last_seen()
+                .is_some()
+        };
+        (seen("gateway"), seen("child"))
+    }
+
+    /// Each responding ECU counts: the positive response updates the gateway's
+    /// `last_seen`, the NRC updates the child's.
+    #[tokio::test]
+    async fn functional_every_response_updates_its_ecu() {
+        let (gateway, child) = contact_after_functional_send(
+            vec![0x22, 0xF1, 0x90],
+            &[
+                ("gateway", vec![0x62, 0xF1, 0x90]),
+                ("child", vec![0x7F, 0x22, 0x31]),
+            ],
+        )
+        .await;
+
+        assert!(gateway);
+        assert!(child);
+    }
+
+    /// A pending NRC counts even if no final response follows: the gateway
+    /// returns the first frame of each ECU, here the child's 0x78.
+    #[tokio::test]
+    async fn functional_response_pending_updates_last_seen() {
+        let (gateway, child) = contact_after_functional_send(
+            vec![0x22, 0xF1, 0x90],
+            &[
+                ("gateway", vec![0x62, 0xF1, 0x90]),
+                ("child", vec![0x7F, 0x22, 0x78]),
+            ],
+        )
+        .await;
+
+        assert!(gateway);
+        assert!(child);
+    }
+
+    /// With a suppressed positive response, a response the CDA still receives
+    /// (here the child's NRC) counts for the ECU that sent it; the silent
+    /// gateway is not updated.
+    #[tokio::test]
+    async fn functional_suppressed_positive_response_counts_received_nrc() {
+        let (gateway, child) =
+            contact_after_functional_send(vec![0x10, 0x81], &[("child", vec![0x7F, 0x10, 0x22])])
+                .await;
+
+        assert!(!gateway);
+        assert!(child);
     }
 
     #[tokio::test]

@@ -337,6 +337,7 @@ mod tests {
                 ),
             ],
             vec![],
+            std::sync::Arc::new(crate::test_helpers::RecordingConnectivityHandler::default()),
         );
         gateway.probe_timeout = PROBE_TIMEOUT;
 
