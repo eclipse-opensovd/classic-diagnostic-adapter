@@ -743,7 +743,7 @@ async fn test_lock_when_ecu_offline() -> Result<(), TestingError> {
         let response = create_lock(
             Duration::from_secs(30),
             ECU_ENDPOINT,
-            StatusCode::NOT_FOUND,
+            StatusCode::SERVICE_UNAVAILABLE,
             &runtime.config,
             &auth_owner,
         )

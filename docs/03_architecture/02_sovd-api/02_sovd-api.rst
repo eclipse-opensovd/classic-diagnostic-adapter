@@ -1037,11 +1037,11 @@ Locks
     ``POST /components/{ecu-name}/locks``, the CDA checks the ECU's stored connectivity
     after lock-priority, vehicle-ownership, and functional-lock conflict checks.
 
-    - If connectivity is ``Online``, lock acquisition proceeds. This check does not require
+    - If connectivity is ``Online`` or ``AssumedOnline``, lock acquisition proceeds. This check does not require
       successful variant detection or guarantee that subsequent diagnostic communication succeeds.
-    - If connectivity is ``Offline``, the request returns HTTP 404 with message
+    - If connectivity is ``Offline``, the request returns HTTP 503 with message
       ``ecu is offline``, ``error_code`` set to ``vendor-specific``, and ``vendor_code``
-      set to ``not-found``. No ECU lock is created or renewed.
+      set to ``communication-not-ready``. No ECU lock is created or renewed.
     - If reading the ECU state fails, the diagnostic error is converted to its corresponding
       API error rather than reported as an offline ECU. Lookup failures retain their HTTP 404
       response and diagnostic message; internal failures return HTTP 500.
