@@ -1717,3 +1717,98 @@ async fn test_user_memory_fault_status_uses_status_byte() {
         );
     }
 }
+
+/// Test that GET /faults returns ECU-reported DTCs with and without ODX references.
+#[tokio::test]
+async fn test_get_faults_with_and_without_odx_reference() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let ecu_name = "flxc1000";
+    let fault_memory = "Standard";
+
+    // Clear any existing DTCs from the simulator.
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+        .await
+        .expect("Failed to clear DTCs in simulator");
+
+    // Scenario 1: Add a DTC that has a matching ODX reference.
+    // Status mask 0x29 (binary 0010_1001):
+    // - Bit 0: testFailed = true
+    // - Bit 3: confirmedDTC = true
+    // - Bit 5: testFailedSinceLastClear = true
+    let dtc1 = DtcMinimal {
+        id: "01E241".into(),
+        status_mask: "29".into(),
+        emissions_related: false,
+    };
+
+    ecusim::add_dtc(&runtime.ecu_sim, ecu_name, fault_memory, &dtc1)
+        .await
+        .expect("Failed to add ODX-referenced DTC 0x01E241");
+
+    // Scenario 2: Add an ECU-reported DTC without a matching ODX reference.
+    // Use the same status mask (0x29) to verify that its status is preserved.
+    let dtc2 = DtcMinimal {
+        id: "01E246".into(),
+        status_mask: "29".into(),
+        emissions_related: false,
+    };
+
+    ecusim::add_dtc(&runtime.ecu_sim, ecu_name, fault_memory, &dtc2)
+        .await
+        .expect("Failed to add DTC 0x01E246 without an ODX reference");
+
+    // Test GET /faults - both DTCs should be returned, including the one without an ODX reference.
+    let faults = get_faults(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .expect("Failed to get faults via SOVD");
+
+    // Verify that the DTC with an ODX reference is returned with status mask 0x29.
+    let fault1 = faults
+        .iter()
+        .find(|fault| fault.code == "01E241")
+        .expect("Expected ODX-referenced DTC 0x01E241 to be present");
+
+    assert_eq!(
+        fault1
+            .status
+            .as_ref()
+            .and_then(|status| status.mask.clone()),
+        Some("29".to_string()),
+        "Expected DTC 0x01E241 to have status mask 0x29"
+    );
+
+    // Verify that the ECU-reported DTC without an ODX reference is also returned.
+    let fault2 = faults
+        .iter()
+        .find(|fault| fault.code == "01E246")
+        .expect("Expected ECU-reported DTC 0x01E246 without an ODX reference to be present");
+
+    assert_eq!(
+        fault2
+            .status
+            .as_ref()
+            .and_then(|status| status.mask.clone()),
+        Some("29".to_string()),
+        "Expected DTC 0x01E246 to have status mask 0x29"
+    );
+
+    // Clear all DTCs from the simulator.
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+        .await
+        .expect("Failed to clear DTCs in simulator");
+
+    // Verify that no failed faults remain after clearing the DTCs.
+    let failed_faults_after_clear = get_faults(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .map(filter_failed_faults)
+        .expect("Failed to get faults after clearing DTCs");
+
+    assert_eq!(
+        failed_faults_after_clear.len(),
+        0,
+        "Expected 0 failed faults after clearing DTCs, got {}",
+        failed_faults_after_clear.len()
+    );
+}
