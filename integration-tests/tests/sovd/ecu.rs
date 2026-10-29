@@ -15,8 +15,9 @@ use std::{collections::HashMap, time::Duration};
 use http::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use serde_json::json;
-use sovd_interfaces::components::ecu::modes::{
-    self, dtcsetting, security_and_session::put::RequestSeedResponse,
+use sovd_interfaces::{
+    apps::sovd2uds::data::network_structure::get::Response as NetworkStructureResponse,
+    components::ecu::modes::{self, dtcsetting, security_and_session::put::RequestSeedResponse},
 };
 
 use crate::{
@@ -720,6 +721,129 @@ async fn test_variant_detection_duplicates() {
         sovd_interfaces::components::ecu::State::Duplicate,
     )
     .await;
+}
+
+#[tokio::test]
+async fn test_network_structure_uses_detected_ecu_as_gateway() {
+    // Duplicate ECU descriptions are detected through DoIP VAMs, so this
+    // regression test is not applicable to the CAN transport.
+    if skip_unless(
+        Transport::uses_doip,
+        "test_network_structure_uses_detected_ecu_as_gateway depends on DoIP VAM announcements",
+    ) {
+        return;
+    }
+
+    let test_env = TestEnv::builder().await.unwrap();
+    let auth = test_env.auth_header().await.unwrap();
+
+    // Switch variant and check that the network structure updates accordingly.
+    ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "APPLICATION2")
+        .await
+        .unwrap();
+    force_variant_detection(&test_env, sovd::COMPONENTS_FLXC1000_BASE)
+        .await
+        .unwrap();
+
+    validate_ecu_state(
+        &test_env,
+        sovd::COMPONENTS_FLXC1000_BASE,
+        sovd_interfaces::components::ecu::State::Duplicate,
+    )
+    .await;
+    validate_ecu_state(
+        &test_env,
+        sovd::COMPONENTS_FLXCNG1000_BASE,
+        sovd_interfaces::components::ecu::State::Online,
+    )
+    .await;
+
+    let response = send_cda_request(
+        &test_env.config,
+        "apps/sovd2uds/data/networkstructure",
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+    let network: NetworkStructureResponse = response_to_t(&response).unwrap();
+    let gateway = network
+        .data
+        .iter()
+        .flat_map(|structure| &structure.gateways)
+        .find(|gateway| gateway.logical_address == "0x1000")
+        .expect("expected gateway at logical address 0x1000");
+
+    assert_eq!(gateway.name, "FLXCNG1000");
+    assert!(
+        gateway
+            .ecus
+            .iter()
+            .any(|ecu| { ecu.qualifier == "FLXCNG1000" && ecu.state == "Online" })
+    );
+    assert!(
+        gateway
+            .ecus
+            .iter()
+            .any(|ecu| { ecu.qualifier == "FLXC1000" && ecu.state == "Duplicate" })
+    );
+
+    // Switch back to the original variant and verify that the network structure updates accordingly.
+    ecusim::switch_variant(&test_env.ecu_sim, "FLXC1000", "APPLICATION")
+        .await
+        .unwrap();
+    force_variant_detection(&test_env, sovd::COMPONENTS_FLXC1000_BASE)
+        .await
+        .unwrap();
+
+    validate_ecu_state(
+        &test_env,
+        sovd::COMPONENTS_FLXC1000_BASE,
+        sovd_interfaces::components::ecu::State::Online,
+    )
+    .await;
+    validate_ecu_state(
+        &test_env,
+        sovd::COMPONENTS_FLXCNG1000_BASE,
+        sovd_interfaces::components::ecu::State::Duplicate,
+    )
+    .await;
+
+    let response = send_cda_request(
+        &test_env.config,
+        "apps/sovd2uds/data/networkstructure",
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+    let network: NetworkStructureResponse = response_to_t(&response).unwrap();
+    let gateway = network
+        .data
+        .iter()
+        .flat_map(|structure| &structure.gateways)
+        .find(|gateway| gateway.logical_address == "0x1000")
+        .expect("expected gateway at logical address 0x1000");
+
+    assert_eq!(gateway.name, "FLXC1000");
+    assert!(
+        gateway
+            .ecus
+            .iter()
+            .any(|ecu| { ecu.qualifier == "FLXCNG1000" && ecu.state == "Duplicate" })
+    );
+    assert!(
+        gateway
+            .ecus
+            .iter()
+            .any(|ecu| { ecu.qualifier == "FLXC1000" && ecu.state == "Online" })
+    );
 }
 
 #[tokio::test]
