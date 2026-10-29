@@ -584,6 +584,11 @@ Configurations -- SID 22\ :sub:`16` & 2E\ :sub:`16`
     .. note::
        ``x-sovd2uds-serviceAbstract`` is an extension to the standard.
 
+    .. note::
+       configuration_write service requests bypass the structured service resolution, the target ECU will receive
+       raw UDS request payload (e.g. ``2E 1234 <payload>``) and is responsible for evaluating whether the
+       payload is valid and whether the operation can be performed.
+
     **Rationale for serviceAbstract**
 
     Coding data files might not include the matching name for a service, or detailed JSON parameters that would
@@ -1192,6 +1197,36 @@ Locks
     ``lock_expiration`` (ISO 8601 string) and ``x-sovd2uds-isexclusive`` (boolean). For defunct
     locks: additionally ``x-sovd2uds-broken-by`` (string), ``x-sovd2uds-broken-at`` (ISO 8601 string), and
     ``x-sovd2uds-current-holder`` (string, the identity of the current lock holder).
+
+
+.. arch:: ECU Lock Connectivity Check
+    :id: arch~sovd-api-lock-ecu-connectivity
+    :status: draft
+
+    Before acquiring or renewing an ECU lock through
+    ``POST /components/{ecu-name}/locks``, the CDA checks the ECU's stored connectivity
+    after lock-priority, vehicle-ownership, and functional-lock conflict checks.
+
+    - If connectivity is ``Online`` or ``AssumedOnline``, lock acquisition proceeds. This check does not require
+      successful variant detection or guarantee that subsequent diagnostic communication succeeds.
+    - If connectivity is ``Offline``, the request returns HTTP 503 with message
+      ``ecu is offline``, ``error_code`` set to ``vendor-specific``, and ``vendor_code``
+      set to ``communication-not-ready``. No ECU lock is created or renewed.
+    - If reading the ECU state fails, the diagnostic error is converted to its corresponding
+      API error rather than reported as an offline ECU. Lookup failures retain their HTTP 404
+      response and diagnostic message; internal failures return HTTP 500.
+
+    On rejection, pending preemption is rolled back and the acquisition reservation is released.
+
+    The check reads a state snapshot; it does not probe the ECU. Connectivity is updated
+    asynchronously by transport events and diagnostic processing, so a recently disconnected
+    ECU may still be reported as online until the disconnect is detected. An ECU can also
+    disconnect after the check succeeds.
+
+    This connectivity requirement applies to ECU-lock POST requests only. It does not add
+    an all-ECUs-online requirement to vehicle or functional-group locks, and does not change
+    the behavior of GET, PUT, or DELETE on existing ECU locks. A disconnect alone does not
+    revoke an existing lock; its normal expiration and deletion rules still apply.
 
 
 .. arch:: Lock Exclusivity

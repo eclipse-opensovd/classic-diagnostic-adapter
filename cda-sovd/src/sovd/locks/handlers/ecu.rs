@@ -18,16 +18,19 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
-use cda_interfaces::{UdsEcu, file_manager::FileManager, lock_priority_api::LockScope};
+use cda_interfaces::{
+    Connectivity, UdsEcu, file_manager::FileManager, lock_priority_api::LockScope,
+};
 use cda_plugin_security::{Claims, Secured};
+use sovd_interfaces::error::ErrorCode;
 
 use super::super::{
-    ActiveLock, ApiError, ErrorWrapper, LockContext, LockCoverage, LockPathParam,
-    LockUpdateContext, ScopeKey, delete_handler, get_handler, get_id_handler, post_handler,
-    put_handler, rollback_preemption, validate_vehicle_owner,
+    AcquisitionGuard, ActiveLock, ApiError, ErrorWrapper, LockContext, LockCoverage, LockPathParam,
+    LockUpdateContext, Locks, PendingPreemption, ScopeKey, delete_handler, get_handler,
+    get_id_handler, post_handler, put_handler, rollback_preemption, validate_vehicle_owner,
 };
 use crate::{
-    openapi,
+    VendorErrorCode, openapi,
     sovd::{self, WebserverEcuState},
 };
 
@@ -145,6 +148,22 @@ pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
     OriginalUri(uri): OriginalUri,
     WithRejection(Json(body), _): WithRejection<Json<sovd_interfaces::locking::Request>, ApiError>,
 ) -> impl IntoApiResponse {
+    async fn rollback_and_respond(
+        pending: Option<PendingPreemption>,
+        acquisition: AcquisitionGuard,
+        locks: &Locks,
+        error: ApiError,
+        include_schema: bool,
+    ) -> Response {
+        rollback_preemption(pending, locks).await;
+        acquisition.finish();
+        ErrorWrapper {
+            error,
+            include_schema,
+        }
+        .into_response()
+    }
+
     let claims = sec_plugin.as_auth_plugin().claims();
     let (acquisition, pending, request) = match locks
         .evaluate_acquisition(
@@ -167,23 +186,34 @@ pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
         }
     };
     if let Err(error) = validate_vehicle_owner(&locks, &claims).await {
-        rollback_preemption(pending, &locks).await;
-        acquisition.finish();
-        return ErrorWrapper {
-            error,
-            include_schema: query.include_schema,
-        }
-        .into_response();
+        return rollback_and_respond(pending, acquisition, &locks, error, query.include_schema)
+            .await;
     }
 
     if functional_lock_blocks_ecu(&locks.open_locks().await, &ecu_name, claims.sub()) {
-        rollback_preemption(pending, &locks).await;
-        acquisition.finish();
-        return ErrorWrapper {
-            error: ApiError::Conflict("functional lock prevents setting ecu lock".to_owned()),
-            include_schema: query.include_schema,
-        }
-        .into_response();
+        return rollback_and_respond(
+            pending,
+            acquisition,
+            &locks,
+            ApiError::Conflict("functional lock prevents setting ecu lock".to_owned()),
+            query.include_schema,
+        )
+        .await;
+    }
+
+    let state_error = match uds.get_ecu_state(&ecu_name).await {
+        Ok(state) if state.connectivity == Connectivity::Online => None,
+        Ok(_) => Some(ApiError::ServiceUnavailable {
+            message: "ecu is offline".to_owned(),
+            retry_after: None,
+            error_code: ErrorCode::VendorSpecific,
+            vendor_code: Some(VendorErrorCode::CommunicationNotReady),
+        }),
+        Err(error) => Some(ApiError::from(error)),
+    };
+    if let Some(error) = state_error {
+        return rollback_and_respond(pending, acquisition, &locks, error, query.include_schema)
+            .await;
     }
 
     post_handler(
@@ -212,28 +242,34 @@ fn functional_lock_blocks_ecu(open_locks: &[ActiveLock], ecu_name: &str, subject
 
 pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
     op.description("Create a lock for an ECU")
-            .response_with::<200, Json<sovd_interfaces::locking::post_put::Response>, _>(|res| {
-                res.example(openapi::lock_created_example()).description(
-                    "Existing caller-owned lock renewed for compatibility. Use PUT on the lock \
-                     resource to modify its expiration.",
-                )
-            })
-            .response_with::<201, Json<sovd_interfaces::locking::post_put::Response>, _>(|res| {
-                res.example(openapi::lock_created_example())
+        .response_with::<200, Json<sovd_interfaces::locking::post_put::Response>, _>(|res| {
+            res.example(openapi::lock_created_example()).description(
+                "Existing caller-owned lock renewed for compatibility. Use PUT on the lock \
+                 resource to modify its expiration.",
+            )
+        })
+        .response_with::<201, Json<sovd_interfaces::locking::post_put::Response>, _>(|res| {
+            res.example(openapi::lock_created_example())
                 .description("Lock created successfully.")
                 .with(openapi::lock_created_response)
-            })
-            .response_with::<
-                403,
+        })
+        .response_with::<
+            403,
                 Json<sovd_interfaces::error::ApiErrorResponse::<sovd::error::VendorErrorCode>>,
                  _>(|res| {
                 res.description("Lock is already owned by someone else.")
             })
-            .response_with::<
+        .response_with::<
             409,
             Json<sovd_interfaces::error::ApiErrorResponse::<sovd::error::VendorErrorCode>>,
             _>(|res| {
                 res.description("Functional lock prevents setting lock.")
+            })
+        .response_with::<
+            503,
+                Json<sovd_interfaces::error::ApiErrorResponse::<sovd::error::VendorErrorCode>>,
+                 _>(|res| {
+                res.description("ECU is offline or not found.")
             })
 }
 

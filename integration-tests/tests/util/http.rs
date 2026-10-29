@@ -199,10 +199,13 @@ pub(crate) async fn send_request(
     url: reqwest::Url,
 ) -> Result<Response, TestingError> {
     let client = reqwest::Client::new();
-    let mut request_builder = client.request(method, url.clone()).header(
-        reqwest::header::CONTENT_TYPE,
-        mime::APPLICATION_JSON.essence_str(),
-    );
+    let mut request_builder = client.request(method, url.clone());
+    if !headers.is_some_and(|headers| headers.contains_key(reqwest::header::CONTENT_TYPE)) {
+        request_builder = request_builder.header(
+            reqwest::header::CONTENT_TYPE,
+            mime::APPLICATION_JSON.essence_str(),
+        );
+    }
 
     if let Some(json_data) = data {
         request_builder = request_builder.body(json_data.to_string());
