@@ -788,6 +788,7 @@ ECU States
 
 .. arch:: ECU States
     :id: arch~dt-ecu-states
+    :links: dimpl~uds-ecu-reply-contact, test~uds-ecu-reply-contact, test~uds-suppressed-response-no-contact
     :status: draft
 
     ECU state management tracks the lifecycle of each ECU from registration through
@@ -830,11 +831,29 @@ ECU States
     database and adds runtime state information. The state is queryable through the SOVD API
     component endpoints.
 
-    In addition to the state enum, each ECU manager stores a ``last_seen`` timestamp, updated whenever a
-    diagnostic exchange with the ECU succeeds (e.g. a successful variant detection response, or a successful
-    diagnostic service response during normal operation). For ECUs registered in the AssumedOnline state,
-    the initial value of ``last_seen`` is taken from the persisted topology (see
-    :need:`arch~dt-ecu-list-persistence`) and reflects the last successful contact from a previous session.
+    In addition to the state enum, each ECU manager stores a ``last_seen`` timestamp, the time of the last
+    reply of the ECU. For ECUs registered in the AssumedOnline state, the initial value of ``last_seen`` is
+    taken from the persisted topology (see :need:`arch~dt-ecu-list-persistence`) and reflects the last reply
+    of the ECU in a previous session.
+
+    Any UDS message the ECU sends while a request to it is in progress counts, positive or negative,
+    including the pending NRCs 0x78, 0x21 and 0x94. It counts whether or not the request succeeds as a
+    whole (e.g. 0x78 followed by a timeout), and also if the message is not the answer to the request
+    (e.g. a late answer to an earlier request). For a functional request, each responding ECU counts.
+
+    A physical request with a suppressed positive response (``suppressPosRspMsgIndicationBit`` set) never
+    counts. The CDA does not wait for a UDS reply to such a request: the request ends with the transport
+    acknowledgement, which for DoIP comes from the gateway and does not prove that the ECU is reachable.
+    An NRC that the ECU still sends afterwards (allowed for physical requests) arrives after the request
+    has ended and is not read. For a functional request with a suppressed positive response, every
+    response the CDA still receives (e.g. an NRC) counts for the ECU that sent it. On DoIP, a negative
+    response to a tester present message (``7F 3E``) counts for the ECU that sent it, also when the tester
+    present request was sent with a suppressed positive response.
+
+    ``last_seen`` is wall-clock time, and the newest write always wins, even if it is older than the stored
+    value. Vehicle clocks are often wrong at boot and corrected later by time synchronization. Keeping the
+    maximum would pin a wrong future timestamp that later contacts could never replace; with the newest
+    write, ``last_seen`` can go backwards once after such a correction.
 
     **State Transitions**
 
