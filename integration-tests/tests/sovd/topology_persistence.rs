@@ -11,29 +11,38 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! ECU list persistence: storing and reusing the vehicle topology.
+//! ECU list persistence: storing, reusing and resetting the vehicle topology.
 
 use std::time::{Duration, Instant};
 
+use aide::openapi::{OpenApi, ReferenceOr};
 use cda_interfaces::{
     communication_control::{CommunicationInitMode, CommunicationSettings},
-    topology::{PersistedEcu, PersistedEcuState, PersistedGateway},
+    topology::{PersistedEcu, PersistedEcuState, PersistedGateway, logical_address_hex},
 };
 use http::{Method, StatusCode};
 use opensovd_cda_lib::config::configfile::{Configuration, TransportOverride, TransportType};
+use sovd_interfaces::{
+    Items,
+    apps::sovd2uds::operations::networkreset::OperationResponse,
+    common::operations::{ExecutionListResponse, OperationCollectionItem},
+};
 
 use crate::{
-    sovd::{COMPONENTS_FLXC1000_BASE, COMPONENTS_FSNR2000_BASE, force_variant_detection},
+    sovd::{
+        COMPONENTS_FLXC1000_BASE, COMPONENTS_FSNR2000_BASE, force_variant_detection, runtimefiles,
+    },
     util::{
         TestingError,
         config::CDA_STORAGE_DIR,
         ecusim,
-        http::{CdaClient, poll_until, send_authenticated_cda_request},
+        http::{CdaClient, poll_until, response_to_t, send_authenticated_cda_request},
         locks::{COMPONENTS_FLXC1000_LOCKS, Lock, default_timeout},
         test_env::{Lease, TestEnv, Transport, skip_unless, wait_for_ecus_online},
     },
 };
 
+const NETWORK_RESET: &str = "apps/sovd2uds/operations/networkreset/executions";
 const FLXC1000_APP_VARIANT: &str = "FLXC1000_App_0101";
 
 /// The collection of the persisted topology in the storage of the CDA.
@@ -78,6 +87,43 @@ async fn persisted_gateways(env: &TestEnv) -> Vec<PersistedGateway> {
         .into_iter::<PersistedGateway>()
         .map(|entry| entry.expect("Invalid persisted gateway"))
         .collect()
+}
+
+/// Logical address of a gateway that no database knows, see
+/// [`plant_stale_gateway`].
+const STALE_GATEWAY_ADDRESS: u16 = 0x7FFE;
+
+/// Writes a persisted entry for a gateway that does not exist, like a leftover
+/// of an earlier topology. Only a clear or a persist run, which prunes unknown
+/// gateways, removes it.
+async fn plant_stale_gateway(env: &TestEnv) {
+    let entry = serde_json::to_string(&PersistedGateway {
+        name: "STALE_GATEWAY".to_owned(),
+        logical_address: STALE_GATEWAY_ADDRESS,
+        network_address: Some("192.0.2.1".to_owned()),
+        doip_protocol_version: None,
+        ecus: Vec::new(),
+    })
+    .expect("Failed to encode the stale gateway");
+    let dir = topology_dir();
+    env.exec_in_cda_container(&format!(
+        "mkdir -p {dir} && printf '%s' '{entry}' > {dir}/{}",
+        logical_address_hex(STALE_GATEWAY_ADDRESS)
+    ))
+    .await
+    .expect("Failed to plant the stale gateway");
+    assert!(
+        has_stale_gateway(env).await,
+        "the stale gateway must be persisted"
+    );
+}
+
+/// Whether the entry written by [`plant_stale_gateway`] is persisted.
+async fn has_stale_gateway(env: &TestEnv) -> bool {
+    persisted_gateways(env)
+        .await
+        .iter()
+        .any(|gateway| gateway.logical_address == STALE_GATEWAY_ADDRESS)
 }
 
 /// Whether any persisted ECU has the variant `name`.
@@ -130,6 +176,11 @@ async fn is_persisted_state(env: &TestEnv, name: &str, state: PersistedEcuState)
         .await
         .is_some_and(|(_, ecu)| ecu.state == state)
 }
+
+/// `ReadDataByIdentifier` of DID 0xF100 (`Identification_Read`), the request
+/// the variant patterns of the test ECUs match on (see
+/// `testcontainer/odx/generate.py`). Only the variant detection sends it.
+const VARIANT_DETECTION_REQUEST: &str = "22f100";
 
 /// Recorded UDS requests without `TesterPresent` (0x3E) keep-alives, which the
 /// mixed `DoIP` and CAN setup sends independently of the topology.
@@ -348,6 +399,328 @@ async fn last_seen_is_written_back_at_shutdown() {
         after >= contact,
         "shutdown must save the contact made before restart"
     );
+}
+
+async fn start_reset(cda: &impl CdaClient, body: &str, expected: StatusCode) -> Option<String> {
+    let response = send_authenticated_cda_request(
+        cda,
+        NETWORK_RESET,
+        expected,
+        Method::POST,
+        Some(body),
+        None,
+    )
+    .await
+    .expect("networkreset request failed");
+    (expected == StatusCode::ACCEPTED).then(|| {
+        response_to_t::<sovd_interfaces::common::operations::ExecutionCreatedResponse>(&response)
+            .expect("Invalid networkreset response")
+            .id
+    })
+}
+
+async fn wait_reset_completed(cda: &impl CdaClient, id: &str) {
+    use sovd_interfaces::apps::sovd2uds::operations::networkreset::{
+        ExecutionResponse, ExecutionStatus,
+    };
+    poll_until(
+        Duration::from_secs(60),
+        Duration::from_millis(500),
+        || async {
+            let response = send_authenticated_cda_request(
+                cda,
+                &format!("{NETWORK_RESET}/{id}?include-schema=true"),
+                StatusCode::OK,
+                Method::GET,
+                None,
+                None,
+            )
+            .await?;
+            // Deserializing also checks the capability, which can only be `execute`.
+            let execution: ExecutionResponse = response_to_t(&response)?;
+            assert!(execution.schema.is_some(), "include-schema must be honored");
+            match &execution.status {
+                ExecutionStatus::Completed => Ok(Ok(())),
+                ExecutionStatus::Running => Ok(Err("networkreset is running".to_owned())),
+                status => panic!("networkreset ended with {status:?}: {execution:?}"),
+            }
+        },
+    )
+    .await
+    .unwrap_or_else(|e| panic!("networkreset did not complete: {e:?}"));
+}
+
+/// Deletes the finished `networkreset` execution `id` and verifies the DELETE:
+/// the execution is not found anymore and the execution list is empty.
+async fn delete_reset(cda: &impl CdaClient, id: &str) {
+    send_authenticated_cda_request(
+        cda,
+        &format!("{NETWORK_RESET}/{id}"),
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        None,
+        None,
+    )
+    .await
+    .expect("Failed to delete the execution");
+    send_authenticated_cda_request(
+        cda,
+        &format!("{NETWORK_RESET}/{id}"),
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        None,
+        None,
+    )
+    .await
+    .expect("A deleted execution must not be found");
+    assert!(
+        reset_executions(cda).await.items.is_empty(),
+        "no execution may be listed after the delete"
+    );
+}
+
+async fn reset_executions(cda: &impl CdaClient) -> ExecutionListResponse {
+    let list =
+        send_authenticated_cda_request(cda, NETWORK_RESET, StatusCode::OK, Method::GET, None, None)
+            .await
+            .expect("Failed to list executions");
+    response_to_t(&list).expect("Invalid execution list")
+}
+
+/// Without a persistence hook, a rediscovery-only `networkreset` completes and
+/// runs a variant detection. Works on both `DoIP` and CAN-only configurations.
+/// [[ itest~plugin-vehicle-topology-reset-without-persistence-completes, Networkreset without persistence completes and rediscovers, itest ]]
+#[tokio::test]
+async fn networkreset_without_persistence_completes() {
+    let env = TestEnv::builder()
+        .await
+        .expect("Failed to set up the test environment");
+    assert!(
+        !env.config
+            .communication
+            .topology
+            .ecu_list_persistence
+            .enabled
+    );
+    wait_for_ecus_online(&env.config)
+        .await
+        .expect("ECUs did not come online");
+    let lock_id = runtimefiles::setup_with_lock(&env).await;
+    let recorder = env
+        .record("flxc1000")
+        .await
+        .expect("Failed to start recording");
+    let id = start_reset(
+        &env,
+        r#"{"parameters":{"clear_persisted":false}}"#,
+        StatusCode::ACCEPTED,
+    )
+    .await
+    .expect("execution id");
+    wait_reset_completed(&env, &id).await;
+    wait_for(
+        "the variant detection of the rediscovery",
+        Duration::from_secs(30),
+        || async {
+            let recorded = recorder.frames().await.expect("Failed to read recording");
+            recorded
+                .iter()
+                .any(|frame| frame.eq_ignore_ascii_case(VARIANT_DETECTION_REQUEST))
+        },
+    )
+    .await;
+    recorder.stop().await.expect("Failed to stop recording");
+    wait_for_ecus_online(&env.config)
+        .await
+        .expect("Rediscovered ECUs did not come online");
+    delete_reset(&env, &id).await;
+    runtimefiles::teardown_lock(&env, &lock_id).await;
+}
+
+async fn assert_networkreset_discoverable(cda: &impl CdaClient) {
+    let collection = send_authenticated_cda_request(
+        cda,
+        "apps/sovd2uds/operations",
+        StatusCode::OK,
+        Method::GET,
+        None,
+        None,
+    )
+    .await
+    .expect("Operation discovery failed");
+    let collection: Items<OperationCollectionItem> =
+        response_to_t(&collection).expect("Invalid operations collection");
+    let operation = collection
+        .items
+        .iter()
+        .find(|item| item.id == "networkreset")
+        .expect("networkreset must be advertised");
+    let details = send_authenticated_cda_request(
+        cda,
+        &format!(
+            "apps/sovd2uds/operations/{}?include-schema=true",
+            operation.id
+        ),
+        StatusCode::OK,
+        Method::GET,
+        None,
+        None,
+    )
+    .await
+    .expect("Operation details failed");
+    let details: OperationResponse = response_to_t(&details).expect("Invalid operation details");
+    assert_eq!(details.item.id, operation.id);
+    assert!(details.schema.is_some(), "include-schema must be honored");
+
+    let docs = send_authenticated_cda_request(
+        cda,
+        &format!("apps/sovd2uds/operations/{}/docs", operation.id),
+        StatusCode::OK,
+        Method::GET,
+        None,
+        None,
+    )
+    .await
+    .expect("Operation capability description failed");
+    let docs: OpenApi = response_to_t(&docs).expect("Invalid capability description");
+    let mut paths = docs
+        .paths
+        .expect("Capability description has no paths")
+        .paths;
+    let executions = format!("/apps/sovd2uds/operations/{}/executions", operation.id);
+    let execution = paths
+        .get(&format!("{executions}/{{execution-id}}"))
+        .and_then(ReferenceOr::as_item)
+        .expect("Execution path missing");
+    assert!(execution.get.is_some());
+    assert!(execution.delete.is_some());
+    let request_schema = paths
+        .swap_remove(&executions)
+        .and_then(ReferenceOr::into_item)
+        .expect("Executions path missing")
+        .post
+        .expect("POST capability missing")
+        .request_body
+        .and_then(ReferenceOr::into_item)
+        .expect("Request body missing")
+        .content
+        .swap_remove(mime::APPLICATION_JSON.as_ref())
+        .and_then(|media| media.schema)
+        .expect("JSON request schema missing")
+        .json_schema;
+    for name in ["clear_persisted", "trigger_detection"] {
+        let parameter = request_schema
+            .pointer(&format!("/properties/parameters/properties/{name}"))
+            .expect("Parameter schema missing");
+        assert_eq!(
+            parameter.get("default"),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
+}
+
+/// `networkreset` clears the persisted topology and rediscovers it.
+/// [[ itest~plugin-vehicle-topology-reset-clears-and-rediscovers, networkreset clears and rediscovers the topology, itest ]]
+#[tokio::test]
+async fn networkreset_clears_and_rediscovers_the_topology() {
+    if skip_unless(Transport::uses_doip, "DoIP topology only") {
+        return;
+    }
+    let mut env = persistence_env(CommunicationInitMode::WhenNotPersisted).await;
+    wait_for_persisted_topology(&env).await;
+
+    assert_networkreset_discoverable(&env).await;
+
+    // The exclusive vehicle lock is required.
+    start_reset(&env, "{}", StatusCode::CONFLICT).await;
+    let lock_id = runtimefiles::setup_with_lock(&env).await;
+
+    // Both flags false is no operation.
+    start_reset(
+        &env,
+        r#"{"parameters":{"clear_persisted":false,"trigger_detection":false}}"#,
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+
+    // Clear only. Only the vehicle lock is required: an ECU lock of the vehicle lock
+    // owner does not prevent the reset. `WhenNotPersisted` starts communication on its
+    // own, so it comes back right after the clear, as at a startup without a persisted
+    // topology, and persists the rediscovered topology again. Any persist run prunes
+    // unknown gateways, so the stale gateway being gone verifies the re-persisting,
+    // not the clear; the clear itself is verified with `OnDemand` below.
+    plant_stale_gateway(&env).await;
+    let child = Lock::acquire(&env, COMPONENTS_FLXC1000_LOCKS, default_timeout()).await;
+    let id = start_reset(
+        &env,
+        r#"{"parameters":{"trigger_detection":false}}"#,
+        StatusCode::ACCEPTED,
+    )
+    .await
+    .expect("execution id");
+    wait_reset_completed(&env, &id).await;
+    child.release(&env).await;
+    wait_for(
+        "the topology persisted again after the clear",
+        Duration::from_secs(30),
+        || async {
+            !has_stale_gateway(&env).await
+                && has_variant(&persisted_gateways(&env).await, FLXC1000_APP_VARIANT)
+        },
+    )
+    .await;
+
+    // Clear and detect (default): the topology is rediscovered and persisted
+    // again, which drops the stale gateway.
+    plant_stale_gateway(&env).await;
+    let id = start_reset(&env, "{}", StatusCode::ACCEPTED)
+        .await
+        .expect("execution id");
+    wait_reset_completed(&env, &id).await;
+    let gateways = persisted_gateways(&env).await;
+    assert!(
+        !gateways
+            .iter()
+            .any(|gateway| gateway.logical_address == STALE_GATEWAY_ADDRESS),
+        "the stale gateway must be gone: {gateways:?}"
+    );
+    assert!(has_variant(&gateways, FLXC1000_APP_VARIANT), "{gateways:?}");
+
+    // Only the latest execution is kept.
+    let list = reset_executions(&env).await;
+    assert_eq!(list.items.len(), 1, "{:?}", list.items);
+    assert_eq!(
+        list.items.first().map(|item| item.id.as_str()),
+        Some(id.as_str())
+    );
+    delete_reset(&env, &id).await;
+    runtimefiles::teardown_lock(&env, &lock_id).await;
+
+    // `OnDemand` does not start communication after a clear-only reset, so
+    // nothing persists the topology again and the clear itself is observed.
+    restart_on_demand(&mut env).await;
+    let lock_id = runtimefiles::setup_with_lock(&env).await;
+    // Otherwise the check for the cleared topology below passes without a clear.
+    let topology = persisted_topology(&env).await;
+    assert!(
+        !topology.trim().is_empty(),
+        "the topology must be persisted before the clear"
+    );
+    let id = start_reset(
+        &env,
+        r#"{"parameters":{"trigger_detection":false}}"#,
+        StatusCode::ACCEPTED,
+    )
+    .await
+    .expect("execution id");
+    wait_reset_completed(&env, &id).await;
+    let topology = persisted_topology(&env).await;
+    assert!(
+        topology.trim().is_empty(),
+        "a clear-only reset must remove the persisted topology: {topology}"
+    );
+    delete_reset(&env, &id).await;
+    runtimefiles::teardown_lock(&env, &lock_id).await;
 }
 
 /// [[ itest~ecu-list-persistence-unreachable, No gateway connected keeps the persisted states, itest ]]

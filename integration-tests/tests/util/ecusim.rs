@@ -317,6 +317,22 @@ impl Recorder {
         &self.ecu
     }
 
+    /// Returns the recorded requests without stopping or clearing the recording.
+    ///
+    /// # Errors
+    /// Returns an error if ecu-sim cannot be reached or does not know the ECU.
+    pub(crate) async fn frames(&self) -> Result<Vec<String>, TestingError> {
+        let response = crate::util::http::send_request(
+            StatusCode::OK,
+            http::Method::GET,
+            None,
+            None,
+            sim_url(&self.sim, &[&self.ecu, "record"])?,
+        )
+        .await?;
+        crate::util::http::response_to_t(&response)
+    }
+
     /// Stops recording and returns the requests recorded since the start.
     ///
     /// # Errors
