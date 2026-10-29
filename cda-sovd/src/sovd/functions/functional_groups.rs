@@ -383,12 +383,13 @@ fn handle_ecu_response<R: DiagServiceResponse>(
     errors: &mut Vec<sovd_interfaces::error::DataError<VendorErrorCode>>,
     ecu_name: String,
     result: Result<R, cda_interfaces::DiagServiceError>,
+    binary_encoding: cda_interfaces::BinaryEncoding,
 ) {
     match result {
         Ok(response) => {
             if response.response_type() == DiagServiceResponseType::Positive {
                 // Extract data from the response into JSON format
-                match response.into_json() {
+                match response.into_json(binary_encoding) {
                     Ok(json_response) => {
                         let parse_error_ref = format!("{data_tag}/{ecu_name}");
                         if let serde_json::Value::Object(data_map) = json_response.data {

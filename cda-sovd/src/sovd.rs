@@ -71,6 +71,7 @@ use crate::{
 };
 
 pub(crate) mod apps;
+pub(crate) mod binary_encoding;
 pub(crate) mod components;
 pub(crate) mod docs;
 pub(crate) mod error;
@@ -688,6 +689,7 @@ pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: Securi
     components_config: ComponentsConfig,
     uds: &T,
     flash_config: FlashConfig,
+    binary_encoding: cda_interfaces::BinaryEncoding,
     mut file_manager: HashMap<String, U>,
     locks: Arc<Locks>,
     communication_access: Arc<dyn CommunicationAccess>,
@@ -713,6 +715,9 @@ pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: Securi
     vehicle_route::<T, S>(state, router, functional_group_config)
         .await
         .layer(middleware::from_fn(security_plugin_middleware::<S>))
+        .layer(axum::Extension(binary_encoding::DefaultBinaryEncoding(
+            binary_encoding,
+        )))
         .with_state(uds.clone())
 }
 
@@ -1144,6 +1149,7 @@ fn get_payload_data<'a, T>(
     content_type: Option<&mime::Mime>,
     headers: &HeaderMap,
     body: &'a Bytes,
+    binary_encoding: cda_interfaces::BinaryEncoding,
 ) -> Result<Option<UdsPayloadData>, ApiError>
 where
     T: sovd_interfaces::Payload + serde::de::Deserialize<'a>,
@@ -1155,7 +1161,10 @@ where
         (mime::APPLICATION, mime::JSON) => {
             let sovd_request = serde_json::from_slice::<T>(body)
                 .map_err(|e| ApiError::BadRequest(format!("Invalid JSON: {e:?}")))?;
-            Some(UdsPayloadData::ParameterMap(sovd_request.get_data_map()))
+            Some(UdsPayloadData::ParameterMap(
+                sovd_request.get_data_map(),
+                binary_encoding,
+            ))
         }
         (mime::APPLICATION, mime::OCTET_STREAM) => get_octet_stream_payload(headers, body)?,
         _ => {

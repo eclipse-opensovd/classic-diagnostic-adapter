@@ -223,6 +223,7 @@ impl AppArgs {
         {
             use crate::config::configfile::ServerTransport;
 
+            let binary_encoding = config.server.binary_encoding();
             config.server = if let Some(unix_socket) = self.unix_socket {
                 // `--unix-socket` takes priority over `--listen-address`/`--listen-port`,
                 // matching the config file's documented priority.
@@ -230,6 +231,7 @@ impl AppArgs {
                     unix_socket,
                     address: crate::config::configfile::default_server_address(),
                     port: crate::config::configfile::default_server_port(),
+                    binary_encoding,
                 }
             } else {
                 let mut address = config.server.address().to_owned();
@@ -244,6 +246,7 @@ impl AppArgs {
                     address,
                     port,
                     unix_socket: None,
+                    binary_encoding,
                 }
             };
         }
@@ -949,6 +952,7 @@ mod webserver_lifecycle_tests {
             address: "0.0.0.0".to_owned(),
             port: available_port(),
             unix_socket: None,
+            binary_encoding: cda_interfaces::BinaryEncoding::default(),
         };
         config.doip.tester_address = "127.0.0.1".to_owned();
         config.doip.gateway_port = available_port();

@@ -54,6 +54,47 @@ impl SchemaDescription {
         self.schema
     }
 
+    /// Set the `format` of binary (byte field) string values to the one of
+    /// `encoding`. Byte fields are marked with the base64 format `byte` by
+    /// the schema generation.
+    #[must_use]
+    pub fn with_binary_encoding(mut self, encoding: crate::BinaryEncoding) -> Self {
+        fn replace(value: &mut serde_json::Value, from: &str, to: &str) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    let is_binary_string = map.get("type").and_then(|t| t.as_str())
+                        == Some("string")
+                        && map.get("format").and_then(|f| f.as_str()) == Some(from);
+                    if is_binary_string {
+                        map.insert("format".to_owned(), to.into());
+                    }
+                    for v in map.values_mut() {
+                        replace(v, from, to);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for v in values.iter_mut() {
+                        replace(v, from, to);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let from = crate::BinaryEncoding::Base64.json_schema_format();
+        let to = encoding.json_schema_format();
+        if from != to
+            && let Some(schema) = self.schema.as_mut()
+        {
+            let mut value = std::mem::take(schema).to_value();
+            replace(&mut value, from, to);
+            if let Ok(updated) = schemars::Schema::try_from(value) {
+                *schema = updated;
+            }
+        }
+        self
+    }
+
     #[must_use]
     pub fn get_param_properties(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
         let properties = self.schema()?;
@@ -125,4 +166,39 @@ pub trait SchemaProvider {
         service: &DiagComm,
         functional_group_name: &str,
     ) -> impl Future<Output = Result<SchemaDescription, DiagServiceError>> + Send;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_with_binary_encoding() {
+        let schema = schemars::json_schema!({
+            "type": "object",
+            "properties": {
+                "raw": { "type": "string", "format": "byte" },
+                "list": { "type": "array", "items": [{ "type": "string", "format": "byte" }] },
+                "date": { "type": "string", "format": "date" }
+            }
+        });
+        let desc = SchemaDescription::new("n".to_owned(), "t".to_owned(), Some(schema.clone()));
+
+        let hex = desc
+            .with_binary_encoding(crate::BinaryEncoding::Hex)
+            .into_schema()
+            .unwrap()
+            .to_value();
+        let format = |pointer: &str| hex.pointer(pointer).and_then(|v| v.as_str());
+        assert_eq!(format("/properties/raw/format"), Some("binary"));
+        assert_eq!(format("/properties/list/items/0/format"), Some("binary"));
+        assert_eq!(format("/properties/date/format"), Some("date"));
+
+        let desc = SchemaDescription::new("n".to_owned(), "t".to_owned(), Some(schema.clone()));
+        assert_eq!(
+            desc.with_binary_encoding(crate::BinaryEncoding::Base64)
+                .into_schema(),
+            Some(schema)
+        );
+    }
 }

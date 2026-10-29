@@ -374,6 +374,11 @@ Data Type A_BYTEFIELD as Hex
     through an optional query-parameter. Using ``hex`` means, that the binary data must be base16-encoded,
     either with or without preceding ``0x`` prefixes.
 
+    By default, binary data is base64-encoded (format ``byte``) as specified by ISO 17978-3. The default
+    must be configurable (``server.binary_encoding = "base64" | "hex"``) and can be overridden per request
+    with the query parameter ``x-sovd2uds-binary-encoding=base64|hex``. The selected encoding applies to
+    ``A_BYTEFIELD`` values in requests and responses, including security access seeds and keys.
+
     **Rationale**
 
     Handling base64 encoded binary directly can be a compatibility challenge for offboard testers accessing the

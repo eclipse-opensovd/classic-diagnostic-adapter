@@ -19,7 +19,7 @@
 
 use cda_health::config::HealthConfig;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, HashMapExtensions,
+    BinaryEncoding, FunctionalDescriptionConfig, HashMap, HashMapExtensions,
     communication_control::CommunicationSettings,
     datatypes::{
         ComParamConfig, ComParamPrecedence, ComParams, ComponentsConfig, DatabaseNamingConvention,
@@ -124,6 +124,7 @@ pub(crate) fn container_config(mut config: Configuration, socketcand_host: &str)
         address: "0.0.0.0".to_owned(),
         port: CDA_HTTP_PORT,
         unix_socket: None,
+        binary_encoding: config.server.binary_encoding(),
     };
     config.doip.gateway_port = DOIP_GATEWAY_PORT;
 
@@ -190,6 +191,8 @@ fn base_test_config(
             address: host.clone(),
             port: cda_port,
             unix_socket: None,
+            // The existing integration tests expect hex coded binary data.
+            binary_encoding: BinaryEncoding::Hex,
         },
         doip: opensovd_cda_lib::config::configfile::DoipConfig {
             tester_address: host,
@@ -474,6 +477,7 @@ mod tests {
                 address: "localhost".to_owned(),
                 port: 45678,
                 unix_socket: None,
+                binary_encoding: cda_interfaces::BinaryEncoding::Hex,
             },
             ..Default::default()
         };

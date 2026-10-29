@@ -122,6 +122,7 @@ async fn handle_mode_change<T: UdsEcu + Clone>(
     parameters: Option<HashMap<String, serde_json::Value>>,
     expiration: Option<Duration>,
     include_schema: bool,
+    binary_encoding: cda_interfaces::BinaryEncoding,
 ) -> Response {
     let claims = security_plugin.as_auth_plugin().claims();
     if let Err(response) = validate_fg_write(
@@ -143,7 +144,9 @@ async fn handle_mode_change<T: UdsEcu + Clone>(
             &(security_plugin as cda_interfaces::DynamicPlugin),
             service_id,
             value,
-            parameters,
+            parameters.map(|p| {
+                cda_interfaces::diagservices::UdsPayloadData::ParameterMap(p, binary_encoding)
+            }),
             expiration,
             false,
         )
@@ -408,6 +411,7 @@ pub(crate) mod commctrl {
     pub(crate) async fn put<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
+        crate::sovd::binary_encoding::BinaryEncodingParam(binary_encoding): crate::sovd::binary_encoding::BinaryEncodingParam,
         State(state): State<WebserverFgState<T>>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::commctrl::put::Request>,
@@ -423,6 +427,7 @@ pub(crate) mod commctrl {
             request_body.parameters,
             None,
             query.include_schema,
+            binary_encoding,
         )
         .await
     }
@@ -502,6 +507,7 @@ pub(crate) mod dtcsetting {
     pub(crate) async fn put<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
+        crate::sovd::binary_encoding::BinaryEncodingParam(binary_encoding): crate::sovd::binary_encoding::BinaryEncodingParam,
         State(state): State<WebserverFgState<T>>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::dtcsetting::put::Request>,
@@ -517,6 +523,7 @@ pub(crate) mod dtcsetting {
             request_body.parameters,
             None,
             query.include_schema,
+            binary_encoding,
         )
         .await
     }
@@ -590,6 +597,7 @@ pub(crate) mod session {
     pub(crate) async fn put<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
+        crate::sovd::binary_encoding::BinaryEncodingParam(binary_encoding): crate::sovd::binary_encoding::BinaryEncodingParam,
         State(state): State<WebserverFgState<T>>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::session::put::Request>,
@@ -605,6 +613,7 @@ pub(crate) mod session {
             None,
             request_body.mode_expiration.map(Duration::from_secs),
             query.include_schema,
+            binary_encoding,
         )
         .await
     }

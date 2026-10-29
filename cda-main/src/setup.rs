@@ -94,6 +94,7 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
     pub lock_provider: Arc<cda_sovd::SovdLockStateProvider>,
     pub flash_files_path: String,
     pub flash_functional_class_default: String,
+    pub binary_encoding: cda_interfaces::BinaryEncoding,
     pub components_config: cda_interfaces::datatypes::ComponentsConfig,
     pub health: Option<HashMap<String, Arc<dyn HealthProvider>>>,
     pub storage: Arc<LocalStorage>,
@@ -516,6 +517,7 @@ where
 {
     let flash_files_path = config.flash_files_path.clone();
     let flash_functional_class_default = config.flash_functional_class_default.clone();
+    let binary_encoding = config.server.binary_encoding();
     let components_config = config.components.clone();
     let mdd_decompress = config.flat_buf.mdd_decompress;
 
@@ -580,6 +582,7 @@ where
         cda_sovd::VehicleConfig {
             flash_files_path: config.flash_files_path.clone(),
             flash_functional_class_default: config.flash_functional_class_default.clone(),
+            binary_encoding: config.server.binary_encoding(),
             functional_group_config: config.functional_description.clone(),
             components_config: config.components.clone(),
         },
@@ -601,6 +604,7 @@ where
         vehicle_route_handle,
         flash_files_path,
         flash_functional_class_default,
+        binary_encoding,
         components_config,
         lock_provider: Arc::clone(&lock_provider),
         shutdown_signal,
