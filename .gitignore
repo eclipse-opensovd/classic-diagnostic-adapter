@@ -49,3 +49,6 @@ mbedtls-4*
 
 # Heaptrack allocation captures
 heaptrack.*
+
+# Per-user trailer for PR descriptions (see .opencode/skills/cda-git-workflow)
+.opencode/pr-trailer

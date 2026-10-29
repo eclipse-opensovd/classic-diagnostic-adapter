@@ -52,10 +52,8 @@ Config: `opensovd-cda.toml`, overridable with `CDA_`-prefixed env vars; file sel
 ## Rules
 
 - Every new file needs the SPDX/REUSE license header (see any existing file).
-- Commits use Conventional Commits with a crate scope, e.g. `fix(transport-router): ...`.
-- Commits must carry a DCO sign-off (`git commit -s`, adds `Signed-off-by: Name <email>`).
-  Do not add `Co-authored-by:` trailers (or any other AI attribution) to commit messages.
-- Do not commit, push or open PRs unless asked.
+- Do not commit, push or open PRs unless asked. For commits and pull requests load the
+  `cda-git-workflow` skill and follow it.
 
 ## Agents
 
@@ -85,6 +83,8 @@ available IDs), e.g.:
 
 - `.opencode/skills/cda-rust-development` - Rust coding rules, build/test/lint commands and
   pre-finish checklist.
+- `.opencode/skills/cda-git-workflow` - commit rules (Conventional Commits, DCO sign-off) and
+  pull requests (PR template, optional per-user PR description trailer from `.opencode/pr-trailer`).
 - `.opencode/skills/cda-diagnostic-protocol-spec` - UDS, DoIP and CAN/ISO-TP knowledge, doc sources
   and how to request specification text from the user.
 - `.opencode/skills/cda-issue-analysis` - structured analysis of bug reports and issues.
