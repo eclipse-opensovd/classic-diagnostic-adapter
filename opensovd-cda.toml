@@ -705,6 +705,8 @@
 # Whether the SOVD operation `/apps/sovd2uds/operations/doip-connect-ecu` is offered,
 # which connects an ECU directly to a given IP address instead of discovering it
 # via VIR/VAM. Intended for ECU development, disabled by default.
+# Only available in builds with the `doip-direct-connect` feature. If set
+# without that feature, an error is logged and the operation remains unavailable.
 # direct_connect_enabled = false
 # How gateways are discovered on the network:
 # - `Disabled`: no discovery of any kind, ECUs are only connected through an

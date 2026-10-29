@@ -13,7 +13,10 @@
 
 /// [[ dimpl~plugin-vehicle-topology-connect-ecu, Connect ECU directly operation, dimpl, req~plugin-vehicle-topology-connect-ecu; arch~plugin-vehicle-topology-connect-ecu ]]
 ///
-/// Connects an ECU directly to an IP address, bypassing VIR/VAM discovery.
+/// Connects a gateway ECU directly to an IP address, bypassing VIR/VAM discovery.
+///
+/// Only available in builds with the `doip-direct-connect` feature, and only offered
+/// if `doip.direct_connect_enabled` is set. Requires the vehicle lock.
 ///
 /// Modelled as an operation with a synchronous execution, as specified for
 /// `POST /{entity-path}/operations/{operation-id}/executions` (ISO 17978-3, 7.14.6).
@@ -21,6 +24,7 @@
 /// Preliminary: connecting ECUs belongs to the topology plugin. This operation is
 /// a stopgap in the SOVD layer and is expected to be replaced by what the topology
 /// plugin provides.
+#[cfg(feature = "doip-direct-connect")]
 pub(crate) mod doip_connect_ecu {
     use aide::{UseApi, transform::TransformOperation};
     use axum::{
@@ -35,23 +39,30 @@ pub(crate) mod doip_connect_ecu {
         ExecutionRequest, ExecutionResponse, ExecutionResponseParameters,
     };
 
-    use crate::sovd::{
-        WebserverState, acquire_communication_activity, create_schema,
-        error::{ApiError, ErrorWrapper},
+    use crate::{
+        openapi,
+        sovd::{
+            WebserverState, acquire_communication_activity, create_schema,
+            error::{ApiError, ErrorWrapper},
+            locks::validate_vehicle_write,
+        },
     };
 
     pub(crate) const EXECUTIONS_ROUTE: &str =
         "/vehicle/v15/apps/sovd2uds/operations/doip-connect-ecu/executions";
 
-    // Deliberately requires no ECU lock: the ECU is usually offline when this is
-    // called, and nothing is sent to it that a lock would need to protect. The
-    // request still has to be authenticated.
+    // Requires the vehicle lock instead of an ECU lock: the ECU is usually offline
+    // when this is called, so there is no ECU lock to hold. But changing the set of
+    // connected ECUs must not happen while another client works on the vehicle.
     #[tracing::instrument(
-        skip(state, query),
+        skip(security_plugin, state, query),
         fields(ecu = %request_body.parameters.ecu, ip = %request_body.parameters.ip)
     )]
     pub(crate) async fn post<T: UdsEcu + Clone>(
-        UseApi(cda_plugin_security::Secured(_), _): UseApi<cda_plugin_security::Secured, ()>,
+        UseApi(cda_plugin_security::Secured(security_plugin), _): UseApi<
+            cda_plugin_security::Secured,
+            (),
+        >,
         WithRejection(Query(query), _): WithRejection<
             Query<sovd_interfaces::IncludeSchemaQuery>,
             ApiError,
@@ -62,9 +73,23 @@ pub(crate) mod doip_connect_ecu {
         let include_schema = query.include_schema;
         let parameters = request_body.parameters;
 
+        if let Err(response) = validate_vehicle_write(
+            &security_plugin.as_auth_plugin().claims(),
+            &state.locks,
+            include_schema,
+        )
+        .await
+        {
+            return response.into_response();
+        }
+
+        // The route is only registered if direct connect is enabled, so this is not
+        // reachable through the router.
         let Some(doip_connect) = &state.doip_connect else {
             return ErrorWrapper {
-                error: ApiError::NotFound(Some("Direct connect is not enabled".to_owned())),
+                error: ApiError::InternalServerError(Some(
+                    "Direct connect is not available".to_owned(),
+                )),
                 include_schema,
             }
             .into_response();
@@ -131,14 +156,34 @@ pub(crate) mod doip_connect_ecu {
     }
 
     pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
+        type ErrorResponse =
+            Json<sovd_interfaces::error::ApiErrorResponse<crate::sovd::error::VendorErrorCode>>;
+
         op.description(
-            "Connect an ECU directly to an IP address, bypassing vehicle discovery (VIR/VAM).",
+            "Connect a gateway ECU directly to an IP address, bypassing vehicle discovery \
+             (VIR/VAM). Requires the vehicle lock.",
         )
         .input::<Json<ExecutionRequest>>()
         .response_with::<200, Json<ExecutionResponse>, _>(|res| res.description("ECU connected."))
-        .response_with::<409, Json<sovd_interfaces::error::ApiErrorResponse<
-            crate::sovd::error::VendorErrorCode,
-        >>, _>(|res| res.description("ECU is already connected."))
+        .with(openapi::error_bad_request)
+        .with(openapi::error_forbidden)
+        .with(openapi::error_not_found)
+        .response_with::<409, ErrorResponse, _>(|res| {
+            res.description(
+                "Conflict: The vehicle lock is not held by the client, the ECU is already \
+                 connected, or a connection to it is currently being established.",
+            )
+        })
+        .response_with::<423, ErrorResponse, _>(|res| {
+            res.description("Locked: The vehicle lock is held by another client.")
+        })
+        .with(openapi::error_internal_server)
+        .response_with::<503, ErrorResponse, _>(|res| {
+            res.description("Service Unavailable: DoIP communication is not enabled or not ready.")
+        })
+        .response_with::<504, ErrorResponse, _>(|res| {
+            res.description("Gateway Timeout: The ECU could not be reached in time.")
+        })
     }
 
     #[cfg(test)]
@@ -154,7 +199,7 @@ pub(crate) mod doip_connect_ecu {
         use tokio::sync::RwLock;
 
         use super::*;
-        use crate::sovd::Locks;
+        use crate::sovd::{Locks, locks::insert_test_vehicle_lock};
 
         struct FakeDoipConnect(Result<(), DiagServiceError>);
 
@@ -170,9 +215,25 @@ pub(crate) mod doip_connect_ecu {
         }
 
         fn state(doip_connect: Option<Result<(), DiagServiceError>>) -> WebserverState<MockUdsEcu> {
+            state_with_locks(doip_connect, Arc::new(Locks::new()))
+        }
+
+        async fn state_with_vehicle_lock(
+            doip_connect: Option<Result<(), DiagServiceError>>,
+            owner: &str,
+        ) -> WebserverState<MockUdsEcu> {
+            let locks = Arc::new(Locks::new());
+            insert_test_vehicle_lock(&locks, owner).await;
+            state_with_locks(doip_connect, locks)
+        }
+
+        fn state_with_locks(
+            doip_connect: Option<Result<(), DiagServiceError>>,
+            locks: Arc<Locks>,
+        ) -> WebserverState<MockUdsEcu> {
             WebserverState {
                 uds: MockUdsEcu::new(),
-                locks: Arc::new(Locks::new()),
+                locks,
                 flash_data: Arc::new(RwLock::new(sovd_interfaces::sovd2uds::FileList {
                     files: Vec::new(),
                     path: None,
@@ -219,32 +280,49 @@ pub(crate) mod doip_connect_ecu {
 
         #[tokio::test]
         async fn connects_the_ecu() {
-            let response = execute(state(Some(Ok(()))), "10.0.0.5").await;
+            let state = state_with_vehicle_lock(Some(Ok(())), "test_user").await;
+            let response = execute(state, "10.0.0.5").await;
             assert_eq!(response.status(), StatusCode::OK);
         }
 
         #[tokio::test]
         async fn already_connected_ecu_is_a_conflict() {
-            let response = execute(
-                state(Some(Err(DiagServiceError::Conflict(
+            let state = state_with_vehicle_lock(
+                Some(Err(DiagServiceError::Conflict(
                     "ECU 'my_ecu' is already connected on 10.0.0.5".to_owned(),
-                )))),
-                "10.0.0.9",
+                ))),
+                "test_user",
             )
             .await;
+            let response = execute(state, "10.0.0.9").await;
             assert_eq!(response.status(), StatusCode::CONFLICT);
         }
 
         #[tokio::test]
         async fn invalid_ip_is_a_bad_request() {
-            let response = execute(state(Some(Ok(()))), "not-an-ip").await;
+            let state = state_with_vehicle_lock(Some(Ok(())), "test_user").await;
+            let response = execute(state, "not-an-ip").await;
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         }
 
         #[tokio::test]
-        async fn disabled_direct_connect_is_not_found() {
-            let response = execute(state(None), "10.0.0.5").await;
-            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        async fn missing_vehicle_lock_is_rejected() {
+            let response = execute(state(Some(Ok(()))), "10.0.0.5").await;
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+
+        #[tokio::test]
+        async fn vehicle_lock_of_another_client_is_rejected() {
+            let state = state_with_vehicle_lock(Some(Ok(())), "someone_else").await;
+            let response = execute(state, "10.0.0.5").await;
+            assert_eq!(response.status(), StatusCode::LOCKED);
+        }
+
+        #[tokio::test]
+        async fn unwired_direct_connect_is_an_internal_error() {
+            let state = state_with_vehicle_lock(None, "test_user").await;
+            let response = execute(state, "10.0.0.5").await;
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         }
     }
 }

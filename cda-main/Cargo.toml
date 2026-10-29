@@ -102,6 +102,9 @@ openssl-vendored = [
 ]
 mbedtls = ["cda-comm-doip/mbedtls"]
 can = ["cda-comm-can/can"]
+# SOVD operation to connect an ECU directly to an IP address (VIR/VAM bypass),
+# see `doip.direct_connect_enabled`. Intended for ECU development.
+doip-direct-connect = ["cda-sovd/doip-direct-connect"]
 # Userspace ISO-TP over raw CAN (`rawcan:<ifname>` interface scheme):
 # vcan suffices, no can_isotp kernel module needed.
 can-isotp-userspace = ["can", "cda-comm-can/can-isotp-userspace"]

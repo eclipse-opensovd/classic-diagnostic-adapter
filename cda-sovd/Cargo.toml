@@ -101,6 +101,9 @@ percent-encoding = { workspace = true }
 default = []
 auth = []
 dlt-tracing = ["cda-interfaces/dlt-tracing"]
+# Offers the SOVD operation to connect an ECU directly to an IP address, bypassing
+# VIR/VAM discovery. Intended for ECU development, leave it out of builds for vehicles.
+doip-direct-connect = []
 
 [dev-dependencies]
 cda-interfaces = { workspace = true, features = ["test-utils"] }

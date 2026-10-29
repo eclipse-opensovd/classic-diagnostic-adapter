@@ -637,6 +637,10 @@ pub(crate) struct WebserverState<T: UdsEcu + Clone> {
     flash_functional_class_default: Arc<str>,
     components_config: Arc<RwLock<ComponentsConfig>>,
     communication_access: Arc<dyn CommunicationAccess>,
+    #[cfg_attr(
+        not(feature = "doip-direct-connect"),
+        allow(dead_code, reason = "only used by the direct connect operation")
+    )]
     doip_connect: Option<Arc<dyn DoipConnect>>,
 }
 
@@ -726,7 +730,8 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
         .await,
     );
     // Preliminary: ECU connection management is expected to move into the topology
-    // plugin. Only offered when direct connect is enabled in the configuration.
+    // plugin. Only offered if built with the feature, and enabled in the configuration.
+    #[cfg(feature = "doip-direct-connect")]
     let router = if state.doip_connect.is_some() {
         router.api_route(
             apps::sovd2uds::operations::doip_connect_ecu::EXECUTIONS_ROUTE,

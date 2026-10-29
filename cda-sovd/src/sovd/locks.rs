@@ -53,8 +53,12 @@ pub(crate) use handlers::{
 use lifecycle::{LifecycleDelivery, enqueue_lock_event};
 pub(crate) use policy::rollback_preemption;
 use policy::{AcquisitionGuard, PendingPreemption, active_snapshot};
+#[cfg(all(test, feature = "doip-direct-connect"))]
+pub(crate) use tests::insert_test_vehicle_lock;
 #[cfg(test)]
 pub(crate) use tests::{insert_test_ecu_lock, insert_test_fg_lock};
+#[cfg(feature = "doip-direct-connect")]
+pub(crate) use validation::validate_vehicle_write;
 use validation::{validate_claim, validate_vehicle_children};
 pub(crate) use validation::{
     validate_ecu_read, validate_ecu_write, validate_fg_read, validate_fg_write,

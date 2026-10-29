@@ -331,16 +331,24 @@ Vehicle Topology Plugin
     The ``doip-connect-ecu`` operation, following
     the standard SOVD operations semantics, shall be available at
     ``POST /apps/sovd2uds/operations/doip-connect-ecu/executions``.
-    It must accept the parameters for `ecu`, `ip` and `protocol-version` and shall provide
-    a mechanism to establish a connection to a doip ecu without utilizing VIR/VAM.
+    It must accept the parameters ``ecu``, ``ip`` and ``protocol_version`` and shall provide
+    a mechanism to establish a connection to a DoIP gateway ECU without utilizing VIR/VAM.
+    Requests for an ECU that is not a gateway must be rejected with ``400 Bad Request``.
 
-    A configuration entry must exist to enable or disable the operation.
-    The endpoint shall only be available if the corresponding configuration entry enabling the operation is set to true.
+    The operation must only be available if it is built in (build feature ``doip-direct-connect``)
+    and enabled by a configuration entry. If the configuration entry is set in a build without the
+    operation, the CDA must log an error and continue without offering the operation.
+
+    The operation must require the vehicle lock to be held by the requesting client.
 
     The operation must only ever establish a connection for an ECU that has none. An existing connection
     must never be changed or replaced by this operation, even if that connection is currently not active
-    (e.g. because the gateway is offline). In that case the request must be rejected with
-    ``409 Conflict``.
+    (e.g. because the gateway is offline). In that case, or if a connection for the ECU is currently
+    being established, the request must be rejected with ``409 Conflict``.
+
+    The time that establishing the connection may take must be limited. Neither a client giving up on the
+    request nor a connection that is still being established may leave the connection in an
+    inconsistent state, and the latter must not delay disabling communication or shutdown.
 
     After the connection has been established, routing activation, TLS upgrade and ECU identification
     must behave exactly as for a gateway that was discovered via VIR/VAM.

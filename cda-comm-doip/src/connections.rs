@@ -20,6 +20,7 @@ use cda_interfaces::{
 use doip_definitions::payload::{ActivationType, DoipPayload, RoutingActivationRequest};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     ConnectionError, ConnectionTasks, DiagnosticResponse, DiscoveredGateway, DoipConnection,
@@ -39,6 +40,12 @@ pub(crate) struct GatewayState<T> {
     pub ecus: Arc<HashMap<String, RwLock<T>>>,
     pub gateway_ecu_map: HashMap<u16, Vec<u16>>,
     pub connection_tasks: Arc<ConnectionTasks>,
+}
+
+/// Direct connects bound the initial network handshake, before any tasks are spawned.
+pub(crate) struct ConnectControl {
+    pub cancel: CancellationToken,
+    pub headroom: Duration,
 }
 
 struct GatewayConnectionHandles {
@@ -96,7 +103,7 @@ impl From<EcuError> for DiagServiceError {
 }
 
 #[tracing::instrument(
-    skip(transport, state, connectivity_handler),
+    skip(transport, state, connectivity_handler, control),
     fields(
         tester_ip = transport.tester_ip.clone(),
         port = transport.port,
@@ -112,6 +119,7 @@ pub(crate) async fn handle_gateway_connection<T>(
     transport: &DoipTransportConfig,
     state: &GatewayState<T>,
     connectivity_handler: Arc<dyn EcuConnectivityHandler>,
+    control: Option<&ConnectControl>,
 ) -> Result<u16, EcuError>
 where
     T: EcuAddresses + DoipComParams,
@@ -120,7 +128,9 @@ where
         .ecus
         .get(&discovered_gateway.ecu_name)
         .map(|ecu| async { ecu.read().await.tester_address() })
-        .ok_or_else(|| EcuError::ResourceNotFound("ECU not found".to_owned()))?
+        .ok_or_else(|| {
+            EcuError::ResourceNotFound(format!("ECU '{}' not found", discovered_gateway.ecu_name))
+        })?
         .await;
 
     let routing_activation_request = RoutingActivationRequest {
@@ -185,17 +195,7 @@ where
         connectivity_handler: Arc::clone(&connectivity_handler),
     };
     let GatewayConnectionHandles { sender, receivers } =
-        match connection_handler(gateway, Arc::clone(&state.connection_tasks)).await {
-            Ok(handles) => handles,
-            Err(e) => {
-                return Err(EcuError::EcuConnectionError(
-                    ConnectionError::ConnectionFailed(format!(
-                        "Failed to connect to {}: {}",
-                        discovered_gateway.ecu_name, e
-                    )),
-                ));
-            }
-        };
+        connection_handler(gateway, Arc::clone(&state.connection_tasks), control).await?;
 
     let doip_ecus = create_ecu_receiver_map(ecu_ids, &sender, &receivers);
 
@@ -263,6 +263,7 @@ fn create_ecu_receiver_map(
 async fn connection_handler(
     gateway: GatewaySetup,
     connection_tasks: Arc<ConnectionTasks>,
+    control: Option<&ConnectControl>,
 ) -> Result<GatewayConnectionHandles, EcuError> {
     // channel to send messages to the gateway / ecus
     let (intx, inrx) = mpsc::channel::<DoipPayload>(50);
@@ -284,16 +285,32 @@ async fn connection_handler(
     }
 
     // setting up initial gateway connection
-    let gateway_conn = Arc::new(
-        ecu_connection::establish_ecu_connection(&gateway.connection)
-            .await
-            .inspect_err(|e| {
-                tracing::error!(
-                    "Failed to connect to gateway at {}: {e:?}",
-                    gateway.connection.doip.gateway_ip
-                );
-            })?,
-    );
+    let establish = ecu_connection::establish_ecu_connection(&gateway.connection);
+    let established = if let Some(control) = control {
+        let budget = gateway
+            .connection
+            .ecu_timeouts
+            .connection
+            .saturating_add(gateway.connection.ecu_timeouts.routing_activation)
+            .saturating_add(control.headroom);
+        tokio::select! {
+            biased;
+            () = control.cancel.cancelled() => Err(ConnectionError::ConnectionFailed(
+                "DoIP communication was disabled while connecting".to_owned()
+            )),
+            result = tokio::time::timeout(budget, establish) => result.unwrap_or_else(|_| {
+                Err(ConnectionError::Timeout(format!("No connection within {} ms", budget.as_millis())))
+            }),
+        }
+    } else {
+        establish.await
+    };
+    let gateway_conn = Arc::new(established.inspect_err(|error| {
+        tracing::error!(
+            "Failed to connect to gateway at {}: {error:?}",
+            gateway.connection.doip.gateway_ip
+        );
+    })?);
 
     // used by receiver / sender task to reset the connection
     let (conn_reset_tx, conn_reset_rx) = mpsc::channel::<ConnectionResetReason>(1);

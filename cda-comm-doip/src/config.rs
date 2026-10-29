@@ -73,6 +73,8 @@ pub struct DoipConfig {
     /// Whether the SOVD operation `/apps/sovd2uds/operations/doip-connect-ecu` is offered,
     /// which connects an ECU directly to a given IP address instead of discovering it
     /// via VIR/VAM. Intended for ECU development, disabled by default.
+    /// Only available in builds with the `doip-direct-connect` feature. If set
+    /// without that feature, an error is logged and the operation remains unavailable.
     pub direct_connect_enabled: bool,
     /// How gateways are discovered on the network:
     /// - `Disabled`: no discovery of any kind, ECUs are only connected through an
@@ -93,7 +95,8 @@ impl DoipConfig {
     ///
     /// The tester address is used as the source address of every `DoIP`
     /// connection. A stale address only shows up as an obscure bind error once
-    /// the first connection is attempted, so this is meant to be checked at startup.
+    /// the first connection is attempted, so this is checked when the transport is
+    /// enabled (not at process start, the interface may only come up later).
     ///
     /// # Errors
     /// Returns [`ConfigSanityError::InvalidValue`] if the address cannot be

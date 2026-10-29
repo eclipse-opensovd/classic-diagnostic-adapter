@@ -35,7 +35,7 @@ check:
 	cargo +$(STABLE) check --workspace
 
 test:
-	cargo +$(STABLE) test --locked --workspace $(ARGS)
+	cargo +$(STABLE) test --locked --workspace --features opensovd-cda/doip-direct-connect $(ARGS)
 
 integration-test:
 	cargo +$(STABLE) test --locked -p integration-tests --features integration-tests -- --show-output
@@ -83,7 +83,7 @@ precommit-all-features:
 	uv run --locked --group tools prek run --all-files --group CI --group @ungrouped --show-diff-on-failure
 
 coverage:
-	cargo +$(STABLE) llvm-cov --workspace --lcov --output-path lcov.info -- --show-output
+	cargo +$(STABLE) llvm-cov --workspace --features opensovd-cda/doip-direct-connect --lcov --output-path lcov.info -- --show-output
 
 coverage-can:
 	cargo +$(STABLE) llvm-cov -p opensovd-cda -p cda-comm-can --features opensovd-cda/can-socketcand,cda-comm-can/can-socketcand --lcov --output-path lcov-can-unit.info -- --show-output
