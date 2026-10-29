@@ -137,10 +137,13 @@ async fn test_custom_demo_endpoint() {
 
     let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
-    let (dynamic_router, webserver_join_handle) =
-        cda_sovd::launch_webserver(webserver_config, shutdown_signal.clone())
-            .await
-            .expect("Failed to launch webserver");
+    let (dynamic_router, webserver_join_handle) = cda_sovd::launch_webserver(
+        webserver_config,
+        cda_interfaces::BinaryEncoding::Hex,
+        shutdown_signal.clone(),
+    )
+    .await
+    .expect("Failed to launch webserver");
 
     let health = cda_health::add_health_routes(&dynamic_router, cda_version().to_owned()).await;
     let main_health_provider = {
@@ -212,10 +215,13 @@ async fn test_custom_demo_endpoint_over_unix_socket() {
 
     let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
-    let (dynamic_router, webserver_join_handle) =
-        cda_sovd::launch_webserver(webserver_config, shutdown_signal.clone())
-            .await
-            .expect("Failed to launch webserver");
+    let (dynamic_router, webserver_join_handle) = cda_sovd::launch_webserver(
+        webserver_config,
+        cda_interfaces::BinaryEncoding::Hex,
+        shutdown_signal.clone(),
+    )
+    .await
+    .expect("Failed to launch webserver");
 
     // Add custom routes directly. No vehicle routes or health checks are
     // needed for this test since we talk to the raw socket directly instead

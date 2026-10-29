@@ -94,6 +94,7 @@ pub struct VehicleResources<T, M> {
 #[tracing::instrument(skip(config, shutdown_signal))]
 pub async fn launch_webserver<F>(
     config: WebServerConfig,
+    binary_encoding: cda_interfaces::BinaryEncoding,
     shutdown_signal: F,
 ) -> Result<(DynamicRouter, tokio::task::JoinHandle<()>), DoipGatewaySetupError>
 where
@@ -111,7 +112,13 @@ where
 
     let middleware = tower::util::MapRequestLayer::new(rewrite_request_uri);
     let trim_trailing_slash_middleware = NormalizePathLayer::trim_trailing_slash();
-    let service_with_middleware = middleware.layer(trim_trailing_slash_middleware.layer(service));
+    // Applied to the top-level service so every route, including routes added
+    // later via the dynamic router, sees the configured binary encoding.
+    let binary_encoding_layer = axum::Extension(sovd::binary_encoding::DefaultBinaryEncoding(
+        binary_encoding,
+    ));
+    let service_with_middleware = middleware
+        .layer(trim_trailing_slash_middleware.layer(binary_encoding_layer.layer(service)));
 
     let serve_future: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = match config {
         WebServerConfig::UnixSocket { path: socket_path } => {
@@ -566,9 +573,13 @@ mod webserver_bind_tests {
         let (_dir, socket_path, config) = temp_socket_config();
         let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
-        let (_dynamic_router, webserver_task) = launch_webserver(config, shutdown_signal)
-            .await
-            .expect("failed to launch webserver on unix socket");
+        let (_dynamic_router, webserver_task) = launch_webserver(
+            config,
+            cda_interfaces::BinaryEncoding::default(),
+            shutdown_signal,
+        )
+        .await
+        .expect("failed to launch webserver on unix socket");
 
         assert_reachable_then_shutdown(&socket_path, shutdown_tx, webserver_task).await;
     }
@@ -588,9 +599,13 @@ mod webserver_bind_tests {
         };
         let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
-        let (_dynamic_router, webserver_task) = launch_webserver(config, shutdown_signal)
-            .await
-            .expect("failed to launch webserver on tcp");
+        let (_dynamic_router, webserver_task) = launch_webserver(
+            config,
+            cda_interfaces::BinaryEncoding::default(),
+            shutdown_signal,
+        )
+        .await
+        .expect("failed to launch webserver on tcp");
 
         let client = reqwest::Client::new();
         let response = client
@@ -617,9 +632,13 @@ mod webserver_bind_tests {
 
         let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
-        let (_dynamic_router, webserver_task) = launch_webserver(config, shutdown_signal)
-            .await
-            .expect("failed to launch webserver despite stale socket file");
+        let (_dynamic_router, webserver_task) = launch_webserver(
+            config,
+            cda_interfaces::BinaryEncoding::default(),
+            shutdown_signal,
+        )
+        .await
+        .expect("failed to launch webserver despite stale socket file");
 
         assert_reachable_then_shutdown(&socket_path, shutdown_tx, webserver_task).await;
     }
@@ -634,7 +653,12 @@ mod webserver_bind_tests {
 
         let (_shutdown_tx, shutdown_signal) = shutdown_channel();
 
-        let result = launch_webserver(config, shutdown_signal).await;
+        let result = launch_webserver(
+            config,
+            cda_interfaces::BinaryEncoding::default(),
+            shutdown_signal,
+        )
+        .await;
         assert!(
             result.is_err(),
             "expected launch_webserver to fail when the stale socket path is a directory"

@@ -267,7 +267,7 @@ impl TestEnv {
         // The healthcheck runs inside the container. Tests reach the CDA
         // through the published host port, which the Docker host may forward
         // only a moment later.
-        wait_for_cda_online(&self.config.server).await
+        wait_for_cda_online(&self.config.server.transport).await
     }
 
     /// Restarts the CDA in place: stops its container and starts the same
@@ -314,14 +314,14 @@ impl TestEnv {
         })
         .await?;
         self.set_cda_port(port);
-        wait_for_cda_online(&self.config.server).await
+        wait_for_cda_online(&self.config.server.transport).await
     }
 
     /// Points [`Self::config`] and the default configuration at the CDA on
     /// the host port `port`.
     fn set_cda_port(&mut self, port: u16) {
-        self.default_config.server = ServerTransport::Tcp {
-            address: self.default_config.server.address().to_owned(),
+        self.default_config.server.transport = ServerTransport::Tcp {
+            address: self.default_config.server.transport.address().to_owned(),
             port,
             unix_socket: None,
         };
@@ -532,9 +532,9 @@ impl TestEnv {
             };
 
         let mut default_config = default_config;
-        default_config.server = ServerTransport::Tcp {
+        default_config.server.transport = ServerTransport::Tcp {
             address: sim_host.clone(),
-            port: default_config.server.port(),
+            port: default_config.server.transport.port(),
             unix_socket: None,
         };
         Ok(Self {

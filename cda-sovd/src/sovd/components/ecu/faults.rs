@@ -209,8 +209,8 @@ pub(crate) mod id {
 
     use super::*;
     use crate::sovd::{
-        IntoSovdWithSchema, components::IdPathParam, error::VendorErrorCode,
-        remove_descriptions_recursive,
+        IntoSovdWithSchema, binary_encoding::BinaryEncodingParam, components::IdPathParam,
+        error::VendorErrorCode, remove_descriptions_recursive,
     };
 
     impl IntoSovd for datatypes::DtcSnapshot {
@@ -333,6 +333,7 @@ pub(crate) mod id {
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         Path(id): Path<IdPathParam>,
         Query(query): Query<DtcIdQuery>,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverEcuState {
             ecu_name,
             uds,
@@ -356,6 +357,7 @@ pub(crate) mod id {
                 query.include_snapshot_data,
                 query.include_schema,
                 query.memory_selection,
+                binary_encoding,
             )
             .await
         {

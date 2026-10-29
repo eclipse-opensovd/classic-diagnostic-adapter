@@ -14,9 +14,10 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager,
-    FunctionalDescriptionConfig, HashMap, HashMapExtensions, SchemaDescription, SchemaProvider,
-    UdsEcu, UdsEcuDb, UdsTransport, VariantDetectionActivity, VariantDetectionReceiver,
+    BinaryEncoding, Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuGateway,
+    EcuManager, FunctionalDescriptionConfig, HashMap, HashMapExtensions, SchemaDescription,
+    SchemaProvider, UdsEcu, UdsEcuDb, UdsTransport, VariantDetectionActivity,
+    VariantDetectionReceiver,
     communication_control::{ActivationCause, CommunicationAccess, CommunicationGuard},
     datatypes::FaultConfig,
     diagservices::UdsPayloadData,
@@ -387,7 +388,8 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             ecu_name,
             diag_comm,
             security_plugin,
-            Some(UdsPayloadData::ParameterMap(params)),
+            // Programmatic callers provide binary values hex coded.
+            Some(UdsPayloadData::ParameterMap(params, BinaryEncoding::Hex)),
             map_to_json,
         )
         .await
@@ -439,7 +441,8 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             ecu_name,
             diag_comm,
             security_plugin,
-            Some(UdsPayloadData::ParameterMap(params)),
+            // Programmatic callers provide binary values hex coded.
+            Some(UdsPayloadData::ParameterMap(params, BinaryEncoding::Hex)),
             map_to_json,
         )
         .await

@@ -56,3 +56,11 @@ SOVD-API
     :status: draft
 
     Verifies that the component details report the ``last_seen`` timestamp of an ECU.
+
+.. testset:: Binary Encoding
+    :id: testset~sovd-api-binary-encoding
+    :links: test~sovd-api-binary-encoding-codec, test~sovd-api-binary-encoding-selection, test~sovd-api-binary-encoding-config, itest~sovd-api-binary-encoding-security-access, itest~sovd-api-binary-encoding-invalid
+    :status: draft
+
+    Verifies encoding and decoding of ``A_BYTEFIELD`` values as base64 or hex, the configured default and
+    the per request selection via the ``x-sovd2uds-binary-encoding`` query parameter.

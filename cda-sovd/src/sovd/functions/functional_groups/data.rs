@@ -115,6 +115,7 @@ pub(crate) mod diag_service {
     use crate::{
         openapi,
         sovd::{
+            binary_encoding::BinaryEncodingParam,
             components::{ecu::DiagServicePathParam, get_content_type_and_accept},
             error::{ApiError, ErrorWrapper, VendorErrorCode},
             functions::functional_groups::{WebserverFgState, handle_ecu_response, map_to_json},
@@ -138,6 +139,7 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::functions::functional_groups::data::service::Query>,
             ApiError,
         >,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverFgState {
             uds,
             locks,
@@ -167,6 +169,7 @@ pub(crate) mod diag_service {
             None,
             (security_plugin, &locks, FunctionalDataAccess::Read),
             include_schema,
+            binary_encoding,
         )
         .await
     }
@@ -210,6 +213,7 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::functions::functional_groups::data::service::Query>,
             ApiError,
         >,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverFgState {
             uds,
             locks,
@@ -240,6 +244,7 @@ pub(crate) mod diag_service {
             Some(body),
             (security_plugin, &locks, FunctionalDataAccess::Write),
             include_schema,
+            binary_encoding,
         )
         .await
     }
@@ -261,6 +266,10 @@ pub(crate) mod diag_service {
         .with(openapi::error_bad_gateway)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Combining parameters into a struct would not improve readability here"
+    )]
     async fn functional_data_request<T: UdsEcu + Clone>(
         service: DiagComm,
         functional_group_name: &str,
@@ -273,6 +282,7 @@ pub(crate) mod diag_service {
             FunctionalDataAccess,
         ),
         include_schema: bool,
+        binary_encoding: cda_interfaces::BinaryEncoding,
     ) -> Response {
         let (security_plugin, locks, access) = authorization;
         let claims = security_plugin.as_auth_plugin().claims();
@@ -316,7 +326,7 @@ pub(crate) mod diag_service {
         let data = if let Some(body) = body {
             match get_payload_data::<
                 sovd_interfaces::functions::functional_groups::data::DataRequestPayload,
-            >(content_type.as_ref(), &headers, &body)
+            >(content_type.as_ref(), &headers, &body, binary_encoding)
             {
                 Ok(value) => value,
                 Err(e) => {
@@ -363,7 +373,14 @@ pub(crate) mod diag_service {
         let mut errors: Vec<sovd_interfaces::error::DataError<VendorErrorCode>> = Vec::new();
 
         for (ecu_name, result) in results {
-            handle_ecu_response(&mut response_data, "data", &mut errors, ecu_name, result);
+            handle_ecu_response(
+                &mut response_data,
+                "data",
+                &mut errors,
+                ecu_name,
+                result,
+                binary_encoding,
+            );
         }
 
         let schema = if include_schema {
@@ -397,6 +414,7 @@ mod tests {
         body::Bytes,
         extract::{Path, Query, State},
         http::{HeaderMap, StatusCode, header},
+        response::Response,
     };
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{
@@ -413,7 +431,8 @@ mod tests {
     use super::diag_service;
     use crate::sovd::{
         components::ecu::DiagServicePathParam,
-        functions::functional_groups::tests::create_test_fg_state, locks::insert_test_fg_lock,
+        functions::functional_groups::{WebserverFgState, tests::create_test_fg_state},
+        locks::insert_test_fg_lock,
     };
 
     fn foreign_security_plugin() -> Box<dyn SecurityPlugin> {
@@ -453,13 +472,50 @@ mod tests {
         response
             .expect_response_type()
             .returning(|| DiagServiceResponseType::Positive);
-        response.expect_into_json().return_once(|| {
+        response.expect_into_json().return_once(|_| {
             Ok(DiagServiceJsonResponse {
                 data: serde_json::json!({"value": 1}),
                 errors: vec![],
             })
         });
         response
+    }
+
+    /// Calls the GET handler for `VehicleSpeed` with hex encoding.
+    async fn call_get(
+        security_plugin: Box<dyn SecurityPlugin>,
+        state: WebserverFgState<MockUdsEcu>,
+    ) -> Response {
+        diag_service::get::<MockUdsEcu>(
+            headers(),
+            UseApi(Secured(security_plugin), std::marker::PhantomData),
+            Path(DiagServicePathParam {
+                service: "VehicleSpeed".to_owned(),
+            }),
+            query(),
+            crate::sovd::binary_encoding::hex_encoding(),
+            State(state),
+        )
+        .await
+    }
+
+    /// Calls the PUT handler for `VehicleSpeed` with hex encoding and a JSON body.
+    async fn call_put(state: WebserverFgState<MockUdsEcu>) -> Response {
+        diag_service::put::<MockUdsEcu>(
+            headers(),
+            UseApi(
+                Secured(Box::new(TestSecurityPlugin)),
+                std::marker::PhantomData,
+            ),
+            Path(DiagServicePathParam {
+                service: "VehicleSpeed".to_owned(),
+            }),
+            query(),
+            crate::sovd::binary_encoding::hex_encoding(),
+            State(state),
+            Bytes::from_static(b"{\"data\":{\"value\":1}}"),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -469,16 +525,7 @@ mod tests {
         let state = create_test_fg_state(uds, "AllECUs".to_owned());
         insert_test_fg_lock(&state.locks, "AllECUs").await;
 
-        let response = diag_service::get::<MockUdsEcu>(
-            headers(),
-            UseApi(Secured(foreign_security_plugin()), std::marker::PhantomData),
-            Path(DiagServicePathParam {
-                service: "VehicleSpeed".to_owned(),
-            }),
-            query(),
-            State(state),
-        )
-        .await;
+        let response = call_get(foreign_security_plugin(), state).await;
 
         assert_eq!(response.status(), StatusCode::LOCKED);
     }
@@ -489,20 +536,7 @@ mod tests {
         uds.expect_send_functional_group().times(0);
         let state = create_test_fg_state(uds, "AllECUs".to_owned());
 
-        let response = diag_service::put::<MockUdsEcu>(
-            headers(),
-            UseApi(
-                Secured(Box::new(TestSecurityPlugin)),
-                std::marker::PhantomData,
-            ),
-            Path(DiagServicePathParam {
-                service: "VehicleSpeed".to_owned(),
-            }),
-            query(),
-            State(state),
-            Bytes::from_static(b"{\"data\":{\"value\":1}}"),
-        )
-        .await;
+        let response = call_put(state).await;
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
     }
@@ -525,19 +559,7 @@ mod tests {
         let state = create_test_fg_state(uds, "AllECUs".to_owned());
         insert_test_fg_lock(&state.locks, "AllECUs").await;
 
-        let response = diag_service::get::<MockUdsEcu>(
-            headers(),
-            UseApi(
-                Secured(Box::new(TestSecurityPlugin)),
-                std::marker::PhantomData,
-            ),
-            Path(DiagServicePathParam {
-                service: "VehicleSpeed".to_owned(),
-            }),
-            query(),
-            State(state),
-        )
-        .await;
+        let response = call_get(Box::new(TestSecurityPlugin), state).await;
 
         assert_eq!(response.status(), StatusCode::OK);
     }
@@ -560,20 +582,7 @@ mod tests {
         let state = create_test_fg_state(uds, "AllECUs".to_owned());
         insert_test_fg_lock(&state.locks, "AllECUs").await;
 
-        let response = diag_service::put::<MockUdsEcu>(
-            headers(),
-            UseApi(
-                Secured(Box::new(TestSecurityPlugin)),
-                std::marker::PhantomData,
-            ),
-            Path(DiagServicePathParam {
-                service: "VehicleSpeed".to_owned(),
-            }),
-            query(),
-            State(state),
-            Bytes::from_static(b"{\"data\":{\"value\":1}}"),
-        )
-        .await;
+        let response = call_put(state).await;
 
         assert_eq!(response.status(), StatusCode::OK);
     }

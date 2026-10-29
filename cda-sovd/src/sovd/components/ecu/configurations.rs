@@ -140,6 +140,7 @@ pub(crate) mod diag_service {
         openapi,
         sovd::{
             WebserverEcuState,
+            binary_encoding::BinaryEncodingParam,
             components::ecu::{DiagServicePathParam, data_request},
             error::{ApiError, ErrorWrapper},
         },
@@ -153,6 +154,7 @@ pub(crate) mod diag_service {
             Query<sovd_configurations::ConfigurationsQuery>,
             ApiError,
         >,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverEcuState {
             ecu_name,
             uds,
@@ -182,6 +184,7 @@ pub(crate) mod diag_service {
             Some(body),
             (security_plugin, &locks, true),
             include_schema,
+            binary_encoding,
         )
         .await
     }
@@ -214,7 +217,10 @@ pub(crate) mod diag_service {
 
         use crate::{
             openapi,
-            sovd::{WebserverEcuState, docs, error::ApiError, locks::require_ecu_access},
+            sovd::{
+                WebserverEcuState, binary_encoding::BinaryEncodingParam, docs, error::ApiError,
+                locks::require_ecu_access,
+            },
         };
 
         openapi::aide_helper::gen_path_param!(ConfigDocsPathParam service String);
@@ -222,6 +228,7 @@ pub(crate) mod diag_service {
         pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(ConfigDocsPathParam { service }): Path<ConfigDocsPathParam>,
+            BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
             State(WebserverEcuState {
                 ecu_name,
                 uds,
@@ -251,7 +258,14 @@ pub(crate) mod diag_service {
                 .into_response();
             }
 
-            docs::data::build_docs_response(&uds, &ecu_name, &service, "configurations").await
+            docs::data::build_docs_response(
+                &uds,
+                &ecu_name,
+                &service,
+                "configurations",
+                binary_encoding,
+            )
+            .await
         }
 
         pub(crate) fn docs_transform(op: TransformOperation) -> TransformOperation {
@@ -317,6 +331,7 @@ pub(crate) mod diag_service {
                     Path(ConfigDocsPathParam {
                         service: "VarCoding1".to_owned(),
                     }),
+                    crate::sovd::binary_encoding::hex_encoding(),
                     State(state),
                 )
                 .await;
@@ -364,6 +379,7 @@ pub(crate) mod diag_service {
                     Path(ConfigDocsPathParam {
                         service: "NonExistent".to_owned(),
                     }),
+                    crate::sovd::binary_encoding::hex_encoding(),
                     State(state),
                 )
                 .await;
@@ -399,6 +415,7 @@ pub(crate) mod diag_service {
                     Path(ConfigDocsPathParam {
                         service: "Anything".to_owned(),
                     }),
+                    crate::sovd::binary_encoding::hex_encoding(),
                     State(state),
                 )
                 .await;

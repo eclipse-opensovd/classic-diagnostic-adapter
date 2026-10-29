@@ -63,6 +63,7 @@ pub async fn build_docs_response<T: UdsEcu + SchemaProvider + Clone>(
     ecu_name: &str,
     service: &str,
     resource_type: &str,
+    binary_encoding: cda_interfaces::BinaryEncoding,
 ) -> axum::response::Response {
     // Get the read (GET) response schema (ReadDataByIdentifier / 0x22)
     let read_service = DiagComm {
@@ -76,7 +77,7 @@ pub async fn build_docs_response<T: UdsEcu + SchemaProvider + Clone>(
         .schema_for_responses(ecu_name, &read_service)
         .await
         .ok()
-        .and_then(cda_interfaces::SchemaDescription::into_schema);
+        .and_then(|s| s.with_binary_encoding(binary_encoding).into_schema());
 
     // Check if a corresponding WriteDataByIdentifier (0x2E) service exists
     // by attempting to resolve its request schema
@@ -91,7 +92,7 @@ pub async fn build_docs_response<T: UdsEcu + SchemaProvider + Clone>(
         .schema_for_request(ecu_name, &write_service)
         .await
         .ok()
-        .and_then(cda_interfaces::SchemaDescription::into_schema);
+        .and_then(|s| s.with_binary_encoding(binary_encoding).into_schema());
 
     let meta = DataDocsMeta {
         name: service.to_owned(),

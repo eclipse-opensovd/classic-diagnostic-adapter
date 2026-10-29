@@ -319,6 +319,7 @@ pub(crate) mod diag_service {
         openapi,
         sovd::{
             IntoSovd, WebserverEcuState,
+            binary_encoding::BinaryEncodingParam,
             components::ecu::{DiagServicePathParam, data_request},
             create_schema,
             error::{ApiError, ErrorWrapper},
@@ -399,6 +400,7 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::components::ComponentQuery>,
             ApiError,
         >,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverEcuState {
             ecu_name,
             uds,
@@ -431,6 +433,7 @@ pub(crate) mod diag_service {
                 None,
                 (security_plugin, &locks, false),
                 include_schema,
+                binary_encoding,
             )
             .await
         }
@@ -458,6 +461,7 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::components::ecu::data::service::put::Query>,
             ApiError,
         >,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverEcuState {
             ecu_name,
             uds,
@@ -487,6 +491,7 @@ pub(crate) mod diag_service {
             Some(body),
             (security_plugin, &locks, true),
             include_schema,
+            binary_encoding,
         )
         .await
     }
@@ -518,7 +523,10 @@ pub(crate) mod diag_service {
 
         use crate::{
             openapi,
-            sovd::{WebserverEcuState, docs, error::ApiError, locks::require_ecu_access},
+            sovd::{
+                WebserverEcuState, binary_encoding::BinaryEncodingParam, docs, error::ApiError,
+                locks::require_ecu_access,
+            },
         };
 
         openapi::aide_helper::gen_path_param!(DataDocsPathParam service String);
@@ -526,6 +534,7 @@ pub(crate) mod diag_service {
         pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(DataDocsPathParam { service }): Path<DataDocsPathParam>,
+            BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
             State(WebserverEcuState {
                 ecu_name,
                 uds,
@@ -553,7 +562,8 @@ pub(crate) mod diag_service {
                     .into_response();
             }
 
-            docs::data::build_docs_response(&uds, &ecu_name, &service, "data").await
+            docs::data::build_docs_response(&uds, &ecu_name, &service, "data", binary_encoding)
+                .await
         }
 
         pub(crate) fn docs_transform(op: TransformOperation) -> TransformOperation {
@@ -615,6 +625,7 @@ pub(crate) mod diag_service {
                     Path(DataDocsPathParam {
                         service: "EngineTemp".to_owned(),
                     }),
+                    crate::sovd::binary_encoding::hex_encoding(),
                     State(state),
                 )
                 .await;
@@ -661,6 +672,7 @@ pub(crate) mod diag_service {
                     Path(DataDocsPathParam {
                         service: "NonExistent".to_owned(),
                     }),
+                    crate::sovd::binary_encoding::hex_encoding(),
                     State(state),
                 )
                 .await;
@@ -692,6 +704,7 @@ pub(crate) mod diag_service {
                     Path(DataDocsPathParam {
                         service: "Anything".to_owned(),
                     }),
+                    crate::sovd::binary_encoding::hex_encoding(),
                     State(state),
                 )
                 .await;
