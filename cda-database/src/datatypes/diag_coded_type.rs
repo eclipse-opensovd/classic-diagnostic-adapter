@@ -519,6 +519,56 @@ impl DiagCodedType {
         Ok(len)
     }
 
+    /// Prefixes `input_data` with its length encoded in a leading length field of
+    /// `bit_len` bits and packs the result.
+    ///
+    /// # Errors
+    /// `DiagServiceError::BadPayload` if the data length does not fit into the length field.
+    fn encode_leading_length(
+        bit_len: u32,
+        mut input_data: Vec<u8>,
+    ) -> Result<(Vec<u8>, usize), DiagServiceError> {
+        // Ensure the data length fits into the leading length field,
+        // otherwise the length would be silently truncated.
+        let data_len = u64::try_from(input_data.len()).map_err(|_| {
+            DiagServiceError::BadPayload("Data length exceeds u64 capacity".to_owned())
+        })?;
+        if data_len.checked_shr(bit_len).is_some_and(|rest| rest != 0) {
+            return Err(DiagServiceError::BadPayload(format!(
+                "Data length {data_len} exceeds the maximum value of the {bit_len} bit leading \
+                 length field"
+            )));
+        }
+
+        // Subtract the next multiple of 8 from the length in usize as bits.
+        // Shift the length up this amount of bits to put the relevant data into
+        // the MSBs of the length usize.
+        let len_byte_count = bit_len.div_ceil(8);
+        let len_bit_len = len_byte_count.saturating_mul(8);
+        let mut data = (input_data.len() << usize::BITS.saturating_sub(len_bit_len))
+            .to_be_bytes()
+            .get(0..len_byte_count as usize)
+            .ok_or_else(|| {
+                DiagServiceError::BadPayload("Length byte count out of bounds".to_owned())
+            })?
+            .to_vec();
+
+        if data.is_empty() {
+            return Err(DiagServiceError::BadPayload(
+                "Failed to create length info for leading length".to_owned(),
+            ));
+        }
+
+        data.append(&mut input_data);
+        pack_data(
+            data.len().saturating_mul(8),
+            0,
+            None,
+            &data,
+            DataAlignment::Left,
+        )
+    }
+
     /// Encodes input data into a UDS payload according to the coded type.
     /// No conversion from physical values is done here.
     ///
@@ -544,33 +594,7 @@ impl DiagCodedType {
         self.validate_bit_pos(bit_pos)?;
         let (packed_bytes, bit_len, mask) = match &self.type_ {
             DiagCodedTypeVariant::LeadingLengthInfo(bit_len) => {
-                // Subtract the next multiple of 8 from the length in usize as bits.
-                // Shift the length up this amount of bits to put the relevant data into
-                // the MSBs of the length usize.
-                let len_byte_count = bit_len.div_ceil(8);
-                let len_bit_len = len_byte_count.saturating_mul(8);
-                let mut data = (input_data.len() << usize::BITS.saturating_sub(len_bit_len))
-                    .to_be_bytes()
-                    .get(0..len_byte_count as usize)
-                    .ok_or_else(|| {
-                        DiagServiceError::BadPayload("Length byte count out of bounds".to_owned())
-                    })?
-                    .to_vec();
-
-                if data.is_empty() {
-                    return Err(DiagServiceError::BadPayload(
-                        "Failed to create length info for leading length".to_owned(),
-                    ));
-                }
-
-                data.append(&mut input_data);
-                let (packed, len) = pack_data(
-                    data.len().saturating_mul(8),
-                    0,
-                    None,
-                    &data,
-                    DataAlignment::Left,
-                )?;
+                let (packed, len) = Self::encode_leading_length(*bit_len, input_data)?;
                 (packed, len, None)
             }
             DiagCodedTypeVariant::MinMaxLength(mmlt) => {
@@ -2095,6 +2119,37 @@ mod tests {
     fn test_encode_leading_length_4bit() {
         let input = vec![0x01, 0x02, 0x03];
         test_encode_leading_length(4, &input, &[3, 1, 2, 3]).unwrap();
+    }
+
+    #[test]
+    fn test_encode_leading_length_exceeds_field() {
+        // 16 bit length field: 65535 bytes fit, 65536 bytes do not.
+        let input = vec![0u8; 65535];
+        let mut expected = vec![0xFF, 0xFF];
+        expected.extend(input.clone());
+        test_encode_leading_length(16, &input, &expected).unwrap();
+
+        let input = vec![0u8; 65536];
+        assert!(matches!(
+            test_encode_leading_length(16, &input, &[]),
+            Err(DiagServiceError::BadPayload(_))
+        ));
+
+        // 8 bit length field
+        assert!(matches!(
+            test_encode_leading_length(8, &[0u8; 256], &[]),
+            Err(DiagServiceError::BadPayload(_))
+        ));
+
+        // 4 bit length field: max 15 bytes
+        let input = vec![0u8; 15];
+        let mut expected = vec![0x0F];
+        expected.extend(input.clone());
+        test_encode_leading_length(4, &input, &expected).unwrap();
+        assert!(matches!(
+            test_encode_leading_length(4, &[0u8; 16], &[]),
+            Err(DiagServiceError::BadPayload(_))
+        ));
     }
 
     fn test_encode_min_max_length(
