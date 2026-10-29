@@ -17,6 +17,7 @@ use cda_interfaces::{
     HashMap, HashMapExtensions,
     lock_config::LockConfig,
     lock_priority_api::{LockId, LockPriorityPolicy, LockScope},
+    util::system_time_to_rfc3339,
 };
 use cda_plugin_security::Claims;
 use tokio::sync::{Mutex, mpsc};
@@ -26,7 +27,6 @@ use crate::{
     sovd::{
         error::{ApiError, ErrorWrapper},
         lock_state::{ActiveLock, DefunctLock, LockCoverage, LockState, ScopeKey, StateError},
-        timestamp::system_time_to_rfc3339,
     },
 };
 

@@ -609,14 +609,12 @@ pub(crate) mod authentication {
         Connectivity, DynamicPlugin,
         authentication::{AuthenticationState, AuthenticationSubFunction},
         diagservices::{DiagServiceJsonResponse, UdsPayloadData},
+        util::system_time_to_rfc3339,
     };
     use cda_plugin_security::Secured;
 
     use super::*;
-    use crate::{
-        openapi,
-        sovd::{error::ErrorWrapper, timestamp::system_time_to_rfc3339},
-    };
+    use crate::{openapi, sovd::error::ErrorWrapper};
 
     const OFFLINE: &str = "offline";
 
