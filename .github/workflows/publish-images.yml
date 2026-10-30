@@ -83,18 +83,22 @@ jobs:
       # part of the type=gha layer cache, so they are kept in the Actions
       # cache and injected into / extracted from BuildKit around the build.
       # Keyed per architecture and Rust version: sccache entries are not
-      # shared across targets or RUSTFLAGS. The key changes only with
-      # Cargo.lock, so a push that keeps the lock file restores an exact hit
-      # and skips extraction and saving; sccache entries of workspace crates
-      # then age until the next lock file change. Only main saves, to stay
-      # within the repository cache limit; tags and other refs only restore.
+      # shared across targets or RUSTFLAGS. The key changes with Cargo.lock
+      # and with the ISO week: within a week, pushes that keep the lock file
+      # restore an exact hit and skip extraction and saving. The first push
+      # of a week restores the previous entry and saves a refreshed one, so
+      # the sccache entries of workspace crates are at most a week old.
+      # Superseded entries are evicted by GitHub after 7 days without use.
+      # Only main saves, to stay within the repository cache limit; tags and
+      # other refs only restore.
       - name: Cache key
         id: mounts-key
         run: |
           prefix="cda-mounts-release-${{ matrix.arch }}-rust${{ needs.versions.outputs.stable }}"
           {
             echo "prefix=${prefix}"
-            echo "key=${prefix}-${{ hashFiles('Cargo.lock') }}"
+            echo "lock-prefix=${prefix}-${{ hashFiles('Cargo.lock') }}-"
+            echo "key=${prefix}-${{ hashFiles('Cargo.lock') }}-$(date -u +%G-W%V)"
           } >> "$GITHUB_OUTPUT"
       - name: Restore and save cache mounts (main)
         id: mounts-cache-main
@@ -104,6 +108,7 @@ jobs:
           path: cache-mounts
           key: ${{ steps.mounts-key.outputs.key }}
           restore-keys: |
+            ${{ steps.mounts-key.outputs.lock-prefix }}
             ${{ steps.mounts-key.outputs.prefix }}-
       - name: Restore cache mounts
         id: mounts-cache
@@ -113,6 +118,7 @@ jobs:
           path: cache-mounts
           key: ${{ steps.mounts-key.outputs.key }}
           restore-keys: |
+            ${{ steps.mounts-key.outputs.lock-prefix }}
             ${{ steps.mounts-key.outputs.prefix }}-
       - name: Inject cache mounts into BuildKit
         uses: reproducible-containers/buildkit-cache-dance@v3
