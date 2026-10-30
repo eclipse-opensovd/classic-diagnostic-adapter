@@ -44,6 +44,9 @@ use cda_plugin_security::{
     AuthApi, AuthError, AuthorizationRequestHandler, Claims, SecurityApi, SecurityPlugin,
     SecurityPluginInitializer, SecurityPluginLoader,
 };
+use cda_plugin_topology::{
+    DefaultTopologyPlugin, TopologyDatabases, TopologyPlugin, TopologySource, topology_plugin_fn,
+};
 use http::{HeaderMap, request::Parts};
 use opensovd_cda_lib::{Setup, update::update_plugin_fn};
 
@@ -102,6 +105,44 @@ impl AuthorizationRequestHandler for FancySecurityLoader {
 }
 
 impl SecurityPluginLoader for FancySecurityLoader {}
+
+/// Wraps the default topology plugin, as an OEM plugin adding behavior would.
+pub struct FancyTopology {
+    inner: DefaultTopologyPlugin,
+}
+
+#[async_trait]
+impl Shutdown for FancyTopology {
+    async fn shutdown(&self) {
+        self.inner.shutdown().await;
+    }
+}
+
+#[async_trait]
+impl TopologyPlugin for FancyTopology {
+    fn state(&self) -> Arc<cda_interfaces::topology::TopologyState> {
+        self.inner.state()
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.inner.is_enabled()
+    }
+
+    async fn restore_persisted_topology(&self, databases: &dyn TopologyDatabases) {
+        self.inner.restore_persisted_topology(databases).await;
+    }
+
+    async fn refresh_reconnect_search(&self, databases: &dyn TopologyDatabases) {
+        self.inner.refresh_reconnect_search(databases).await;
+    }
+
+    fn create_lifecycle_hook(
+        &self,
+        source: Arc<dyn TopologySource>,
+    ) -> Option<Arc<dyn CommunicationLifecycle>> {
+        self.inner.create_lifecycle_hook(source)
+    }
+}
 
 pub struct FancyCommunication {
     handle: CommunicationHandle,
@@ -288,7 +329,12 @@ pub async fn run_fancy() -> Result<(), opensovd_cda_lib::AppError> {
             |handle, _mode: CommunicationInitMode| async move {
                 Ok::<_, std::convert::Infallible>(FancyCommunication { handle })
             },
-        ));
+        ))
+        .with_topology_plugin(topology_plugin_fn(|config, store| async move {
+            Ok::<_, std::convert::Infallible>(FancyTopology {
+                inner: DefaultTopologyPlugin::new(config, store),
+            })
+        }));
 
     opensovd_cda_lib::run_with_ext_from_config(opensovd_cda_lib::config::default_config(), setup)
         .await

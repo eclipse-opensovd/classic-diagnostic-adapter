@@ -154,7 +154,7 @@ Vehicle Topology Plugin
       next ``networkreset`` or restart) follows :need:`arch~dt-deferred-initialization` as if no persisted
       topology had ever existed.
     - ``clear_persisted=false``, ``trigger_detection=true``: a detection run is performed and its results
-      are upserted per-gateway into the existing persisted topology; entries for gateways/ECUs not observed
+      are written per-gateway into the existing persisted topology; entries for gateways/ECUs not observed
       during this run are left unchanged in the persisted bucket.
     - ``clear_persisted=false``, ``trigger_detection=false``: rejected with an error response, as this
       combination would perform no observable action.
@@ -184,7 +184,7 @@ Vehicle Topology Plugin
             opt trigger_detection = true
                 plugin -> Detect : run VIR/VAM discovery + variant detection
                 Detect --> plugin : detection results
-                plugin -> Persist : set/upsert bucket "ecu-topology"
+                plugin -> Persist : set bucket "ecu-topology"
                 plugin -> Persist : flush
             end
             Client -> plugin : GET .../executions/{id}

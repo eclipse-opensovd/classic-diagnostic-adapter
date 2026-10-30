@@ -65,5 +65,5 @@ dlt-tracing = ["cda-interfaces/dlt-tracing"]
 
 [dev-dependencies]
 cda-interfaces = { workspace = true, features = ["test-utils"] }
-tokio = { workspace = true, features = ["macros", "rt", "time", "sync", "test-util"] }
+tokio = { workspace = true, features = ["macros", "rt", "time", "sync", "net", "io-util", "test-util"] }
 serde_json = { workspace = true }

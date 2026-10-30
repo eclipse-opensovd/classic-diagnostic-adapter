@@ -67,6 +67,9 @@ pub struct EcuCoordinatorHandle {
     /// Trigger generation for detections on this handle; see
     /// [`Self::begin_detection`].
     detection_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Set by a (re)connect, cleared when a detection starts; see
+    /// [`Self::connected_since_detection`].
+    connected_since_detection: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl EcuCoordinatorHandle {
@@ -95,7 +98,31 @@ impl EcuCoordinatorHandle {
             state,
             detection_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             detection_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            connected_since_detection: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
         }
+    }
+
+    /// Records that the ECU's transport (re)connected.
+    pub fn record_connected(&self) {
+        self.connected_since_detection
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Records that a detection starts now, so it counts for every connect recorded before.
+    pub fn record_detection_started(&self) {
+        self.connected_since_detection
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether the transport connected after the last detection started. The
+    /// verdict of that detection may come from the replaced connection, so it
+    /// must not be taken for the state of the ECU, whatever it says.
+    #[must_use]
+    pub fn connected_since_detection(&self) -> bool {
+        self.connected_since_detection
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Read the current ECU status (synchronous, no mailbox round-trip).
@@ -232,10 +259,12 @@ impl Message<ClearServiceStates> for EcuCoordinator {
     }
 }
 
-/// ECU disconnected event -> sets connectivity to Offline, preserving variant state.
+/// ECU disconnected event -> sets connectivity to Offline.
 ///
-/// Only transitions from `Online` to `Offline`. If already `Offline`, this is a no-op.
-/// Variant state is preserved.
+/// Transitions from `Online` or `AssumedOnline` to `Offline`. If already `Offline`, this
+/// is a no-op. An ECU that was online in the current session keeps its variant and is
+/// reported as Disconnected. An `AssumedOnline` ECU loses its restored variant and is
+/// reported as Offline, see [`EcuState::mark_unreachable`].
 pub struct EcuDisconnected;
 
 impl Message<EcuDisconnected> for EcuCoordinator {
@@ -256,13 +285,19 @@ impl Message<EcuDisconnected> for EcuCoordinator {
 
         let mut ecu_state = std_ext::lock_write(&self.state.ecu_state);
 
-        if ecu_state.connectivity == Connectivity::Online {
+        if ecu_state.connectivity.is_online() {
             tracing::info!(
                 ecu = %self.ecu_name,
                 dlt_context = dlt_ctx!("UDS"),
+                previous = ?ecu_state.connectivity,
                 "ECU disconnected. Setting connectivity to Offline"
             );
-            ecu_state.connectivity = Connectivity::Offline;
+            let variant_reset = ecu_state.mark_unreachable();
+            let variant_state = variant_reset.then(|| ecu_state.variant_state.clone());
+            drop(ecu_state);
+            if let Some(variant_state) = variant_state {
+                self.state.publish_variant_state(variant_state);
+            }
             // The ECU may lose its authenticated state while unreachable. A pending
             // expiration finds the ECU deauthenticated and sends nothing.
             *std_ext::lock_write(&self.state.authentication) =
@@ -279,7 +314,9 @@ impl Message<EcuDisconnected> for EcuCoordinator {
 
 /// ECU connected event -> sets connectivity to Online and clears variant for re-detection.
 ///
-/// Only transitions from `Offline` to `Online`. If already `Online`, this is a no-op.
+/// Only transitions from `Offline` to `Online`. If already `Online` or `AssumedOnline`,
+/// this is a no-op: an `AssumedOnline` ECU keeps its restored variant until it is
+/// contacted, so connecting its gateway does not trigger a re-detection.
 /// Variant state is cleared to `NotTested` because the ECU may have rebooted while offline
 /// (e.g. into a different session/variant).
 ///
@@ -312,9 +349,35 @@ impl Message<EcuConnected> for EcuCoordinator {
             tracing::debug!(
                 ecu = %self.ecu_name,
                 current = ?ecu_state.connectivity,
-                "ECU connected received but already Online..skipping"
+                "ECU connected received but already (assumed) Online..skipping"
             );
             false
+        }
+    }
+}
+
+/// ECU replied to a diagnostic request -> confirms an `AssumedOnline` ECU as `Online`.
+///
+/// Any other connectivity is left unchanged: `Online` stays `Online`, and `Offline` is
+/// only left through a connect or variant detection.
+pub struct EcuResponded;
+
+impl Message<EcuResponded> for EcuCoordinator {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _msg: EcuResponded,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let mut ecu_state = std_ext::lock_write(&self.state.ecu_state);
+        if ecu_state.connectivity == Connectivity::AssumedOnline {
+            tracing::info!(
+                ecu = %self.ecu_name,
+                dlt_context = dlt_ctx!("UDS"),
+                "Assumed online ECU responded. Setting connectivity to Online"
+            );
+            ecu_state.connectivity = Connectivity::Online;
         }
     }
 }
@@ -589,6 +652,42 @@ mod tests {
             }
         );
         assert_eq!(status.variant_index, Some(3));
+    }
+
+    /// An `AssumedOnline` ECU was never confirmed in this session: a disconnect
+    /// discards its restored variant, so it is reported Offline, not Disconnected.
+    /// [[ test~ecu-state-assumed-online-unreachable-is-offline, An unreachable assumed online ECU becomes Offline and loses its restored variant, test ]]
+    #[tokio::test]
+    async fn ecu_disconnected_resets_assumed_online_to_offline() {
+        let handle = spawn_test_coordinator("TestECU");
+        {
+            let mut ecu_state = handle.state.ecu_state.write().unwrap();
+            ecu_state.connectivity = Connectivity::AssumedOnline;
+            ecu_state.variant_state = VariantState::Detected {
+                name: "RestoredVariant".to_owned(),
+                is_base_variant: false,
+                is_fallback: false,
+            };
+            ecu_state.variant_index = Some(3);
+        }
+        let mut variant_rx = handle.state.variant_state_rx();
+        variant_rx.mark_unchanged();
+
+        handle
+            .actor_ref
+            .ask(EcuDisconnected)
+            .await
+            .expect("Actor should be alive");
+
+        let status = handle.ecu_status();
+        assert_eq!(status.connectivity, Connectivity::Offline);
+        assert_eq!(status.variant_state, VariantState::NotTested);
+        assert_eq!(status.variant_index, None);
+        assert!(
+            variant_rx.has_changed().unwrap(),
+            "the reset variant must be published"
+        );
+        assert_eq!(*variant_rx.borrow(), VariantState::NotTested);
     }
 
     #[tokio::test]

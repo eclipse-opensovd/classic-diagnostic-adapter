@@ -23,6 +23,7 @@ use cda_interfaces::{
         RetryPolicy, SdSdg, TesterPresentSendType,
     },
     dlt_ctx,
+    topology::PersistedVariant,
     util::std_ext,
 };
 use cda_plugin_security::SecurityPlugin;
@@ -897,8 +898,47 @@ impl<S: SecurityPlugin> EcuManager<S> {
     }
 
     pub(crate) async fn set_variant(&self, variant: VariantData) -> Result<(), DiagServiceError> {
-        let variant_name = &variant.name;
-        let variant_index = self.diag_database.ecu_data().ok().and_then(|ecu_data| {
+        let variant_index = self.variant_index(&variant.name);
+        self.apply_variant(variant, Connectivity::Online, variant_index)
+            .await
+    }
+
+    /// Restores a variant from a persisted topology, without contacting the ECU.
+    ///
+    /// The ECU is registered as [`Connectivity::AssumedOnline`]: reported Online,
+    /// but confirmed only by its first reply. Returns `false` (and changes
+    /// nothing) if the variant is not part of the loaded database, e.g. after a
+    /// database update, so the ECU gets a regular variant detection.
+    ///
+    /// # Errors
+    /// Returns an error if the database cannot be loaded or the default service
+    /// states cannot be set.
+    /// [[ dimpl~ecu-state-restore, Restore an ECU variant as assumed online, dimpl ]]
+    pub async fn restore_persisted_variant(
+        &mut self,
+        variant: &PersistedVariant,
+    ) -> Result<bool, DiagServiceError> {
+        if !self.diag_database.is_loaded() {
+            self.diag_database.load()?;
+        }
+        let Some(variant_index) = self.variant_index(&variant.name) else {
+            return Ok(false);
+        };
+        self.apply_variant(
+            VariantData {
+                name: variant.name.clone(),
+                is_base_variant: variant.is_base_variant,
+                is_fallback: variant.is_fallback,
+            },
+            Connectivity::AssumedOnline,
+            Some(variant_index),
+        )
+        .await?;
+        Ok(true)
+    }
+
+    fn variant_index(&self, variant_name: &str) -> Option<usize> {
+        self.diag_database.ecu_data().ok().and_then(|ecu_data| {
             ecu_data.variants().and_then(|variants| {
                 variants.iter().position(|variant| {
                     variant
@@ -907,7 +947,16 @@ impl<S: SecurityPlugin> EcuManager<S> {
                         .is_some_and(|name| name == variant_name)
                 })
             })
-        });
+        })
+    }
+
+    async fn apply_variant(
+        &self,
+        variant: VariantData,
+        connectivity: Connectivity,
+        variant_index: Option<usize>,
+    ) -> Result<(), DiagServiceError> {
+        let variant_name = &variant.name;
 
         let current_variant_index = std_ext::lock_read(&self.runtime_state.ecu_state).variant_index;
         if current_variant_index != variant_index {
@@ -921,7 +970,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             let mut ecu_state = std_ext::lock_write(&self.runtime_state.ecu_state);
 
             if variant_index.is_some() {
-                ecu_state.connectivity = Connectivity::Online;
+                ecu_state.connectivity = connectivity;
                 ecu_state.variant_state = VariantState::Detected {
                     name: variant.name.clone(),
                     is_base_variant: variant.is_base_variant,
@@ -1160,6 +1209,48 @@ mod tests {
             },
         )
         .await;
+    }
+
+    /// A detection without responses keeps the variant of an ECU that was online
+    /// in this session (reported Disconnected), but discards the restored variant
+    /// of an `AssumedOnline` ECU (reported Offline).
+    /// [[ test~ecu-state-assumed-online-failed-detection-is-offline, A failed detection of an assumed online ECU makes it Offline without variant, test ]]
+    #[tokio::test]
+    async fn test_detect_variant_without_responses_marks_unreachable() {
+        let detected = VariantState::Detected {
+            name: "BaseVariant".to_owned(),
+            is_base_variant: true,
+            is_fallback: false,
+        };
+        for (connectivity, expected_variant) in [
+            (Connectivity::Online, detected.clone()),
+            (Connectivity::AssumedOnline, VariantState::NotTested),
+        ] {
+            let mut ecu_manager = create_ecu_manager_variant_detection(true);
+            {
+                let mut ecu_state = ecu_manager.runtime_state.ecu_state.write().unwrap();
+                ecu_state.connectivity = connectivity;
+                ecu_state.variant_state = detected.clone();
+            }
+
+            ecu_manager
+                .detect_variant(HashMap::<String, DiagServiceResponseStruct>::new())
+                .await
+                .unwrap();
+
+            let status = ecu_manager.runtime_state.status();
+            assert_eq!(
+                status.connectivity,
+                Connectivity::Offline,
+                "{connectivity:?}"
+            );
+            assert_eq!(status.variant_state, expected_variant, "{connectivity:?}");
+            assert_eq!(
+                *ecu_manager.runtime_state.variant_state_rx().borrow(),
+                expected_variant,
+                "{connectivity:?}"
+            );
+        }
     }
 
     #[tokio::test]

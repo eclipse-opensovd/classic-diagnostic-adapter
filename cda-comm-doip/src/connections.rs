@@ -36,11 +36,22 @@ pub(crate) type ConnectionResetReason = String;
 
 /// Runtime state for managing active gateway connections and ECU mappings.
 pub(crate) struct GatewayState<T> {
+    /// All established gateway connections. A connection is appended once its
+    /// gateway is connected; its index is what `logical_address_to_connection` refers to.
     pub doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>>,
+    /// Routes a gateway's logical address to its index in `doip_connections`.
+    /// Registered together with the connection, before the ECUs are announced online.
     pub logical_address_to_connection: Arc<RwLock<HashMap<u16, usize>>>,
+    /// All known ECUs by name, each behind its own lock.
     pub ecus: Arc<HashMap<String, RwLock<T>>>,
+    /// Maps a gateway's logical address to the logical addresses of the ECUs
+    /// reachable behind it.
     pub gateway_ecu_map: HashMap<u16, Vec<u16>>,
+    /// Owns the sender, receiver and reset tasks of all connections, so they
+    /// are stopped together on shutdown.
     pub connection_tasks: Arc<ConnectionTasks>,
+    /// Canceled when the transport start this connect belongs to ends.
+    pub cancel_token: CancellationToken,
 }
 
 /// Direct connects bound the initial network handshake, before any tasks are spawned.
@@ -103,6 +114,8 @@ impl From<EcuError> for DiagServiceError {
     }
 }
 
+/// Connects the gateway and registers its connection and route. Returns the
+/// names of the ECUs behind it; reporting them connected is up to the caller.
 #[tracing::instrument(
     skip(transport, state, connectivity_handler, control),
     fields(
@@ -121,7 +134,7 @@ pub(crate) async fn handle_gateway_connection<T>(
     state: &GatewayState<T>,
     connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     control: Option<&ConnectControl>,
-) -> Result<u16, EcuError>
+) -> Result<Vec<String>, EcuError>
 where
     T: EcuAddresses + DoipComParams,
 {
@@ -206,7 +219,18 @@ where
     let GatewayConnectionHandles { sender, receivers } =
         connection_handler(gateway, Arc::clone(&state.connection_tasks), control).await?;
 
+    // The transport start ended meanwhile: its tasks are aborted by the shutdown,
+    // and the connection must not appear in the maps of the next start.
+    if state.cancel_token.is_cancelled() {
+        return Err(EcuError::EcuConnectionError(ConnectionError::Closed));
+    }
+
     let doip_ecus = create_ecu_receiver_map(ecu_ids, &sender, &receivers);
+    // Without a route the gateway is not reachable.
+    if !doip_ecus.contains_key(&discovered_gateway.logical_address) {
+        tracing::warn!("Gateway has no route after connecting, treating it as not connected");
+        return Err(EcuError::EcuConnectionError(ConnectionError::Closed));
+    }
 
     tracing::info!("Connected to gateway");
     // Register the connection and its route in one step, before the ECUs are
@@ -214,13 +238,11 @@ where
     // must already find the route to the gateway.
     {
         let mut connections = state.doip_connections.write().await;
-        if doip_ecus.contains_key(&discovered_gateway.logical_address) {
-            state
-                .logical_address_to_connection
-                .write()
-                .await
-                .insert(discovered_gateway.logical_address, connections.len());
-        }
+        state
+            .logical_address_to_connection
+            .write()
+            .await
+            .insert(discovered_gateway.logical_address, connections.len());
         connections.push(Arc::new(DoipConnection {
             ecus: doip_ecus,
             ip: discovered_gateway.ip,
@@ -228,13 +250,7 @@ where
         }));
     }
 
-    // Notify connectivity handler that ECUs behind this gateway are now online.
-    // This sets their state to Online so the pre-send variant detection guard works correctly.
-    connectivity_handler
-        .on_gateway_connected(&ecu_names_for_gateway)
-        .await;
-
-    Ok(discovered_gateway.logical_address)
+    Ok(ecu_names_for_gateway)
 }
 
 #[tracing::instrument(skip(sender, receiver),
@@ -336,36 +352,30 @@ async fn connection_handler(
     // task to handle connection resets and reconnects
     let conn_reset = Arc::<EcuConnectionTarget>::clone(&gateway_conn);
 
-    connection_tasks
-        .push(spawn_connection_reset_task(
-            gateway.clone(),
-            conn_reset_rx,
-            conn_reset,
-        ))
-        .await;
+    connection_tasks.push(spawn_connection_reset_task(
+        gateway.clone(),
+        conn_reset_rx,
+        conn_reset,
+    ));
 
     // communication between send / receiver task to unlock the connection in the receiver task
     // when sender task wants to send something
     let (send_pending_tx, send_pending_rx) = watch::channel::<bool>(false);
-    connection_tasks
-        .push(spawn_gateway_sender_task(
-            Arc::<EcuConnectionTarget>::clone(&gateway_conn),
-            inrx,
-            conn_reset_tx.clone(),
-            send_pending_tx.clone(),
-        ))
-        .await;
-    connection_tasks
-        .push(spawn_gateway_receiver_task(
-            gateway,
-            outtx,
-            Arc::<EcuConnectionTarget>::clone(&gateway_conn),
-            ReceiverChannels {
-                send_pending_rx,
-                reset_tx: conn_reset_tx,
-            },
-        ))
-        .await;
+    connection_tasks.push(spawn_gateway_sender_task(
+        Arc::<EcuConnectionTarget>::clone(&gateway_conn),
+        inrx,
+        conn_reset_tx.clone(),
+        send_pending_tx.clone(),
+    ));
+    connection_tasks.push(spawn_gateway_receiver_task(
+        gateway,
+        outtx,
+        Arc::<EcuConnectionTarget>::clone(&gateway_conn),
+        ReceiverChannels {
+            send_pending_rx,
+            reset_tx: conn_reset_tx,
+        },
+    ));
     // no need to wait until the connection is alive, we will reconnect automatically anyway
     Ok(GatewayConnectionHandles {
         sender: intx,

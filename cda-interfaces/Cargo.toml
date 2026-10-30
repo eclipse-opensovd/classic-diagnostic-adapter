@@ -41,6 +41,7 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 #tokio
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
 futures = { workspace = true }
 # runtime size info
 hex = { workspace = true }
