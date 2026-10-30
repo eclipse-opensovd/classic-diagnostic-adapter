@@ -33,8 +33,6 @@ pub mod config;
 // enabled.
 #[cfg(feature = "can")]
 mod gateway;
-#[cfg(all(test, feature = "can"))]
-pub(crate) mod test_helpers;
 #[cfg(not(feature = "can"))]
 use async_trait::async_trait;
 #[cfg(not(feature = "can"))]
@@ -364,7 +362,7 @@ mod transport_routing_tests {
                 ),
             )],
             vec!["ecu1"],
-            Arc::new(crate::test_helpers::RecordingConnectivityHandler::default()),
+            Arc::new(cda_interfaces::util::test_utils::RecordingConnectivityHandler::default()),
         )
     }
 
@@ -571,7 +569,7 @@ mod transport_routing_tests {
         let can = CanDiagGateway::test_instance(
             vec![],
             vec![],
-            Arc::new(crate::test_helpers::RecordingConnectivityHandler::default()),
+            Arc::new(cda_interfaces::util::test_utils::RecordingConnectivityHandler::default()),
         );
         can.disable().await.expect("disable test CAN gateway");
         let gw = DiagnosticTransportRouter::<_, CanDiagGateway>::new(HashMap::default())

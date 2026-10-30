@@ -50,6 +50,7 @@ pub mod config;
 pub mod request_authorization;
 pub mod runtime_update_api;
 pub mod storage_api;
+pub mod topology;
 mod transport;
 pub use transport::TransportType;
 pub mod uds;
@@ -102,14 +103,91 @@ impl VariantDetectionRequest {
     }
 }
 
+/// Counts variant detection work that is running, and signals each time one of
+/// those units ends.
+///
+/// Running work is registered with [`begin`](Self::begin). The generation
+/// changes whenever a registration ends, so a run that finished between two
+/// checks is still visible to a consumer that compares generations.
+#[derive(Debug, Clone, Default)]
+pub struct VariantDetectionActivity {
+    running: tokio_util::task::TaskTracker,
+    ended: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+}
+
+impl VariantDetectionActivity {
+    /// Creates an activity with nothing running.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers running detection work until the returned guard is dropped.
+    #[must_use]
+    pub fn begin(&self) -> VariantDetectionGuard {
+        VariantDetectionGuard {
+            registration: Some(self.running.token()),
+            generation_tx: std::sync::Arc::clone(&self.ended),
+        }
+    }
+
+    /// Whether no detection work is registered.
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        self.running.is_empty()
+    }
+
+    /// Number of registrations that have ended so far.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        *self.ended.borrow()
+    }
+
+    /// Receives every change of [`generation`](Self::generation).
+    #[must_use]
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.ended.subscribe()
+    }
+
+    /// Waits until no detection work is registered.
+    pub async fn wait_until_idle(&self) {
+        let mut ended = self.ended.subscribe();
+        while !self.is_idle() {
+            // This struct holds the sender, so the channel cannot close.
+            let _ = ended.changed().await;
+        }
+    }
+}
+
+/// Running detection work registered with a [`VariantDetectionActivity`]. Dropping it
+/// ends the registration and signals waiters.
+#[derive(Debug)]
+pub struct VariantDetectionGuard {
+    registration: Option<tokio_util::task::task_tracker::TaskTrackerToken>,
+    generation_tx: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+}
+
+impl Drop for VariantDetectionGuard {
+    fn drop(&mut self) {
+        // The count must be released before waiters are woken, or a waiter
+        // wakes up, still sees the work as running and waits for a signal that
+        // never comes.
+        drop(self.registration.take());
+        self.generation_tx
+            .send_modify(|generation| *generation = generation.saturating_add(1));
+    }
+}
+
 /// Sends requests to the variant-detection listener.
 #[derive(Debug, Clone)]
-pub struct VariantDetectionSender(tokio::sync::mpsc::Sender<VariantDetectionRequest>);
+pub struct VariantDetectionSender {
+    sender: tokio::sync::mpsc::Sender<VariantDetectionRequest>,
+}
 
 impl VariantDetectionSender {
     #[must_use]
     pub fn new(sender: tokio::sync::mpsc::Sender<VariantDetectionRequest>) -> Self {
-        Self(sender)
+        Self { sender }
     }
 
     /// # Errors
@@ -119,22 +197,24 @@ impl VariantDetectionSender {
         &self,
         request: VariantDetectionRequest,
     ) -> Result<(), tokio::sync::mpsc::error::SendError<VariantDetectionRequest>> {
-        self.0.send(request).await
+        self.sender.send(request).await
     }
 }
 
 /// Receives requests for the variant-detection listener.
 #[derive(Debug)]
-pub struct VariantDetectionReceiver(tokio::sync::mpsc::Receiver<VariantDetectionRequest>);
+pub struct VariantDetectionReceiver {
+    receiver: tokio::sync::mpsc::Receiver<VariantDetectionRequest>,
+}
 
 impl VariantDetectionReceiver {
     #[must_use]
     pub fn new(receiver: tokio::sync::mpsc::Receiver<VariantDetectionRequest>) -> Self {
-        Self(receiver)
+        Self { receiver }
     }
 
     pub async fn recv(&mut self) -> Option<VariantDetectionRequest> {
-        self.0.recv().await
+        self.receiver.recv().await
     }
 
     /// # Errors
@@ -143,7 +223,7 @@ impl VariantDetectionReceiver {
     pub fn try_recv(
         &mut self,
     ) -> Result<VariantDetectionRequest, tokio::sync::mpsc::error::TryRecvError> {
-        self.0.try_recv()
+        self.receiver.try_recv()
     }
 }
 
@@ -410,6 +490,22 @@ pub enum DiagServiceError {
     InvalidConfiguration(String),
 }
 
+impl DiagServiceError {
+    /// Whether a failed request shows the ECU is unreachable, so its connectivity is demoted.
+    ///
+    /// `EcuOffline` is excluded: it means the gateway has no connection (yet), which must
+    /// keep the state of an `AssumedOnline` ECU while the gateway is still reconnecting.
+    ///
+    /// `ConnectionClosed` is excluded: it reports that our connection to the gateway closed,
+    /// not that the ECU stopped answering. The ECU may still be reachable, and the gateway
+    /// connection reset already reports the gateway's ECUs disconnected. `SendFailed` is
+    /// excluded: it is an internal send failure on our side and says nothing about the ECU.
+    #[must_use]
+    pub fn demotes_connectivity(&self) -> bool {
+        matches!(self, Self::Timeout)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataParseError {
     pub value: String,
@@ -457,4 +553,58 @@ pub trait Shutdown: Send + Sync + 'static {
     /// Aborts background tasks and releases connections/resources owned by this instance.
     /// Implementations should be idempotent where practical.
     async fn shutdown(&self);
+}
+
+#[cfg(test)]
+mod detection_activity_tests {
+    use std::time::Duration;
+
+    use super::VariantDetectionActivity;
+
+    /// [[ test~detection-activity-running-work-keeps-busy, Registered detection work keeps the activity busy until its guard ends, test ]]
+    #[tokio::test]
+    async fn running_work_keeps_activity_busy() {
+        let activity = VariantDetectionActivity::new();
+        assert!(activity.is_idle());
+
+        let guard = activity.begin();
+        assert!(!activity.is_idle());
+
+        drop(guard);
+        assert!(activity.is_idle());
+    }
+
+    /// [[ test~detection-activity-idle-wakes-when-last-work-ends, Waiting for idle returns when the last registered work ends, test ]]
+    #[tokio::test]
+    async fn idle_wakes_when_the_last_guard_ends() {
+        let activity = VariantDetectionActivity::new();
+        let first = activity.begin();
+        let second = activity.begin();
+
+        let waiter = {
+            let activity = activity.clone();
+            tokio::spawn(async move { activity.wait_until_idle().await })
+        };
+        drop(first);
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished(), "one registration is still running");
+
+        drop(second);
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("idle must wake up once all work ended")
+            .expect("waiter must not panic");
+    }
+
+    /// [[ test~detection-activity-finished-work-visible-through-generation, A run that ended before a check still changes the generation, test ]]
+    #[tokio::test]
+    async fn finished_work_is_visible_through_generation() {
+        let activity = VariantDetectionActivity::new();
+        let before = activity.generation();
+
+        drop(activity.begin());
+
+        assert!(activity.is_idle());
+        assert_ne!(activity.generation(), before);
+    }
 }

@@ -21,6 +21,19 @@ pub fn system_time_to_rfc3339(time: std::time::SystemTime) -> String {
     chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+/// Parses an RFC 3339 timestamp. `None` if it is invalid or not representable as
+/// [`SystemTime`](std::time::SystemTime) on this platform, e.g. before 1601 on Windows.
+#[must_use]
+pub fn rfc3339_to_system_time(value: &str) -> Option<std::time::SystemTime> {
+    let since_epoch = chrono::DateTime::parse_from_rfc3339(value)
+        .ok()?
+        .signed_duration_since(chrono::DateTime::UNIX_EPOCH);
+    match since_epoch.to_std() {
+        Ok(after) => std::time::UNIX_EPOCH.checked_add(after),
+        Err(_) => std::time::UNIX_EPOCH.checked_sub(since_epoch.abs().to_std().ok()?),
+    }
+}
+
 pub mod tracing {
     #[must_use]
     pub fn print_hex(data: &[u8], max_size: usize) -> String {
@@ -87,6 +100,70 @@ pub mod tokio_ext {
             && !error.is_cancelled()
         {
             tracing::warn!(%error, task = name, "Aborted task ended abnormally");
+        }
+    }
+}
+
+#[cfg(feature = "test-utils")]
+pub mod test_utils {
+    use std::time::Duration;
+
+    const POLL_INTERVAL: Duration = Duration::from_millis(10);
+    const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// Polls `condition` until it holds, panicking if it does not hold before the timeout.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `condition` does not return `true` within 10 seconds, or if
+    /// `condition` itself panics.
+    pub async fn wait_until<F, Fut>(description: &str, mut condition: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = bool>,
+    {
+        let poll = async {
+            while !condition().await {
+                crate::util::tokio_ext::sleep_for(POLL_INTERVAL).await;
+            }
+        };
+        assert!(
+            tokio::time::timeout(WAIT_TIMEOUT, poll).await.is_ok(),
+            "Timed out waiting until {description}"
+        );
+    }
+
+    /// Connectivity handler that records the ECUs reported as replied.
+    #[derive(Default)]
+    pub struct RecordingConnectivityHandler {
+        replied: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingConnectivityHandler {
+        /// The ECU names reported through `on_ecu_replied`, in order.
+        ///
+        /// # Panics
+        ///
+        /// Panics if the internal lock is poisoned.
+        pub fn replied(&self) -> Vec<String> {
+            // A poisoned lock means a test already panicked while recording,
+            // so panicking here as well makes that failure visible instead of
+            // silently continuing with possibly inconsistent results.
+            self.replied.lock().expect("lock replied").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::EcuConnectivityHandler for RecordingConnectivityHandler {
+        async fn on_gateway_connected(&self, _ecu_names: &[String]) {}
+
+        async fn on_gateway_disconnected(&self, _ecu_names: &[String]) {}
+
+        async fn on_ecu_replied(&self, ecu_name: &str) {
+            self.replied
+                .lock()
+                .expect("lock replied")
+                .push(ecu_name.to_owned());
         }
     }
 }
@@ -578,6 +655,19 @@ mod tests {
     #[test]
     fn formats_unix_epoch() {
         assert_eq!(system_time_to_rfc3339(UNIX_EPOCH), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn parses_rfc3339_before_and_after_the_epoch() {
+        assert_eq!(
+            rfc3339_to_system_time("2026-01-02T03:04:05Z"),
+            Some(UNIX_EPOCH + Duration::from_secs(1_767_323_045))
+        );
+        assert_eq!(
+            rfc3339_to_system_time("1969-12-31T23:59:58.5Z"),
+            UNIX_EPOCH.checked_sub(Duration::from_millis(1_500))
+        );
+        assert_eq!(rfc3339_to_system_time("not a time"), None);
     }
 
     /// A task that never finishes is cancelled, and one that already

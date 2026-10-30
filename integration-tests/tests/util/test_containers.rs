@@ -598,8 +598,8 @@ fn follow_logs_since(container_id: String, service: Service, owner: ContainerOwn
     });
 }
 
-/// Seconds since the Unix epoch, as taken by [`follow_logs_since`].
-fn unix_time_secs() -> i32 {
+/// Seconds since the Unix epoch.
+pub(crate) fn unix_time_secs() -> i32 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()

@@ -41,6 +41,7 @@ rust_library(
         "@classic-diagnostic-adapter//:plugin_communication_management",
         "@classic-diagnostic-adapter//:plugin_runtime_update",
         "@classic-diagnostic-adapter//:plugin_security",
+        "@classic-diagnostic-adapter//:plugin_topology",
         "@classic-diagnostic-adapter//:sovd",
         "@classic-diagnostic-adapter//:sovd_interfaces",
         "@classic-diagnostic-adapter//:storage",
