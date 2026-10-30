@@ -4161,6 +4161,15 @@
       "crate": "cda-sovd"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/variant.rs",
+      "function": "UdsManager::start_variant_detection_for_ecus",
+      "line": 447,
+      "cyclomatic": 5.0,
+      "coverage": 69.56521739130434,
+      "crap": 5.7047752116380375,
+      "crate": "cda-comm-uds"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-plugin-security/src/default_security_plugin.rs",
       "function": "DefaultSecurityPlugin::initialize_from_request_parts",
       "line": 248,
@@ -4573,15 +4582,6 @@
       "coverage": 95.45454545454545,
       "crap": 5.002347858752818,
       "crate": "cda-core"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/variant.rs",
-      "function": "UdsManager::start_variant_detection_for_ecus",
-      "line": 447,
-      "cyclomatic": 5.0,
-      "coverage": 95.65217391304348,
-      "crap": 5.00205473822635,
-      "crate": "cda-comm-uds"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-plugin-runtime-update/src/operations/executions.rs",
