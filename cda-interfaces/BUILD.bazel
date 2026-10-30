@@ -29,6 +29,7 @@ workspace_rust_library(
         "strum",
         "thiserror",
         "tokio",
+        "tokio-util",
         "tracing",
         "uuid",
     ],

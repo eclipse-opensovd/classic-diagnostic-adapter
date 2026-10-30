@@ -1284,12 +1284,11 @@ mod tests {
         assert!(value.get("x-sovd2uds-expires-at").is_none());
     }
 
-    #[tokio::test]
-    async fn get_handler_reports_offline() {
+    async fn get_handler_value(connectivity: Connectivity) -> Option<String> {
         let mut uds = MockUdsEcu::new();
-        uds.expect_get_ecu_state().returning(|_| {
+        uds.expect_get_ecu_state().returning(move |_| {
             Ok(EcuState {
-                connectivity: Connectivity::Offline,
+                connectivity,
                 ..mock_ecu_state_online_variant_detected()
             })
         });
@@ -1317,12 +1316,29 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::OK);
+        body_json(response)
+            .await
+            .pointer("/value")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    }
+
+    #[tokio::test]
+    async fn get_handler_reports_offline() {
         assert_eq!(
-            body_json(response)
-                .await
-                .pointer("/value")
-                .and_then(serde_json::Value::as_str),
+            get_handler_value(Connectivity::Offline).await.as_deref(),
             Some("offline")
+        );
+    }
+
+    /// An ECU assumed online from the persisted topology is not reported offline.
+    #[tokio::test]
+    async fn get_handler_does_not_report_assumed_online_as_offline() {
+        assert_eq!(
+            get_handler_value(Connectivity::AssumedOnline)
+                .await
+                .as_deref(),
+            Some("deAuthenticated")
         );
     }
 

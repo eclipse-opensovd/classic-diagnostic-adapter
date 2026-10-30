@@ -49,3 +49,10 @@ SOVD-API
     :status: draft
 
     Verifies configuration and enforcement of the lock acquisition policy.
+
+.. testset:: Component Last Seen
+    :id: testset~sovd-api-ecu-last-seen
+    :links: itest~ecu-list-persistence-reuse
+    :status: draft
+
+    Verifies that the component details report the ``last_seen`` timestamp of an ECU.

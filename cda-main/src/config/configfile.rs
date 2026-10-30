@@ -34,7 +34,7 @@ use cda_interfaces::{
 pub use cda_interfaces::{
     TransportType,
     communication_control::{
-        CommunicationInitMode, CommunicationSettings, PostUpdateCommunicationMode,
+        CommunicationInitMode, CommunicationSettings, PostUpdateCommunicationMode, VamHandlingMode,
     },
 };
 pub use cda_plugin_runtime_update::config::RuntimeUpdateConfig;
@@ -441,6 +441,32 @@ impl Configuration {
         }
         Ok(())
     }
+
+    /// Logs topology settings that are valid but have no effect in
+    /// combination with the rest of the configuration. Never fails.
+    fn validate_topology(&self) {
+        let topology = &self.communication.topology;
+        let requested = topology.ecu_list_persistence.enabled;
+        let effective = requested && self.doip.enabled;
+        if requested && !self.doip.enabled {
+            tracing::warn!(
+                "communication.ecu_list_persistence.enabled has no effect while doip.enabled is \
+                 false; the persisted topology covers DoIP gateways only"
+            );
+        }
+        if self.communication.init_mode == CommunicationInitMode::WhenNotPersisted && !effective {
+            tracing::warn!(
+                "communication.init_mode = \"WhenNotPersisted\" behaves like \"Always\" while \
+                 communication.ecu_list_persistence is effectively disabled"
+            );
+        }
+        if topology.vam_handling_mode == VamHandlingMode::PersistedOnly && !effective {
+            tracing::warn!(
+                "communication.vam_handling_mode = \"PersistedOnly\" behaves like \"Never\" while \
+                 communication.ecu_list_persistence is effectively disabled"
+            );
+        }
+    }
 }
 
 impl ConfigSanity for Configuration {
@@ -453,6 +479,7 @@ impl ConfigSanity for Configuration {
         self.validate_transport_overrides()?;
         self.locks.validate_sanity()?;
         self.validate_flash_functional_class_default()?;
+        self.validate_topology();
         // Add more checks for Configuration fields here if needed
         Ok(())
     }
@@ -1063,6 +1090,10 @@ parameter_validation = true
         assert_eq!(
             defaults.communication.post_update_mode,
             PostUpdateCommunicationMode::Enabled
+        );
+        assert!(
+            !defaults.communication.topology.ecu_list_persistence.enabled,
+            "ECU list persistence must be disabled by default"
         );
 
         for init_mode in ["OnDemand", "Disabled"] {

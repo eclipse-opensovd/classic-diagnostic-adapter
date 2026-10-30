@@ -57,6 +57,8 @@ impl<S: EcuGateway, T: UdsEcuDb + PayloadDecoder + EcuSecurity> UdsManager<S, T>
         // Inspect the subfunction byte for `suppressPosRspMsgIndicationBit` (bit 7).
         // When set, ECUs are not expected to send a positive response.
         let expect_positive_response = !payload.is_suppress_positive_response();
+        let is_not_tester_present =
+            payload.data.first() != Some(&cda_interfaces::service_ids::TESTER_PRESENT);
 
         let _ecu_permits = match self.request_ecu_permits(request_lock_keys).await {
             Ok(permits) => permits,
@@ -120,7 +122,7 @@ impl<S: EcuGateway, T: UdsEcuDb + PayloadDecoder + EcuSecurity> UdsManager<S, T>
                             // a pending NRC (the gateway returns the first frame of each
                             // ECU), one that does not answer this request, and also one
                             // to a request with a suppressed positive response.
-                            self.state_coordinator.handle_ecu_responded(&ecu_name);
+                            self.state_coordinator.handle_ecu_responded(&ecu_name).await;
                             // Process the response using the ECU's convert_from_uds
                             let ecu_read = fgl_ecu.read().await;
                             let response = ecu_read
@@ -134,6 +136,11 @@ impl<S: EcuGateway, T: UdsEcuDb + PayloadDecoder + EcuSecurity> UdsManager<S, T>
                             result_map.insert(ecu_name, response);
                         }
                         Err(e) => {
+                            if is_not_tester_present && e.demotes_connectivity() {
+                                self.state_coordinator
+                                    .handle_ecu_disconnected(&ecu_name)
+                                    .await;
+                            }
                             result_map.insert(ecu_name, Err(e));
                         }
                     }
@@ -145,6 +152,11 @@ impl<S: EcuGateway, T: UdsEcuDb + PayloadDecoder + EcuSecurity> UdsManager<S, T>
                 // Gateway-level error - return error for all ECUs
                 let mut result_map = HashMap::new();
                 for (_, ecu_name) in expected_ecus {
+                    if is_not_tester_present && e.demotes_connectivity() {
+                        self.state_coordinator
+                            .handle_ecu_disconnected(&ecu_name)
+                            .await;
+                    }
                     result_map.insert(ecu_name, Err(e.clone()));
                 }
                 result_map
@@ -558,7 +570,7 @@ mod tests {
     use cda_interfaces::{
         DiagCommType, DiagServiceError, EcuAddresses, EcuRuntimeState, FunctionalTransport,
         HashMap, HashMapExtensions, NetworkTopology, PhysicalTransport, ServicePayload,
-        TransmissionParameters, TransportResponse, VariantDetectionSender,
+        TransmissionParameters, TransportResponse,
         datatypes::FaultConfig,
         request_authorization::{RequestLockContext, RequestLockProvider, UdsRequestTarget},
     };
@@ -566,7 +578,10 @@ mod tests {
     use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
 
     use super::*;
-    use crate::{state_coordinator::EcuStateCoordinator, test_helpers::TestEcuDb};
+    use crate::{
+        ListenerState, VariantDetectionState, state_coordinator::EcuStateCoordinator,
+        test_helpers::TestEcuDb,
+    };
 
     const GATEWAY_KEY: &str = "a-gateway";
     const CHILD_KEY: &str = "z-child";
@@ -645,7 +660,6 @@ mod tests {
             "functional".to_owned(),
             RwLock::new(functional_ecu),
         )]));
-        let (redetect_tx, _redetect_rx) = mpsc::channel(1);
         UdsManager {
             ecus,
             gateway: RecordingGateway {
@@ -658,17 +672,16 @@ mod tests {
             session_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
             security_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
             authentication_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
-            state_coordinator: EcuStateCoordinator::new(
-                HashMap::<String, EcuRuntimeState>::new(),
-                VariantDetectionSender::new(redetect_tx),
-            ),
+            state_coordinator: EcuStateCoordinator::new(HashMap::<String, EcuRuntimeState>::new()),
             functional_description_database: "functional".to_owned(),
             fault_config: FaultConfig::default(),
             request_lock_provider,
             communication_access: enabled_communication_access_for_test(),
             communication_retry_after: Duration::from_secs(1),
-            variant_detection_receiver: Arc::new(Mutex::new(None)),
-            variant_detection_listener: Arc::new(Mutex::new(None)),
+            variant_detection: VariantDetectionState {
+                listener: Arc::new(Mutex::new(ListenerState::Closed)),
+                activity: cda_interfaces::VariantDetectionActivity::new(),
+            },
         }
     }
 
@@ -794,14 +807,10 @@ mod tests {
             .iter()
             .map(|(ecu_name, data)| ((*ecu_name).to_owned(), Ok(response(data.clone()))))
             .collect();
-        let (redetect_tx, _redetect_rx) = mpsc::channel(1);
-        manager.state_coordinator = EcuStateCoordinator::new(
-            HashMap::from_iter([
-                ("gateway".to_owned(), EcuRuntimeState::new()),
-                ("child".to_owned(), EcuRuntimeState::new()),
-            ]),
-            VariantDetectionSender::new(redetect_tx),
-        );
+        manager.state_coordinator = EcuStateCoordinator::new(HashMap::from_iter([
+            ("gateway".to_owned(), EcuRuntimeState::new()),
+            ("child".to_owned(), EcuRuntimeState::new()),
+        ]));
 
         let results = manager
             .send_functional_to_gateway(
