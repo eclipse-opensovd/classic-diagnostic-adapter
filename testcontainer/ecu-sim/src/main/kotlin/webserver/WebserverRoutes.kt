@@ -200,14 +200,28 @@ private suspend fun SimEcu.dtcFaultsByApplicationCall(call: ApplicationCall) =
  * DTO for configuring an inbound interceptor.
  * [request] is a hex pattern for matching incoming UDS requests (supports `[]` as wildcard for `.*`).
  * [response] is the hex response to send back (empty string = suppress response / simulate ECU offline).
+ *   `null` = forward the request to the regular ECU handler (useful together with timing options).
  * [removeAfterNRequest] optionally auto-removes the interceptor after N matched requests.
+ *
+ * Timing options (all optional, applied in this order before the final response):
+ * [delayMs] waits before the first response (pending NRC or final response) is sent.
+ * [pendingResponses] sends `7F <SID> 78` (response pending) this many times.
+ * [pendingIntervalMs] gap after each response pending NRC (default 1000 ms).
+ *
+ * While delaying, the ECU is busy, so concurrent requests are answered with NRC 0x21.
  */
 @Serializable
 data class SimpleInterceptorDto(
     val request: String,
-    val response: String,
+    val response: String? = "",
     val removeAfterNRequest: Int? = null,
+    val delayMs: Long? = null,
+    val pendingResponses: Int? = null,
+    val pendingIntervalMs: Long? = null,
 )
+
+private const val NRC_RESPONSE_PENDING: Byte = 0x78
+private const val DEFAULT_PENDING_INTERVAL_MS = 1000L
 
 /**
  * Routes to simulate DoIP TCP connection disruptions.
@@ -269,8 +283,22 @@ fun Route.addInterceptorRoutes() {
             val incomingHex = this.message.toHexString(separator = "").uppercase()
             if (incomingHex.matches(regex)) {
                 matchCount += 1
-                if (dto.response.isNotBlank()) {
-                    respond(dto.response.replace(" ", "").decodeHex())
+                dto.delayMs?.takeIf { it > 0 }?.let { Thread.sleep(it) }
+                val pendingCount = dto.pendingResponses ?: 0
+                if (pendingCount > 0) {
+                    val pending = byteArrayOf(0x7F, this.message[0], NRC_RESPONSE_PENDING)
+                    val interval = dto.pendingIntervalMs ?: DEFAULT_PENDING_INTERVAL_MS
+                    repeat(pendingCount) {
+                        request.respond(pending)
+                        Thread.sleep(interval)
+                    }
+                }
+                val response = dto.response
+                if (response == null) {
+                    // forward to the regular ECU request handlers
+                    continueMatching()
+                } else if (response.isNotBlank()) {
+                    respond(response.replace(" ", "").decodeHex())
                 }
                 // If response is blank, suppress response (ECU offline simulation)
                 if (removeAfterNRequest != null && matchCount >= removeAfterNRequest) {
