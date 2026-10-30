@@ -616,7 +616,8 @@ Diagnostic Message Exchange
 
     The only exception is TesterPresent NRCs (``7F 3E xx``), which are intercepted at
     the DoIP decoding layer and routed to a dedicated ``TesterPresentNRC`` event so the
-    receiver can log-and-drop them without polluting per-ECU channels.
+    receiver can log them, report them as a reply of the ECU (see :need:`arch~dt-ecu-states`)
+    and drop them without polluting per-ECU channels.
 
     Multiple intermediate responses may be received before the final response:
 

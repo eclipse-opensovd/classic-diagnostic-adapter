@@ -204,6 +204,7 @@ pub(crate) struct TestEcuDb {
     /// State applied by `detect_variant` for non-empty responses. `None`
     /// keeps the current state.
     detection_outcome: Option<EcuState>,
+    runtime_state: EcuRuntimeState,
 }
 
 fn default_test_status() -> EcuState {
@@ -241,6 +242,7 @@ impl TestEcuDb {
             duplicates: None,
             status: std::sync::Mutex::new(default_test_status()),
             detection_outcome: None,
+            runtime_state: EcuRuntimeState::new(),
         }
     }
 
@@ -259,6 +261,7 @@ impl TestEcuDb {
             duplicates: None,
             status: std::sync::Mutex::new(default_test_status()),
             detection_outcome: None,
+            runtime_state: EcuRuntimeState::new(),
         }
     }
 
@@ -281,6 +284,7 @@ impl TestEcuDb {
             duplicates: None,
             status: std::sync::Mutex::new(default_test_status()),
             detection_outcome: None,
+            runtime_state: EcuRuntimeState::new(),
         }
     }
 
@@ -302,6 +306,7 @@ impl TestEcuDb {
             duplicates: None,
             status: std::sync::Mutex::new(default_test_status()),
             detection_outcome: None,
+            runtime_state: EcuRuntimeState::new(),
         }
     }
 
@@ -326,6 +331,7 @@ impl TestEcuDb {
             duplicates: None,
             status: std::sync::Mutex::new(default_test_status()),
             detection_outcome: None,
+            runtime_state: EcuRuntimeState::new(),
         }
     }
 
@@ -956,7 +962,7 @@ impl cda_interfaces::EcuManager for TestEcuDb {
     }
 
     fn runtime_state(&self) -> EcuRuntimeState {
-        unimplemented!()
+        self.runtime_state.clone()
     }
 }
 

@@ -648,6 +648,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "chrono",
  "foldhash 0.2.0",
  "futures",
  "hex",

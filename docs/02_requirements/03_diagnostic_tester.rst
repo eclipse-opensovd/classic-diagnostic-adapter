@@ -356,7 +356,7 @@ ECU States
     - Offline --> NotTested (reconnection attempt or explicit re-detection requested)
     - Online --> Disconnected (connection lost)
     - Online --> NotTested (explicit re-detection requested)
-    - AssumedOnline --> Online (successfully contacted, e.g. first diagnostic request or re-detection)
+    - AssumedOnline --> Online (the ECU replied, e.g. to its first diagnostic request or to a re-detection)
     - AssumedOnline --> Disconnected (contact attempted but ECU unreachable)
     - AssumedOnline --> NotTested (explicit re-detection requested)
     - NoVariantDetected --> Online (successful re-detection)
@@ -370,7 +370,7 @@ ECU States
     :need:`arch~sovd-api-components-entity-collection`).
 
     In addition to the state, the SOVD API must expose a ``last_seen`` timestamp for each ECU, indicating
-    the time of the last successful diagnostic contact with that ECU. This timestamp must be preserved
+    the time of the last UDS message the CDA received from that ECU. This timestamp must be preserved
     across CDA restarts by persisting it together with the ECU list (see :need:`req~dt-ecu-list-persistence`
     and :need:`req~dt-ecu-list-persistence-shutdown`).
 
@@ -415,7 +415,7 @@ ECU States
         Online --> Disconnected : Connection lost
         Online --> NotTested : Re-detection\nrequested
 
-        AssumedOnline --> Online : Successfully\ncontacted
+        AssumedOnline --> Online : ECU\nreplied
         AssumedOnline --> Disconnected : Contact attempted\nbut unreachable
         AssumedOnline --> NotTested : Re-detection\nrequested
 
@@ -525,10 +525,10 @@ ECU List Persistence - Shutdown Update
 
     **Rationale**
 
-    The ``last_seen`` timestamp is updated frequently during normal operation (on every successful
-    diagnostic response), which is not practical to persist and flush on every single occurrence without
+    The ``last_seen`` timestamp is updated frequently during normal operation (on every UDS message
+    received from the ECU), which is not practical to persist and flush on every single occurrence without
     impacting performance and flash wear. Persisting the latest value at shutdown ensures the timestamp
-    surviving a restart is reasonably up to date, without requiring a flush on every diagnostic response.
+    surviving a restart is reasonably up to date, without requiring a flush on every message.
 
 
 Error Handling

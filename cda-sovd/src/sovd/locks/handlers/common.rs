@@ -23,6 +23,7 @@ use cda_interfaces::{
     lock_priority_api::{
         LockLifecycleEvent, LockPriorityPolicy, LockRequest, LockScope, LockSnapshot,
     },
+    util::system_time_to_rfc3339,
 };
 use cda_plugin_security::{Claims, SecurityPlugin};
 use chrono::Utc;
@@ -33,10 +34,7 @@ use super::super::{
     LockCoverage, LockState, Locks, PendingPreemption, ScopeKey, StateError, TransitionReservation,
     active_snapshot, create_lock, map_state_error, rollback_preemption, validate_claim,
 };
-use crate::sovd::{
-    locks::cleanup::{run_cleanups, take_cleanups},
-    timestamp::system_time_to_rfc3339,
-};
+use crate::sovd::locks::cleanup::{run_cleanups, take_cleanups};
 
 pub(in crate::sovd::locks) struct ValidatedLockRequest {
     pub(in crate::sovd::locks) metadata: serde_json::Map<String, serde_json::Value>,

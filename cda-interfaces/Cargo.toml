@@ -29,6 +29,7 @@ uuid = { workspace = true, features = ["v4"] }
 http = { workspace = true }
 # internal dependencies
 bytes = { workspace = true }
+chrono = { workspace = true }
 foldhash = { workspace = true }
 
 rkyv = { workspace = true }

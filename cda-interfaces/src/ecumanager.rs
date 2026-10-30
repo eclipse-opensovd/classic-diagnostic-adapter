@@ -266,6 +266,19 @@ pub struct EcuRuntimeState {
     /// variant detection's conclusion instead of polling. `Arc`-wrapped so that
     /// cloning `EcuRuntimeState` shares one channel, like `ecu_state` itself.
     variant_state_tx: std::sync::Arc<tokio::sync::watch::Sender<VariantState>>,
+    /// Time of the last reply of the ECU. See [`LastSeen`].
+    last_seen: std::sync::Arc<std::sync::Mutex<LastSeen>>,
+}
+
+/// Time of the last reply of the ECU.
+///
+/// The newest write always wins, even if it is older than the previous value:
+/// vehicle clocks are often wrong at boot and corrected later, so keeping the
+/// maximum would pin a bogus future timestamp forever.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LastSeen {
+    /// The timestamp, `None` if the ECU was never contacted.
+    at: Option<std::time::SystemTime>,
 }
 
 impl EcuRuntimeState {
@@ -280,7 +293,20 @@ impl EcuRuntimeState {
                 AuthenticationState::default(),
             )),
             variant_state_tx: std::sync::Arc::new(variant_state_tx),
+            last_seen: std::sync::Arc::new(std::sync::Mutex::new(LastSeen::default())),
         }
+    }
+
+    /// Records a reply of the ECU now.
+    pub fn update_last_seen(&self) {
+        let mut last_seen = std_ext::lock_mutex(&self.last_seen);
+        last_seen.at = Some(std::time::SystemTime::now());
+    }
+
+    /// Returns the time of the last reply of the ECU.
+    #[must_use]
+    pub fn last_seen(&self) -> Option<std::time::SystemTime> {
+        std_ext::lock_mutex(&self.last_seen).at
     }
 
     /// Convenience: get an [`EcuState`] snapshot.
@@ -948,7 +974,8 @@ pub trait VariantDetection: Send + Sync + 'static {
     async fn set_base_variant_online(&mut self) -> Result<(), DiagServiceError>;
 }
 
-/// Callback interface for connectivity changes for ECUs behind a `DoIP` gateway.
+/// Callback interface of the transports: connectivity changes for ECUs behind a
+/// `DoIP` gateway, and replies of ECUs that the transport does not pass on.
 #[async_trait]
 pub trait EcuConnectivityHandler: Send + Sync + 'static {
     /// Called when a `DoIP` gateway connection is established or re-established.
@@ -960,6 +987,14 @@ pub trait EcuConnectivityHandler: Send + Sync + 'static {
     ///
     /// Notifies for all ECUs behind (and including) the gateway.
     async fn on_gateway_disconnected(&self, ecu_names: &[String]);
+
+    /// Called when the transport receives a UDS frame of the ECU that it does
+    /// not pass on as the answer to a request, e.g. a frame with another SID
+    /// or a tester present NRC. The frame still counts as a reply of the ECU.
+    ///
+    /// Called from the transport's receive path; implementations must return
+    /// promptly and must not wait on requests to the ECU.
+    async fn on_ecu_replied(&self, ecu_name: &str);
 }
 
 /// Resolves `DiagComm` handles from the database by various search criteria.
