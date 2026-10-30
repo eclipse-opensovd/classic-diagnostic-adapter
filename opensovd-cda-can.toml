@@ -67,6 +67,20 @@ probe_timeout_ms = 100
 # as the complete probe sequence.
 # default_probes = true
 
+# Byte used to pad transmitted ISO-TP frames (default: 0x00). Many ECUs
+# expect 0x55 or 0xCC.
+# padding_byte = 0x00
+
+# Optional: CAN FD (ISO 15765-2:2016). With this section, ISO-TP frames are
+# sent as CAN FD frames carrying up to tx_dl data bytes (8, 12, 16, 20, 24,
+# 32, 48 or 64; default 64), with bit rate switch unless brs = false. The
+# interface must run in CAN FD mode: e.g. `ip link set can0 type can bitrate
+# 500000 dbitrate 2000000 fd on`, or a CAN FD capable socketcand server such
+# as cda-can-bridge (upstream socketcand is classic CAN only).
+# [can.fd]
+# tx_dl = 64
+# brs = true
+
 # CAN ID mappings. CDA extracts CAN addressing from the MDD com-params
 # (per-ECU CP_UniqueRespIdTable entries first, then top-level
 # CP_CanPhysReqId / CP_CanRespUSDTId scalars); an [[can.ecu_mappings]]
