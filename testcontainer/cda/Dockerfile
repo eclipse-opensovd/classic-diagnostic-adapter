@@ -33,11 +33,39 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     perl \
     make \
+    curl \
+    xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# sccache 0.18 requires Rust 1.91, while this image builds with Rust 1.88.
-RUN cargo install cargo-chef --locked && \
-    cargo install sccache --version 0.17.0 --locked
+# Prebuilt static binaries instead of `cargo install`, which compiles both
+# tools from source on every layer cache miss (~5 min on CI runners).
+# Pinned versions and checksums; update all of them together.
+ARG TARGETARCH
+ARG CARGO_CHEF_VERSION=0.1.78
+ARG SCCACHE_VERSION=0.17.0
+RUN set -eu; \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+    amd64) arch=x86_64; \
+    chef_sha=aca691abfbfbbe00d482e0ed2249eec3091b65e96a0ce92947fb5b254d48b16d; \
+    sccache_sha=67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006 ;; \
+    arm64) arch=aarch64; \
+    chef_sha=cd59b90fce5fa84c4189648fec33404ec5491791eebdb812df5e7fca8336408d; \
+    sccache_sha=821a86343191aa1cbab74bd42f9e93c9a63bf85e4742945f40d3ae84193c1c77 ;; \
+    *) echo "unsupported architecture: ${TARGETARCH:-unknown}" >&2; exit 1 ;; \
+    esac; \
+    chef=cargo-chef-${arch}-unknown-linux-musl; \
+    sccache=sccache-v${SCCACHE_VERSION}-${arch}-unknown-linux-musl; \
+    cd /tmp; \
+    curl -fsSLO "https://github.com/LukeMathWalker/cargo-chef/releases/download/v${CARGO_CHEF_VERSION}/${chef}.tar.xz"; \
+    curl -fsSLO "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/${sccache}.tar.gz"; \
+    echo "${chef_sha}  ${chef}.tar.xz" | sha256sum -c -; \
+    echo "${sccache_sha}  ${sccache}.tar.gz" | sha256sum -c -; \
+    tar -xJf "${chef}.tar.xz"; \
+    tar -xzf "${sccache}.tar.gz"; \
+    install -m 0755 "${chef}/cargo-chef" "${sccache}/sccache" /usr/local/cargo/bin/; \
+    rm -rf /tmp/*; \
+    cargo chef --version; \
+    sccache --version
 
 # --- Stage 2: Prepare the recipe (dependencies only) ---
 FROM chef AS planner
