@@ -13,7 +13,7 @@
 
 use cda_database::datatypes::{self, DataType};
 use cda_interfaces::{
-    DiagComm, DiagServiceError, HashMap, HashMapExtensions,
+    BinaryEncoding, DiagComm, DiagServiceError, HashMap, HashMapExtensions,
     datatypes::{DtcField, DtcRecord},
     diagservices::{
         DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType, FieldParseError,
@@ -101,8 +101,11 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
         &self.data
     }
 
-    fn into_json(self) -> Result<DiagServiceJsonResponse, DiagServiceError> {
-        self.serialize_to_json()
+    fn into_json(
+        self,
+        binary_encoding: BinaryEncoding,
+    ) -> Result<DiagServiceJsonResponse, DiagServiceError> {
+        self.serialize_to_json(binary_encoding)
     }
 
     fn as_nrc(&self) -> Result<MappedNRC, DiagServiceError> {
@@ -219,12 +222,16 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
 
 impl DiagServiceResponseStruct {
     /// This function tries to serialize the `DiagServiceResponse` into a SOVD style JSON.
+    /// `ByteField` values are represented as strings in `binary_encoding`.
     ///
     /// # Errors
     /// Returns `Err` in case any currently unsupported Nesting of containers or if serde
     /// internally has an error when calling serialize on the elements.
     #[tracing::instrument(skip(self), fields(service_name = %self.service.name))]
-    pub fn serialize_to_json(self) -> Result<DiagServiceJsonResponse, DiagServiceError> {
+    pub fn serialize_to_json(
+        self,
+        binary_encoding: BinaryEncoding,
+    ) -> Result<DiagServiceJsonResponse, DiagServiceError> {
         let MappedResponseData { data, mut errors } = self.get_mapped_payload()?;
         if data.is_empty() {
             return Ok(DiagServiceJsonResponse {
@@ -254,7 +261,11 @@ impl DiagServiceResponseStruct {
             })
             .collect::<Result<HashMap<_, _>, DiagServiceError>>()
             .and_then(|mapped| {
-                serde_json::to_value(&mapped)
+                let encoded: HashMap<_, _> = mapped
+                    .iter()
+                    .map(|(k, v)| (k, v.encoded(binary_encoding)))
+                    .collect();
+                serde_json::to_value(&encoded)
                     .map_err(|e| DiagServiceError::ParameterConversionError(e.to_string()))
             })
             .map(|data| DiagServiceJsonResponse { data, errors });

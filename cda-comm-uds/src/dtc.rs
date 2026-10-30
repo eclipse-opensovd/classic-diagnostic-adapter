@@ -13,8 +13,9 @@
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, HashMapExtensions, HashSet,
-    PayloadDecoder, SchemaDescription, SchemaProvider, ServicePayload, UdsDtc, UdsTransport,
+    BinaryEncoding, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap,
+    HashMapExtensions, HashSet, PayloadDecoder, SchemaDescription, SchemaProvider, ServicePayload,
+    UdsDtc, UdsTransport,
     datatypes::{
         self, DTC_CODE_BIT_LEN, DtcCode, DtcExtendedInfo, DtcMask, DtcReadInformationFunction,
         DtcRecordAndStatus, DtcSnapshot, ExtendedDataRecords, ExtendedSnapshots,
@@ -275,6 +276,10 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         Ok((response, extended_data_lookup.scope, schema))
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Combining parameters into a struct would not improve readability here"
+    )]
     async fn map_extended_data(
         &self,
         ecu_name: &str,
@@ -283,6 +288,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         include_schema: bool,
         memory_selection: Option<u8>,
         scope: DtcReadInformationFunction,
+        binary_encoding: BinaryEncoding,
     ) -> Result<(Option<ExtendedDataRecords>, Option<serde_json::Value>), DiagServiceError> {
         fn extract_schema_properties(schema_desc: &SchemaDescription) -> Option<serde_json::Value> {
             // todo after solving #54: we are missing the 'Selector' and the case name here
@@ -311,6 +317,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             )
             .await?;
 
+        let schema_desc = schema_desc.map(|s| s.with_binary_encoding(binary_encoding));
         let schema = if include_schema {
             extract_schema_properties(&schema_desc.ok_or(DiagServiceError::InvalidRequest(
                 "Schema requested but not found".to_owned(),
@@ -323,7 +330,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             return Ok((None, schema));
         }
 
-        let extended_data_json = extended_data_response.into_json()?;
+        let extended_data_json = extended_data_response.into_json(binary_encoding)?;
         let extended_data: Option<HashMap<_, _>> =
             extended_data_json.data.as_object().and_then(|obj| {
                 obj.iter()
@@ -366,6 +373,10 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         ))
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Combining parameters into a struct would not improve readability here"
+    )]
     async fn map_snapshots(
         &self,
         ecu_name: &str,
@@ -374,6 +385,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         include_schema: bool,
         memory_selection: Option<u8>,
         scope: DtcReadInformationFunction,
+        binary_encoding: BinaryEncoding,
     ) -> Result<(Option<ExtendedSnapshots>, Option<serde_json::Value>), DiagServiceError> {
         fn extract_schema_properties(schema_desc: &SchemaDescription) -> Option<serde_json::Value> {
             // Todo when solving #54: We are missing the mux case name in the schema.
@@ -408,6 +420,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             )
             .await?;
 
+        let schema_desc = schema_desc.map(|s| s.with_binary_encoding(binary_encoding));
         let schema = if include_schema {
             extract_schema_properties(&schema_desc.ok_or(DiagServiceError::InvalidRequest(
                 "Schema requested but not found".to_owned(),
@@ -420,7 +433,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             return Ok((None, schema));
         }
 
-        let snapshot_json = snapshot_data_response.into_json()?;
+        let snapshot_json = snapshot_data_response.into_json(binary_encoding)?;
         let snapshot_data: Option<HashMap<_, _>> = snapshot_json
             .data
             .as_object()
@@ -649,6 +662,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         include_snapshot: bool,
         include_schema: bool,
         memory_selection: Option<u8>,
+        binary_encoding: BinaryEncoding,
     ) -> Result<DtcExtendedInfo, DiagServiceError> {
         let dtc_code = decode_dtc_from_str(sae_dtc)?;
 
@@ -672,6 +686,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
                 include_schema,
                 memory_selection,
                 scope,
+                binary_encoding,
             )
             .await?
         } else {
@@ -686,6 +701,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
                 include_schema,
                 memory_selection,
                 scope,
+                binary_encoding,
             )
             .await?
         } else {

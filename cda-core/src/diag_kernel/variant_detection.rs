@@ -81,7 +81,8 @@ pub(super) fn evaluate_variant<T: DiagServiceResponse + Sized>(
     let service_responses = service_responses
         .into_iter()
         .map(|(service, res)| {
-            let json = res.into_json()?;
+            // Variant patterns in the database are hex coded, see byte_field_matches_hex_pattern.
+            let json = res.into_json(cda_interfaces::BinaryEncoding::Hex)?;
             let params = json
                 .data
                 .as_object()

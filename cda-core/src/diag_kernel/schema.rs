@@ -400,6 +400,16 @@ fn normal_dop_to_schema(
                 "default": default_value,
                 "type": type_
             });
+            if datatype.base_datatype() == datatypes::DataType::ByteField {
+                // Base64 is the default, `SchemaDescription::with_binary_encoding`
+                // switches it to the encoding selected for the request.
+                param_schema.insert(
+                    "format".to_owned(),
+                    cda_interfaces::BinaryEncoding::Base64
+                        .json_schema_format()
+                        .into(),
+                );
+            }
             add_phys_constr_range(normal_dop, &mut param_schema);
             schema.insert(name, param_schema.into());
         }
@@ -639,9 +649,10 @@ fn ecu_datatype_to_jsontype(type_: datatypes::DataType) -> String {
     match type_ {
         datatypes::DataType::Int32 | datatypes::DataType::UInt32 => "integer".to_owned(),
         datatypes::DataType::Float32 | datatypes::DataType::Float64 => "number".to_owned(),
+        // Byte fields are represented as base64 or hex coded string.
         datatypes::DataType::AsciiString
         | datatypes::DataType::Utf8String
-        | datatypes::DataType::Unicode2String => "string".to_owned(),
-        datatypes::DataType::ByteField => "array".to_owned(),
+        | datatypes::DataType::Unicode2String
+        | datatypes::DataType::ByteField => "string".to_owned(),
     }
 }

@@ -34,6 +34,7 @@ use crate::util::{
 };
 
 mod authentication;
+mod binary_encoding;
 mod custom_routes;
 mod data;
 mod deferred_init;

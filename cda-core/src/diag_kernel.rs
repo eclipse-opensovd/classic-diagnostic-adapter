@@ -17,7 +17,7 @@ use cda_database::{
     datatypes,
     datatypes::{DataType, IntervalType, Limit},
 };
-use cda_interfaces::{DiagServiceError, HashMap};
+use cda_interfaces::{BinaryEncoding, DiagServiceError, HashMap};
 use serde::{Serialize, Serializer};
 
 mod additional_fields;
@@ -348,27 +348,59 @@ pub fn into_db_protocol<'db>(
     )))
 }
 
-impl Serialize for DiagDataValue {
+/// Serializable view of a [`DiagDataValue`] that represents binary data
+/// (`ByteField`) as string in the given [`BinaryEncoding`].
+pub(crate) struct EncodedDiagDataValue<'a> {
+    pub(crate) value: &'a DiagDataValue,
+    pub(crate) encoding: BinaryEncoding,
+}
+
+impl DiagDataValue {
+    pub(crate) fn encoded(&self, encoding: BinaryEncoding) -> EncodedDiagDataValue<'_> {
+        EncodedDiagDataValue {
+            value: self,
+            encoding,
+        }
+    }
+}
+
+impl Serialize for EncodedDiagDataValue<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        match self {
+        fn serialize_map<S: Serializer>(
+            map: &HashMap<String, DiagDataValue>,
+            encoding: BinaryEncoding,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            serializer.collect_map(map.iter().map(|(k, v)| (k, v.encoded(encoding))))
+        }
+
+        struct EncodedMap<'a> {
+            map: &'a HashMap<String, DiagDataValue>,
+            encoding: BinaryEncoding,
+        }
+        impl Serialize for EncodedMap<'_> {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serialize_map(self.map, self.encoding, serializer)
+            }
+        }
+
+        match self.value {
             DiagDataValue::Int32(v) => v.serialize(serializer),
             DiagDataValue::UInt32(v) => v.serialize(serializer),
             DiagDataValue::Float32(v) => v.serialize(serializer),
             DiagDataValue::String(v) => v.serialize(serializer),
-            DiagDataValue::ByteField(v) => {
-                let byte_string = v
-                    .iter()
-                    .map(|&b| format!("{b:#04X}"))
-                    .collect::<Vec<String>>()
-                    .join(" ");
-                byte_string.serialize(serializer)
-            }
+            DiagDataValue::ByteField(v) => self.encoding.encode(v).serialize(serializer),
             DiagDataValue::Float64(v) => v.serialize(serializer),
-            DiagDataValue::Struct(v) => v.serialize(serializer),
-            DiagDataValue::RepeatingStruct(v) => v.serialize(serializer),
+            DiagDataValue::Struct(v) => serialize_map(v, self.encoding, serializer),
+            DiagDataValue::RepeatingStruct(v) => {
+                serializer.collect_seq(v.iter().map(|map| EncodedMap {
+                    map,
+                    encoding: self.encoding,
+                }))
+            }
         }
     }
 }
@@ -379,6 +411,28 @@ mod tests {
     use cda_interfaces::HashMapExtensions;
 
     use super::*;
+
+    #[test]
+    fn test_encoded_byte_field_serialization() {
+        let mut inner = HashMap::new();
+        inner.insert("raw".to_owned(), DiagDataValue::ByteField(vec![0x01, 0x02]));
+        let mut outer = HashMap::new();
+        outer.insert("nested".to_owned(), DiagDataValue::Struct(inner));
+        outer.insert("num".to_owned(), DiagDataValue::UInt32(7));
+        let mut rep = HashMap::new();
+        rep.insert("b".to_owned(), DiagDataValue::ByteField(vec![0xFF]));
+        outer.insert("rep".to_owned(), DiagDataValue::RepeatingStruct(vec![rep]));
+        let value = DiagDataValue::Struct(outer);
+
+        assert_eq!(
+            serde_json::to_value(value.encoded(BinaryEncoding::Base64)).unwrap(),
+            serde_json::json!({"nested": {"raw": "AQI="}, "num": 7, "rep": [{"b": "/w=="}]})
+        );
+        assert_eq!(
+            serde_json::to_value(value.encoded(BinaryEncoding::Hex)).unwrap(),
+            serde_json::json!({"nested": {"raw": "0x01 0x02"}, "num": 7, "rep": [{"b": "0xFF"}]})
+        );
+    }
 
     #[test]
     fn test_int32_within_limits() {

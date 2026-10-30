@@ -1907,16 +1907,22 @@ fn map_param_coded_const_from_uds(
         "CodedConst has no coded value".to_owned(),
     ))?;
     let const_json_value = str_to_json_value(const_value, diag_type.base_datatype())?;
-    let expected = operations::json_value_to_uds_data(&diag_type, None, None, &const_json_value)
-        .inspect_err(|e| {
-            tracing::error!(
-                error = ?e,
-                "Failed to convert CodedConst coded value to UDS data for parameter '{}'",
-                param_ctx.parameter.short_name().unwrap_or_default()
-            );
-        })?
-        .into_iter()
-        .collect::<Vec<_>>();
+    let expected = operations::json_value_to_uds_data(
+        &diag_type,
+        None,
+        None,
+        &const_json_value,
+        cda_interfaces::BinaryEncoding::Hex,
+    )
+    .inspect_err(|e| {
+        tracing::error!(
+            error = ?e,
+            "Failed to convert CodedConst coded value to UDS data for parameter '{}'",
+            param_ctx.parameter.short_name().unwrap_or_default()
+        );
+    })?
+    .into_iter()
+    .collect::<Vec<_>>();
     let expected = expected
         .get(expected.len().saturating_sub(value.data.len())..)
         .ok_or(DiagServiceError::BadPayload(
@@ -2106,7 +2112,13 @@ mod tests {
             .convert_from_uds(service, &create_payload(payload_data), true, None)
             .await
             .unwrap();
-        assert_eq!(response.serialize_to_json().unwrap().data, expected_json);
+        assert_eq!(
+            response
+                .serialize_to_json(cda_interfaces::BinaryEncoding::Hex)
+                .unwrap()
+                .data,
+            expected_json
+        );
     }
 
     async fn assert_uds_conversion_fails(

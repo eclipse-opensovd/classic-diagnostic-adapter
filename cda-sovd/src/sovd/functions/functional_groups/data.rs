@@ -115,6 +115,7 @@ pub(crate) mod diag_service {
     use crate::{
         openapi,
         sovd::{
+            binary_encoding::BinaryEncodingParam,
             components::{ecu::DiagServicePathParam, get_content_type_and_accept},
             error::{ApiError, ErrorWrapper, VendorErrorCode},
             functions::functional_groups::{WebserverFgState, handle_ecu_response, map_to_json},
@@ -138,6 +139,7 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::functions::functional_groups::data::service::Query>,
             ApiError,
         >,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverFgState {
             uds,
             locks,
@@ -167,6 +169,7 @@ pub(crate) mod diag_service {
             None,
             (security_plugin, &locks, FunctionalDataAccess::Read),
             include_schema,
+            binary_encoding,
         )
         .await
     }
@@ -210,6 +213,7 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::functions::functional_groups::data::service::Query>,
             ApiError,
         >,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverFgState {
             uds,
             locks,
@@ -240,6 +244,7 @@ pub(crate) mod diag_service {
             Some(body),
             (security_plugin, &locks, FunctionalDataAccess::Write),
             include_schema,
+            binary_encoding,
         )
         .await
     }
@@ -261,6 +266,10 @@ pub(crate) mod diag_service {
         .with(openapi::error_bad_gateway)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Combining parameters into a struct would not improve readability here"
+    )]
     async fn functional_data_request<T: UdsEcu + Clone>(
         service: DiagComm,
         functional_group_name: &str,
@@ -273,6 +282,7 @@ pub(crate) mod diag_service {
             FunctionalDataAccess,
         ),
         include_schema: bool,
+        binary_encoding: cda_interfaces::BinaryEncoding,
     ) -> Response {
         let (security_plugin, locks, access) = authorization;
         let claims = security_plugin.as_auth_plugin().claims();
@@ -316,7 +326,7 @@ pub(crate) mod diag_service {
         let data = if let Some(body) = body {
             match get_payload_data::<
                 sovd_interfaces::functions::functional_groups::data::DataRequestPayload,
-            >(content_type.as_ref(), &headers, &body)
+            >(content_type.as_ref(), &headers, &body, binary_encoding)
             {
                 Ok(value) => value,
                 Err(e) => {
@@ -363,7 +373,14 @@ pub(crate) mod diag_service {
         let mut errors: Vec<sovd_interfaces::error::DataError<VendorErrorCode>> = Vec::new();
 
         for (ecu_name, result) in results {
-            handle_ecu_response(&mut response_data, "data", &mut errors, ecu_name, result);
+            handle_ecu_response(
+                &mut response_data,
+                "data",
+                &mut errors,
+                ecu_name,
+                result,
+                binary_encoding,
+            );
         }
 
         let schema = if include_schema {
@@ -453,7 +470,7 @@ mod tests {
         response
             .expect_response_type()
             .returning(|| DiagServiceResponseType::Positive);
-        response.expect_into_json().return_once(|| {
+        response.expect_into_json().return_once(|_| {
             Ok(DiagServiceJsonResponse {
                 data: serde_json::json!({"value": 1}),
                 errors: vec![],
@@ -476,6 +493,7 @@ mod tests {
                 service: "VehicleSpeed".to_owned(),
             }),
             query(),
+            crate::sovd::binary_encoding::BinaryEncodingParam(cda_interfaces::BinaryEncoding::Hex),
             State(state),
         )
         .await;
@@ -499,6 +517,7 @@ mod tests {
                 service: "VehicleSpeed".to_owned(),
             }),
             query(),
+            crate::sovd::binary_encoding::BinaryEncodingParam(cda_interfaces::BinaryEncoding::Hex),
             State(state),
             Bytes::from_static(b"{\"data\":{\"value\":1}}"),
         )
@@ -535,6 +554,7 @@ mod tests {
                 service: "VehicleSpeed".to_owned(),
             }),
             query(),
+            crate::sovd::binary_encoding::BinaryEncodingParam(cda_interfaces::BinaryEncoding::Hex),
             State(state),
         )
         .await;
@@ -570,6 +590,7 @@ mod tests {
                 service: "VehicleSpeed".to_owned(),
             }),
             query(),
+            crate::sovd::binary_encoding::BinaryEncodingParam(cda_interfaces::BinaryEncoding::Hex),
             State(state),
             Bytes::from_static(b"{\"data\":{\"value\":1}}"),
         )
