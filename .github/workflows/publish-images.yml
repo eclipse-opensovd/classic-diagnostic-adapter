@@ -79,6 +79,53 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+      # BuildKit cache mounts (cargo registry, cargo git, sccache) are not
+      # part of the type=gha layer cache, so they are kept in the Actions
+      # cache and injected into / extracted from BuildKit around the build.
+      # Keyed per architecture and Rust version: sccache entries are not
+      # shared across targets or RUSTFLAGS. Only main saves, to stay within
+      # the repository cache limit; tags and other refs only restore.
+      - name: Cache key
+        id: mounts-key
+        run: |
+          prefix="cda-mounts-release-${{ matrix.arch }}-rust${{ needs.versions.outputs.stable }}"
+          {
+            echo "prefix=${prefix}"
+            echo "key=${prefix}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}"
+            echo "lock-prefix=${prefix}-${{ hashFiles('Cargo.lock') }}-"
+          } >> "$GITHUB_OUTPUT"
+      - name: Restore and save cache mounts (main)
+        id: mounts-cache-main
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache@v5
+        with:
+          path: cache-mounts
+          key: ${{ steps.mounts-key.outputs.key }}
+          restore-keys: |
+            ${{ steps.mounts-key.outputs.lock-prefix }}
+            ${{ steps.mounts-key.outputs.prefix }}-
+      - name: Restore cache mounts
+        id: mounts-cache
+        if: github.ref != 'refs/heads/main'
+        uses: actions/cache/restore@v5
+        with:
+          path: cache-mounts
+          key: ${{ steps.mounts-key.outputs.key }}
+          restore-keys: |
+            ${{ steps.mounts-key.outputs.lock-prefix }}
+            ${{ steps.mounts-key.outputs.prefix }}-
+      - name: Inject cache mounts into BuildKit
+        uses: reproducible-containers/buildkit-cache-dance@v3
+        with:
+          cache-map: |
+            {
+              "cache-mounts/cargo-registry": "/usr/local/cargo/registry",
+              "cache-mounts/cargo-git": "/usr/local/cargo/git",
+              "cache-mounts/sccache": "/sccache"
+            }
+          # The post step extracts the mounts for the save step of
+          # actions/cache, which only runs on main and on a key miss.
+          skip-extraction: ${{ github.ref != 'refs/heads/main' || steps.mounts-cache-main.outputs.cache-hit == 'true' }}
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v6
@@ -89,13 +136,11 @@ jobs:
           build-args: |
             RUST_VERSION=${{ needs.versions.outputs.stable }}
             SOURCE_GIT_SHA=${{ github.sha }}
+            SCCACHE_CACHE_SIZE=2G
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
-          # amd64 can additionally reuse the release build cache of build.yml
-          # (same Dockerfile, Rust version and profile).
           cache-from: |
             type=gha,scope=cda-publish-${{ matrix.arch }}
-            ${{ matrix.arch == 'amd64' && 'type=gha,scope=cda-cargo-main' || '' }}
           cache-to: |
             type=gha,mode=max,scope=cda-publish-${{ matrix.arch }}
       - name: Export digest

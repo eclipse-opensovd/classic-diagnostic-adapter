@@ -82,8 +82,13 @@ ARG CHECK_RUSTFLAGS
 
 # Use BuildKit cache mounts for Cargo registry, Git, and sccache
 # This significantly speeds up subsequent builds by reusing downloaded crates and compiled artifacts.
+# BuildKit does not export cache mounts with the image layer cache; CI persists
+# them separately, see .github/workflows/publish-images.yml. SCCACHE_CACHE_SIZE
+# bounds the sccache directory, so that it fits into the CI cache.
+ARG SCCACHE_CACHE_SIZE=10G
 ENV RUSTC_WRAPPER=sccache \
-    SCCACHE_DIR=/sccache
+    SCCACHE_DIR=/sccache \
+    SCCACHE_CACHE_SIZE=${SCCACHE_CACHE_SIZE}
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
@@ -92,7 +97,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo chef cook --profile dev --recipe-path recipe.json; \
     else \
     cargo chef cook --release --recipe-path recipe.json; \
-    fi
+    fi && \
+    sccache --stop-server
 
 # --- Stage 4: Build the application ---
 FROM chef AS builder
@@ -105,6 +111,7 @@ ARG CHECK_RUSTFLAGS
 # "can-socketcand" to compile in the socketcand-backed CAN transport used by
 # the CAN integration tests.
 ARG CDA_FEATURES=""
+ARG SCCACHE_CACHE_SIZE=10G
 
 WORKDIR /app
 # Copy pre-built dependencies from the cacher stage
@@ -136,7 +143,8 @@ COPY opensovd-axum-extra ./opensovd-axum-extra
 COPY override-macros ./override-macros
 
 ENV RUSTC_WRAPPER=sccache \
-    SCCACHE_DIR=/sccache
+    SCCACHE_DIR=/sccache \
+    SCCACHE_CACHE_SIZE=${SCCACHE_CACHE_SIZE}
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
@@ -150,7 +158,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     else \
     cargo build --release --bin opensovd-cda ${CDA_FEATURES:+--features "$CDA_FEATURES"} && \
     cp target/release/opensovd-cda /tmp/opensovd-cda; \
-    fi
+    fi && \
+    sccache --stop-server
 
 # --- Stage 4b: A binary compiled outside Docker ---
 # Empty here; the build context `cda-prebuilt`, which holds the binary,
