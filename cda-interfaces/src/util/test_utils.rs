@@ -11,6 +11,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::time::Duration;
+
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
+const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Implements [`DoipComParams`](crate::DoipComParams) for `$ty` with the fixed
 /// values used by the test ECUs.
 #[macro_export]
@@ -52,6 +57,28 @@ macro_rules! impl_test_doip_com_params {
             }
         }
     };
+}
+
+/// Polls `condition` until it holds, panicking if it does not hold before the timeout.
+///
+/// # Panics
+///
+/// Panics if `condition` does not return `true` within 10 seconds, or if
+/// `condition` itself panics.
+pub async fn wait_until<F, Fut>(description: &str, mut condition: F)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let poll = async {
+        while !condition().await {
+            crate::util::tokio_ext::sleep_for(POLL_INTERVAL).await;
+        }
+    };
+    assert!(
+        tokio::time::timeout(WAIT_TIMEOUT, poll).await.is_ok(),
+        "Timed out waiting until {description}"
+    );
 }
 
 /// Connectivity handler that records the ECUs reported as replied.

@@ -57,6 +57,8 @@ impl<S: EcuGateway, T: UdsEcuDb + PayloadDecoder + EcuSecurity> UdsManager<S, T>
         // Inspect the subfunction byte for `suppressPosRspMsgIndicationBit` (bit 7).
         // When set, ECUs are not expected to send a positive response.
         let expect_positive_response = !payload.is_suppress_positive_response();
+        let is_not_tester_present =
+            payload.data.first() != Some(&cda_interfaces::service_ids::TESTER_PRESENT);
 
         let _ecu_permits = match self.request_ecu_permits(request_lock_keys).await {
             Ok(permits) => permits,
@@ -120,7 +122,7 @@ impl<S: EcuGateway, T: UdsEcuDb + PayloadDecoder + EcuSecurity> UdsManager<S, T>
                             // a pending NRC (the gateway returns the first frame of each
                             // ECU), one that does not answer this request, and also one
                             // to a request with a suppressed positive response.
-                            self.state_coordinator.handle_ecu_responded(&ecu_name);
+                            self.state_coordinator.handle_ecu_responded(&ecu_name).await;
                             // Process the response using the ECU's convert_from_uds
                             let ecu_read = fgl_ecu.read().await;
                             let response = ecu_read
@@ -134,6 +136,11 @@ impl<S: EcuGateway, T: UdsEcuDb + PayloadDecoder + EcuSecurity> UdsManager<S, T>
                             result_map.insert(ecu_name, response);
                         }
                         Err(e) => {
+                            if is_not_tester_present && e.demotes_connectivity() {
+                                self.state_coordinator
+                                    .handle_ecu_disconnected(&ecu_name)
+                                    .await;
+                            }
                             result_map.insert(ecu_name, Err(e));
                         }
                     }
@@ -145,6 +152,11 @@ impl<S: EcuGateway, T: UdsEcuDb + PayloadDecoder + EcuSecurity> UdsManager<S, T>
                 // Gateway-level error - return error for all ECUs
                 let mut result_map = HashMap::new();
                 for (_, ecu_name) in expected_ecus {
+                    if is_not_tester_present && e.demotes_connectivity() {
+                        self.state_coordinator
+                            .handle_ecu_disconnected(&ecu_name)
+                            .await;
+                    }
                     result_map.insert(ecu_name, Err(e.clone()));
                 }
                 result_map
@@ -566,7 +578,10 @@ mod tests {
     use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
 
     use super::*;
-    use crate::{state_coordinator::EcuStateCoordinator, test_helpers::TestEcuDb};
+    use crate::{
+        ListenerState, VariantDetectionState, state_coordinator::EcuStateCoordinator,
+        test_helpers::TestEcuDb,
+    };
 
     const GATEWAY_KEY: &str = "a-gateway";
     const CHILD_KEY: &str = "z-child";
@@ -667,8 +682,10 @@ mod tests {
             request_lock_provider,
             communication_access: enabled_communication_access_for_test(),
             communication_retry_after: Duration::from_secs(1),
-            variant_detection_receiver: Arc::new(Mutex::new(None)),
-            variant_detection_listener: Arc::new(Mutex::new(None)),
+            variant_detection: VariantDetectionState {
+                listener: Arc::new(Mutex::new(ListenerState::Closed)),
+                activity: cda_interfaces::VariantDetectionActivity::new(),
+            },
         }
     }
 
