@@ -41,7 +41,7 @@ use tokio::sync::{RwLock, mpsc};
 
 use self::{
     background::BackgroundTask,
-    connection::CanEcuConnection,
+    connection::{CanEcuConnection, CanLinkSettings},
     error::{CanError, CanGatewaySetupError},
     probe::ProbeRequest,
 };
@@ -85,6 +85,8 @@ pub struct CanDiagGateway {
     functional_id: CanId,
     /// Configured keepalive interval. Zero disables keepalive.
     keepalive_interval: Duration,
+    /// ISO-TP link layer settings (padding, CAN FD) for all sockets.
+    link: CanLinkSettings,
     /// Notifies variant detection after discovery and rediscovery.
     variant_detection: VariantDetectionSender,
     /// Shared restartable lifecycle state and retained task configuration.
@@ -132,6 +134,11 @@ impl CanDiagGateway {
         tracing::info!("Initializing CanDiagGateway");
 
         let probe_sequence = Self::build_probe_sequence(config)?;
+        if let Some(fd) = &config.fd {
+            fd.validate()
+                .map_err(CanGatewaySetupError::InvalidConfiguration)?;
+        }
+        let link = CanLinkSettings::from(config);
 
         // Functional broadcast ID for the TesterPresent keep-alive: prefer the
         // MDD com-params (CP_CanFuncReqId), fall back to the ISO 15765-4
@@ -182,7 +189,8 @@ impl CanDiagGateway {
                     request_id,
                     response_id,
                     mapping.addressing_mode,
-                );
+                )
+                .with_link_settings(link);
 
                 tracing::debug!(
                     ecu = %mapping.ecu_name,
@@ -236,6 +244,7 @@ impl CanDiagGateway {
             probe_sequence: Arc::new(probe_sequence),
             functional_id,
             keepalive_interval: Duration::from_millis(config.keepalive_interval_ms),
+            link,
             variant_detection,
             lifecycle: Arc::new(GatewayLifecycle::new(TransportState::Disabled)),
         };
@@ -312,7 +321,8 @@ impl CanDiagGateway {
                 ids.request,
                 ids.response,
                 CanAddressingMode::Standard,
-            );
+            )
+            .with_link_settings(CanLinkSettings::from(config));
             tracing::debug!(
                 ecu = %name,
                 logical_addr = logical_addr,
@@ -804,6 +814,7 @@ impl TransportControl for CanDiagGateway {
                 self.interface.clone(),
                 self.functional_id,
                 self.keepalive_interval,
+                self.link,
             ));
         }
 
@@ -859,6 +870,7 @@ impl Clone for CanDiagGateway {
             probe_sequence: Arc::clone(&self.probe_sequence),
             functional_id: self.functional_id,
             keepalive_interval: self.keepalive_interval,
+            link: self.link,
             variant_detection: self.variant_detection.clone(),
             lifecycle: Arc::clone(&self.lifecycle),
         }
@@ -897,6 +909,7 @@ impl CanDiagGateway {
             probe_sequence: Arc::new(vec![ProbeRequest::tester_present()]),
             functional_id: CanId::try_from(0x7DF).expect("valid test CAN ID"),
             keepalive_interval: Duration::ZERO,
+            link: CanLinkSettings::default(),
             variant_detection: VariantDetectionSender::new(mpsc::channel(1).0),
             lifecycle: Arc::new(GatewayLifecycle::new(TransportState::Enabled)),
         }

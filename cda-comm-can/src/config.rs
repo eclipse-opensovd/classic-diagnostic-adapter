@@ -90,6 +90,83 @@ pub struct CanConfig {
     /// but do respond to another lightweight diagnostic request.
     #[serde(default)]
     pub probe_fallbacks: Vec<CanProbeConfig>,
+
+    /// Byte used to pad transmitted ISO-TP frames (TX padding is always
+    /// enabled). Defaults to `0x00`; many ECUs expect `0x55` or `0xCC`.
+    /// See `response_timeout_ms` for why the serde default is needed.
+    #[serde(default = "default_padding_byte")]
+    pub padding_byte: u8,
+
+    /// CAN FD (ISO 15765-2:2016) link layer. If present, ISO-TP frames are
+    /// transmitted as CAN FD frames with up to `tx_dl` data bytes; if absent,
+    /// classic CAN frames are used. Received CAN FD frames are accepted
+    /// either way on the userspace backends (`socketcand:`, `rawcan:`).
+    ///
+    /// Example (TOML):
+    /// ```toml
+    /// [can.fd]
+    /// tx_dl = 64
+    /// brs = true
+    /// ```
+    ///
+    /// The CAN interface itself must be configured for CAN FD: e.g.
+    /// `ip link set can0 type can bitrate 500000 dbitrate 2000000 fd on`, or
+    /// a CAN FD capable socketcand server such as `cda-can-bridge` (upstream
+    /// socketcand is classic CAN only).
+    #[serde(default)]
+    pub fd: Option<CanFdConfig>,
+}
+
+/// CAN FD link layer settings for ISO-TP.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+pub struct CanFdConfig {
+    /// Max data bytes per transmitted CAN FD frame (`TX_DL`): one of 8, 12,
+    /// 16, 20, 24, 32, 48, 64. Defaults to 64.
+    #[serde(default = "default_fd_tx_dl")]
+    pub tx_dl: u8,
+
+    /// Transmit with bit rate switch (data phase at the data bitrate).
+    /// Defaults to `true`.
+    #[serde(default = "default_fd_brs")]
+    pub brs: bool,
+}
+
+impl Default for CanFdConfig {
+    fn default() -> Self {
+        Self {
+            tx_dl: default_fd_tx_dl(),
+            brs: default_fd_brs(),
+        }
+    }
+}
+
+impl CanFdConfig {
+    /// Valid CAN FD `TX_DL` values.
+    pub const VALID_TX_DL: [u8; 8] = [8, 12, 16, 20, 24, 32, 48, 64];
+
+    /// Checks that `tx_dl` is a valid CAN FD data length.
+    ///
+    /// # Errors
+    /// Returns a description of the problem if `tx_dl` is invalid.
+    pub fn validate(&self) -> Result<(), String> {
+        if Self::VALID_TX_DL.contains(&self.tx_dl) {
+            Ok(())
+        } else {
+            Err(format!(
+                "invalid can.fd.tx_dl {}: expected one of {:?}",
+                self.tx_dl,
+                Self::VALID_TX_DL
+            ))
+        }
+    }
+}
+
+fn default_fd_tx_dl() -> u8 {
+    64
+}
+
+fn default_fd_brs() -> bool {
+    true
 }
 
 /// Per-ECU transport selection override.
@@ -200,8 +277,14 @@ impl Default for CanConfig {
             keepalive_interval_ms: 0,
             default_probes: true,
             probe_fallbacks: Vec::new(),
+            padding_byte: 0x00,
+            fd: None,
         }
     }
+}
+
+fn default_padding_byte() -> u8 {
+    CanConfig::default().padding_byte
 }
 
 fn default_response_timeout_ms() -> u64 {
@@ -230,7 +313,7 @@ fn default_keepalive_interval_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{CanConfig, CanProbeConfig};
+    use super::{CanConfig, CanFdConfig, CanProbeConfig};
 
     /// `[can]` is an optional config section, so it is deserialized directly
     /// from the user's TOML without the figment defaults tree behind it. A
@@ -256,6 +339,45 @@ mod tests {
         assert!(config.ecu_mappings.is_empty());
         assert!(config.transport_overrides.is_empty());
         assert!(config.probe_fallbacks.is_empty());
+        assert_eq!(config.padding_byte, 0x00);
+        assert!(config.fd.is_none());
+    }
+
+    #[test]
+    fn can_fd_section_deserializes_with_defaults() {
+        let config: CanConfig = toml::from_str(
+            r#"
+            interface = "socketcand:bridge:29536:can0"
+            padding_byte = 0x55
+            [fd]
+            "#,
+        )
+        .expect("fd config");
+        assert_eq!(config.padding_byte, 0x55);
+        let fd = config.fd.expect("fd section");
+        assert_eq!(fd, CanFdConfig::default());
+        assert_eq!(fd.tx_dl, 64);
+        assert!(fd.brs);
+        assert!(fd.validate().is_ok());
+    }
+
+    #[test]
+    fn can_fd_tx_dl_is_validated() {
+        let config: CanConfig = toml::from_str(
+            r#"
+            interface = "can0"
+            [fd]
+            tx_dl = 10
+            brs = false
+            "#,
+        )
+        .expect("fd config");
+        let fd = config.fd.expect("fd section");
+        assert!(!fd.brs);
+        assert!(fd.validate().is_err());
+        for tx_dl in CanFdConfig::VALID_TX_DL {
+            assert!(CanFdConfig { tx_dl, brs: true }.validate().is_ok());
+        }
     }
 
     #[test]
