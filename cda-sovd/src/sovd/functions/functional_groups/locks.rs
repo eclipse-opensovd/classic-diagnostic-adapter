@@ -13,7 +13,7 @@
 
 use aide::{UseApi, transform::TransformOperation};
 use axum::extract::OriginalUri;
-use cda_interfaces::{Connectivity, DiagServiceError, UdsEcu, lock_priority_api::LockScope};
+use cda_interfaces::{DiagServiceError, UdsEcu, lock_priority_api::LockScope};
 use cda_plugin_security::Secured;
 use sovd_interfaces::error::ErrorCode;
 
@@ -270,7 +270,7 @@ async fn ensure_functional_group_online<T: UdsEcu>(
         futures::future::join_all(ecu_names.iter().map(|name| uds.ensure_ecu_online(name))).await;
     if results
         .iter()
-        .any(|r| matches!(r, Ok(state) if state.connectivity == Connectivity::Online))
+        .any(|r| matches!(r, Ok(state) if state.connectivity.is_online()))
     {
         return Ok(());
     }

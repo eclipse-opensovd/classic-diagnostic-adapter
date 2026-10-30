@@ -47,7 +47,8 @@ use http::{HeaderMap, Method, StatusCode};
 use opensovd_cda_lib::config::configfile::{Configuration, ServerTransport};
 use sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response as NetworkStructureResponse;
 use testcontainers::{
-    ContainerAsync, ContainerRequest, GenericImage, ImageExt, TestcontainersError, core::Mount,
+    ContainerAsync, ContainerRequest, GenericImage, ImageExt, TestcontainersError,
+    core::{CmdWaitFor, ExecCommand, Mount},
     runners::AsyncRunner,
 };
 use tokio::sync::{Semaphore, SemaphorePermit};
@@ -371,6 +372,73 @@ impl TestEnv {
         vehicle_url(&self.config, endpoint)
     }
 
+    /// Runs `command` with `sh -c` in the CDA container and returns its
+    /// standard output.
+    ///
+    /// # Errors
+    /// Returns [`TestingError::ProcessFailed`] if the command cannot be run or
+    /// does not exit with 0.
+    pub(crate) async fn exec_in_cda_container(
+        &self,
+        command: &str,
+    ) -> Result<String, TestingError> {
+        let cda = self.cda_container()?;
+        exec_in_container(cda, command).await
+    }
+
+    /// Runs `command` with `sh -c` in the ecu-sim container and returns its
+    /// standard output.
+    ///
+    /// # Errors
+    /// Returns [`TestingError::ProcessFailed`] if the command cannot be run or
+    /// does not exit with 0.
+    pub(crate) async fn exec_in_ecu_sim_container(
+        &self,
+        command: &str,
+    ) -> Result<String, TestingError> {
+        let sim = self.ecu_sim_container()?;
+        exec_in_container(sim, command).await
+    }
+
+    /// Makes the `DoIP` gateway at `ip` unreachable while the other gateways
+    /// stay reachable.
+    ///
+    /// Removes the gateway's `/32` address from the interface of the ecu-sim
+    /// container, so new connections to it time out, and closes all active
+    /// `DoIP` connections (of every gateway; testers of the other gateways
+    /// reconnect). The environment is marked dirty; undo with
+    /// [`Self::start_gateway`].
+    ///
+    /// # Errors
+    /// Returns an error if the address cannot be removed, e.g. because it is
+    /// not configured on the interface.
+    pub(crate) async fn stop_gateway(&mut self, ip: &str) -> Result<(), TestingError> {
+        self.dirty = true;
+        self.exec_in_ecu_sim_container(&format!(
+            "ip -o -4 address show dev eth0 | grep -q ' {ip}/32 ' && ip address del {ip}/32 dev \
+             eth0"
+        ))
+        .await?;
+        ecusim::disconnect(&self.ecu_sim).await
+    }
+
+    /// Makes an address stopped by [`Self::stop_gateway`] reachable again.
+    ///
+    /// # Errors
+    /// Returns an error if the address cannot be added.
+    pub(crate) async fn start_gateway(&self, ip: &str) -> Result<(), TestingError> {
+        self.exec_in_ecu_sim_container(&format!("ip address add {ip}/32 dev eth0"))
+            .await
+            .map(drop)
+    }
+
+    fn cda_container(&self) -> Result<Container, TestingError> {
+        self.containers
+            .cda
+            .clone()
+            .ok_or_else(|| TestingError::SetupError("CDA container is gone".to_owned()))
+    }
+
     /// Removes the CDA container, on a best effort basis.
     async fn stop_cda(&mut self) -> Result<(), TestingError> {
         *self.auth.get_mut().unwrap_or_else(PoisonError::into_inner) = None;
@@ -545,6 +613,26 @@ impl TestEnv {
         discards.retain(|removal| !removal.is_finished());
         discards.push(removal);
     }
+}
+
+/// Runs `command` with `sh -c` in `container` and returns its standard output.
+async fn exec_in_container(container: Container, command: &str) -> Result<String, TestingError> {
+    let command = command.to_owned();
+    on_shared_runtime(async move {
+        let failed =
+            |e: TestcontainersError| TestingError::ProcessFailed(format!("`{command}`: {e}"));
+        // Fails unless the command exits with 0.
+        let mut result = container
+            .exec(
+                ExecCommand::new(["sh", "-c", command.as_str()])
+                    .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
+            )
+            .await
+            .map_err(failed)?;
+        let stdout = result.stdout_to_vec().await.map_err(failed)?;
+        Ok(String::from_utf8_lossy(&stdout).into_owned())
+    })
+    .await
 }
 
 impl Drop for TestEnv {
@@ -842,6 +930,7 @@ pub(crate) fn on_demand_communication() -> CommunicationSettings {
         variant_detection: VariantDetectionMode::Always,
         post_update_mode: PostUpdateCommunicationMode::Enabled,
         deferred_retry_after_seconds: ON_DEMAND_RETRY_AFTER_SECONDS,
+        ..CommunicationSettings::default()
     }
 }
 

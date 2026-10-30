@@ -37,6 +37,6 @@ mod transaction;
 
 pub use collection::{Collection, CollectionName, DirectFileAccess, Metadata, MetadataProperty};
 pub use error::StorageError;
-pub use io::{RandomAccessData, ReadableStream};
+pub use io::{RandomAccessData, RandomAccessReader, ReadableStream};
 pub use storage::Storage;
 pub use transaction::{Operation, Transaction, TransactionCommitter};

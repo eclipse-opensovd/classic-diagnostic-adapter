@@ -33,6 +33,7 @@ members = [
   "cda-plugin-security",
   "cda-plugin-runtime-update",
   "cda-plugin-communication-management",
+  "cda-plugin-topology",
   "cda-health",
   "cda-extra",
   "cda-storage",
@@ -58,6 +59,7 @@ cda-plugin-lock-priority = { path = "cda-plugin-lock-priority" }
 cda-plugin-security = { path = "cda-plugin-security" }
 cda-plugin-runtime-update = { path = "cda-plugin-runtime-update" }
 cda-plugin-communication-management = { path = "cda-plugin-communication-management" }
+cda-plugin-topology = { path = "cda-plugin-topology" }
 cda-sovd = { path = "cda-sovd" }
 cda-tracing = { path = "cda-tracing" }
 cda-health = { path = "cda-health" }
