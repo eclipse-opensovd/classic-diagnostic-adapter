@@ -137,7 +137,7 @@ Entities
 
 .. arch:: Components Entity Collection
     :id: arch~sovd-api-components-entity-collection
-    :links: dimpl~sovd-ecu-last-seen
+    :links: dimpl~sovd-ecu-last-seen, itest~ecu-list-persistence-reuse
     :status: draft
 
     The ``/components`` endpoint serves as the entry point for discovering available ECU entities.

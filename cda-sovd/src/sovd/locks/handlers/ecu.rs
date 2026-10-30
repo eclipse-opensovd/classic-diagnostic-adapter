@@ -18,9 +18,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
-use cda_interfaces::{
-    Connectivity, UdsEcu, file_manager::FileManager, lock_priority_api::LockScope,
-};
+use cda_interfaces::{UdsEcu, file_manager::FileManager, lock_priority_api::LockScope};
 use cda_plugin_security::{Claims, Secured};
 use sovd_interfaces::error::ErrorCode;
 
@@ -202,7 +200,7 @@ pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
     }
 
     let state_error = match uds.get_ecu_state(&ecu_name).await {
-        Ok(state) if state.connectivity == Connectivity::Online => None,
+        Ok(state) if state.connectivity.is_online() => None,
         Ok(_) => Some(ApiError::ServiceUnavailable {
             message: "ecu is offline".to_owned(),
             retry_after: None,

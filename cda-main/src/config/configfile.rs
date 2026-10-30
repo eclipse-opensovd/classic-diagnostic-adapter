@@ -34,7 +34,7 @@ use cda_interfaces::{
 pub use cda_interfaces::{
     TransportType,
     communication_control::{
-        CommunicationInitMode, CommunicationSettings, PostUpdateCommunicationMode,
+        CommunicationInitMode, CommunicationSettings, PostUpdateCommunicationMode, VamHandlingMode,
     },
 };
 pub use cda_plugin_runtime_update::config::RuntimeUpdateConfig;
@@ -441,6 +441,57 @@ impl Configuration {
         }
         Ok(())
     }
+
+    /// A zero settle timeout would persist before discovery and detection can
+    /// finish. There is intentionally no upper bound.
+    fn validate_detection_settle_timeout(&self) -> Result<(), ConfigSanityError> {
+        let seconds = self
+            .communication
+            .ecu_list_persistence
+            .detection_settle_timeout_seconds;
+        if seconds == 0 {
+            return Err(ConfigSanityError::InvalidValue {
+                field: "communication.ecu_list_persistence.detection_settle_timeout_seconds"
+                    .to_owned(),
+                reason: "must be at least 1".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Whether ECU list persistence takes effect: only `DoIP` topologies are
+    /// persisted, so without `DoIP` it behaves as disabled.
+    pub(crate) fn ecu_list_persistence_active(&self) -> bool {
+        self.communication.ecu_list_persistence.enabled && self.doip.enabled
+    }
+
+    /// Logs settings that are valid but have no effect in combination.
+    fn warn_ineffective_communication_settings(&self) {
+        if self.communication.ecu_list_persistence.enabled && !self.doip.enabled {
+            tracing::warn!(
+                "communication.ecu_list_persistence.enabled has no effect while doip.enabled is \
+                 false; the persisted topology covers DoIP gateways only"
+            );
+        }
+        if self.communication.init_mode == CommunicationInitMode::WhenNotPersisted
+            && !self.ecu_list_persistence_active()
+        {
+            tracing::warn!(
+                "communication.init_mode = \"WhenNotPersisted\" behaves like \"Always\" while \
+                 communication.ecu_list_persistence is effectively disabled (disabled or \
+                 doip.enabled is false)"
+            );
+        }
+        if self.communication.vam_handling_mode == VamHandlingMode::PersistedOnly
+            && !self.ecu_list_persistence_active()
+        {
+            tracing::warn!(
+                "communication.vam_handling_mode = \"PersistedOnly\" behaves like \"Never\" while \
+                 communication.ecu_list_persistence is effectively disabled (disabled or \
+                 doip.enabled is false)"
+            );
+        }
+    }
 }
 
 impl ConfigSanity for Configuration {
@@ -453,6 +504,8 @@ impl ConfigSanity for Configuration {
         self.validate_transport_overrides()?;
         self.locks.validate_sanity()?;
         self.validate_flash_functional_class_default()?;
+        self.validate_detection_settle_timeout()?;
+        self.warn_ineffective_communication_settings();
         // Add more checks for Configuration fields here if needed
         Ok(())
     }
@@ -1063,6 +1116,10 @@ parameter_validation = true
         assert_eq!(
             defaults.communication.post_update_mode,
             PostUpdateCommunicationMode::Enabled
+        );
+        assert!(
+            !defaults.communication.ecu_list_persistence.enabled,
+            "ECU list persistence must be disabled by default"
         );
 
         for init_mode in ["OnDemand", "Disabled"] {

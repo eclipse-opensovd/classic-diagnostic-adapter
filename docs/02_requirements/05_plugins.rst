@@ -313,7 +313,7 @@ Vehicle Topology Plugin
       performing any live detection or vehicle communication. Subsequent behavior is governed by
       :need:`req~dt-deferred-initialization` (``init_mode``) as if no persisted topology had ever existed.
     - ``clear_persisted=false``, ``trigger_detection=true``: a live detection run is performed and its
-      results are merged (upserted) into the existing persisted topology, without first removing entries
+      results are merged (persisted) into the existing persisted topology, without first removing entries
       for gateways/ECUs not seen during this run.
     - ``clear_persisted=false``, ``trigger_detection=false``: no operation is performed; this combination
       must be rejected as an invalid request.

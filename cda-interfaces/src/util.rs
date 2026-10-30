@@ -21,6 +21,19 @@ pub fn system_time_to_rfc3339(time: std::time::SystemTime) -> String {
     chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+/// Parses an RFC 3339 timestamp. `None` if it is invalid or not representable as
+/// [`SystemTime`](std::time::SystemTime) on this platform, e.g. before 1601 on Windows.
+#[must_use]
+pub fn rfc3339_to_system_time(value: &str) -> Option<std::time::SystemTime> {
+    let since_epoch = chrono::DateTime::parse_from_rfc3339(value)
+        .ok()?
+        .signed_duration_since(chrono::DateTime::UNIX_EPOCH);
+    match since_epoch.to_std() {
+        Ok(after) => std::time::UNIX_EPOCH.checked_add(after),
+        Err(_) => std::time::UNIX_EPOCH.checked_sub(since_epoch.abs().to_std().ok()?),
+    }
+}
+
 pub mod tracing {
     #[must_use]
     pub fn print_hex(data: &[u8], max_size: usize) -> String {
@@ -578,6 +591,19 @@ mod tests {
     #[test]
     fn formats_unix_epoch() {
         assert_eq!(system_time_to_rfc3339(UNIX_EPOCH), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn parses_rfc3339_before_and_after_the_epoch() {
+        assert_eq!(
+            rfc3339_to_system_time("2026-01-02T03:04:05Z"),
+            Some(UNIX_EPOCH + Duration::from_secs(1_767_323_045))
+        );
+        assert_eq!(
+            rfc3339_to_system_time("1969-12-31T23:59:58.5Z"),
+            UNIX_EPOCH.checked_sub(Duration::from_millis(1_500))
+        );
+        assert_eq!(rfc3339_to_system_time("not a time"), None);
     }
 
     /// A task that never finishes is cancelled, and one that already

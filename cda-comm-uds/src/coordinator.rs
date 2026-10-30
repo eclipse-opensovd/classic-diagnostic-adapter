@@ -67,6 +67,11 @@ pub struct EcuCoordinatorHandle {
     /// Trigger generation for detections on this handle; see
     /// [`Self::begin_detection`].
     detection_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Number of connects reported for this ECU; see [`Self::record_connected`].
+    connect_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// `connect_epoch` when the last detection started; see
+    /// [`Self::connected_since_detection`].
+    detection_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl EcuCoordinatorHandle {
@@ -95,7 +100,37 @@ impl EcuCoordinatorHandle {
             state,
             detection_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             detection_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            connect_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            detection_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// Records that the ECU's transport (re)connected.
+    pub fn record_connected(&self) {
+        self.connect_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Records that a detection starts now, so it counts for every connect recorded before.
+    pub fn record_detection_started(&self) {
+        self.detection_epoch.store(
+            self.connect_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            std::sync::atomic::Ordering::Release,
+        );
+    }
+
+    /// Whether the transport connected after the last detection started. The
+    /// verdict of that detection may come from the replaced connection, so it
+    /// must not be taken for the state of the ECU, whatever it says.
+    #[must_use]
+    pub fn connected_since_detection(&self) -> bool {
+        let detection_epoch = self
+            .detection_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+        self.connect_epoch
+            .load(std::sync::atomic::Ordering::Acquire)
+            > detection_epoch
     }
 
     /// Read the current ECU status (synchronous, no mailbox round-trip).
@@ -234,8 +269,9 @@ impl Message<ClearServiceStates> for EcuCoordinator {
 
 /// ECU disconnected event -> sets connectivity to Offline, preserving variant state.
 ///
-/// Only transitions from `Online` to `Offline`. If already `Offline`, this is a no-op.
-/// Variant state is preserved.
+/// Transitions from `Online` or `AssumedOnline` to `Offline`. If already `Offline`, this
+/// is a no-op. Variant state is preserved, so an ECU that was known to be reachable is
+/// reported as Disconnected.
 pub struct EcuDisconnected;
 
 impl Message<EcuDisconnected> for EcuCoordinator {
@@ -256,10 +292,11 @@ impl Message<EcuDisconnected> for EcuCoordinator {
 
         let mut ecu_state = std_ext::lock_write(&self.state.ecu_state);
 
-        if ecu_state.connectivity == Connectivity::Online {
+        if ecu_state.connectivity.is_online() {
             tracing::info!(
                 ecu = %self.ecu_name,
                 dlt_context = dlt_ctx!("UDS"),
+                previous = ?ecu_state.connectivity,
                 "ECU disconnected. Setting connectivity to Offline"
             );
             ecu_state.connectivity = Connectivity::Offline;
@@ -279,7 +316,9 @@ impl Message<EcuDisconnected> for EcuCoordinator {
 
 /// ECU connected event -> sets connectivity to Online and clears variant for re-detection.
 ///
-/// Only transitions from `Offline` to `Online`. If already `Online`, this is a no-op.
+/// Only transitions from `Offline` to `Online`. If already `Online` or `AssumedOnline`,
+/// this is a no-op: an `AssumedOnline` ECU keeps its restored variant until it is
+/// contacted, so connecting its gateway does not trigger a re-detection.
 /// Variant state is cleared to `NotTested` because the ECU may have rebooted while offline
 /// (e.g. into a different session/variant).
 ///
@@ -312,9 +351,35 @@ impl Message<EcuConnected> for EcuCoordinator {
             tracing::debug!(
                 ecu = %self.ecu_name,
                 current = ?ecu_state.connectivity,
-                "ECU connected received but already Online..skipping"
+                "ECU connected received but already (assumed) Online..skipping"
             );
             false
+        }
+    }
+}
+
+/// ECU replied to a diagnostic request -> confirms an `AssumedOnline` ECU as `Online`.
+///
+/// Any other connectivity is left unchanged: `Online` stays `Online`, and `Offline` is
+/// only left through a connect or variant detection.
+pub struct EcuResponded;
+
+impl Message<EcuResponded> for EcuCoordinator {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _msg: EcuResponded,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let mut ecu_state = std_ext::lock_write(&self.state.ecu_state);
+        if ecu_state.connectivity == Connectivity::AssumedOnline {
+            tracing::info!(
+                ecu = %self.ecu_name,
+                dlt_context = dlt_ctx!("UDS"),
+                "Assumed online ECU responded. Setting connectivity to Online"
+            );
+            ecu_state.connectivity = Connectivity::Online;
         }
     }
 }

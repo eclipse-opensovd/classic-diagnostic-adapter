@@ -598,8 +598,9 @@ fn follow_logs_since(container_id: String, service: Service, owner: ContainerOwn
     });
 }
 
-/// Seconds since the Unix epoch, as taken by [`follow_logs_since`].
-fn unix_time_secs() -> i32 {
+/// The current time in seconds since the Unix epoch, as Docker takes it for
+/// `since`.
+pub(crate) fn unix_time_secs() -> i32 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()

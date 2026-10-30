@@ -45,6 +45,7 @@ mod operations;
 mod read_only_partition;
 mod runtimefiles;
 mod tester_present;
+mod topology_persistence;
 mod version_endpoint;
 
 pub(crate) use crate::util::endpoints::{

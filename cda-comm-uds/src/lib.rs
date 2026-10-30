@@ -14,13 +14,14 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, FunctionalDescriptionConfig,
-    HashMap, HashMapExtensions, SchemaDescription, SchemaProvider, UdsEcu, UdsEcuDb, UdsTransport,
-    VariantDetectionReceiver,
+    Connectivity, DetectionTracker, DiagComm, DiagServiceError, DynamicPlugin, EcuGateway,
+    EcuManager, FunctionalDescriptionConfig, HashMap, HashMapExtensions, SchemaDescription,
+    SchemaProvider, UdsEcu, UdsEcuDb, UdsTransport, VariantDetectionReceiver,
     communication_control::{ActivationCause, CommunicationAccess, CommunicationGuard},
     datatypes::FaultConfig,
     diagservices::UdsPayloadData,
     request_authorization::RequestLockProvider,
+    topology::EcuTopologyEntry,
 };
 use tokio::{
     sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore},
@@ -128,6 +129,11 @@ pub struct UdsManager<S: EcuGateway, T: UdsEcuDb> {
     /// work runs before an authorized activation.
     variant_detection_receiver: Arc<Mutex<Option<VariantDetectionReceiver>>>,
     variant_detection_listener: VariantDetectionListener,
+    /// Counts queued and running variant detections, see [`DetectionTracker`].
+    detection_tracker: DetectionTracker,
+    /// Set by `initialize`, consumed by the activation's `detect`, to tell it
+    /// apart from an explicit re-detection.
+    activation_detection_pending: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
@@ -219,9 +225,63 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             request_lock_provider,
             communication_access,
             communication_retry_after,
+            detection_tracker: variant_detection_receiver.tracker().clone(),
+            activation_detection_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             variant_detection_receiver: Arc::new(Mutex::new(Some(variant_detection_receiver))),
             variant_detection_listener: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Tracker that is idle once no variant detection is queued or running.
+    #[must_use]
+    pub fn detection_tracker(&self) -> &DetectionTracker {
+        &self.detection_tracker
+    }
+
+    /// Resets the physical ECUs that are still assumed online from a persisted
+    /// topology to `NotTested` (keeping `last_seen`), e.g. before an explicit
+    /// re-detection.
+    pub async fn reset_ecu_states(&self)
+    where
+        T: EcuManager,
+    {
+        for ecu in self.ecus.values() {
+            let ecu = ecu.read().await;
+            if !ecu.is_physical_ecu() {
+                continue;
+            }
+            let runtime_state = ecu.runtime_state();
+            {
+                let mut state = cda_interfaces::util::std_ext::lock_write(&runtime_state.ecu_state);
+                if state.connectivity != Connectivity::AssumedOnline {
+                    continue;
+                }
+                *state = cda_interfaces::EcuState::default();
+            }
+            runtime_state.publish_variant_state(cda_interfaces::VariantState::NotTested);
+        }
+    }
+
+    /// Snapshot of all physical ECUs for topology persistence.
+    pub async fn ecu_topology_entries(&self) -> Vec<EcuTopologyEntry>
+    where
+        T: EcuManager,
+    {
+        let mut entries = Vec::new();
+        for (name, ecu) in self.ecus.iter() {
+            let ecu = ecu.read().await;
+            if !ecu.is_physical_ecu() {
+                continue;
+            }
+            entries.push(EcuTopologyEntry {
+                name: name.clone(),
+                logical_address: ecu.logical_address(),
+                gateway_address: ecu.logical_gateway_address(),
+                state: ecu.ecu_status(),
+                runtime_state: ecu.runtime_state(),
+            });
+        }
+        entries
     }
 
     /// Stops the listener, then either drops its receiver or drains and retains
@@ -387,6 +447,8 @@ impl<S: Clone + EcuGateway, T: UdsEcuDb> Clone for UdsManager<S, T> {
             communication_retry_after: self.communication_retry_after,
             variant_detection_receiver: Arc::clone(&self.variant_detection_receiver),
             variant_detection_listener: Arc::clone(&self.variant_detection_listener),
+            detection_tracker: self.detection_tracker.clone(),
+            activation_detection_pending: Arc::clone(&self.activation_detection_pending),
         }
     }
 }

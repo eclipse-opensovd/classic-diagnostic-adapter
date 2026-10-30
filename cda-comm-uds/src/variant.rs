@@ -22,9 +22,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState, HashMap,
-    HashMapExtensions, HashSet, HashSetExtensions, PayloadDecoder, ServicePayload, UdsVariant,
-    VariantState,
+    Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState,
+    HashMap, HashMapExtensions, HashSet, HashSetExtensions, PayloadDecoder, ServicePayload,
+    UdsVariant, VariantState,
     communication_control::{
         ActivationCause, CommunicationLifecycle, CommunicationState, CommunicationVariantDetection,
         VariantDetectionMode, error::CommControlError,
@@ -69,19 +69,30 @@ async fn claim_detection(
         return DetectionPermit::Run(None);
     };
 
-    if matches!(trigger, DetectionTrigger::Forced) {
-        return DetectionPermit::Run(Some(lock_handle.begin_forced_detection().await));
-    }
-
-    let Some(guard) = lock_handle.begin_detection().await else {
-        return DetectionPermit::Skip;
+    let guard = if matches!(trigger, DetectionTrigger::Forced) {
+        lock_handle.begin_forced_detection().await
+    } else {
+        let Some(guard) = lock_handle.begin_detection().await else {
+            return DetectionPermit::Skip;
+        };
+        // A connect after the last detection started makes its verdict
+        // untrustworthy even when it settled the state: a detection that
+        // raced the reconnect can conclude "no variant" from the replaced
+        // connection, and nothing else would correct that.
+        if !state_handles.is_empty()
+            && !state_handles
+                .iter()
+                .any(|handle| needs_variant_detection(&handle.ecu_status()))
+            && !state_handles
+                .iter()
+                .any(|handle| handle.connected_since_detection())
+        {
+            return DetectionPermit::Skip;
+        }
+        guard
     };
-    if !state_handles.is_empty()
-        && !state_handles
-            .iter()
-            .any(|handle| needs_variant_detection(&handle.ecu_status()))
-    {
-        return DetectionPermit::Skip;
+    for handle in state_handles {
+        handle.record_detection_started();
     }
     DetectionPermit::Run(Some(guard))
 }
@@ -94,8 +105,7 @@ async fn claim_detection(
 fn needs_offline_retry(state_handles: &[&EcuCoordinatorHandle]) -> bool {
     state_handles.iter().any(|handle| {
         let status = handle.ecu_status();
-        status.connectivity == cda_interfaces::Connectivity::Offline
-            && needs_variant_detection(&status)
+        status.connectivity == Connectivity::Offline && needs_variant_detection(&status)
     })
 }
 
@@ -152,6 +162,9 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             tracing::debug!(ecu_name, "Variant detection trigger obsolete, skipping");
             return Ok(());
         };
+        // Counted only when a detection actually runs, so a skipped probe does not
+        // count as a detection run (and is not persisted as one).
+        let _ticket = self.detection_tracker.begin();
 
         let Some(mut duplicated_ecus) = ecu
             .read()
@@ -467,6 +480,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
 
         for ecu_name in representatives {
             let vd = self.clone();
+            let ticket = self.detection_tracker.begin();
             cda_interfaces::spawn_named!(&format!("variant-detection-{ecu_name}"), async move {
                 // Retry budget for detections that conclude offline: such a
                 // verdict is usually transient here (the detection raced the
@@ -479,6 +493,8 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 // offline ECUs still settle at Offline after the retries.
                 const OFFLINE_VERDICT_RETRIES: u32 = 3;
                 const OFFLINE_VERDICT_RETRY_DELAY: Duration = Duration::from_secs(1);
+                // Keeps detection pending across the retries below.
+                let _ticket = ticket;
 
                 for attempt in 0..=OFFLINE_VERDICT_RETRIES {
                     if attempt > 0 {
@@ -522,13 +538,26 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     #[tracing::instrument(skip_all,
         fields(dlt_context = dlt_ctx!("UDS"))
     )]
-    async fn start_variant_detection(&self) {
+    async fn start_variant_detection(&self, after_activation: bool) {
         let mut ecus = Vec::new();
         for (ecu_name, db) in self.ecus.iter() {
             if !db.read().await.is_physical_ecu() {
                 tracing::debug!(
                     ecu_name = %ecu_name,
                     "Skip variant detection for functional description"
+                );
+                continue;
+            }
+            // Restored from a persisted topology: keeps its variant until contacted,
+            // and its gateway may not be connected yet, which must not mark it
+            // offline here. Only for the detection of an activation; an explicit
+            // re-detection reset these ECUs to NotTested before.
+            if after_activation
+                && db.read().await.ecu_status().connectivity == Connectivity::AssumedOnline
+            {
+                tracing::debug!(
+                    ecu_name = %ecu_name,
+                    "Skip variant detection for ECU restored as assumed online"
                 );
                 continue;
             }
@@ -878,13 +907,12 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 tracing::warn!(
                     "Variant detection failed for ECU {ecu_name}: {e:?}, marking as undetected"
                 );
-                any_online |= ecu.read().await.ecu_status().connectivity
-                    == cda_interfaces::Connectivity::Online;
+                any_online |= ecu.read().await.ecu_status().connectivity == Connectivity::Online;
                 continue;
             }
 
             let status = ecu.read().await.ecu_status();
-            any_online |= status.connectivity == cda_interfaces::Connectivity::Online;
+            any_online |= status.connectivity == Connectivity::Online;
             if !status.is_online_and_detected() {
                 continue;
             }
@@ -997,6 +1025,8 @@ impl<S: EcuGateway, T: EcuManager> CommunicationLifecycle for UdsManager<S, T> {
     }
 
     async fn initialize(&self) -> Result<(), CommControlError> {
+        self.activation_detection_pending
+            .store(true, std::sync::atomic::Ordering::Release);
         // Start the variant-detection listener if it is not already running.
         if let Some(mut receiver) = self.variant_detection_receiver.lock().await.take() {
             let uds_manager = self.clone();
@@ -1004,12 +1034,14 @@ impl<S: EcuGateway, T: EcuManager> CommunicationLifecycle for UdsManager<S, T> {
             let task_cancel = cancel.clone();
             let listener = cda_interfaces::spawn_named!("variant-detection-receiver", async move {
                 loop {
-                    let ecus = tokio::select! {
+                    // The ticket keeps the tracker busy until the detections
+                    // below are spawned and hold tickets of their own.
+                    let (ecus, _ticket) = tokio::select! {
                         biased; // prefer cancellation over variant detection
                         () = task_cancel.cancelled() => break,
-                        ecus = receiver.recv() => {
-                            let Some(ecus) = ecus else { break };
-                            ecus.into_ecus()
+                        received = receiver.recv_tracked() => {
+                            let Some((request, ticket)) = received else { break };
+                            (request.into_ecus(), ticket)
                         }
                     };
                     let mut processed_duplicates = HashSet::new();
@@ -1047,11 +1079,19 @@ impl<S: EcuGateway, T: EcuManager> CommunicationLifecycle for UdsManager<S, T> {
     }
 
     async fn on_enabled(&self) {
+        // The activation is complete, with or without detection (`Never` mode).
+        self.activation_detection_pending
+            .store(false, std::sync::atomic::Ordering::Release);
         self.resume_tester_present().await;
         self.resume_deferred_resets().await;
     }
 
     async fn deinitialize(&self) {
+        // A failed activation (a later initializer failing) must not leave the
+        // flag set, or the next explicit re-detection is mistaken for one
+        // following an activation.
+        self.activation_detection_pending
+            .store(false, std::sync::atomic::Ordering::Release);
         self.suspend_tester_present().await;
         self.stop_variant_detection_listener(ReceiverRetention::Keep)
             .await;
@@ -1065,7 +1105,16 @@ impl<S: EcuGateway, T: EcuManager> CommunicationVariantDetection for UdsManager<
     }
 
     async fn detect(&self) -> Result<(), CommControlError> {
-        self.start_variant_detection().await;
+        // `initialize` runs on every activation, right before its detection;
+        // any other call is an explicit re-detection.
+        let after_activation = self
+            .activation_detection_pending
+            .swap(false, std::sync::atomic::Ordering::AcqRel);
+        if !after_activation {
+            // Explicit re-detection: AssumedOnline -> NotTested.
+            self.reset_ecu_states().await;
+        }
+        self.start_variant_detection(after_activation).await;
         Ok(())
     }
 }
@@ -1122,6 +1171,77 @@ mod tests {
             matches!(queued.await.expect("queued trigger"), DetectionPermit::Skip),
             "successful detection must suppress queued automatic trigger"
         );
+    }
+
+    fn mark_online_not_detected(handle: &EcuCoordinatorHandle) {
+        let mut state = handle.state.ecu_state.write().unwrap();
+        state.connectivity = Connectivity::Online;
+        state.variant_state = VariantState::NotDetected;
+    }
+
+    /// A detection that raced a reconnect can settle the state from the replaced
+    /// connection; the trigger of the reconnect queued behind it must still run.
+    #[tokio::test]
+    async fn queued_automatic_detection_runs_after_reconnect_during_detection() {
+        let handle = EcuCoordinatorHandle::spawn("TestECU".to_owned());
+        let DetectionPermit::Run(Some(in_flight)) =
+            claim_detection(Some(&handle), &[&handle], DetectionTrigger::IfNeeded).await
+        else {
+            panic!("the first detection must run");
+        };
+
+        handle.record_connected();
+        let queued_handle = handle.clone();
+        let queued = tokio::spawn(async move {
+            claim_detection(
+                Some(&queued_handle),
+                &[&queued_handle],
+                DetectionTrigger::IfNeeded,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+
+        mark_online_not_detected(&handle);
+        drop(in_flight);
+
+        assert!(
+            matches!(
+                queued.await.expect("queued trigger"),
+                DetectionPermit::Run(Some(_))
+            ),
+            "a reconnect during the detection must permit the queued trigger"
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_automatic_detection_is_skipped_without_reconnect_during_detection() {
+        let handle = EcuCoordinatorHandle::spawn("TestECU".to_owned());
+        handle.record_connected();
+        let DetectionPermit::Run(Some(in_flight)) =
+            claim_detection(Some(&handle), &[&handle], DetectionTrigger::IfNeeded).await
+        else {
+            panic!("the first detection must run");
+        };
+
+        let queued_handle = handle.clone();
+        let queued = tokio::spawn(async move {
+            claim_detection(
+                Some(&queued_handle),
+                &[&queued_handle],
+                DetectionTrigger::IfNeeded,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+
+        mark_online_not_detected(&handle);
+        drop(in_flight);
+
+        assert!(matches!(
+            queued.await.expect("queued trigger"),
+            DetectionPermit::Skip
+        ));
     }
 
     #[tokio::test]

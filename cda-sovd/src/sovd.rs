@@ -94,9 +94,17 @@ impl IntoSovd for cda_interfaces::EcuState {
     fn into_sovd(self) -> Self::SovdType {
         match (&self.connectivity, &self.variant_state) {
             (_, VariantState::Duplicate) => sovd_ecu::State::Duplicate,
-            (Connectivity::Online, VariantState::Detected { .. }) => sovd_ecu::State::Online,
-            (Connectivity::Online, VariantState::NotDetected) => sovd_ecu::State::NoVariantDetected,
-            (Connectivity::Online, VariantState::NotTested) => sovd_ecu::State::NotTested,
+            // AssumedOnline is internal-only and reported like Online; `last_seen`
+            // tells clients how current that is.
+            (Connectivity::Online | Connectivity::AssumedOnline, VariantState::Detected { .. }) => {
+                sovd_ecu::State::Online
+            }
+            (Connectivity::Online | Connectivity::AssumedOnline, VariantState::NotDetected) => {
+                sovd_ecu::State::NoVariantDetected
+            }
+            (Connectivity::Online | Connectivity::AssumedOnline, VariantState::NotTested) => {
+                sovd_ecu::State::NotTested
+            }
             (Connectivity::Offline, VariantState::NotTested) => sovd_ecu::State::Offline,
             (Connectivity::Offline, VariantState::Detected { .. } | VariantState::NotDetected) => {
                 sovd_ecu::State::Disconnected
@@ -1688,6 +1696,58 @@ pub(crate) mod tests {
 
         assert!(matches!(error.error, ApiError::Conflict(_)));
         assert_eq!(Arc::strong_count(&access.active), 1);
+    }
+
+    /// [[ test~ecu-state-assumed-online-reported-as-online, An `AssumedOnline` ECU is reported like an Online one over SOVD, test ]]
+    #[test]
+    fn assumed_online_is_reported_like_online() {
+        let detected = VariantState::Detected {
+            name: "Variant".to_owned(),
+            is_base_variant: false,
+            is_fallback: false,
+        };
+        for variant_state in [
+            detected,
+            VariantState::NotDetected,
+            VariantState::NotTested,
+            VariantState::Duplicate,
+        ] {
+            let state = |connectivity| {
+                cda_interfaces::EcuState {
+                    connectivity,
+                    variant_state: variant_state.clone(),
+                    variant_index: None,
+                }
+                .into_sovd()
+            };
+            assert_eq!(
+                state(Connectivity::AssumedOnline),
+                state(Connectivity::Online),
+                "{variant_state:?}"
+            );
+        }
+        let assumed = |variant_state| {
+            cda_interfaces::EcuState {
+                connectivity: Connectivity::AssumedOnline,
+                variant_state,
+                variant_index: None,
+            }
+            .into_sovd()
+        };
+        assert_eq!(
+            assumed(VariantState::Detected {
+                name: "Variant".to_owned(),
+                is_base_variant: false,
+                is_fallback: false,
+            }),
+            sovd_ecu::State::Online
+        );
+        assert_eq!(assumed(VariantState::NotTested), sovd_ecu::State::NotTested);
+        assert_eq!(
+            assumed(VariantState::NotDetected),
+            sovd_ecu::State::NoVariantDetected
+        );
+        assert_eq!(assumed(VariantState::Duplicate), sovd_ecu::State::Duplicate);
     }
 
     pub fn create_test_webserver_state<T: UdsEcu + Clone, U: FileManager>(
