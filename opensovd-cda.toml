@@ -475,7 +475,10 @@
 # diagnostic request arrives while initialization is still pending.
 # deferred_retry_after_seconds = 30
 # Controls when diagnostic transport network activation begins:
-# - "Always": whole-vehicle communication initializes eagerly at startup (default).
+# - "Always": whole-vehicle communication initializes eagerly at startup,
+#   always with a full VIR discovery (default).
+# - "WhenNotPersisted": like "Always", but a persisted topology (see
+#   `ecu_list_persistence`) is reused instead of a VIR discovery.
 # - "OnDemand": HTTP/SOVD starts first. The first qualifying ECU diagnostic
 #   request, or an explicit `activate()` call, triggers initialization.
 # - "Disabled": HTTP/SOVD starts first. The default communication plugin
@@ -489,6 +492,12 @@
 # - "Deferred": leave communication deferred even if the update displaced
 #   an enabled runtime. The transport stays down until triggered.
 # post_update_mode = "Enabled"
+# Handling of spontaneous vehicle announcements (VAMs):
+# - "Always": connect announced gateways and detect their ECUs (default).
+# - "PersistedOnly": only while a persisted topology exists; like "Never"
+#   while `ecu_list_persistence` is disabled.
+# - "Never": do not listen for spontaneous announcements.
+# vam_handling_mode = "Always"
 # Controls whether enabling communication also runs whole-vehicle variant
 # detection:
 # - "Always": the registered detector runs as the last stage of every
@@ -497,6 +506,21 @@
 #   only, so variant-dependent surfaces report not-ready until detection is
 #   triggered explicitly.
 # variant_detection = "Always"
+
+# Persistence of the detected ECU/gateway topology.
+[communication.ecu_list_persistence]
+# Upper bound (in seconds) for waiting until gateway discovery and
+# variant detection have settled before the result is persisted.
+# Must be at least 1.
+# detection_settle_timeout_seconds = 60
+# When `true`, the detected topology is persisted after every detection
+# run and `last_seen` timestamps are written back at shutdown. With
+# `init_mode = "WhenNotPersisted"` (or `OnDemand`/`Disabled` once
+# triggered), a persisted topology is reused instead of a full
+# VIR/VAM discovery. When `false` (default), the persisted
+# topology is never read or written. Requires `DoIP` (`doip.enabled =
+# true`); without `DoIP` it behaves as `false`.
+# enabled = false
 
 [components.additional_fields.x-sovd2uds-can-ecus.CAN]
 # ignore_case = true
@@ -708,11 +732,18 @@
 # Only available in builds with the `doip-direct-connect` feature. If set
 # without that feature, an error is logged and the operation remains unavailable.
 # direct_connect_enabled = false
-# How gateways are discovered on the network:
-# - `Disabled`: no discovery of any kind, ECUs are only connected through an
-#   explicit direct-connect request.
-# - `VamOnly`: only react to spontaneous VAMs, no VIR is broadcast.
-# - `Full`: broadcast a VIR on startup and react to the resulting and later VAMs.
+# How gateways are discovered on the network, once communication has been
+# initialized (independent of `communication.init_mode`):
+# - `Disabled`: no VIR, VAMs are ignored and persisted gateways are not
+#   reconnected. ECUs are only connected through an explicit direct-connect
+#   request.
+# - `VamOnly`: no VIR, neither at startup nor as a fallback. VAMs are handled
+#   as `communication.vam_handling_mode` allows. Persisted gateways are
+#   reconnected by unicast; one that cannot be connected is reported
+#   unreachable.
+# - `Full`: broadcast a VIR on startup and handle VAMs as
+#   `communication.vam_handling_mode` allows. A persisted gateway that cannot
+#   be reached at its persisted address is searched by VIR.
 # discovery = "Full"
 # Whether the `DoIP` transport is enabled.
 # When `false`, CDA skips `DoIP` initialization entirely (useful for

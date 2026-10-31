@@ -190,7 +190,7 @@ Communication Initialization Mode
       attempt a direct (unicast) DoIP connection to each persisted gateway's known network address,
       skipping the broadcast VIR step; if a gateway cannot be reached at its persisted address, the CDA
       must fall back to broadcast-based discovery for that specific gateway, as defined in
-      :need:`req~doip-vehicle-identification`, before marking its ECUs as Offline. This mode requires ECU
+      :need:`req~doip-vehicle-identification`, before marking its ECUs as Disconnected. This mode requires ECU
       list persistence to be enabled; it is equivalent to **Always** if persistence is disabled, since no
       persisted topology can ever exist in that configuration.
     - **OnDemand** -- DoIP gateway initialization and ECU discovery are postponed until one of the
@@ -215,6 +215,9 @@ Communication Initialization Mode
       a plugin or other custom code may equally initiate a detection run directly. Once triggered, this
       always initializes all gateways/ECUs at once (there is no per-ECU auto-trigger in this mode),
       applying the same persisted-vs-broadcast behavior as **WhenNotPersisted**.
+
+    The broadcast steps of all modes apply only if the DoIP discovery mode allows a VIR (see
+    :need:`req~doip-discovery-mode`).
 
     In both **OnDemand** and **Disabled** mode:
 
@@ -310,7 +313,9 @@ Variant Detection
 
     The following requirements apply:
 
-    - Variant detection must be initiated automatically after startup (unless deferred initialization is enabled)
+    - Variant detection must be initiated automatically after startup (unless deferred initialization is
+      enabled, or the ECU's last known variant is restored from a persisted topology, see
+      :need:`req~dt-ecu-list-persistence`)
     - Variant detection requests must be sent as defined in the MDD variant detection configuration
     - Responses must be evaluated against variant patterns defined in the MDD
     - For ECUs with duplicate definitions (same logical address), variant detection must determine which definition applies
@@ -337,7 +342,8 @@ ECU States
     The following states must be supported:
 
     - **NotTested**: ECU is registered but variant detection has not been performed
-    - **Online**: ECU is reachable and variant has been successfully detected
+    - **Online**: ECU is reachable and variant has been successfully detected, or restored from a persisted
+      ECU list and confirmed reachable by a reply of the ECU (see :need:`req~dt-ecu-list-persistence`)
     - **AssumedOnline**: ECU was known to be Online according to a persisted ECU list (see
       :need:`req~dt-ecu-list-persistence`), but has not yet been contacted in the current session
     - **NoVariantDetected**: ECU is reachable but no matching variant pattern was found (using fallback if enabled)
@@ -356,7 +362,8 @@ ECU States
     - Offline --> NotTested (reconnection attempt or explicit re-detection requested)
     - Online --> Disconnected (connection lost)
     - Online --> NotTested (explicit re-detection requested)
-    - AssumedOnline --> Online (the ECU replied, e.g. to its first diagnostic request or to a re-detection)
+    - AssumedOnline --> Online (the ECU replied, e.g. to its first diagnostic request or to a re-detection;
+      the restored variant is kept, not re-detected)
     - AssumedOnline --> Disconnected (contact attempted but ECU unreachable)
     - AssumedOnline --> NotTested (explicit re-detection requested)
     - NoVariantDetected --> Online (successful re-detection)
@@ -492,6 +499,13 @@ ECU List Persistence
       ``init_mode``, select the applicable startup behavior (see :need:`req~dt-deferred-initialization`)
     - When an ECU is loaded from a persisted topology with a last known state of Online, it must be
       registered in the AssumedOnline state (see :need:`req~dt-ecu-states`) rather than NotTested
+    - A variant restored from the persisted topology is not verified against the ECU: the first reply of
+      the ECU (positive or negative) confirms it as Online with the restored variant, and no variant
+      detection runs for it until one is explicitly requested (see :need:`req~dt-variant-detection`) or a
+      detection run is triggered (e.g. via ``networkreset``, see :need:`req~plugin-vehicle-topology-reset`).
+      Consequently, a variant change that happened while the CDA was not running (e.g. the ECU was flashed
+      by another tester, or is running its boot variant) remains undetected. Deployments where this can
+      occur should use ``init_mode = Always``, or trigger a re-detection after such changes.
     - When the Vehicle Topology Plugin is loaded, it must be possible to clear the persisted topology
       independently of triggering a new detection run (see
       :need:`req~plugin-vehicle-topology-reset-clear-persisted`); this has no observable effect when
@@ -507,6 +521,10 @@ ECU List Persistence
     an opt-in capability (disabled by default), preserving the CDA's established default behavior of always
     performing a full VIR/VAM broadcast detection at startup when left unconfigured (see the **Always** vs
     **WhenNotPersisted** distinction in :need:`req~dt-deferred-initialization`).
+
+    The restored variant is trusted on purpose: verifying it would require the same UDS traffic per ECU that
+    persisting the topology is meant to avoid. The ``last_seen`` timestamp tells clients how old the
+    restored information is.
 
 
 ECU List Persistence - Shutdown Update

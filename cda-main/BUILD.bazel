@@ -26,6 +26,7 @@ workspace_rust_library(
     ),
     crate_deps = [
         "backon",
+        "chrono",
         "clap",
         "figment",
         "futures",
@@ -35,6 +36,7 @@ workspace_rust_library(
         "serde_json",
         "thiserror",
         "tokio",
+        "tokio-util",
         "toml",
         "tracing",
         "tracing-subscriber",
@@ -72,6 +74,7 @@ workspace_rust_library(
         "//cda-plugin-lock-priority:cda_plugin_lock_priority",
         "//cda-plugin-runtime-update:cda_plugin_runtime_update",
         "//cda-plugin-security:cda_plugin_security",
+        "//cda-plugin-topology:cda_plugin_topology",
         "//cda-sovd:cda_sovd",
         "//cda-storage:cda_storage",
         "//cda-tracing:cda_tracing",

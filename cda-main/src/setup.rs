@@ -29,7 +29,7 @@ use cda_comm_can::CanDiagGateway;
 use cda_comm_doip::DoipDiagGateway;
 use cda_core::EcuManager;
 use cda_interfaces::{
-    HashMap, ShutdownSignal,
+    DetectionTracker, HashMap, ShutdownSignal,
     communication_control::{
         ActivationCause, CommunicationAccess, CommunicationInitMode, CommunicationLifecycle,
         CommunicationVariantDetection, DoipConnect, PostUpdateCommunicationMode,
@@ -39,6 +39,7 @@ use cda_interfaces::{
     health::HealthProvider,
     http_protection::registry::HttpProtectionRegistry,
     lock_priority_api::LockPriorityPolicy,
+    topology::EcuTopologyEntry,
 };
 use cda_plugin_communication_management::{
     lifecycle::{
@@ -61,6 +62,7 @@ use crate::{
     ApplicationState,
     config::configfile::Configuration,
     error::AppError,
+    topology::{EcuTopologySource, TopologyContext},
     update::{UpdatePluginBuilder, add_runtime_update_routes},
     vehicle::{UdsManagerType, VehicleData},
 };
@@ -114,6 +116,8 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
     /// Retry hint surfaced on the HTTP `Retry-After` header while a runtime
     /// update holds communication exclusively.
     pub update_retry_after: Duration,
+    /// ECU list persistence: store, discovery plan and persistence hook.
+    pub topology: Arc<TopologyContext>,
 }
 
 /// Bridges the `RwLock`-wrapped `UdsManager` to both communication-framework
@@ -377,6 +381,39 @@ where
     Ok((communication_runtime, communication_access))
 }
 
+/// Reads the live ECUs from the current UDS manager, so a manager replaced by a
+/// runtime update is picked up.
+struct UdsTopologySource<SP: SecurityPlugin> {
+    uds_manager: ComponentSlot<UdsManagerType<SP>>,
+}
+
+#[async_trait::async_trait]
+impl<SP: SecurityPlugin> EcuTopologySource for UdsTopologySource<SP> {
+    async fn ecu_topology_entries(&self) -> Vec<EcuTopologyEntry> {
+        self.uds_manager.read().await.ecu_topology_entries().await
+    }
+
+    async fn detection_tracker(&self) -> DetectionTracker {
+        self.uds_manager.read().await.detection_tracker().clone()
+    }
+}
+
+/// Registers the topology persistence hook after the UDS manager hooks, if ECU
+/// list persistence is enabled (which requires `DoIP`).
+async fn register_topology_persistence(
+    plugin: &Arc<dyn CommunicationPlugin>,
+    source: Arc<dyn EcuTopologySource>,
+    topology: &TopologyContext,
+) -> Result<(), AppError> {
+    let Some(persistence) = topology.create_persistence(source) else {
+        return Ok(());
+    };
+    plugin
+        .register_lifecycle_hook(persistence as Arc<dyn CommunicationLifecycle>)
+        .await
+        .map_err(|error| AppError::InitializationFailed(error.to_string()))
+}
+
 /// Registers the UDS manager's two communication hooks through the authoritative
 /// plugin.
 ///
@@ -403,7 +440,8 @@ where
         .map_err(|error| AppError::InitializationFailed(error.to_string()))
 }
 
-/// `Always` initializes whole-vehicle communication eagerly at startup and propagates
+/// `Always` and `WhenNotPersisted` initialize whole-vehicle communication eagerly at
+/// startup (they differ only in how gateways are discovered) and propagate
 /// failure according to existing application-start semantics. `OnDemand` and `Disabled`
 /// leave it uninitialized, with HTTP/SOVD already served by the routes registered
 /// beforehand. Under `OnDemand` an explicit `activate()` or a qualifying ECU request
@@ -414,7 +452,7 @@ async fn activate_communication_per_init_mode(
     init_mode: CommunicationInitMode,
 ) -> Result<(), AppError> {
     match init_mode {
-        CommunicationInitMode::Always => plugin
+        CommunicationInitMode::Always | CommunicationInitMode::WhenNotPersisted => plugin
             .activate(ActivationCause::Startup)
             .await
             .map(|_| ())
@@ -465,6 +503,7 @@ pub(crate) async fn setup_runtime_routes<SP, SL, UPB, CPB>(
     build_update_plugin: Option<UPB>,
     communication_plugin: CPB,
     storage: Arc<LocalStorage>,
+    topology: Arc<TopologyContext>,
 ) -> Result<CommunicationRuntime, AppError>
 where
     SP: SecurityPlugin,
@@ -529,6 +568,10 @@ where
     let file_managers = components.file_managers;
 
     register_communication_hooks(&plugin, &uds_manager).await?;
+    let topology_source: Arc<dyn EcuTopologySource> = Arc::new(UdsTopologySource {
+        uds_manager: uds_manager.clone(),
+    });
+    register_topology_persistence(&plugin, Arc::clone(&topology_source), &topology).await?;
 
     let communication_disable: Arc<dyn DisableCommunication> =
         Arc::new(CommunicationDisableView::new(Arc::clone(&plugin)));
@@ -574,6 +617,7 @@ where
         health: vehicle_data.health_providers,
         storage,
         mdd_decompress,
+        topology,
     };
 
     setup_update_plugin::<SP, SL, _>(
@@ -696,6 +740,10 @@ mod tests {
     async fn startup_activation_follows_init_mode() {
         for (mode, expected) in [
             (CommunicationInitMode::Always, CommunicationState::Enabled),
+            (
+                CommunicationInitMode::WhenNotPersisted,
+                CommunicationState::Enabled,
+            ),
             (
                 CommunicationInitMode::OnDemand,
                 CommunicationState::Disabled,

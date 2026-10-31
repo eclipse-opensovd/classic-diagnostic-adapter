@@ -44,6 +44,7 @@ pub mod config;
 pub mod error;
 pub mod mdd;
 pub mod setup;
+pub mod topology;
 pub mod update;
 pub mod vehicle;
 
@@ -93,11 +94,14 @@ pub enum Command {
 /// Command line representation of [`cda_comm_doip::config::DiscoveryMode`].
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DoipDiscoveryArg {
-    /// No discovery of any kind, ECUs are connected directly.
+    /// No VIR, no VAMs and no reconnect of persisted gateways, ECUs are
+    /// connected directly.
     Disabled,
-    /// Only react to spontaneous VAMs, no VIR is broadcast.
+    /// No VIR, VAMs as `vam_handling_mode` allows, persisted gateways are
+    /// reconnected by unicast without a VIR fallback.
     VamOnly,
-    /// Broadcast a VIR and react to VAMs.
+    /// Broadcast a VIR, VAMs as `vam_handling_mode` allows, VIR fallback
+    /// for persisted gateways.
     Full,
 }
 
@@ -134,8 +138,10 @@ pub struct AppArgs {
     #[arg(long)]
     pub gateway_port: Option<u16>,
 
-    /// How `DoIP` gateways are discovered: `disabled` (no discovery, connect ECUs
-    /// directly), `vam-only` (react to spontaneous VAMs, no VIR) or `full`.
+    /// How `DoIP` gateways are discovered: `disabled` (no VIR, no VAMs, no
+    /// reconnect of persisted gateways; connect ECUs directly), `vam-only` (no
+    /// VIR; VAMs as `vam_handling_mode` allows; persisted gateways reconnected by
+    /// unicast without a VIR fallback) or `full`.
     #[arg(long, value_enum)]
     pub doip_discovery: Option<DoipDiscoveryArg>,
 
@@ -412,12 +418,15 @@ where
         return Ok(());
     };
 
+    let topology = topology::TopologyContext::new(&config, Arc::clone(&storage));
+
     let Some(vehicle_data) = await_startup_stage(
         vehicle::load_vehicle_data::<SP>(
             &config,
             webserver_state.health_state.as_ref(),
             &storage,
             setup.lock_priority_policy,
+            &topology,
         ),
         webserver_state.shutdown_signal.clone(),
     )
@@ -443,6 +452,7 @@ where
             setup.build_update_plugin,
             setup.build_communication_plugin,
             storage,
+            Arc::clone(&topology),
         ),
         webserver_state.shutdown_signal.clone(),
     )
@@ -465,6 +475,8 @@ where
     // Wait for shutdown signal
     webserver_state.shutdown_signal.clone().await;
     tracing::info!("Shutting down...");
+    // Before communication shuts down, which cancels pending topology writes.
+    topology.persist_on_shutdown().await;
     cda_interfaces::Shutdown::shutdown(&*communication_runtime.plugin).await;
     webserver_state.join().await
 }

@@ -437,6 +437,11 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuSecurity> UdsManager<S, 
                         rx_timeout_next = None;
                         continue 'send;
                     }
+                    if sent_sid != service_ids::TESTER_PRESENT && e.demotes_connectivity() {
+                        self.state_coordinator
+                            .handle_ecu_disconnected(ecu_name)
+                            .await;
+                    }
                     return Err(e);
                 }
             }
@@ -478,7 +483,7 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuSecurity> UdsManager<S, 
                             // also one that does not answer this request (e.g. a late
                             // answer to an earlier request).
                             // [[ dimpl~uds-ecu-reply-contact, Any reply of the ECU counts as contact, dimpl ]]
-                            self.state_coordinator.handle_ecu_responded(ecu_name);
+                            self.state_coordinator.handle_ecu_responded(ecu_name).await;
                             // if we received a response matching our sent SID, return it
                             // other responses are logged as warnings and ignored.
                             if !msg.data.is_empty() && msg.is_response_for_sid(sent_sid) {
@@ -500,7 +505,7 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuSecurity> UdsManager<S, 
                         }
                         Ok(Some(TransportResponse::Pending(pending))) => {
                             // Every pending NRC is a reply of the ECU.
-                            self.state_coordinator.handle_ecu_responded(ecu_name);
+                            self.state_coordinator.handle_ecu_responded(ecu_name).await;
                             match pending {
                                 // BusyRepeatRequest and TemporarilyNotAvailable differ
                                 // only in which com-params drive
@@ -659,8 +664,10 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuSecurity> UdsManager<S, 
         // Post-send: if a service send (not tester present) timed out,
         // the ECU is unreachable - notify the coordinator.
         // The coordinator will suppress this if variant detection is in progress.
-        if matches!(response, Err(DiagServiceError::Timeout))
-            && sent_sid != service_ids::TESTER_PRESENT
+        if sent_sid != service_ids::TESTER_PRESENT
+            && response
+                .as_ref()
+                .is_err_and(DiagServiceError::demotes_connectivity)
         {
             self.state_coordinator
                 .handle_ecu_disconnected(ecu_name)
@@ -1108,6 +1115,8 @@ pub(crate) mod send_tests {
                 communication_retry_after: TEST_COMMUNICATION_RETRY_AFTER,
                 variant_detection_receiver: Arc::new(Mutex::new(None)),
                 variant_detection_listener: Arc::new(Mutex::new(None)),
+                detection_tracker: cda_interfaces::DetectionTracker::new(),
+                activation_detection_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }
         }
     }
@@ -2417,6 +2426,41 @@ pub(crate) mod send_tests {
                 CommunicationReadiness::AssumeReady,
             )
             .await
+    }
+
+    /// A request to an `AssumedOnline` ECU whose gateway has no connection (yet)
+    /// keeps the ECU's state, so the restored variant survives while the gateway
+    /// is still reconnecting.
+    /// [[ test~ecu-state-assumed-online-keeps-state-without-gateway, A request to an assumed online ECU without a gateway connection keeps its state, test ]]
+    #[tokio::test]
+    async fn assumed_online_ecu_without_gateway_connection_keeps_state() {
+        use cda_interfaces::Connectivity;
+
+        for (before, after) in [
+            (Connectivity::AssumedOnline, Connectivity::AssumedOnline),
+            (Connectivity::Online, Connectivity::Online),
+        ] {
+            let gateway = TestGateway {
+                send_fn: Arc::new(|_, _| Err(DiagServiceError::EcuOffline("TestECU".to_owned()))),
+            };
+            let manager = make_manager(gateway);
+            let state = &manager
+                .state_coordinator
+                .get_handle("TestECU")
+                .expect("handle exists")
+                .state;
+            state.ecu_state.write().unwrap().connectivity = before;
+
+            let result = send_for_contact(
+                &manager,
+                make_test_payload(service_ids::SESSION_CONTROL, &[0x01]),
+                true,
+            )
+            .await;
+
+            assert!(matches!(result, Err(DiagServiceError::EcuOffline(_))));
+            assert_eq!(state.status().connectivity, after, "{before:?}");
+        }
     }
 
     /// 0x78 followed by silence ends in a timeout, but the ECU replied.

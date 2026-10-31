@@ -50,6 +50,7 @@ pub mod config;
 pub mod request_authorization;
 pub mod runtime_update_api;
 pub mod storage_api;
+pub mod topology;
 mod transport;
 pub use transport::TransportType;
 pub mod uds;
@@ -102,14 +103,101 @@ impl VariantDetectionRequest {
     }
 }
 
+/// Current detection activity, including work completed between observer polls.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DetectionProgress {
+    /// Number of queued or running detections.
+    pub pending: usize,
+    /// Monotonic activity generation, retained even after detection becomes idle.
+    pub generation: u64,
+}
+
+/// Tracks queued and running variant detections through owned [`DetectionTicket`]s.
+/// The retained generation lets consumers observe even a complete run between polls.
+#[derive(Debug, Clone, Default)]
+pub struct DetectionTracker {
+    progress: std::sync::Arc<tokio::sync::watch::Sender<DetectionProgress>>,
+}
+
+impl DetectionTracker {
+    /// Creates an idle tracker.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers pending detection work until the returned ticket is dropped.
+    #[must_use]
+    pub fn begin(&self) -> DetectionTicket {
+        self.progress.send_modify(|progress| {
+            progress.pending = progress.pending.saturating_add(1);
+            progress.generation = progress.generation.saturating_add(1);
+        });
+        DetectionTicket(self.clone())
+    }
+
+    /// Subscribes to pending detections and their retained activity generation.
+    #[must_use]
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DetectionProgress> {
+        self.progress.subscribe()
+    }
+
+    /// Waits until no detection work is pending or running. Returns `false` if
+    /// `timeout` elapsed first.
+    pub async fn wait_idle(&self, timeout: Duration) -> bool {
+        let mut rx = self.progress.subscribe();
+        tokio::time::timeout(timeout, rx.wait_for(|progress| progress.pending == 0))
+            .await
+            .is_ok_and(|result| result.is_ok())
+    }
+
+    fn end(&self) {
+        self.progress.send_modify(|progress| {
+            progress.pending = progress.pending.saturating_sub(1);
+            progress.generation = progress.generation.saturating_add(1);
+        });
+    }
+}
+
+/// Pending detection work registered with a [`DetectionTracker`]; releases its
+/// count on drop. Owns exactly one count, so wherever it ends up (received,
+/// dropped with an undelivered request, dropped with the channel) the count goes
+/// with it.
+#[derive(Debug)]
+pub struct DetectionTicket(DetectionTracker);
+
+impl Drop for DetectionTicket {
+    fn drop(&mut self) {
+        self.0.end();
+    }
+}
+
+/// What travels through the variant-detection channel: the request and the
+/// ticket counting it.
+pub type QueuedRequest = (VariantDetectionRequest, DetectionTicket);
+
 /// Sends requests to the variant-detection listener.
 #[derive(Debug, Clone)]
-pub struct VariantDetectionSender(tokio::sync::mpsc::Sender<VariantDetectionRequest>);
+pub struct VariantDetectionSender {
+    sender: tokio::sync::mpsc::Sender<QueuedRequest>,
+    tracker: DetectionTracker,
+}
 
 impl VariantDetectionSender {
+    /// Creates a sender with its own tracker.
     #[must_use]
-    pub fn new(sender: tokio::sync::mpsc::Sender<VariantDetectionRequest>) -> Self {
-        Self(sender)
+    pub fn new(sender: tokio::sync::mpsc::Sender<QueuedRequest>) -> Self {
+        Self::with_tracker(sender, DetectionTracker::new())
+    }
+
+    /// Creates a sender that counts queued requests on `tracker`. Use the same
+    /// tracker for the matching [`VariantDetectionReceiver`].
+    #[must_use]
+    pub fn with_tracker(
+        sender: tokio::sync::mpsc::Sender<QueuedRequest>,
+        tracker: DetectionTracker,
+    ) -> Self {
+        Self { sender, tracker }
     }
 
     /// # Errors
@@ -119,22 +207,54 @@ impl VariantDetectionSender {
         &self,
         request: VariantDetectionRequest,
     ) -> Result<(), tokio::sync::mpsc::error::SendError<VariantDetectionRequest>> {
-        self.0.send(request).await
+        // Counted only once the slot is reserved: a send cancelled while waiting
+        // for capacity must not leave a count behind.
+        let Ok(permit) = self.sender.reserve().await else {
+            return Err(tokio::sync::mpsc::error::SendError(request));
+        };
+        self.commit(permit, request);
+        Ok(())
+    }
+
+    /// The ticket travels with the request, so the count is released wherever the
+    /// request ends: received, or dropped with the channel (also if the receiver
+    /// went away while this sender waited for capacity).
+    fn commit(
+        &self,
+        permit: tokio::sync::mpsc::Permit<'_, QueuedRequest>,
+        request: VariantDetectionRequest,
+    ) {
+        permit.send((request, self.tracker.begin()));
     }
 }
 
 /// Receives requests for the variant-detection listener.
 #[derive(Debug)]
-pub struct VariantDetectionReceiver(tokio::sync::mpsc::Receiver<VariantDetectionRequest>);
+pub struct VariantDetectionReceiver {
+    receiver: tokio::sync::mpsc::Receiver<QueuedRequest>,
+    tracker: DetectionTracker,
+}
 
 impl VariantDetectionReceiver {
+    /// Creates a receiver for requests counted on `tracker`.
     #[must_use]
-    pub fn new(receiver: tokio::sync::mpsc::Receiver<VariantDetectionRequest>) -> Self {
-        Self(receiver)
+    pub fn with_tracker(
+        receiver: tokio::sync::mpsc::Receiver<QueuedRequest>,
+        tracker: DetectionTracker,
+    ) -> Self {
+        Self { receiver, tracker }
     }
 
-    pub async fn recv(&mut self) -> Option<VariantDetectionRequest> {
-        self.0.recv().await
+    /// The tracker counting queued requests and running detections.
+    #[must_use]
+    pub fn tracker(&self) -> &DetectionTracker {
+        &self.tracker
+    }
+
+    /// Receives a request together with the ticket counting it. Hold the ticket
+    /// until the requested detections are running (and hold tickets of their own).
+    pub async fn recv_tracked(&mut self) -> Option<(VariantDetectionRequest, DetectionTicket)> {
+        self.receiver.recv().await
     }
 
     /// # Errors
@@ -143,7 +263,7 @@ impl VariantDetectionReceiver {
     pub fn try_recv(
         &mut self,
     ) -> Result<VariantDetectionRequest, tokio::sync::mpsc::error::TryRecvError> {
-        self.0.try_recv()
+        self.receiver.try_recv().map(|(request, _ticket)| request)
     }
 }
 
@@ -410,6 +530,20 @@ pub enum DiagServiceError {
     InvalidConfiguration(String),
 }
 
+impl DiagServiceError {
+    /// Whether a failed request shows the ECU is unreachable, so its connectivity is demoted.
+    ///
+    /// `EcuOffline` is excluded: it means the gateway has no connection (yet), which must
+    /// keep the state of an `AssumedOnline` ECU while the gateway is still reconnecting.
+    #[must_use]
+    pub fn demotes_connectivity(&self) -> bool {
+        matches!(
+            self,
+            Self::Timeout | Self::ConnectionClosed(_) | Self::SendFailed(_)
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataParseError {
     pub value: String,
@@ -457,4 +591,113 @@ pub trait Shutdown: Send + Sync + 'static {
     /// Aborts background tasks and releases connections/resources owned by this instance.
     /// Implementations should be idempotent where practical.
     async fn shutdown(&self);
+}
+
+#[cfg(test)]
+mod detection_tracker_tests {
+    use std::time::Duration;
+
+    use super::{
+        DetectionTracker, VariantDetectionReceiver, VariantDetectionRequest, VariantDetectionSender,
+    };
+
+    /// A tracker with a sender and a receiver counting on it.
+    fn tracked_channel(
+        capacity: usize,
+    ) -> (
+        DetectionTracker,
+        VariantDetectionSender,
+        VariantDetectionReceiver,
+    ) {
+        let tracker = DetectionTracker::new();
+        let (tx, rx) = tokio::sync::mpsc::channel(capacity);
+        let sender = VariantDetectionSender::with_tracker(tx, tracker.clone());
+        let receiver = VariantDetectionReceiver::with_tracker(rx, tracker.clone());
+        (tracker, sender, receiver)
+    }
+
+    fn pending(tracker: &DetectionTracker) -> usize {
+        tracker.subscribe().borrow().pending
+    }
+
+    /// [[ test~detection-tracker-queued-requests-and-tickets-keep-tracker-busy, Queued and running detections keep the tracker busy, test ]]
+    #[tokio::test]
+    async fn queued_requests_and_tickets_keep_tracker_busy() {
+        let (tracker, sender, mut receiver) = tracked_channel(4);
+        assert_eq!(pending(&tracker), 0);
+
+        sender
+            .send(VariantDetectionRequest::new(vec!["ecu".to_owned()]))
+            .await
+            .unwrap();
+        assert_eq!(pending(&tracker), 1, "a queued request counts as pending");
+
+        let (_request, ticket) = receiver.recv_tracked().await.unwrap();
+        assert_eq!(pending(&tracker), 1, "the received ticket keeps it pending");
+        let running = tracker.begin();
+        drop(ticket);
+        assert_eq!(pending(&tracker), 1);
+        drop(running);
+        assert!(tracker.wait_idle(Duration::from_millis(10)).await);
+    }
+
+    #[tokio::test]
+    async fn cancelled_send_is_not_counted() {
+        let (tracker, sender, _receiver) = tracked_channel(1);
+        sender
+            .send(VariantDetectionRequest::new(Vec::new()))
+            .await
+            .unwrap();
+        // The channel is full: this send waits and is cancelled by the timeout.
+        let blocked = tokio::time::timeout(
+            Duration::from_millis(20),
+            sender.send(VariantDetectionRequest::new(Vec::new())),
+        )
+        .await;
+        assert!(blocked.is_err());
+        assert_eq!(pending(&tracker), 1, "only the queued request counts");
+    }
+
+    /// [[ test~detection-tracker-idle-after-receiver-drop, Dropping the receiver releases the counts of its queued requests, test ]]
+    #[tokio::test]
+    async fn dropping_the_receiver_releases_queued_requests() {
+        let (tracker, sender, receiver) = tracked_channel(4);
+        for _ in 0..2 {
+            sender
+                .send(VariantDetectionRequest::new(Vec::new()))
+                .await
+                .unwrap();
+        }
+        drop(receiver);
+        assert_eq!(pending(&tracker), 0);
+        assert!(
+            sender
+                .send(VariantDetectionRequest::new(Vec::new()))
+                .await
+                .is_err()
+        );
+        assert_eq!(pending(&tracker), 0, "a failed send is not counted");
+    }
+
+    /// [[ test~detection-tracker-undelivered-request-released, A request sent after the receiver went away releases its count with the channel, test ]]
+    #[tokio::test]
+    async fn send_racing_with_dropping_the_receiver_does_not_leave_a_count() {
+        let (tracker, sender, receiver) = tracked_channel(4);
+
+        // A sender that already holds its slot while the receiver goes away.
+        let permit = sender.sender.reserve().await.unwrap();
+        drop(receiver);
+        sender.commit(permit, VariantDetectionRequest::new(Vec::new()));
+        assert_eq!(
+            pending(&tracker),
+            1,
+            "the undelivered request is counted until the channel is dropped"
+        );
+
+        drop(sender);
+        assert!(
+            tracker.wait_idle(Duration::from_millis(200)).await,
+            "a request that can no longer be received must not keep the tracker busy"
+        );
+    }
 }

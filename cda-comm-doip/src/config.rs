@@ -17,17 +17,25 @@ use cda_interfaces::{
 };
 use serde::{Deserialize, Serialize};
 
-/// How gateways are discovered on the network.
+/// How gateways are discovered on the network, once communication has been
+/// initialized. Independent of `communication.init_mode`, which controls when
+/// communication starts and whether a persisted topology is reused.
 #[derive(
     Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema,
 )]
 pub enum DiscoveryMode {
-    /// No discovery of any kind: no VIR is broadcast and VAMs are ignored.
-    /// ECUs are only connected through an explicit direct-connect request.
+    /// No discovery of any kind: no VIR is broadcast, VAMs are ignored and
+    /// persisted gateways are not reconnected. ECUs are only connected through an
+    /// explicit direct-connect request.
     Disabled,
-    /// Only react to spontaneous VAMs. No VIR is broadcast.
+    /// No VIR is ever broadcast, neither at startup nor as a fallback. VAMs are
+    /// handled as `communication.vam_handling_mode` allows. Persisted gateways
+    /// are reconnected by unicast to their persisted address; one that cannot be
+    /// connected this way is reported unreachable.
     VamOnly,
-    /// Broadcast a VIR on startup and react to the resulting and later VAMs.
+    /// Broadcast a VIR on startup and handle VAMs as
+    /// `communication.vam_handling_mode` allows. A persisted gateway that cannot
+    /// be reached at its persisted address is searched by VIR.
     #[default]
     Full,
 }
@@ -76,11 +84,18 @@ pub struct DoipConfig {
     /// Only available in builds with the `doip-direct-connect` feature. If set
     /// without that feature, an error is logged and the operation remains unavailable.
     pub direct_connect_enabled: bool,
-    /// How gateways are discovered on the network:
-    /// - `Disabled`: no discovery of any kind, ECUs are only connected through an
-    ///   explicit direct-connect request.
-    /// - `VamOnly`: only react to spontaneous VAMs, no VIR is broadcast.
-    /// - `Full`: broadcast a VIR on startup and react to the resulting and later VAMs.
+    /// How gateways are discovered on the network, once communication has been
+    /// initialized (independent of `communication.init_mode`):
+    /// - `Disabled`: no VIR, VAMs are ignored and persisted gateways are not
+    ///   reconnected. ECUs are only connected through an explicit direct-connect
+    ///   request.
+    /// - `VamOnly`: no VIR, neither at startup nor as a fallback. VAMs are handled
+    ///   as `communication.vam_handling_mode` allows. Persisted gateways are
+    ///   reconnected by unicast; one that cannot be connected is reported
+    ///   unreachable.
+    /// - `Full`: broadcast a VIR on startup and handle VAMs as
+    ///   `communication.vam_handling_mode` allows. A persisted gateway that cannot
+    ///   be reached at its persisted address is searched by VIR.
     pub discovery: DiscoveryMode,
     /// The name of the protocol to use.
     /// Matched case-insensitive against the database.

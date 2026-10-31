@@ -239,6 +239,54 @@ fun Route.addDisconnectRoutes() {
 }
 
 /**
+ * Routes to make single DoIP gateways unreachable and reachable again, addressed by their IP
+ * address. The IP address is removed from/added to the network interface (see [GatewayAddresses]),
+ * so this needs `NET_ADMIN`, `USE_MULTIPLE_IPS=true` and a configured `SIM_NETWORK_INTERFACE`.
+ *
+ * - POST /network/addresses/{ip}/stop: Removes the address `{ip}` and closes all active DoIP TCP
+ *   connections (the library does not tell which entity a connection belongs to; the testers of
+ *   the other gateways reconnect on their own). New TCP connections to the address no longer
+ *   work. Idempotent. Note that the broadcast listener may still answer vehicle identification
+ *   requests with the announcements of all gateways, including the stopped one.
+ * - POST /network/addresses/{ip}/start: Adds a stopped address back. For an address that is not
+ *   stopped it does nothing and answers 200.
+ *
+ * Stop answers 409 if the address is not a secondary `/32` address of the interface.
+ */
+fun Route.addGatewayRoutes() {
+    post("/network/addresses/{ip}/stop") {
+        MDC.clear()
+        val ip = call.parameters["ip"].orEmpty()
+        try {
+            GatewayAddresses.stop(ip)
+            val closed =
+                networkInstances()
+                    .flatMap { it.doipEntities }
+                    .flatMap { it.connectionHandlers.toList() }
+                    .onEach { it.closeSocket() }
+                    .size
+            call.respond(
+                HttpStatusCode.OK,
+                mapOf("message" to "Stopped address $ip, closed $closed TCP connection(s)"),
+            )
+        } catch (e: GatewayAddresses.GatewayAddressException) {
+            call.respond(HttpStatusCode.Conflict, mapOf("message" to e.message))
+        }
+    }
+
+    post("/network/addresses/{ip}/start") {
+        MDC.clear()
+        val ip = call.parameters["ip"].orEmpty()
+        try {
+            GatewayAddresses.start(ip)
+            call.respond(HttpStatusCode.OK, mapOf("message" to "Started address $ip"))
+        } catch (e: GatewayAddresses.GatewayAddressException) {
+            call.respond(HttpStatusCode.Conflict, mapOf("message" to e.message))
+        }
+    }
+}
+
+/**
  * Routes to install/remove named inbound interceptors on ECUs.
  * This is used in integration tests to simulate custom ECU responses
  * (e.g., malformed responses, suppressed responses, or temporary overrides).

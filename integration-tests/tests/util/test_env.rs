@@ -47,7 +47,8 @@ use http::{HeaderMap, Method, StatusCode};
 use opensovd_cda_lib::config::configfile::{Configuration, ServerTransport};
 use sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response as NetworkStructureResponse;
 use testcontainers::{
-    ContainerAsync, ContainerRequest, GenericImage, ImageExt, TestcontainersError, core::Mount,
+    ContainerAsync, ContainerRequest, GenericImage, ImageExt, TestcontainersError,
+    core::{CmdWaitFor, ExecCommand, Mount},
     runners::AsyncRunner,
 };
 use tokio::sync::{Semaphore, SemaphorePermit};
@@ -369,6 +370,39 @@ impl TestEnv {
     /// is replaced, see [`Self::replace_cda`].
     pub(crate) fn vehicle_url(&self, endpoint: &str) -> String {
         vehicle_url(&self.config, endpoint)
+    }
+
+    /// Runs `command` with `sh -c` in the CDA container and returns its
+    /// standard output.
+    ///
+    /// # Errors
+    /// Returns [`TestingError::ProcessFailed`] if the command cannot be run or
+    /// does not exit with 0.
+    pub(crate) async fn exec_in_cda(&self, command: &str) -> Result<String, TestingError> {
+        let cda = self.cda_container()?;
+        let command = command.to_owned();
+        on_shared_runtime(async move {
+            let failed =
+                |e: TestcontainersError| TestingError::ProcessFailed(format!("`{command}`: {e}"));
+            // Fails unless the command exits with 0.
+            let mut result = cda
+                .exec(
+                    ExecCommand::new(["sh", "-c", command.as_str()])
+                        .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
+                )
+                .await
+                .map_err(failed)?;
+            let stdout = result.stdout_to_vec().await.map_err(failed)?;
+            Ok(String::from_utf8_lossy(&stdout).into_owned())
+        })
+        .await
+    }
+
+    fn cda_container(&self) -> Result<Container, TestingError> {
+        self.containers
+            .cda
+            .clone()
+            .ok_or_else(|| TestingError::SetupError("CDA container is gone".to_owned()))
     }
 
     /// Removes the CDA container, on a best effort basis.
@@ -842,6 +876,7 @@ pub(crate) fn on_demand_communication() -> CommunicationSettings {
         variant_detection: VariantDetectionMode::Always,
         post_update_mode: PostUpdateCommunicationMode::Enabled,
         deferred_retry_after_seconds: ON_DEMAND_RETRY_AFTER_SECONDS,
+        ..CommunicationSettings::default()
     }
 }
 

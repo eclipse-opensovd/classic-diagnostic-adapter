@@ -99,6 +99,12 @@ alias(
 )
 
 alias(
+    name = "plugin_topology",
+    actual = "//cda-plugin-topology:cda_plugin_topology",
+    visibility = ["//visibility:public"],
+)
+
+alias(
     name = "vendor_override_macros",
     actual = "//override-macros:override_macros",
     visibility = ["//visibility:public"],

@@ -34,6 +34,8 @@ pub enum CollectionName {
     DiagnosticDatabaseNextUpdate,
     /// Backup of the diagnostic database before an update.
     DiagnosticDatabaseBackup,
+    /// The persisted ECU/gateway topology.
+    EcuTopology,
     /// A user-defined collection with an arbitrary name.
     Custom(String),
 }
@@ -46,6 +48,7 @@ impl CollectionName {
             Self::DiagnosticDatabase => "diagnostic_database",
             Self::DiagnosticDatabaseNextUpdate => "diagnostic_database_next_update",
             Self::DiagnosticDatabaseBackup => "diagnostic_database_backup",
+            Self::EcuTopology => "ecu_topology",
             Self::Custom(name) => name.as_str(),
         }
     }
