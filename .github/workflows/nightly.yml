@@ -46,7 +46,7 @@ jobs:
         run: make deny ARGS=advisories
   nightly_clippy:
     needs: versions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     name: "Nightly Lint and Format"
     steps:
       - name: Checkout repository

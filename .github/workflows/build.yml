@@ -33,7 +33,7 @@ jobs:
 
   bazel:
     name: Bazel (Ubuntu)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -48,7 +48,7 @@ jobs:
 
   features:
     needs: versions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       RUSTFLAGS: "--cfg tokio_unstable -L /usr/local/lib"
       PKG_CONFIG_PATH: "/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
