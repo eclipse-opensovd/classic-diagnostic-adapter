@@ -14,6 +14,10 @@ NIGHTLY := nightly-2026-07-21
 CARGO_DENY_VERSION := 0.20.2
 CARGO_LLVM_COV_VERSION := 0.9.1
 PROTOC_VERSION := 34.1
+UV_VERSION := 0.13.6
+
+# tools installed by setup-devenv (uv, protoc) are placed in ~/.local/bin
+export PATH := $(HOME)/.local/bin:$(PATH)
 
 # on macOS the xcode tools cause a build failure in bazel due to a fullpath being used
 # this selects the macOS bazel targets if it detects the platform
@@ -35,7 +39,7 @@ endif
 	precommit precommit-all-features \
 	coverage coverage-can integration-coverage deny \
 	generate-config generate-test-config generate-flatbuffers generate-protos docs rustdoc \
-	tool-versions setup-devenv doctor run profile depgraph clean clean-doc help
+	tool-versions setup-devenv install-uv install-protoc doctor run profile depgraph clean clean-doc help
 
 build:
 	cargo +$(STABLE) build --locked $(ARGS)
@@ -157,13 +161,25 @@ tool-versions:
 
 setup-devenv:
 	@command -v rustup >/dev/null 2>&1 || { printf '%s\n' 'rustup is required: https://rustup.rs'; exit 1; }
-	@command -v uv >/dev/null 2>&1 || { printf '%s\n' 'uv is required: https://docs.astral.sh/uv/'; exit 1; }
+	$(MAKE) install-uv install-protoc
 	rustup toolchain install $(STABLE) --profile minimal --component clippy --component rustfmt --component llvm-tools
 	rustup toolchain install $(NIGHTLY) --profile minimal --component clippy --component rustfmt
 	cargo +$(STABLE) install --locked --version $(CARGO_DENY_VERSION) cargo-deny
 	cargo +$(STABLE) install --locked --version $(CARGO_LLVM_COV_VERSION) cargo-llvm-cov
 	uv sync --locked --group tools
 	$(MAKE) doctor
+
+install-uv:
+	@command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/$(UV_VERSION)/install.sh | sh
+
+install-protoc:
+	@command -v protoc >/dev/null 2>&1 || { \
+		case "$$(uname -s)" in Linux) os=linux ;; Darwin) os=osx ;; *) printf '%s\n' 'install protoc manually: https://protobuf.dev'; exit 1 ;; esac; \
+		case "$$(uname -m)" in x86_64) arch=x86_64 ;; aarch64|arm64) arch=aarch_64 ;; *) printf '%s\n' 'install protoc manually: https://protobuf.dev'; exit 1 ;; esac; \
+		zip="$$(mktemp -d)/protoc.zip"; \
+		curl -fsSL -o "$$zip" "https://github.com/protocolbuffers/protobuf/releases/download/v$(PROTOC_VERSION)/protoc-$(PROTOC_VERSION)-$$os-$$arch.zip" && \
+		unzip -qo "$$zip" -d "$$HOME/.local"; \
+	}
 
 doctor:
 	@missing=0; \
