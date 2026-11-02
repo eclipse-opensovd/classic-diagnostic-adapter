@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/// [[ dimpl~plugin-vehicle-topology-connect-ecu, Connect ECU directly operation, dimpl, req~plugin-vehicle-topology-connect-ecu; arch~plugin-vehicle-topology-connect-ecu ]]
+/// [[ dimpl~plugin-vehicle-topology-connect-ecu, Connect ECU directly operation, dimpl ]]
 ///
 /// Connects a gateway ECU directly to an IP address, bypassing VIR/VAM discovery.
 ///

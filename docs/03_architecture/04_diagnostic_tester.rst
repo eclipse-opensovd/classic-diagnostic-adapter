@@ -25,7 +25,7 @@ Startup Sequence
 
 .. arch:: Startup Sequence
     :id: arch~dt-startup-sequence
-    :links: dimpl~deferred-communication-startup, dimpl~deferred-doip-transport, test~deferred-startup-policy, test~deferred-doip-passive-construction, itest~deferred-on-demand-pending, itest~deferred-on-demand-uds-silence, itest~deferred-disabled-uds-silence
+    :links: dimpl~deferred-communication-startup, dimpl~deferred-doip-transport, testset~deferred-communication-startup
     :status: draft
 
     The CDA startup is orchestrated by the main application entry point, which coordinates
@@ -386,7 +386,7 @@ Communication Initialization Mode
 
 .. arch:: Communication Initialization Mode
     :id: arch~dt-deferred-initialization
-    :links: dimpl~communication-control-contracts, dimpl~communication-control-access, dimpl~communication-control-operations, dimpl~communication-lifecycle-controller, dimpl~default-communication-policy, dimpl~deferred-communication-startup, dimpl~deferred-sovd-admission, dimpl~deferred-doip-transport, test~deferred-communication-config, test~deferred-startup-policy, test~deferred-admitting-modes-activate, test~deferred-disabled-rejects-activation, test~deferred-request-activation-policy, test~deferred-activation-retry, test~deferred-sovd-admission, test~deferred-doip-passive-construction, itest~deferred-on-demand-pending, itest~deferred-on-demand-uds-silence, itest~deferred-disabled-uds-silence
+    :links: dimpl~communication-control-contracts, dimpl~communication-control-access, dimpl~communication-control-operations, dimpl~communication-lifecycle-controller, dimpl~default-communication-policy, dimpl~deferred-communication-startup, dimpl~deferred-sovd-admission, dimpl~deferred-doip-transport, testset~deferred-communication-startup, testset~deferred-communication-activation
     :status: draft
 
     The CDA supports a configurable ``[communication] init_mode`` to enable scenarios where
@@ -527,7 +527,7 @@ Post-Update Deferred Communication
 
 .. arch:: Post-Update Deferred Communication
     :id: arch~dt-post-update-deferred-communication
-    :links: dimpl~communication-control-contracts, dimpl~communication-lifecycle-controller, dimpl~post-update-deferred-communication, test~deferred-communication-config, test~deferred-post-update-apply, test~deferred-post-update-rollback, itest~deferred-post-update
+    :links: dimpl~communication-control-contracts, dimpl~communication-lifecycle-controller, dimpl~post-update-deferred-communication, testset~deferred-post-update
     :status: draft
 
     Runtime database updates acquire the communication lifecycle controller's exclusive disable lease
@@ -729,7 +729,7 @@ Variant Detection
 
 .. arch:: Variant Detection
     :id: arch~dt-variant-detection
-    :links: dimpl~default-communication-policy, itest~variant-detection-explicit
+    :links: dimpl~default-communication-policy, testset~variant-detection-explicit
     :status: draft
 
     Variant detection identifies the correct ECU software variant from multiple possible
@@ -1033,6 +1033,7 @@ Error Handling
 .. arch:: Startup Error Handling
     :id: arch~dt-error-handling
     :status: draft
+    :links: dimpl~communication-control-errors
 
     The CDA implements graceful degradation during startup to maximize availability even
     when individual components fail.
