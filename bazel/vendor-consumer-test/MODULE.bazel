@@ -20,7 +20,7 @@ local_path_override(
 bazel_dep(name = "mbedtls-rs", version = "0.1.0")
 git_override(
     module_name = "mbedtls-rs",
-    commit = "e976dc7b45216022cab175a68c0ee387430ad874",
+    commit = "1dac0d8c6a80feb3864e86aac80b35cf34b10f87",
     remote = "https://github.com/eclipse-opensovd/mbedtls-rs.git",
 )
 
