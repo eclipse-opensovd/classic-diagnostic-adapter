@@ -212,7 +212,7 @@ SDG/SD Metadata
 
 .. arch:: Component SDG/SDs
     :id: arch~sovd-api-component-sdgsd
-    :links: dimpl~sovd-api-component-sdgsd, dimpl~sovd-api-component-data-sdgsd, dimpl~sovd-api-component-operations-sdgsd, itest~sovd-api-component-sdgsd, itest~sovd-api-component-alias-sdgsd, itest~sovd-api-component-data-sdgsd, itest~sovd-api-component-operations-sdgsd
+    :links: dimpl~sovd-api-component-sdgsd, dimpl~sovd-api-component-data-sdgsd, dimpl~sovd-api-component-operations-sdgsd, testset~sovd-api-component-sdgsd
     :status: draft
 
     Special Data Groups (SDGs) and Special Data (SDs) from the diagnostic description can be retrieved through an
@@ -858,7 +858,7 @@ Authentication -- SID 29\ :sub:`16`
 
 .. arch:: Authentication Endpoints
     :id: arch~sovd-api-authentication-modes
-    :links: req~sovd-api-authentication-modes, itest~sovd-api-authentication-modes-pki, itest~sovd-api-authentication-modes-pki-bidirectional, itest~sovd-api-authentication-modes-challenge-response, itest~sovd-api-authentication-modes-rejected, itest~sovd-api-authentication-modes-expiration, itest~sovd-api-authentication-modes-nrc, itest~sovd-api-authentication-modes-invalid
+    :links: testset~sovd-api-authentication-modes
     :status: draft
 
     .. note::
@@ -1380,7 +1380,7 @@ Locks
 .. arch:: Lock Acquisition Policy
     :id: arch~sovd-api-lock-acquisition-policy
     :status: draft
-    :links: dimpl~sovd-api-lock-acquisition-policy, dimpl~sovd-api-lock-acquisition-policy-config, test~sovd-api-lock-acquisition-policy-config, test~sovd-api-lock-acquisition-policy-validation, test~sovd-api-lock-acquisition-policy-handlers, itest~sovd-api-lock-acquisition-policy
+    :links: dimpl~sovd-api-lock-acquisition-policy, dimpl~sovd-api-lock-acquisition-policy-config, testset~sovd-api-lock-acquisition-policy
 
     The ECU lock POST handler and the functional group lock POST handler each evaluate the
     configured ``lock_acquisition_policy`` before creating the child lock, in addition to
@@ -1521,7 +1521,7 @@ Version Endpoint
 
 .. arch:: API Version Endpoint Registration Function
     :id: arch~sovd-api-version-registration-function
-    :links: dimpl~sovd-api-version-endpoint
+    :links: dimpl~sovd-api-version-endpoint, testset~sovd-api-version-endpoint
     :status: draft
 
     The CDA provides a version registration function that sets up version-related endpoints during

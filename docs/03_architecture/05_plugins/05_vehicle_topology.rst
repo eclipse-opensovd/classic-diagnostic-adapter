@@ -196,6 +196,7 @@ Vehicle Topology Plugin
 .. arch:: Vehicle Topology Plugin - Connect ECU
     :id: arch~plugin-vehicle-topology-connect-ecu
     :status: draft
+    :links: dimpl~plugin-vehicle-topology-connect-ecu
 
     The plugin provides a ``doip-connect-ecu`` operation to connect an ECU directly to an IP address,
     without waiting for it to be discovered via VIR/VAM. It follows the standard SOVD operations

@@ -13,7 +13,7 @@
 
 //! Capability-limited transport control over a replaceable gateway.
 //!
-//! [[ dimpl~communication-control-swappable-gateway, Replaceable gateway transport-control capability, dimpl, req~plugin-diagnostic-database-update; arch~plugin-diagnostic-database-update ]]
+//! [[ dimpl~communication-control-swappable-gateway, Replaceable gateway transport-control capability, dimpl ]]
 use std::sync::Arc;
 
 use async_trait::async_trait;

@@ -15,6 +15,7 @@ Diagnostic Database Update Plugin
 .. arch:: Diagnostic Database Update Plugin
     :id: arch~plugin-diagnostic-database-update
     :status: draft
+    :links: dimpl~communication-control-swappable-gateway
 
     **Endpoints and Security**
 

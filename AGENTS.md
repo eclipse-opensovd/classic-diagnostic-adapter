@@ -39,7 +39,7 @@ Rust Cargo workspace (see the `cda-rust-development` skill).
 | `comm-mbedtls/` | mbedtls FFI bindings (`mbedtls-sys`) and async wrapper (`mbedtls-rs`) |
 | `integration-tests/` | End-to-end tests against Docker containers |
 | `testcontainer/` | Docker compose env, Kotlin ECU simulator (`ecu-sim/`), ODX, test config |
-| `docs/` | Sphinx docs: requirements, architecture, ADRs (`docs/04_adr/`) |
+| `docs/` | Sphinx docs: requirements, architecture, ADRs (`docs/04_adr/`), test sets (`docs/05_verification/`); see the `cda-documentation` skill |
 
 ## Rust development
 
@@ -83,6 +83,9 @@ available IDs), e.g.:
 
 - `.opencode/skills/cda-rust-development` - Rust coding rules, build/test/lint commands and
   pre-finish checklist.
+- `.opencode/skills/cda-documentation` - Sphinx/sphinx-needs docs, test sets in `docs/05_verification/`
+  and the downward traceability link direction (`req -> arch -> dsgn -> impl/dimpl`, `arch/dsgn -> testset -> test/itest`)
+  enforced by `docs/conf.py`.
 - `.opencode/skills/cda-git-workflow` - commit rules (Conventional Commits, DCO sign-off) and
   pull requests (PR template, optional per-user PR description trailer from `.opencode/pr-trailer`).
 - `.opencode/skills/cda-diagnostic-protocol-spec` - UDS, DoIP and CAN/ISO-TP knowledge, doc sources
