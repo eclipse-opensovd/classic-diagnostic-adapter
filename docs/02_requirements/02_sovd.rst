@@ -670,7 +670,9 @@ ECU-lock POST requests additionally check stored ECU connectivity as specified i
 
     A POST that creates a lock must return HTTP 201 with a ``Location`` header referencing the
     created lock. A same-owner compatibility renewal must return HTTP 200 without a ``Location``
-    header. Both POST responses must include ``id`` (UUID string) and ``owned`` (boolean, always
+    header. When such a renewal carries vendor-specific properties, they replace the lock's
+    stored vendor-specific data; a renewal without them keeps the existing data. Both POST
+    responses must include ``id`` (UUID string) and ``owned`` (boolean, always
     ``true`` for the requesting client). The GET ``/locks/{id}`` response must include
     ``lock_expiration`` as an ISO 8601 string and ``owned`` relative to the requesting client.
 
@@ -1054,6 +1056,15 @@ ECU-lock POST requests additionally check stored ECU connectivity as specified i
     - When the defunct lock's original expiration elapses it is silently removed; no
       cleanup is triggered.
     - When the defunct lock is deleted, no cleanup is triggered.
+    - When the preempted client acquires a new lock on the same scope, or one whose
+      coverage contains all entities of the defunct lock (e.g. a vehicle lock), the defunct
+      lock is removed as if the client had deleted it. No cleanup is triggered. A client
+      therefore holds at most one lock record, active or defunct, per diagnostic entity.
+    - A lock request of the preempted client that overlaps the defunct lock without
+      containing it (e.g. an ECU lock while its vehicle lock is defunct) must be rejected
+      with the defunct lock's HTTP 409 ``lock-broken`` error (see
+      :need:`req~sovd-api-lock-defunct-enforcement`), until the client deletes the defunct
+      lock or acquires a lock that contains it.
     - The new (higher-priority) lock operates normally and performs its own cleanup on
       release or expiry.
 
@@ -1061,6 +1072,11 @@ ECU-lock POST requests additionally check stored ECU connectivity as specified i
 
     Retaining the defunct lock gives the preempted client an observable signal that their
     lock was superseded, identifying who took it and when, and if a lock is still held.
+    Once that client holds a new lock over all entities of the defunct lock, the signal has
+    served its purpose; keeping the record would only block the client's own requests (see
+    :need:`req~sovd-api-lock-defunct-enforcement`). A narrower lock does not re-establish the
+    broken lock, so the signal stays, and the narrower lock is rejected because every request
+    under it would fail with ``lock-broken``.
 
 
 

@@ -51,6 +51,7 @@ pub(crate) use handlers::{
     ecu, vehicle,
 };
 use lifecycle::{LifecycleDelivery, enqueue_lock_event};
+pub(super) use policy::EvaluatedMetadata;
 pub(crate) use policy::rollback_preemption;
 use policy::{AcquisitionGuard, PendingPreemption, active_snapshot};
 #[cfg(all(test, feature = "doip-direct-connect"))]

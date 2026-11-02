@@ -161,6 +161,12 @@ pub enum LockPriorityOperation {
     /// Acquire a new lock.
     Acquire,
     /// Renew an existing lock through `POST` by its current owner.
+    ///
+    /// When `evaluation.request.metadata` is not empty it replaces the lock's
+    /// metadata on success, so a policy that derives priority from metadata
+    /// should compare it with the prior snapshot's metadata and evaluate the
+    /// request like an acquisition when it changed. Preemption is never
+    /// permitted during renewal.
     PostRenew {
         /// Existing lock ID that would be renewed.
         ///
