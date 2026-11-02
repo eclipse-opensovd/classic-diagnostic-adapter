@@ -23,7 +23,6 @@ use axum_extra::extract::WithRejection;
 use cda_interfaces::{
     HashMap, UdsEcu,
     diagservices::{DiagServiceResponse, DiagServiceResponseType},
-    file_manager::FileManager,
 };
 use schemars::Schema;
 use serde::Serialize;
@@ -44,7 +43,7 @@ use crate::{
     },
 };
 
-pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+pub(crate) async fn get<T: UdsEcu + Clone>(
     UseApi(cda_plugin_security::Secured(security_plugin), _): UseApi<
         cda_plugin_security::Secured,
         (),
@@ -55,7 +54,7 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
         uds,
         locks,
         ..
-    }): State<WebserverEcuState<T, U>>,
+    }): State<WebserverEcuState<T>>,
 ) -> Response {
     require_ecu_access!(
         read,
@@ -236,7 +235,7 @@ pub(crate) mod session {
             mode_expiration = ?request_body.mode_expiration
         )
         )]
-    pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn put<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(WebserverEcuState {
@@ -244,7 +243,7 @@ pub(crate) mod session {
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): State<WebserverEcuState<T>>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::security_and_session::put::SessionRequest>,
             ApiError,
@@ -327,7 +326,7 @@ pub(crate) mod session {
             .with(openapi::error_bad_gateway)
     }
 
-    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(WebserverEcuState {
@@ -335,7 +334,7 @@ pub(crate) mod session {
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): State<WebserverEcuState<T>>,
     ) -> Response {
         handle_mode_get(
             &uds,
@@ -384,7 +383,7 @@ pub(crate) mod security {
     use super::*;
     use crate::{openapi, sovd::error::ErrorWrapper};
 
-    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(WebserverEcuState {
@@ -392,7 +391,7 @@ pub(crate) mod security {
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): State<WebserverEcuState<T>>,
     ) -> Response {
         handle_mode_get(
             &uds,
@@ -447,7 +446,7 @@ pub(crate) mod security {
         }
     }
 
-    pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn put<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(WebserverEcuState {
@@ -455,7 +454,7 @@ pub(crate) mod security {
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): State<WebserverEcuState<T>>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::security_and_session::put::Request>,
             ApiError,
@@ -648,7 +647,7 @@ pub(crate) mod authentication {
         }
     }
 
-    pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn get<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(WebserverEcuState {
@@ -656,7 +655,7 @@ pub(crate) mod authentication {
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): State<WebserverEcuState<T>>,
     ) -> Response {
         let include_schema = query.include_schema;
         require_ecu_access!(read, security_plugin, &ecu_name, &locks, include_schema);
@@ -736,7 +735,7 @@ pub(crate) mod authentication {
             mode_expiration = ?request_body.mode_expiration
         )
     )]
-    pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn put<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(WebserverEcuState {
@@ -744,7 +743,7 @@ pub(crate) mod authentication {
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): State<WebserverEcuState<T>>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::authentication::put::Request>,
             ApiError,
@@ -885,7 +884,7 @@ pub(crate) mod commctrl {
         response::Response,
     };
     use axum_extra::extract::WithRejection;
-    use cda_interfaces::{SchemaProvider, UdsEcu, file_manager::FileManager, service_ids};
+    use cda_interfaces::{SchemaProvider, UdsEcu, service_ids};
     use cda_plugin_security::Secured;
     use sovd_interfaces::{
         common::modes::{COMM_CONTROL_ID, COMM_CONTROL_NAME},
@@ -901,7 +900,7 @@ pub(crate) mod commctrl {
         },
     };
 
-    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(WebserverEcuState {
@@ -909,7 +908,7 @@ pub(crate) mod commctrl {
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): State<WebserverEcuState<T>>,
     ) -> Response {
         handle_mode_get(
             &uds,
@@ -942,7 +941,7 @@ pub(crate) mod commctrl {
             .with(openapi::error_not_found)
     }
 
-    pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn put<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(WebserverEcuState {
@@ -950,7 +949,7 @@ pub(crate) mod commctrl {
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): State<WebserverEcuState<T>>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::commctrl::put::Request>,
             ApiError,
@@ -998,7 +997,7 @@ pub(crate) mod dtcsetting {
         response::Response,
     };
     use axum_extra::extract::WithRejection;
-    use cda_interfaces::{SchemaProvider, UdsEcu, file_manager::FileManager, service_ids};
+    use cda_interfaces::{SchemaProvider, UdsEcu, service_ids};
     use cda_plugin_security::Secured;
     use sovd_interfaces::{
         common::modes::{DTC_SETTING_ID, DTC_SETTING_NAME},
@@ -1014,7 +1013,7 @@ pub(crate) mod dtcsetting {
         },
     };
 
-    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(WebserverEcuState {
@@ -1022,7 +1021,7 @@ pub(crate) mod dtcsetting {
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): State<WebserverEcuState<T>>,
     ) -> Response {
         handle_mode_get(
             &uds,
@@ -1055,7 +1054,7 @@ pub(crate) mod dtcsetting {
             .with(openapi::error_not_found)
     }
 
-    pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn put<T: UdsEcu + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(WebserverEcuState {
@@ -1063,7 +1062,7 @@ pub(crate) mod dtcsetting {
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T, U>>,
+        }): State<WebserverEcuState<T>>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::dtcsetting::put::Request>,
             ApiError,
@@ -1120,7 +1119,6 @@ mod tests {
         diagservices::{
             DiagServiceJsonResponse, DiagServiceResponseType, mock::MockDiagServiceResponse,
         },
-        file_manager::mock::MockFileManager,
         mock::{MockUdsEcu, mock_ecu_state_online_variant_detected},
     };
     use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
@@ -1297,13 +1295,9 @@ mod tests {
         });
         uds.expect_get_ecu_authentication_state()
             .returning(|_| Ok(AuthenticationState::default()));
-        let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-            ECU.to_owned(),
-            uds,
-            MockFileManager::new(),
-        );
+        let state = create_test_webserver_state::<MockUdsEcu>(ECU.to_owned(), uds);
 
-        let response = authentication::get::<MockUdsEcu, MockFileManager>(
+        let response = authentication::get::<MockUdsEcu>(
             UseApi(
                 Secured(Box::new(TestSecurityPlugin)),
                 std::marker::PhantomData,
@@ -1330,13 +1324,9 @@ mod tests {
 
     #[tokio::test]
     async fn put_handler_requires_lock() {
-        let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-            ECU.to_owned(),
-            MockUdsEcu::new(),
-            MockFileManager::new(),
-        );
+        let state = create_test_webserver_state::<MockUdsEcu>(ECU.to_owned(), MockUdsEcu::new());
 
-        let response = authentication::put::<MockUdsEcu, MockFileManager>(
+        let response = authentication::put::<MockUdsEcu>(
             UseApi(
                 Secured(Box::new(TestSecurityPlugin)),
                 std::marker::PhantomData,

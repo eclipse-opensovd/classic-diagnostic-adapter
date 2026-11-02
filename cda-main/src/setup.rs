@@ -526,7 +526,6 @@ where
         Arc::clone(&communication_access),
     );
     let uds_manager = ComponentSlot::new(components.uds_manager);
-    let file_managers = components.file_managers;
 
     register_communication_hooks(&plugin, &uds_manager).await?;
 
@@ -534,7 +533,7 @@ where
         Arc::new(CommunicationDisableView::new(Arc::clone(&plugin)));
 
     // Routes are published only after the plugin, initializers, and narrow views are ready.
-    let vehicle_route_handle = cda_sovd::add_vehicle_routes::<_, _, SL>(
+    let vehicle_route_handle = cda_sovd::add_vehicle_routes::<_, SL>(
         &ws.dynamic_router,
         cda_sovd::VehicleConfig {
             flash_files_path: config.flash_files_path.clone(),
@@ -544,7 +543,6 @@ where
         },
         cda_sovd::VehicleResources {
             ecu_uds: uds_manager.read().await.clone(),
-            file_managers,
             locks: Arc::clone(&vehicle_data.locks),
             communication_access: Arc::clone(&communication_access),
             doip_connect: doip_connect.clone(),

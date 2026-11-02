@@ -39,6 +39,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         self.runtime_state.publish_variant_state(variant_state);
         self.db_cache.reset().await;
         self.diag_database.unload();
+        self.embedded_files.release().await;
     }
 }
 

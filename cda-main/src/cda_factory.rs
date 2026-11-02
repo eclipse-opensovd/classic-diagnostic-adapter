@@ -72,8 +72,6 @@ impl<SP>
 where
     SP: SecurityPlugin,
 {
-    type FileManager = cda_database::FileManager;
-
     async fn create(
         &self,
         config: &Configuration,
@@ -82,7 +80,6 @@ where
         VehicleComponents<
             UdsManagerType<SP>,
             DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
-            Self::FileManager,
         >,
         ReloadError,
     > {
@@ -101,7 +98,6 @@ where
         Ok(VehicleComponents {
             uds_manager: crate_components.uds_manager,
             diagnostic_gateway: crate_components.diagnostic_gateway,
-            file_managers: crate_components.file_managers,
             functional_group_config: config.functional_description.clone(),
         })
     }

@@ -19,7 +19,7 @@ use axum::{
     response::{IntoResponse as _, Response},
 };
 use axum_extra::extract::WithRejection;
-use cda_interfaces::{DynamicPlugin, SchemaProvider, UdsEcu, file_manager::FileManager};
+use cda_interfaces::{DynamicPlugin, SchemaProvider, UdsEcu};
 use cda_plugin_security::Secured;
 use sovd_interfaces::components::ecu::operations::OperationCollectionItem;
 
@@ -29,7 +29,7 @@ use crate::sovd::{
     locks::require_ecu_access,
 };
 
-pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone>(
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::IncludeSchemaQuery>,
@@ -40,7 +40,7 @@ pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
         uds,
         locks,
         ..
-    }): State<WebserverEcuState<T, U>>,
+    }): State<WebserverEcuState<T>>,
 ) -> Response {
     require_ecu_access!(
         read,
@@ -109,7 +109,6 @@ pub(crate) mod comparams {
         use axum_extra::extract::WithRejection;
         use cda_interfaces::{
             HashMap, HashMapExtensions, UdsEcu, communication_control::CommunicationAccess,
-            file_manager::FileManager,
         };
         use cda_plugin_security::Secured;
         use indexmap::IndexMap;
@@ -132,7 +131,7 @@ pub(crate) mod comparams {
             })
         }
 
-        pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+        pub(crate) async fn get<T: UdsEcu + Clone>(
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             WithRejection(Query(query), _): WithRejection<
                 Query<sovd_comparams::executions::get::Query>,
@@ -143,7 +142,7 @@ pub(crate) mod comparams {
                 locks,
                 comparam_executions,
                 ..
-            }): State<WebserverEcuState<T, U>>,
+            }): State<WebserverEcuState<T>>,
         ) -> Response {
             require_ecu_access!(
                 read,
@@ -168,7 +167,7 @@ pub(crate) mod comparams {
                 })
         }
 
-        pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
+        pub(crate) async fn post<T: UdsEcu + Clone>(
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             WithRejection(Query(query), _): WithRejection<
                 Query<sovd_comparams::executions::get::Query>,
@@ -180,7 +179,7 @@ pub(crate) mod comparams {
                 comparam_executions,
                 communication_access,
                 ..
-            }): State<WebserverEcuState<T, U>>,
+            }): State<WebserverEcuState<T>>,
             UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
             OriginalUri(uri): OriginalUri,
             request_body: Option<Json<sovd_comparams::executions::update::Request>>,
@@ -314,7 +313,7 @@ pub(crate) mod comparams {
         pub(crate) mod id {
             use super::*;
             use crate::{openapi, sovd::components::IdPathParam};
-            pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+            pub(crate) async fn get<T: UdsEcu + Clone>(
                 UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
                 Path(id): Path<IdPathParam>,
                 WithRejection(Query(query), _): WithRejection<
@@ -327,7 +326,7 @@ pub(crate) mod comparams {
                     locks,
                     comparam_executions,
                     ..
-                }): State<WebserverEcuState<T, U>>,
+                }): State<WebserverEcuState<T>>,
             ) -> Response {
                 let include_schema = query.include_schema;
                 require_ecu_access!(read, security_plugin, &ecu_name, &locks, include_schema);
@@ -413,7 +412,7 @@ pub(crate) mod comparams {
                     .with(openapi::comparam_execution_errors)
             }
 
-            pub(crate) async fn delete<T: UdsEcu + Clone, U: FileManager>(
+            pub(crate) async fn delete<T: UdsEcu + Clone>(
                 UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
                 Path(id): Path<IdPathParam>,
                 State(WebserverEcuState {
@@ -421,7 +420,7 @@ pub(crate) mod comparams {
                     locks,
                     comparam_executions,
                     ..
-                }): State<WebserverEcuState<T, U>>,
+                }): State<WebserverEcuState<T>>,
             ) -> Response {
                 require_ecu_access!(write, security_plugin, &ecu_name, &locks, false);
                 let id = match parse_exec_uuid(&id, false) {
@@ -452,7 +451,7 @@ pub(crate) mod comparams {
                     .with(openapi::comparam_execution_errors)
             }
 
-            pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
+            pub(crate) async fn put<T: UdsEcu + Clone>(
                 UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
                 Path(id): Path<IdPathParam>,
                 WithRejection(Query(query), _): WithRejection<
@@ -464,7 +463,7 @@ pub(crate) mod comparams {
                     locks,
                     comparam_executions,
                     ..
-                }): State<WebserverEcuState<T, U>>,
+                }): State<WebserverEcuState<T>>,
                 UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
                 OriginalUri(uri): OriginalUri,
                 WithRejection(Json(request), _): WithRejection<
@@ -553,10 +552,7 @@ pub(crate) mod service {
 
     /// `GET /operations/{service}` - get operation details or SDGs
     // [[ dimpl~sovd-api-component-operations-sdgsd, GET /operations/{service} SDG handler ]]
-    pub(crate) async fn get<
-        T: cda_interfaces::UdsEcu + cda_interfaces::SchemaProvider + Clone,
-        U: cda_interfaces::file_manager::FileManager,
-    >(
+    pub(crate) async fn get<T: cda_interfaces::UdsEcu + cda_interfaces::SchemaProvider + Clone>(
         UseApi(cda_plugin_security::Secured(security_plugin), _): UseApi<
             cda_plugin_security::Secured,
             (),
@@ -573,7 +569,7 @@ pub(crate) mod service {
             uds,
             locks,
             ..
-        }): State<crate::sovd::WebserverEcuState<T, U>>,
+        }): State<crate::sovd::WebserverEcuState<T>>,
     ) -> axum::response::Response {
         use axum::response::IntoResponse as _;
 
@@ -728,8 +724,7 @@ pub(crate) mod service {
             response::{IntoResponse as _, Response},
         };
         use cda_interfaces::{
-            DiagComm, DiagCommType, DynamicPlugin, SchemaProvider, UdsEcu,
-            file_manager::FileManager, subfunction_ids,
+            DiagComm, DiagCommType, DynamicPlugin, SchemaProvider, UdsEcu, subfunction_ids,
         };
         use cda_plugin_security::Secured;
 
@@ -745,7 +740,7 @@ pub(crate) mod service {
 
         openapi::aide_helper::gen_path_param!(OperationNamePathParam service String);
 
-        pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+        pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone>(
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(OperationNamePathParam { service }): Path<OperationNamePathParam>,
             State(WebserverEcuState {
@@ -753,7 +748,7 @@ pub(crate) mod service {
                 uds,
                 locks,
                 ..
-            }): State<WebserverEcuState<T, U>>,
+            }): State<WebserverEcuState<T>>,
         ) -> Response {
             require_ecu_access!(read, security_plugin, &ecu_name, &locks, false);
             let security_plugin: DynamicPlugin = security_plugin;
@@ -837,7 +832,6 @@ pub(crate) mod service {
             DiagComm, DiagCommType, DiagServiceError, DynamicPlugin, SchemaProvider, UdsEcu,
             communication_control::CommunicationAccess,
             diagservices::{DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType},
-            file_manager::FileManager,
             subfunction_ids,
             util::std_ext::{lock_read, lock_write},
         };
@@ -881,7 +875,7 @@ pub(crate) mod service {
             pub body: Bytes,
         }
 
-        pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+        pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone>(
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(OperationServicePathParam { service }): Path<OperationServicePathParam>,
             WithRejection(Query(query), _): WithRejection<Query<sovd_executions::Query>, ApiError>,
@@ -890,7 +884,7 @@ pub(crate) mod service {
                 locks,
                 service_executions,
                 ..
-            }): State<WebserverEcuState<T, U>>,
+            }): State<WebserverEcuState<T>>,
         ) -> Response {
             require_ecu_access!(
                 read,
@@ -932,7 +926,7 @@ pub(crate) mod service {
             clippy::too_many_arguments,
             reason = "Axum extractors cannot be combined without a new custom extractor"
         )]
-        pub(crate) async fn post<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+        pub(crate) async fn post<T: UdsEcu + SchemaProvider + Clone>(
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(OperationServicePathParam { service }): Path<OperationServicePathParam>,
             WithRejection(Query(query), _): WithRejection<Query<OperationQuery>, ApiError>,
@@ -943,7 +937,7 @@ pub(crate) mod service {
                 service_executions,
                 communication_access,
                 ..
-            }): State<WebserverEcuState<T, U>>,
+            }): State<WebserverEcuState<T>>,
             UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
             OriginalUri(uri): OriginalUri,
             headers: HeaderMap,
@@ -1769,7 +1763,7 @@ pub(crate) mod service {
                 )
             }
 
-            pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+            pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone>(
                 UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
                 Path(ServiceAndIdPathParam { service, id }): Path<ServiceAndIdPathParam>,
                 WithRejection(Query(query), _): WithRejection<Query<OperationQuery>, ApiError>,
@@ -1779,7 +1773,7 @@ pub(crate) mod service {
                     locks,
                     service_executions,
                     ..
-                }): State<WebserverEcuState<T, U>>,
+                }): State<WebserverEcuState<T>>,
             ) -> Response {
                 let include_schema = query.include_schema;
                 require_ecu_access!(write, security_plugin, &ecu_name, &locks, include_schema);
@@ -1868,7 +1862,7 @@ pub(crate) mod service {
                           together makes cleanup on every response path visible. Splitting the \
                           flow would obscure that state invariant"
             )]
-            pub(crate) async fn delete<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+            pub(crate) async fn delete<T: UdsEcu + SchemaProvider + Clone>(
                 UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
                 Path(ServiceAndIdPathParam { service, id }): Path<ServiceAndIdPathParam>,
                 WithRejection(Query(query), _): WithRejection<
@@ -1881,7 +1875,7 @@ pub(crate) mod service {
                     locks,
                     service_executions,
                     ..
-                }): State<WebserverEcuState<T, U>>,
+                }): State<WebserverEcuState<T>>,
             ) -> Response {
                 let include_schema = query.include_schema;
                 require_ecu_access!(write, security_plugin, &ecu_name, &locks, include_schema);
@@ -2018,9 +2012,7 @@ mod tests {
         use aide::UseApi;
         use axum::extract::{OriginalUri, Path, Query, State};
         use axum_extra::extract::WithRejection;
-        use cda_interfaces::{
-            HashMap, HashMapExtensions, file_manager::mock::MockFileManager, mock::MockUdsEcu,
-        };
+        use cda_interfaces::{HashMap, HashMapExtensions, mock::MockUdsEcu};
         use cda_plugin_security::{
             Secured, SecurityPlugin,
             mock::{MockAuthApi, MockClaims, MockSecurityPlugin, TestSecurityPlugin},
@@ -2091,8 +2083,7 @@ mod tests {
         async fn get_foreign_exclusive_lock_skips_uds() {
             let mut uds = MockUdsEcu::new();
             uds.expect_get_comparams().times(0);
-            let state =
-                create_test_webserver_state("TestECU".to_owned(), uds, MockFileManager::new());
+            let state = create_test_webserver_state("TestECU".to_owned(), uds);
             insert_test_ecu_lock(&state.locks, "TestECU").await;
             let id = Uuid::new_v4();
             state
@@ -2102,7 +2093,7 @@ mod tests {
                 .insert(id, execution(&*state.communication_access));
             let executions = Arc::clone(&state.comparam_executions);
 
-            let response = handlers::id::get::<MockUdsEcu, MockFileManager>(
+            let response = handlers::id::get::<MockUdsEcu>(
                 UseApi(Secured(foreign_security_plugin()), std::marker::PhantomData),
                 Path(IdPathParam { id: id.to_string() }),
                 query(),
@@ -2116,14 +2107,10 @@ mod tests {
 
         #[tokio::test]
         async fn post_without_owned_write_lock_does_not_create_execution() {
-            let state = create_test_webserver_state(
-                "TestECU".to_owned(),
-                MockUdsEcu::new(),
-                MockFileManager::new(),
-            );
+            let state = create_test_webserver_state("TestECU".to_owned(), MockUdsEcu::new());
             let executions = Arc::clone(&state.comparam_executions);
 
-            let response = handlers::post::<MockUdsEcu, MockFileManager>(
+            let response = handlers::post::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -2149,11 +2136,7 @@ mod tests {
 
         #[tokio::test]
         async fn put_without_owned_write_lock_does_not_mutate_execution() {
-            let state = create_test_webserver_state(
-                "TestECU".to_owned(),
-                MockUdsEcu::new(),
-                MockFileManager::new(),
-            );
+            let state = create_test_webserver_state("TestECU".to_owned(), MockUdsEcu::new());
             let id = Uuid::new_v4();
             state
                 .comparam_executions
@@ -2162,7 +2145,7 @@ mod tests {
                 .insert(id, execution(&*state.communication_access));
             let executions = Arc::clone(&state.comparam_executions);
 
-            let response = handlers::id::put::<MockUdsEcu, MockFileManager>(
+            let response = handlers::id::put::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -2194,11 +2177,7 @@ mod tests {
 
         #[tokio::test]
         async fn delete_without_owned_write_lock_does_not_remove_execution() {
-            let state = create_test_webserver_state(
-                "TestECU".to_owned(),
-                MockUdsEcu::new(),
-                MockFileManager::new(),
-            );
+            let state = create_test_webserver_state("TestECU".to_owned(), MockUdsEcu::new());
             let id = Uuid::new_v4();
             state
                 .comparam_executions
@@ -2207,7 +2186,7 @@ mod tests {
                 .insert(id, execution(&*state.communication_access));
             let executions = Arc::clone(&state.comparam_executions);
 
-            let response = handlers::id::delete::<MockUdsEcu, MockFileManager>(
+            let response = handlers::id::delete::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -2223,15 +2202,11 @@ mod tests {
 
         #[tokio::test]
         async fn post_with_owned_write_lock_creates_execution() {
-            let state = create_test_webserver_state(
-                "TestECU".to_owned(),
-                MockUdsEcu::new(),
-                MockFileManager::new(),
-            );
+            let state = create_test_webserver_state("TestECU".to_owned(), MockUdsEcu::new());
             insert_test_ecu_lock(&state.locks, "TestECU").await;
             let executions = Arc::clone(&state.comparam_executions);
 
-            let response = handlers::post::<MockUdsEcu, MockFileManager>(
+            let response = handlers::post::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -2308,7 +2283,6 @@ mod tests {
         use axum_extra::extract::WithRejection;
         use cda_interfaces::{
             datatypes::ComponentOperationsInfo,
-            file_manager::mock::MockFileManager,
             mock::{MockUdsEcu, mock_ecu_state_online_variant_detected},
         };
         use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
@@ -2321,7 +2295,6 @@ mod tests {
         async fn test_get_operations_returns_empty_list() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             mock_uds
                 .expect_get_ecu_state()
@@ -2332,13 +2305,9 @@ mod tests {
                 .times(1)
                 .returning(|_, _| Ok(vec![]));
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
 
-            let response = get::<MockUdsEcu, MockFileManager>(
+            let response = get::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -2367,7 +2336,6 @@ mod tests {
         async fn test_get_operations_returns_items() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             mock_uds
                 .expect_get_ecu_state()
@@ -2393,13 +2361,9 @@ mod tests {
                     ])
                 });
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
 
-            let response = get::<MockUdsEcu, MockFileManager>(
+            let response = get::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -2438,7 +2402,6 @@ mod tests {
         async fn test_get_operations_with_schema() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             mock_uds
                 .expect_get_ecu_state()
@@ -2448,13 +2411,9 @@ mod tests {
                 .times(1)
                 .returning(|_, _| Ok(vec![]));
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
 
-            let response = get::<MockUdsEcu, MockFileManager>(
+            let response = get::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -2496,7 +2455,6 @@ mod tests {
             diagservices::{
                 DiagServiceJsonResponse, DiagServiceResponseType, mock::MockDiagServiceResponse,
             },
-            file_manager::mock::MockFileManager,
             mock::MockUdsEcu,
             util::std_ext::{lock_read, lock_write},
         };
@@ -2585,15 +2543,10 @@ mod tests {
         async fn test_list_executions_empty() {
             let ecu_name = "TestECU".to_string();
             let mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
-            let response = handlers::get::<MockUdsEcu, MockFileManager>(
+            let response = handlers::get::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -2626,12 +2579,7 @@ mod tests {
         async fn test_list_executions_shows_tracked_id() {
             let ecu_name = "TestECU".to_string();
             let mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             // Pre-populate an execution
@@ -2650,7 +2598,7 @@ mod tests {
                     },
                 );
 
-            let response = handlers::get::<MockUdsEcu, MockFileManager>(
+            let response = handlers::get::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -2687,16 +2635,11 @@ mod tests {
         async fn test_get_execution_by_id_not_found() {
             let ecu_name = "TestECU".to_string();
             let mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let unknown_id = uuid::Uuid::new_v4().to_string();
-            let response = id_handlers::get::<MockUdsEcu, MockFileManager>(
+            let response = id_handlers::get::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -2725,7 +2668,6 @@ mod tests {
         async fn test_get_execution_by_id_calls_request_results() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             // Expect send with subfunction_id = REQUEST_RESULTS (0x03)
             mock_uds
@@ -2746,11 +2688,7 @@ mod tests {
                     })))
                 });
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
@@ -2768,7 +2706,7 @@ mod tests {
                     },
                 );
 
-            let response = id_handlers::get::<MockUdsEcu, MockFileManager>(
+            let response = id_handlers::get::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -2817,16 +2755,11 @@ mod tests {
         async fn test_get_execution_suppress_service_skips_send_returns_stored() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             // suppress_service=true must skip the UDS send entirely
             mock_uds.expect_send().times(0);
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
@@ -2849,7 +2782,7 @@ mod tests {
                     },
                 );
 
-            let response = id_handlers::get::<MockUdsEcu, MockFileManager>(
+            let response = id_handlers::get::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -2895,7 +2828,6 @@ mod tests {
         async fn test_get_execution_not_found_without_suppress_returns_error() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             mock_uds.expect_send().times(1).returning(|_, _, _, _, _| {
                 Err(DiagServiceError::NotFound(
@@ -2903,11 +2835,7 @@ mod tests {
                 ))
             });
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
@@ -2925,7 +2853,7 @@ mod tests {
                     },
                 );
 
-            let response = id_handlers::get::<MockUdsEcu, MockFileManager>(
+            let response = id_handlers::get::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -2955,16 +2883,11 @@ mod tests {
         async fn test_delete_execution_not_found() {
             let ecu_name = "TestECU".to_string();
             let mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name.clone(),
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name.clone(), mock_uds);
             insert_test_ecu_lock(&state.locks, &ecu_name).await;
 
             let unknown_id = uuid::Uuid::new_v4().to_string();
-            let response = id_handlers::delete::<MockUdsEcu, MockFileManager>(
+            let response = id_handlers::delete::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -2994,7 +2917,6 @@ mod tests {
         async fn test_delete_execution_calls_stop() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             // Expect send with subfunction_id = STOP (0x02)
             mock_uds
@@ -3009,11 +2931,7 @@ mod tests {
                 .times(1)
                 .returning(|_, _, _, _, _| Ok(make_empty_positive_response()));
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
@@ -3034,7 +2952,7 @@ mod tests {
             // Keep a reference to service_executions so we can verify after consuming state
             let service_executions_ref = Arc::clone(&state.service_executions);
 
-            let response = id_handlers::delete::<MockUdsEcu, MockFileManager>(
+            let response = id_handlers::delete::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -3070,7 +2988,6 @@ mod tests {
         async fn test_delete_execution_stop_with_data_returns_200_stopped() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             // ECU returns a non-empty positive response from Stop
             mock_uds
@@ -3088,11 +3005,7 @@ mod tests {
                     })))
                 });
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
@@ -3112,7 +3025,7 @@ mod tests {
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
-            let response = id_handlers::delete::<MockUdsEcu, MockFileManager>(
+            let response = id_handlers::delete::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -3166,7 +3079,6 @@ mod tests {
             // Stop maps to JSON Null -> 200 with empty parameters (user-requested extension)
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             mock_uds
                 .expect_send()
@@ -3179,11 +3091,7 @@ mod tests {
                 .times(1)
                 .returning(|_, _, _, _, _| Ok(make_json_response(serde_json::Value::Null)));
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
@@ -3203,7 +3111,7 @@ mod tests {
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
-            let response = id_handlers::delete::<MockUdsEcu, MockFileManager>(
+            let response = id_handlers::delete::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -3252,7 +3160,6 @@ mod tests {
             // Stop maps to a non-object JSON value (e.g. a string) -> 200 stopped, error surfaced
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             mock_uds
                 .expect_send()
@@ -3267,11 +3174,7 @@ mod tests {
                     Ok(make_json_response(serde_json::json!("unexpected_string")))
                 });
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
@@ -3291,7 +3194,7 @@ mod tests {
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
-            let response = id_handlers::delete::<MockUdsEcu, MockFileManager>(
+            let response = id_handlers::delete::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -3338,7 +3241,6 @@ mod tests {
             // Stop response cannot be parsed (into_json fails) -> 200 stopped, error surfaced
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             mock_uds
                 .expect_send()
@@ -3362,11 +3264,7 @@ mod tests {
                     Ok(resp)
                 });
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
@@ -3386,7 +3284,7 @@ mod tests {
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
-            let response = id_handlers::delete::<MockUdsEcu, MockFileManager>(
+            let response = id_handlers::delete::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -3431,18 +3329,13 @@ mod tests {
         async fn test_delete_execution_force_removes_on_uds_error() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             // UDS returns an error (non-NotFound)
             mock_uds.expect_send().times(1).returning(|_, _, _, _, _| {
                 Err(DiagServiceError::SendFailed("timeout".to_string()))
             });
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
@@ -3463,7 +3356,7 @@ mod tests {
             // Keep a reference to service_executions so we can verify after consuming state
             let service_executions_ref = Arc::clone(&state.service_executions);
 
-            let response = id_handlers::delete::<MockUdsEcu, MockFileManager>(
+            let response = id_handlers::delete::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -3499,18 +3392,13 @@ mod tests {
         async fn test_delete_execution_force_removes_on_negative_response() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             mock_uds
                 .expect_send()
                 .times(1)
                 .returning(|_, _, _, _, _| Ok(make_negative_response()));
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
@@ -3530,7 +3418,7 @@ mod tests {
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
-            let response = id_handlers::delete::<MockUdsEcu, MockFileManager>(
+            let response = id_handlers::delete::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -3566,17 +3454,12 @@ mod tests {
         async fn test_delete_execution_without_force_returns_error_on_uds_failure() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             mock_uds.expect_send().times(1).returning(|_, _, _, _, _| {
                 Err(DiagServiceError::SendFailed("timeout".to_string()))
             });
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
@@ -3597,7 +3480,7 @@ mod tests {
             // Keep a reference to service_executions so we can verify after consuming state
             let service_executions_ref = Arc::clone(&state.service_executions);
 
-            let response = id_handlers::delete::<MockUdsEcu, MockFileManager>(
+            let response = id_handlers::delete::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -3629,18 +3512,13 @@ mod tests {
         async fn test_delete_execution_negative_response_resets_in_flight() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             mock_uds
                 .expect_send()
                 .times(1)
                 .returning(|_, _, _, _, _| Ok(make_negative_response()));
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
@@ -3660,7 +3538,7 @@ mod tests {
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
-            let response = id_handlers::delete::<MockUdsEcu, MockFileManager>(
+            let response = id_handlers::delete::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -3697,7 +3575,6 @@ mod tests {
         async fn test_delete_execution_suppress_service_removes_on_not_found() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             mock_uds.expect_send().times(1).returning(|_, _, _, _, _| {
                 Err(DiagServiceError::NotFound(
@@ -3705,11 +3582,7 @@ mod tests {
                 ))
             });
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
@@ -3730,7 +3603,7 @@ mod tests {
             // Keep a reference to service_executions so we can verify after consuming state
             let service_executions_ref = Arc::clone(&state.service_executions);
 
-            let response = id_handlers::delete::<MockUdsEcu, MockFileManager>(
+            let response = id_handlers::delete::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -3766,12 +3639,7 @@ mod tests {
         async fn test_get_execution_in_flight_returns_conflict() {
             let ecu_name = "TestECU".to_string();
             let mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
@@ -3789,7 +3657,7 @@ mod tests {
                     },
                 );
 
-            let response = id_handlers::get::<MockUdsEcu, MockFileManager>(
+            let response = id_handlers::get::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -3818,12 +3686,7 @@ mod tests {
         async fn test_delete_execution_in_flight_returns_conflict() {
             let ecu_name = "TestECU".to_string();
             let mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name.clone(),
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name.clone(), mock_uds);
             insert_test_ecu_lock(&state.locks, &ecu_name).await;
 
             let exec_id = uuid::Uuid::new_v4();
@@ -3841,7 +3704,7 @@ mod tests {
                     },
                 );
 
-            let response = id_handlers::delete::<MockUdsEcu, MockFileManager>(
+            let response = id_handlers::delete::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
@@ -3884,13 +3747,8 @@ mod tests {
         async fn test_post_operation_conflict_when_running_execution_exists() {
             let ecu_name = "TestECU".to_string();
             let mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name.clone(),
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name.clone(), mock_uds);
 
             // Pre-populate a running execution for CalibrateSensor
             lock_write(&state.service_executions)
@@ -3933,7 +3791,6 @@ mod tests {
             // An execution running for ServiceA must NOT block ServiceB
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             mock_uds
                 .expect_get_routine_subfunctions()
@@ -3949,11 +3806,7 @@ mod tests {
                 .times(1)
                 .returning(|_, _, _, _, _| Ok(make_empty_positive_response()));
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name.clone(),
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name.clone(), mock_uds);
 
             // Pre-populate a running execution for a DIFFERENT service
             lock_write(&state.service_executions)
@@ -3996,7 +3849,6 @@ mod tests {
         async fn test_post_operation_service_not_found_returns_404() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             mock_uds
                 .expect_get_routine_subfunctions()
@@ -4017,11 +3869,7 @@ mod tests {
                     ))
                 });
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name.clone(),
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name.clone(), mock_uds);
 
             let response = ecu_operation_write_handler::<MockUdsEcu>(
                 handlers::WriteHandlerRequest {
@@ -4048,7 +3896,6 @@ mod tests {
         async fn test_post_operation_sync_returns_200_on_empty_response() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             mock_uds
                 .expect_get_routine_subfunctions()
@@ -4064,11 +3911,7 @@ mod tests {
                 .times(1)
                 .returning(|_, _, _, _, _| Ok(make_empty_positive_response()));
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name.clone(),
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name.clone(), mock_uds);
 
             let response = ecu_operation_write_handler::<MockUdsEcu>(
                 handlers::WriteHandlerRequest {
@@ -4095,7 +3938,6 @@ mod tests {
         async fn test_post_named_io_control_uses_exact_operation_service() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             mock_uds
                 .expect_get_routine_subfunctions()
@@ -4131,11 +3973,7 @@ mod tests {
                 .times(1)
                 .returning(|_, _, _, _, _| Ok(make_empty_positive_response()));
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name.clone(),
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name.clone(), mock_uds);
 
             let response = ecu_operation_write_handler::<MockUdsEcu>(
                 handlers::WriteHandlerRequest {
@@ -4165,7 +4003,6 @@ mod tests {
         async fn test_post_operation_async_returns_202_and_tracks_execution() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             mock_uds
                 .expect_get_routine_subfunctions()
@@ -4183,11 +4020,7 @@ mod tests {
                 })))
             });
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name.clone(),
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name.clone(), mock_uds);
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
@@ -4227,17 +4060,12 @@ mod tests {
         async fn test_post_operation_suppress_service_async_skips_send_returns_202_and_tracks() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             mock_uds.expect_get_routine_subfunctions().times(0);
             // send must NOT be called when suppress_service=true
             mock_uds.expect_send().times(0);
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name.clone(),
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name.clone(), mock_uds);
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
@@ -4268,7 +4096,6 @@ mod tests {
         async fn test_post_operation_async_into_json_error_returns_empty_parameters() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             mock_uds
                 .expect_get_routine_subfunctions()
@@ -4293,11 +4120,7 @@ mod tests {
                 Ok(resp)
             });
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name.clone(),
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name.clone(), mock_uds);
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
@@ -4352,7 +4175,6 @@ mod tests {
         async fn test_post_operation_async_non_object_json_returns_empty_parameters() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             mock_uds
                 .expect_get_routine_subfunctions()
@@ -4378,11 +4200,7 @@ mod tests {
                 Ok(resp)
             });
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name.clone(),
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name.clone(), mock_uds);
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
@@ -4427,7 +4245,6 @@ mod tests {
         async fn test_request_results_into_json_error_surfaces_in_errors_field() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
 
             // RequestResults returns a non-empty response whose into_json() fails
             mock_uds.expect_send().times(1).returning(|_, _, _, _, _| {
@@ -4443,11 +4260,7 @@ mod tests {
                 Ok(resp)
             });
 
-            let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name,
-                mock_uds,
-                mock_file_manager,
-            );
+            let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
@@ -4465,7 +4278,7 @@ mod tests {
                     },
                 );
 
-            let response = id_handlers::get::<MockUdsEcu, MockFileManager>(
+            let response = id_handlers::get::<MockUdsEcu>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
