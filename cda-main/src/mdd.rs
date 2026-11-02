@@ -28,6 +28,7 @@ use cda_interfaces::{
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     health::HealthProvider,
     mdd_chunks::{Chunk, ChunkType},
+    runtime_update_api::ReloadError,
     storage_api::{Collection, DirectFileAccess},
 };
 use cda_plugin_security::SecurityPlugin;
@@ -35,7 +36,6 @@ use cda_storage::LocalStorage;
 use tokio::sync::RwLock;
 
 use crate::{
-    AppError,
     config::configfile::{Configuration, EcuConfig},
     vehicle::DatabaseMap,
 };
@@ -56,6 +56,43 @@ pub enum MddLoadingError {
     ComParamsInvalid { ecu: String },
     #[error("Failed to create ECU manager for ECU {ecu}: {reason}")]
     EcuManagerFailed { ecu: String, reason: String },
+}
+
+/// Everything loading the MDD databases can fail with.
+///
+/// Narrow on purpose: the loading path describes only its own failure domain,
+/// so every caller converts it into whatever error type it reports, instead of
+/// carrying the whole application's error type through a conversion whose
+/// other cases can never occur.
+#[derive(Debug, thiserror::Error)]
+pub enum DatabaseLoadError {
+    #[error("Data error `{0}`")]
+    Data(String),
+    #[error("Configuration error `{message}`")]
+    Configuration {
+        message: String,
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
+    /// `provided` MDD files resolved, yet not one database loaded. Distinct
+    /// from an empty set, which is a legitimate state.
+    #[error("No database loaded although {provided} MDD file(s) were provided")]
+    NoDatabasesLoaded { provided: usize },
+}
+
+impl From<DatabaseLoadError> for ReloadError {
+    /// A reload that loaded nothing from files that were provided is a total
+    /// loss of diagnostic function and grants a rollback; every other load
+    /// failure leaves the previous databases in place and is reported as a
+    /// failed replacement.
+    fn from(error: DatabaseLoadError) -> Self {
+        let message = error.to_string();
+        match error {
+            DatabaseLoadError::NoDatabasesLoaded { .. } => Self::NoDatabasesLoaded(message),
+            DatabaseLoadError::Data(_) | DatabaseLoadError::Configuration { .. } => {
+                Self::ReplacementFailure(message)
+            }
+        }
+    }
 }
 
 pub const PROTO_LOAD_CONFIG: &[ProtoLoadConfig; 4] = &[
@@ -104,12 +141,14 @@ struct EcuLoadContext<'a> {
     components_config: &'a cda_interfaces::datatypes::ComponentsConfig,
 }
 
+/// Every ECU that loaded, keyed by its lowercased name, with the metadata read
+/// from its MDD alongside the manager built from it.
 pub(crate) type LoadedEcuMap<S> = HashMap<String, (EcuManager<S>, EcuMetadata)>;
 
 /// Loads MDD database files into memory and returns the database and file-manager maps.
 ///
 /// # Errors
-/// Returns [`AppError`] if any database file fails to parse or initialize.
+/// Returns [`DatabaseLoadError`] if any database file fails to parse or initialize.
 #[tracing::instrument(
     skip(config, mdd_paths, db_health_provider),
     fields(database_count = mdd_paths.len())
@@ -118,7 +157,7 @@ pub async fn load_databases<S: SecurityPlugin>(
     config: &Configuration,
     mdd_paths: &[PathBuf],
     db_health_provider: Option<&Arc<dyn HealthProvider>>,
-) -> Result<DatabaseMap<S>, AppError> {
+) -> Result<DatabaseMap<S>, DatabaseLoadError> {
     if let Some(provider) = db_health_provider {
         provider.set_status(cda_health::Status::Starting).await;
     }
@@ -146,7 +185,7 @@ pub async fn load_databases<S: SecurityPlugin>(
                     if let Some(provider) = db_health_provider {
                         provider.set_status(cda_health::Status::Failed).await;
                     }
-                    return Err(AppError::DataError(e.to_string()));
+                    return Err(DatabaseLoadError::Data(e.to_string()));
                 }
             };
 
@@ -268,7 +307,7 @@ pub(crate) fn handle_ecu_config_keys<S: SecurityPlugin>(
     ecu_config_map: &HashMap<String, EcuConfig>,
     databases: &HashMap<String, RwLock<EcuManager<S>>>,
     strict: bool,
-) -> Result<(), AppError> {
+) -> Result<(), DatabaseLoadError> {
     let mut unmatched = Vec::new();
     for ecu_key in ecu_config_map.keys() {
         if !databases.contains_key(ecu_key) {
@@ -280,7 +319,7 @@ pub(crate) fn handle_ecu_config_keys<S: SecurityPlugin>(
         }
     }
     if strict && !unmatched.is_empty() {
-        return Err(AppError::ConfigurationError {
+        return Err(DatabaseLoadError::Configuration {
             message: format!(
                 "[strict] ecu_config is enabled and the following per-ECU config entries do not \
                  match any loaded database: {}",
@@ -438,9 +477,13 @@ fn create_ecu_manager<S: SecurityPlugin>(
     })
 }
 
-/// Extract file chunks from proto data.
-fn extract_file_chunks(mut proto_data: HashMap<ChunkType, Vec<Chunk>>) -> Vec<Chunk> {
-    let filtered_chunks: Vec<Chunk> = [
+/// The chunks the bulk-data endpoints serve.
+///
+/// Only the chunk types [`PROTO_LOAD_CONFIG`] asks for besides the diagnostic
+/// description: whatever else an MDD carries was never loaded, and the
+/// diagnostic description itself is not a file to hand out.
+fn extract_file_chunks(proto_data: &mut HashMap<ChunkType, Vec<Chunk>>) -> Vec<Chunk> {
+    [
         ChunkType::CodeFile,
         ChunkType::CodeFilePartial,
         ChunkType::EmbeddedFile,
@@ -448,12 +491,7 @@ fn extract_file_chunks(mut proto_data: HashMap<ChunkType, Vec<Chunk>>) -> Vec<Ch
     .iter()
     .filter_map(|chunk_type| proto_data.remove(chunk_type))
     .flat_map(IntoIterator::into_iter)
-    .collect();
-
-    filtered_chunks
-        .into_iter()
-        .chain(proto_data.into_values().flat_map(IntoIterator::into_iter))
-        .collect()
+    .collect()
 }
 
 /// Load and process a single ECU from MDD file.
@@ -485,10 +523,11 @@ fn load_ecu_from_file<S: SecurityPlugin>(
     } else {
         EcuManagerType::Ecu
     };
-    // Built here so the handle is stored on the manager itself: a separate map
-    // keyed by ECU name has no way to stay in sync with the manager.
+    // Built here so the handle can be stored on the manager itself: a separate
+    // map has no way to stay in sync with it across a reload.
     let embedded_files = Arc::new(
-        EmbeddedFileStore::new(ctx.mdd_path.clone(), extract_file_chunks(proto_data)).with_expiry(),
+        EmbeddedFileStore::new(ctx.mdd_path.clone(), extract_file_chunks(&mut proto_data))
+            .with_expiry(),
     );
     create_ecu_manager(
         diag_database,
@@ -633,6 +672,30 @@ mod tests {
             panic!("Exactly one file expected.");
         };
         assert_eq!(valid_file.file_name().unwrap(), "valid.mdd");
+    }
+
+    #[tokio::test]
+    async fn resolve_mdd_paths_stays_empty_when_collection_is_empty() {
+        let fixture = Fixture::new_with_mdd_files(&[("ECU.mdd", b"DATA")]);
+
+        // An existing collection is authoritative, so an emptied one must not fall back.
+        fixture
+            .storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
+            .await
+            .unwrap();
+
+        let paths =
+            resolve_mdd_paths(&fixture.storage, fixture.db_dir.path().to_str().unwrap()).await;
+        assert!(paths.is_empty(), "Expected no MDD paths, got {paths:?}");
+
+        // The configured database dir stays unused on every following boot as well.
+        let paths =
+            resolve_mdd_paths(&fixture.storage, fixture.db_dir.path().to_str().unwrap()).await;
+        assert!(
+            paths.is_empty(),
+            "Expected no MDD paths on the second boot, got {paths:?}"
+        );
     }
 
     #[tokio::test]

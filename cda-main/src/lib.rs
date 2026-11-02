@@ -39,8 +39,8 @@ use crate::{
     update::{UpdatePluginBuilder, create_default_update_plugin, update_plugin_fn},
 };
 
-pub mod cda_factory;
 pub mod config;
+pub mod database_reload;
 pub mod error;
 pub mod mdd;
 pub mod setup;
@@ -49,6 +49,7 @@ pub mod vehicle;
 
 pub use error::AppError;
 pub use setup::Setup;
+pub use vehicle::{TransportConfigs, VehicleData, create_diagnostic_gateway, load_vehicle_data};
 
 // Valgrind and other profing tools intercept the system allocator, whereas mimalloc
 // manages allocations internally. Keep mimalloc in normal builds but omit it
@@ -416,7 +417,7 @@ where
         vehicle::load_vehicle_data::<SP>(
             &config,
             webserver_state.health_state.as_ref(),
-            &storage,
+            Arc::clone(&storage),
             setup.lock_priority_policy,
         ),
         webserver_state.shutdown_signal.clone(),
@@ -426,12 +427,6 @@ where
         tracing::info!("Shutdown requested during database load, exiting cleanly");
         return Ok(());
     };
-
-    if vehicle_data.database_count == 0 && config.database.exit_no_database_loaded {
-        return Err(AppError::ResourceError(
-            "No database loaded, exiting as configured".to_string(),
-        ));
-    }
 
     // Retained for the full server lifetime, so its event dispatcher keeps
     // running until explicit shutdown.
@@ -485,8 +480,7 @@ pub async fn run(args: AppArgs) -> Result<(), AppError> {
     >(
         args,
         Setup::new().with_update_plugin(update_plugin_fn(|infra| async move {
-            create_default_update_plugin::<DefaultSecurityPluginData, DefaultSecurityPlugin>(infra)
-                .await
+            create_default_update_plugin::<DefaultSecurityPluginData>(infra).await
         })),
     ))
     .await
@@ -509,10 +503,7 @@ pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
         config,
         Setup::new().with_update_plugin(update_plugin_fn(
             |infra: setup::CdaRuntime<DefaultSecurityPluginData>| async move {
-                create_default_update_plugin::<DefaultSecurityPluginData, DefaultSecurityPlugin>(
-                    infra,
-                )
-                .await
+                create_default_update_plugin::<DefaultSecurityPluginData>(infra).await
             },
         )),
     ))
@@ -559,6 +550,7 @@ async fn init_webserver(
     let mut webserver_state = ApplicationState {
         _tracing_guards: tracing_guards,
         dynamic_router,
+        sovd_registry: cda_sovd::SovdRegistry::default(),
         webserver_task: Some(webserver_task),
         shutdown_signal: clonable_shutdown_signal,
         health_state: None,
@@ -604,7 +596,13 @@ async fn init_webserver(
     );
 
     register_version_endpoints(&webserver_state.dynamic_router).await;
-    cda_sovd::add_openapi_routes(&webserver_state.dynamic_router).await;
+    // The registry starts empty and receives the vehicle identities once they are loaded,
+    // so the OpenAPI document is served during initialization already.
+    cda_sovd::add_openapi_routes(
+        &webserver_state.dynamic_router,
+        &webserver_state.sovd_registry,
+    )
+    .await;
 
     if let Some(hook) = pre_load {
         hook(webserver_state.dynamic_router.clone()).await?;
@@ -652,6 +650,8 @@ async fn register_version_endpoints(dynamic_router: &cda_sovd::dynamic_router::D
 pub(crate) struct ApplicationState {
     _tracing_guards: TracingGuards,
     pub dynamic_router: cda_sovd::dynamic_router::DynamicRouter,
+    /// Live SOVD identities, published once the vehicle data is loaded.
+    pub sovd_registry: cda_sovd::SovdRegistry,
     webserver_task: Option<tokio::task::JoinHandle<()>>,
     pub shutdown_signal: cda_interfaces::ShutdownSignal,
     health_state: Option<cda_health::HealthState>,
@@ -911,6 +911,7 @@ mod webserver_lifecycle_tests {
                 _otel: None,
             },
             dynamic_router: cda_sovd::dynamic_router::DynamicRouter::new(),
+            sovd_registry: cda_sovd::SovdRegistry::default(),
             webserver_task: Some(task),
             shutdown_signal: cda_interfaces::shutdown_signal(std::future::pending()),
             health_state: None,
@@ -955,11 +956,7 @@ mod webserver_lifecycle_tests {
                 .with_existing_tracing()
                 .with_update_plugin(update_plugin_fn(
                     |infra: setup::CdaRuntime<DefaultSecurityPluginData>| async move {
-                        create_default_update_plugin::<
-                            DefaultSecurityPluginData,
-                            DefaultSecurityPlugin,
-                        >(infra)
-                        .await
+                        create_default_update_plugin::<DefaultSecurityPluginData>(infra).await
                     },
                 )),
         ));

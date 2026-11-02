@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 use aide::UseApi;
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::Query,
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
@@ -24,7 +24,7 @@ use cda_plugin_security::Secured;
 use http::StatusCode;
 use sovd_interfaces::components::ecu::data_categories as sovd_data_categories;
 
-use super::{ApiError, DynamicPlugin, ErrorWrapper, UdsEcu, WebserverEcuState};
+use super::{ApiError, DynamicPlugin, EcuContext, ErrorWrapper, UdsEcu, WebserverEcuState};
 use crate::sovd::create_schema;
 
 pub(crate) async fn get<T: UdsEcu + Clone>(
@@ -33,7 +33,7 @@ pub(crate) async fn get<T: UdsEcu + Clone>(
         Query<sovd_data_categories::get::Query>,
         ApiError,
     >,
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T>>,
+    EcuContext(WebserverEcuState { ecu_name, uds, .. }): EcuContext<T>,
 ) -> Response {
     let schema = if query.include_schema {
         Some(create_schema!(sovd_data_categories::get::Response))
@@ -103,7 +103,6 @@ pub(crate) fn docs_get(
 #[cfg(test)]
 mod tests {
     use aide::UseApi;
-    use axum::extract::State;
     use cda_interfaces::{datatypes::ComponentDataInfo, mock::MockUdsEcu};
     use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
 
@@ -111,7 +110,7 @@ mod tests {
     use crate::sovd::tests::create_test_webserver_state;
 
     async fn call_get(mock_uds: MockUdsEcu) -> Response {
-        let state = create_test_webserver_state::<MockUdsEcu>("TestECU".to_owned(), mock_uds);
+        let state = create_test_webserver_state::<MockUdsEcu>("TestECU".to_owned(), mock_uds).await;
 
         get::<MockUdsEcu>(
             UseApi(
@@ -124,7 +123,7 @@ mod tests {
                 }),
                 std::marker::PhantomData,
             ),
-            State(state),
+            EcuContext(state),
         )
         .await
     }

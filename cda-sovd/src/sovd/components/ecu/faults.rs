@@ -14,7 +14,6 @@
 use aide::{UseApi, transform::TransformOperation};
 use axum::{
     Json,
-    extract::State,
     http::StatusCode,
     response::{IntoResponse as _, Response},
 };
@@ -34,7 +33,7 @@ use sovd_interfaces::components::ecu::{
 use crate::{
     openapi,
     sovd::{
-        IntoSovd, WebserverEcuState, create_schema,
+        EcuContext, IntoSovd, WebserverEcuState, create_schema,
         error::{ApiError, ErrorWrapper, api_error_from_diag_response},
         faults::faults::FaultStatus,
         locks::require_ecu_access,
@@ -75,12 +74,12 @@ impl IntoSovd for DtcRecordAndStatus {
 
 pub(crate) async fn get<T: UdsEcu + Send + Sync + Clone>(
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-    State(WebserverEcuState {
+    EcuContext(WebserverEcuState {
         ecu_name,
         uds,
         locks,
         ..
-    }): State<WebserverEcuState<T>>,
+    }): EcuContext<T>,
     WithRejection(QsQuery(query), _): WithRejection<QsQuery<GetFaultQuery>, ApiError>,
 ) -> Response {
     require_ecu_access!(
@@ -144,12 +143,12 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
 
 pub(crate) async fn delete<T: UdsEcu + Send + Sync + Clone>(
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-    State(WebserverEcuState {
+    EcuContext(WebserverEcuState {
         ecu_name,
         uds,
         locks,
         ..
-    }): State<WebserverEcuState<T>>,
+    }): EcuContext<T>,
     WithRejection(QsQuery(query), _): WithRejection<QsQuery<DeleteFaultQuery>, ApiError>,
 ) -> Response {
     require_ecu_access!(write, security_plugin, &ecu_name, &locks, false);
@@ -326,12 +325,12 @@ pub(crate) mod id {
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         Path(id): Path<IdPathParam>,
         Query(query): Query<DtcIdQuery>,
-        State(WebserverEcuState {
+        EcuContext(WebserverEcuState {
             ecu_name,
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T>>,
+        }): EcuContext<T>,
     ) -> Response {
         require_ecu_access!(
             read,
@@ -380,12 +379,12 @@ pub(crate) mod id {
     pub(crate) async fn delete<T: UdsEcu + Send + Sync + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         Path(IdPathParam { id }): Path<IdPathParam>,
-        State(WebserverEcuState {
+        EcuContext(WebserverEcuState {
             ecu_name,
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<T>>,
+        }): EcuContext<T>,
         WithRejection(QsQuery(query), _): WithRejection<QsQuery<DeleteFaultQuery>, ApiError>,
     ) -> Response {
         require_ecu_access!(write, security_plugin, &ecu_name, &locks, false);
@@ -486,7 +485,7 @@ mod tests {
             });
 
         // Create state using test utility
-        let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds);
+        let state = create_test_webserver_state::<MockUdsEcu>(ecu_name, mock_uds).await;
 
         let query = GetFaultQuery {
             status: None,
@@ -500,7 +499,7 @@ mod tests {
         let security_plugin = Box::new(TestSecurityPlugin);
         let response = get::<MockUdsEcu>(
             UseApi(Secured(security_plugin), std::marker::PhantomData),
-            State(state),
+            EcuContext(state),
             WithRejection(QsQuery(query), std::marker::PhantomData),
         )
         .await;

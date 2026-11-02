@@ -949,7 +949,7 @@ mod acquisition_policy {
     use aide::UseApi;
     use axum::{
         Json,
-        extract::{OriginalUri, Query, State},
+        extract::{OriginalUri, Query},
         http::Uri,
         response::Response,
     };
@@ -959,9 +959,9 @@ mod acquisition_policy {
 
     use super::*;
     use crate::sovd::{
-        WebserverEcuState,
+        EcuContext, WebserverEcuState,
         functions::functional_groups::{
-            locks::post as fg_post, tests::create_test_fg_state_with_locks,
+            FgContext, locks::post as fg_post, tests::create_test_fg_state_with_locks,
         },
         locks::handlers::ecu::post as ecu_post,
         tests::create_test_webserver_state,
@@ -986,14 +986,14 @@ mod acquisition_policy {
     async fn post_ecu_lock(uds: MockUdsEcu, ecu_name: &str, locks: &Arc<Locks>) -> Response {
         let state = WebserverEcuState {
             locks: Arc::clone(locks),
-            ..create_test_webserver_state::<MockUdsEcu>(ecu_name.to_owned(), uds)
+            ..create_test_webserver_state::<MockUdsEcu>(ecu_name.to_owned(), uds).await
         };
         ecu_post(
             UseApi(
                 Secured(Box::new(TestSecurityPlugin)),
                 std::marker::PhantomData,
             ),
-            State(state),
+            EcuContext(state),
             Query(sovd_interfaces::IncludeSchemaQuery {
                 include_schema: false,
             }),
@@ -1010,7 +1010,7 @@ mod acquisition_policy {
                 Secured(Box::new(TestSecurityPlugin)),
                 std::marker::PhantomData,
             ),
-            State(create_test_fg_state_with_locks(
+            FgContext(create_test_fg_state_with_locks(
                 uds,
                 fg_name.to_owned(),
                 Arc::clone(locks),
