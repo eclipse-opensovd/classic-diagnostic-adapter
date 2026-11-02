@@ -20,7 +20,7 @@ pub(crate) mod single_ecu {
         response::{IntoResponse as _, Response},
     };
     use axum_extra::extract::WithRejection;
-    use cda_interfaces::{UdsEcu, file_manager::FileManager};
+    use cda_interfaces::UdsEcu;
 
     use crate::{
         openapi,
@@ -32,12 +32,12 @@ pub(crate) mod single_ecu {
 
     openapi::aide_helper::gen_path_param!(ExecutionJobPathParam job_name String);
 
-    pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn get<T: UdsEcu + Clone>(
         WithRejection(Query(query), _): WithRejection<
             Query<sovd_interfaces::IncludeSchemaQuery>,
             ApiError,
         >,
-        State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<T, U>>,
+        State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<T>>,
     ) -> Response {
         let include_schema = query.include_schema;
         let schema = if include_schema {
@@ -83,13 +83,13 @@ pub(crate) mod single_ecu {
 
     pub(crate) mod name {
         use super::*;
-        pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+        pub(crate) async fn get<T: UdsEcu + Clone>(
             Path(job_name): Path<ExecutionJobPathParam>,
             WithRejection(Query(query), _): WithRejection<
                 Query<sovd_interfaces::IncludeSchemaQuery>,
                 ApiError,
             >,
-            State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<T, U>>,
+            State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<T>>,
         ) -> Response {
             let include_schema = query.include_schema;
             let mut job = match uds

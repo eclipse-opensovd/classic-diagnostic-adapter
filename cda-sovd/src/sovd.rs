@@ -44,7 +44,7 @@ use cda_interfaces::{
     },
     datatypes::ComponentsConfig,
     diagservices::{FieldParseError, UdsPayloadData},
-    file_manager::FileManager,
+    mdd_chunks::EmbeddedFilesProvider,
     runtime_update_api::LockStateProvider,
     util::std_ext::lock_write,
 };
@@ -106,18 +106,12 @@ impl IntoSovd for cda_interfaces::EcuState {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum SovdError {
-    #[error("Failed to create route: {0}")]
-    RouteError(String),
-}
-
 /// Synchronous lock for short execution-map operations so reservation cleanup can run in `Drop`.
 /// Lock guards must never be held across an `.await`.
 pub(crate) type ExecutionLock<E> = StdRwLock<HashMap<String, IndexMap<Uuid, E>>>;
 
 #[derive(Clone)]
-pub(crate) struct WebserverEcuState<T: UdsEcu + Clone, U: FileManager> {
+pub(crate) struct WebserverEcuState<T: UdsEcu + Clone> {
     ecu_name: String,
     uds: T,
     locks: Arc<Locks>,
@@ -128,7 +122,6 @@ pub(crate) struct WebserverEcuState<T: UdsEcu + Clone, U: FileManager> {
     pub(crate) service_executions: Arc<ExecutionLock<ServiceExecution>>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
     flash_functional_class_default: Arc<str>,
-    mdd_embedded_files: Arc<U>,
 }
 
 pub(crate) fn with_retry_after(mut response: Response, retry_after: Option<Duration>) -> Response {
@@ -679,17 +672,14 @@ pub struct FlashConfig {
     pub functional_class_default: String,
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Combining parameters into a struct is not preferred here, to keep route setup \
-              explicit"
-)]
-pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: SecurityPluginLoader>(
+pub async fn route<
+    T: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone,
+    S: SecurityPluginLoader,
+>(
     functional_group_config: FunctionalDescriptionConfig,
     components_config: ComponentsConfig,
     uds: &T,
     flash_config: FlashConfig,
-    mut file_manager: HashMap<String, U>,
     locks: Arc<Locks>,
     communication_access: Arc<dyn CommunicationAccess>,
     doip_connect: Option<Arc<dyn DoipConnect>>,
@@ -709,7 +699,7 @@ pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: Securi
         doip_connect,
     };
 
-    let router = components_route::<T, U>(state.clone(), &mut file_manager).await;
+    let router = components_route::<T>(state.clone()).await;
 
     vehicle_route::<T, S>(state, router, functional_group_config)
         .await
@@ -851,9 +841,8 @@ fn docs_components(op: TransformOperation) -> TransformOperation {
         })
 }
 
-async fn components_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
+async fn components_route<T: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone>(
     state: WebserverState<T>,
-    file_manager: &mut HashMap<String, U>,
 ) -> Router<WebserverState<T>> {
     let mut router = Router::new().api_route(
         "/vehicle/v15/components",
@@ -861,14 +850,8 @@ async fn components_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + '
     );
     let mut ecus = state.uds.get_physical_ecus().await;
     for ecu_name in ecus.drain(0..) {
-        match ecu_route::<T, U>(&ecu_name, &state, file_manager) {
-            Ok((ecu_path, nested)) => {
-                router = router.nest_api_service(&ecu_path, nested);
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to create route for ECU '{ecu_name}'");
-            }
-        }
+        let (ecu_path, nested) = ecu_route::<T>(&ecu_name, &state);
+        router = router.nest_api_service(&ecu_path, nested);
     }
     router.with_state(state)
 }
@@ -877,11 +860,10 @@ async fn components_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + '
     clippy::too_many_lines,
     reason = "Route creation kept together for structural clarity"
 )]
-fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
+fn ecu_route<T: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone>(
     ecu_name: &str,
     state: &WebserverState<T>,
-    file_manager: &mut HashMap<String, U>,
-) -> Result<(String, Router), SovdError> {
+) -> (String, Router) {
     let ecu_lower = ecu_name.to_lowercase();
     let ecu_state = WebserverEcuState {
         ecu_name: ecu_lower.clone(),
@@ -892,11 +874,6 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
         service_executions: Arc::new(StdRwLock::new(HashMap::default())),
         flash_data: Arc::clone(&state.flash_data),
         flash_functional_class_default: Arc::clone(&state.flash_functional_class_default),
-        mdd_embedded_files: Arc::new(file_manager.remove(&ecu_lower).ok_or_else(|| {
-            SovdError::RouteError(format!(
-                "FileManager for ECU '{ecu_name}' not found in provided FileManager map"
-            ))
-        })?),
     };
     let ecu_path = format!("/vehicle/v15/components/{ecu_lower}");
 
@@ -1138,7 +1115,7 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
         .with_path_items(crate::openapi::defunct_lock_path)
         .with_path_items(|op| op.tag(ecu_name));
 
-    Ok((ecu_path, router))
+    (ecu_path, router)
 }
 
 fn get_payload_data<'a, T>(
@@ -1433,7 +1410,6 @@ pub(crate) mod tests {
             ActivationCause, CommunicationAccess, CommunicationError, CommunicationState,
             VariantDetectionMode,
         },
-        file_manager::FileManager,
         util::std_ext::lock_read,
     };
     use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
@@ -1691,11 +1667,10 @@ pub(crate) mod tests {
         assert_eq!(Arc::strong_count(&access.active), 1);
     }
 
-    pub fn create_test_webserver_state<T: UdsEcu + Clone, U: FileManager>(
+    pub fn create_test_webserver_state<T: UdsEcu + Clone>(
         ecu_name: String,
         uds: T,
-        file_manager: U,
-    ) -> WebserverEcuState<T, U> {
+    ) -> WebserverEcuState<T> {
         WebserverEcuState {
             ecu_name,
             uds,
@@ -1709,7 +1684,6 @@ pub(crate) mod tests {
                 schema: None,
             })),
             flash_functional_class_default: Arc::from("flash_download_upload"),
-            mdd_embedded_files: Arc::new(file_manager),
         }
     }
 }

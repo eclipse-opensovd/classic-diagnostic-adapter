@@ -18,7 +18,7 @@ use std::{
 
 use cda_core::{EcuManager, EcuManagerConfig};
 use cda_database::{
-    FileManager, ProtoLoadConfig,
+    EmbeddedFileStore, ProtoLoadConfig,
     storage::{DatabaseLocation, current_database_location},
     update_mdd_uncompressed,
 };
@@ -26,8 +26,8 @@ use cda_interfaces::{
     EcuAddresses, EcuManager as EcuManagerTrait, EcuManagerType, FunctionalDescriptionConfig,
     HashMap, HashMapEntry, HashMapExtensions, HashSet, Protocol,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
-    file_manager::{Chunk, ChunkType},
     health::HealthProvider,
+    mdd_chunks::{Chunk, ChunkType},
     storage_api::{Collection, DirectFileAccess},
 };
 use cda_plugin_security::SecurityPlugin;
@@ -37,7 +37,7 @@ use tokio::sync::RwLock;
 use crate::{
     AppError,
     config::configfile::{Configuration, EcuConfig},
-    vehicle::{DatabaseMap, FileManagerMap},
+    vehicle::DatabaseMap,
 };
 
 pub(crate) const DB_HEALTH_COMPONENT_KEY: &str = "database";
@@ -104,12 +104,6 @@ struct EcuLoadContext<'a> {
     components_config: &'a cda_interfaces::datatypes::ComponentsConfig,
 }
 
-/// Result of building an ECU manager and associated metadata.
-struct EcuLoadResult<S: SecurityPlugin> {
-    manager: EcuManager<S>,
-    files: Vec<Chunk>,
-}
-
 pub(crate) type LoadedEcuMap<S> = HashMap<String, (EcuManager<S>, EcuMetadata)>;
 
 /// Loads MDD database files into memory and returns the database and file-manager maps.
@@ -124,7 +118,7 @@ pub async fn load_databases<S: SecurityPlugin>(
     config: &Configuration,
     mdd_paths: &[PathBuf],
     db_health_provider: Option<&Arc<dyn HealthProvider>>,
-) -> Result<(DatabaseMap<S>, FileManagerMap), AppError> {
+) -> Result<DatabaseMap<S>, AppError> {
     if let Some(provider) = db_health_provider {
         provider.set_status(cda_health::Status::Starting).await;
     }
@@ -139,10 +133,9 @@ pub async fn load_databases<S: SecurityPlugin>(
     let protocol = cda_interfaces::Protocol::new(config.doip.protocol_name.clone());
 
     let mut loaded_ecus: LoadedEcuMap<S> = HashMap::new();
-    let mut file_managers_map: HashMap<String, FileManager> = HashMap::new();
 
     for path in mdd_paths {
-        let (ecu_name, ecu_manager, file_manager) =
+        let (ecu_name, ecu_manager) =
             match load_single_mdd::<S>(path, config, &ecu_config_map, &protocol) {
                 Ok(result) => result,
                 Err(e) if config.database.ignore_invalid_mdd => {
@@ -167,7 +160,6 @@ pub async fn load_databases<S: SecurityPlugin>(
                 valid: true,
             },
         );
-        file_managers_map.insert(ecu_name, file_manager);
     }
 
     let databases: DatabaseMap<S> = loaded_ecus
@@ -181,12 +173,6 @@ pub async fn load_databases<S: SecurityPlugin>(
         .collect();
 
     mark_duplicate_ecus_by_address(&databases).await;
-
-    let file_managers: FileManagerMap = file_managers_map
-        .into_iter()
-        .filter(|(k, _): &(String, FileManager)| databases.contains_key(&k.to_lowercase()))
-        .map(|(k, v): (String, FileManager)| (k.to_lowercase(), v))
-        .collect();
 
     handle_ecu_config_keys(&ecu_config_map, &databases, config.strict.ecu_config())?;
 
@@ -210,7 +196,7 @@ pub async fn load_databases<S: SecurityPlugin>(
         provider.set_status(status).await;
     }
 
-    Ok((databases, file_managers))
+    Ok(databases)
 }
 
 /// Returns paths to the current MDD files, see
@@ -428,6 +414,7 @@ fn create_ecu_manager<S: SecurityPlugin>(
     ecu_type: EcuManagerType,
     effective_com_params: &ComParams,
     ctx: &EcuLoadContext<'_>,
+    embedded_files: Arc<EmbeddedFileStore>,
 ) -> Result<EcuManager<S>, MddLoadingError> {
     EcuManager::new(
         diag_database,
@@ -440,6 +427,7 @@ fn create_ecu_manager<S: SecurityPlugin>(
             strict_parameter_validation: ctx.strict_parameter_validation,
         },
         ctx.func_description_cfg,
+        embedded_files,
     )
     .map(|manager| {
         manager.with_additional_field_filters(ctx.components_config.additional_fields.clone())
@@ -476,7 +464,7 @@ fn load_ecu_from_file<S: SecurityPlugin>(
     proto_data: HashMap<ChunkType, Vec<Chunk>>,
     ctx: &EcuLoadContext<'_>,
     per_ecu_cfg: Option<&EcuConfig>,
-) -> Result<EcuLoadResult<S>, MddLoadingError> {
+) -> Result<EcuManager<S>, MddLoadingError> {
     let mut proto_data = proto_data;
     let diag_database = build_diagnostic_database(&mut proto_data, ctx)?;
     // resolve_com_params logs the cause itself.
@@ -497,19 +485,22 @@ fn load_ecu_from_file<S: SecurityPlugin>(
     } else {
         EcuManagerType::Ecu
     };
-    let manager = create_ecu_manager(
+    // Built here so the handle is stored on the manager itself: a separate map
+    // keyed by ECU name has no way to stay in sync with the manager.
+    let embedded_files = Arc::new(
+        EmbeddedFileStore::new(ctx.mdd_path.clone(), extract_file_chunks(proto_data)).with_expiry(),
+    );
+    create_ecu_manager(
         diag_database,
         protocol,
         ecu_type,
         &effective_com_params,
         ctx,
-    )?;
-    let files = extract_file_chunks(proto_data);
-
-    Ok(EcuLoadResult { manager, files })
+        embedded_files,
+    )
 }
 
-/// Loads a single MDD file and returns the ECU name, manager, and file manager.
+/// Loads a single MDD file and returns the ECU name and manager.
 ///
 /// # Errors
 ///
@@ -519,7 +510,7 @@ fn load_single_mdd<S: SecurityPlugin>(
     config: &Configuration,
     ecu_config_map: &HashMap<String, EcuConfig>,
     protocol: &Protocol,
-) -> Result<(String, EcuManager<S>, FileManager), MddLoadingError> {
+) -> Result<(String, EcuManager<S>), MddLoadingError> {
     let mdd_path =
         path.to_str()
             .map(ToOwned::to_owned)
@@ -568,10 +559,9 @@ fn load_single_mdd<S: SecurityPlugin>(
     };
 
     let per_ecu_cfg = ecu_config_map.get(&ecu_name.to_lowercase());
-    let result = load_ecu_from_file(proto_data, &ctx, per_ecu_cfg)?;
+    let manager = load_ecu_from_file(proto_data, &ctx, per_ecu_cfg)?;
 
-    let file_manager = FileManager::new(mdd_path, result.files);
-    Ok((ecu_name, result.manager, file_manager))
+    Ok((ecu_name, manager))
 }
 
 /// Inserts or updates an ECU entry in the loaded map, handling duplicate names

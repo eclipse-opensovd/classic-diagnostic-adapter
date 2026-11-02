@@ -20,6 +20,7 @@ use cda_interfaces::{
     communication_control::{ActivationCause, CommunicationAccess, CommunicationGuard},
     datatypes::FaultConfig,
     diagservices::UdsPayloadData,
+    mdd_chunks::{EmbeddedFileAccess, EmbeddedFilesProvider},
     request_authorization::RequestLockProvider,
 };
 use tokio::{
@@ -425,6 +426,15 @@ impl<S: EcuGateway, T: EcuManager> cda_interfaces::Shutdown for UdsManager<S, T>
 }
 
 impl<S: EcuGateway, T: EcuManager> UdsEcu for UdsManager<S, T> {}
+
+impl<S: EcuGateway, T: EcuManager + EmbeddedFileAccess> EmbeddedFilesProvider for UdsManager<S, T> {
+    type Files = T::Files;
+
+    async fn embedded_files(&self, ecu_name: &str) -> Result<Arc<T::Files>, DiagServiceError> {
+        let files = self.uds_ecu_db(ecu_name)?.read().await.embedded_files();
+        Ok(files)
+    }
+}
 
 impl<S: EcuGateway, T: EcuManager> SchemaProvider for UdsManager<S, T> {
     async fn schema_for_request(

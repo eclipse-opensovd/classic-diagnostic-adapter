@@ -22,7 +22,6 @@ use axum_extra::extract::WithRejection;
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, SchemaProvider, UdsEcu,
     diagservices::{DiagServiceJsonResponse, DiagServiceResponseType},
-    file_manager::FileManager,
 };
 use cda_plugin_security::SecurityPlugin;
 use http::{HeaderMap, StatusCode};
@@ -51,8 +50,8 @@ pub(crate) mod x_sovd2uds_bulk_data;
 pub(crate) mod x_sovd2uds_download;
 
 // [[ dimpl~sovd-api-component-sdgsd, GET /components/{ecu} SDG handler ]]
-pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+pub(crate) async fn get<T: UdsEcu + Clone>(
+    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T>>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::components::ComponentQuery>,
         ApiError,
@@ -149,8 +148,8 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
         })
 }
 
-pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+pub(crate) async fn post<T: UdsEcu + Clone>(
+    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T>>,
 ) -> Response {
     update(&ecu_name, uds).await
 }
@@ -161,8 +160,8 @@ pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
 // Delegates to the UDS layer which sends diagnostic requests to the ECU and
 // evaluates the responses against known variant patterns. Returns 200 with
 // the resulting variant on success or an error response if detection fails.
-pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+pub(crate) async fn put<T: UdsEcu + Clone>(
+    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T>>,
 ) -> Response {
     update(&ecu_name, uds).await
 }

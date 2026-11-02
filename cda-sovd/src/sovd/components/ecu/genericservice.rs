@@ -13,7 +13,7 @@
 
 use aide::UseApi;
 use axum::{body::Bytes, extract::State, response::Response};
-use cda_interfaces::{UdsEcu, diagservices::UdsPayloadData, file_manager::FileManager};
+use cda_interfaces::{UdsEcu, diagservices::UdsPayloadData};
 use cda_plugin_security::Secured;
 use http::{HeaderMap, header};
 
@@ -23,7 +23,7 @@ use crate::{
     sovd::{WebserverEcuState, get_octet_stream_payload, locks::require_ecu_access},
 };
 
-pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
+pub(crate) async fn put<T: UdsEcu + Clone>(
     headers: HeaderMap,
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
     State(WebserverEcuState {
@@ -31,7 +31,7 @@ pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
         uds,
         locks,
         ..
-    }): State<WebserverEcuState<T, U>>,
+    }): State<WebserverEcuState<T>>,
     body: Bytes,
 ) -> Response {
     require_ecu_access!(write, security_plugin, &ecu_name, &locks, false);

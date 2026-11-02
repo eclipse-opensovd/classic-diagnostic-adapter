@@ -29,7 +29,7 @@ use cda_interfaces::{
     DiagServiceError, HashMap, HashMapExtensions, HashSet,
     communication_control::CommunicationError,
     diagservices::{DiagServiceResponse, MappedNRC},
-    file_manager::MddError,
+    mdd_chunks::MddError,
 };
 use serde::{Deserialize, Serialize};
 use serde_qs::axum::QsQueryRejection;

@@ -20,12 +20,12 @@ use axum::{
 };
 use cda_comm_doip::DoipGatewaySetupError;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
+    FunctionalDescriptionConfig, SchemaProvider, UdsEcu,
     communication_control::{CommunicationAccess, DoipConnect},
     datatypes::ComponentsConfig,
     dlt_ctx,
-    file_manager::FileManager,
     http_protection::registry::HttpRouteMatcher,
+    mdd_chunks::EmbeddedFilesProvider,
 };
 use cda_plugin_security::SecurityPluginLoader;
 use dynamic_router::DynamicRouter;
@@ -69,9 +69,8 @@ pub struct VehicleConfig {
 }
 
 /// Runtime resources (handles, shared state) for vehicle SOVD routes.
-pub struct VehicleResources<T, M> {
+pub struct VehicleResources<T> {
     pub ecu_uds: T,
-    pub file_managers: HashMap<String, M>,
     pub locks: Arc<Locks>,
     /// Access-only view used to admit diagnostic communication activities.
     pub communication_access: Arc<dyn CommunicationAccess>,
@@ -193,17 +192,16 @@ fn remove_stale_unix_socket(socket_path: &str) -> Result<(), DoipGatewaySetupErr
         flash_files_path = %config.flash_files_path
     )
 )]
-pub async fn add_vehicle_routes<T, M, S>(
+pub async fn add_vehicle_routes<T, S>(
     dynamic_router: &DynamicRouter,
     config: VehicleConfig,
-    resources: VehicleResources<T, M>,
+    resources: VehicleResources<T>,
 ) -> Result<RouteHandle, DoipGatewaySetupError>
 where
-    T: UdsEcu + SchemaProvider + Clone + Send + Sync + 'static,
-    M: FileManager + Send + Sync + 'static,
+    T: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone + Send + Sync + 'static,
     S: SecurityPluginLoader,
 {
-    let vehicle_router = build_vehicle_routes::<T, M, S>(config, resources).await;
+    let vehicle_router = build_vehicle_routes::<T, S>(config, resources).await;
 
     let handle = dynamic_router.add_routes(vehicle_router).await;
 
@@ -215,16 +213,15 @@ where
     clippy::implicit_hasher,
     reason = "Type alias doesn't allow specifying hasher"
 )]
-pub async fn build_vehicle_routes<T, M, S>(
+pub async fn build_vehicle_routes<T, S>(
     config: VehicleConfig,
-    resources: VehicleResources<T, M>,
+    resources: VehicleResources<T>,
 ) -> aide::axum::ApiRouter
 where
-    T: UdsEcu + SchemaProvider + Clone + Send + Sync + 'static,
-    M: FileManager + Send + Sync + 'static,
+    T: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone + Send + Sync + 'static,
     S: SecurityPluginLoader,
 {
-    sovd::route::<T, M, S>(
+    sovd::route::<T, S>(
         config.functional_group_config,
         config.components_config,
         &resources.ecu_uds,
@@ -232,7 +229,6 @@ where
             files_path: config.flash_files_path,
             functional_class_default: config.flash_functional_class_default,
         },
-        resources.file_managers,
         resources.locks,
         resources.communication_access,
         resources.doip_connect,

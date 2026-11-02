@@ -35,8 +35,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use strum_macros::EnumString;
 
 use crate::{
-    FunctionalDescriptionConfig, HashMap, Shutdown, UdsQuery,
-    file_manager::FileManager,
+    FunctionalDescriptionConfig, Shutdown, UdsQuery,
     storage_api::{Collection, DirectFileAccess},
 };
 
@@ -45,20 +44,18 @@ pub use error::{ReloadError, RuntimeUpdateError, VerificationError};
 
 /// The result of creating a fresh set of vehicle components inside
 /// [`VehicleComponentFactory::create`].
-pub struct VehicleComponents<UdsManager, Gateway, File>
+pub struct VehicleComponents<UdsManager, Gateway>
 where
     UdsManager: UdsQuery + Shutdown,
     Gateway: Shutdown,
-    File: FileManager,
 {
     pub uds_manager: UdsManager,
-    pub file_managers: HashMap<String, File>,
     pub diagnostic_gateway: Gateway,
     pub functional_group_config: FunctionalDescriptionConfig,
 }
 
-/// Async factory that recreates vehicle components (UDS manager, diagnostic gateway,
-/// file managers) from a configuration snapshot and new MDD paths.
+/// Async factory that recreates vehicle components (UDS manager, diagnostic gateway)
+/// from a configuration snapshot and new MDD paths.
 ///
 ///
 /// # Type parameters
@@ -72,16 +69,13 @@ where
     Uds: UdsQuery + Shutdown,
     Gateway: Shutdown,
 {
-    /// Concrete file-manager type produced by this factory.
-    type FileManager: FileManager;
-
     /// Creates a fresh set of vehicle components.
     ///
     async fn create(
         &self,
         config: &Config,
         mdd_paths: &[PathBuf],
-    ) -> Result<VehicleComponents<Uds, Gateway, Self::FileManager>, ReloadError>;
+    ) -> Result<VehicleComponents<Uds, Gateway>, ReloadError>;
 }
 
 /// A file to be uploaded to the CDA during a runtime update.

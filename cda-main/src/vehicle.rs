@@ -22,7 +22,6 @@ use cda_comm_can::{CanDiagGateway, config::CanConfig};
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::{UdsManager, state_coordinator::EcuStateCoordinator};
 use cda_core::EcuManager;
-use cda_database::FileManager;
 use cda_interfaces::{
     EcuConnectivityHandler, EcuRuntimeState, FunctionalDescriptionConfig, HashMap,
     HashMapExtensions, TransportType, VariantDetectionReceiver, VariantDetectionSender,
@@ -43,7 +42,6 @@ use crate::{
 };
 
 pub type DatabaseMap<S> = HashMap<String, RwLock<EcuManager<S>>>;
-pub type FileManagerMap = HashMap<String, FileManager>;
 
 pub type UdsManagerType<S> = UdsManager<
     DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>,
@@ -63,12 +61,10 @@ pub struct VehicleComponents<S: SecurityPlugin> {
     pub uds_manager: UdsManagerType<S>,
     pub diagnostic_gateway:
         DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>,
-    pub file_managers: FileManagerMap,
 }
 
 pub(crate) struct PreparedVehicleComponents<S: SecurityPlugin> {
     databases: Arc<DatabaseMap<S>>,
-    file_managers: FileManagerMap,
     diagnostic_gateway: DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>,
     variant_detection_rx: VariantDetectionReceiver,
     state_coordinator: EcuStateCoordinator,
@@ -231,7 +227,7 @@ async fn prepare_vehicle_components<S: SecurityPlugin>(
     let doip_provider: Option<&Arc<dyn HealthProvider>> =
         health_providers.and_then(|h| h.get(DOIP_HEALTH_COMPONENT_KEY));
 
-    let (databases, file_managers) = load_databases::<S>(config, mdd_paths, db_provider).await?;
+    let databases = load_databases::<S>(config, mdd_paths, db_provider).await?;
 
     let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
     let variant_detection_tx = VariantDetectionSender::new(variant_detection_tx);
@@ -256,7 +252,6 @@ async fn prepare_vehicle_components<S: SecurityPlugin>(
 
     Ok(PreparedVehicleComponents {
         databases,
-        file_managers,
         diagnostic_gateway,
         variant_detection_rx,
         state_coordinator,
@@ -298,7 +293,6 @@ pub(crate) fn finish_vehicle_components<S: SecurityPlugin>(
     VehicleComponents {
         uds_manager,
         diagnostic_gateway: prepared.diagnostic_gateway,
-        file_managers: prepared.file_managers,
     }
 }
 

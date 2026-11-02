@@ -954,10 +954,7 @@ mod acquisition_policy {
         response::Response,
     };
     use axum_extra::extract::WithRejection;
-    use cda_interfaces::{
-        file_manager::mock::MockFileManager,
-        lock_config::{LockAcquisitionPolicy, LockConfig},
-    };
+    use cda_interfaces::lock_config::{LockAcquisitionPolicy, LockConfig};
     use cda_plugin_security::Secured;
 
     use super::*;
@@ -989,11 +986,7 @@ mod acquisition_policy {
     async fn post_ecu_lock(uds: MockUdsEcu, ecu_name: &str, locks: &Arc<Locks>) -> Response {
         let state = WebserverEcuState {
             locks: Arc::clone(locks),
-            ..create_test_webserver_state::<MockUdsEcu, MockFileManager>(
-                ecu_name.to_owned(),
-                uds,
-                MockFileManager::new(),
-            )
+            ..create_test_webserver_state::<MockUdsEcu>(ecu_name.to_owned(), uds)
         };
         ecu_post(
             UseApi(
