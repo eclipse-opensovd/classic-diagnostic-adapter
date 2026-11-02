@@ -15,7 +15,7 @@ pub(crate) mod single_ecu {
     use aide::transform::TransformOperation;
     use axum::{
         Json,
-        extract::{Path, Query, State},
+        extract::{Path, Query},
         http::StatusCode,
         response::{IntoResponse as _, Response},
     };
@@ -25,7 +25,7 @@ pub(crate) mod single_ecu {
     use crate::{
         openapi,
         sovd::{
-            IntoSovd, WebserverEcuState, create_schema,
+            EcuContext, IntoSovd, WebserverEcuState, create_schema,
             error::{ApiError, ErrorWrapper},
         },
     };
@@ -37,7 +37,7 @@ pub(crate) mod single_ecu {
             Query<sovd_interfaces::IncludeSchemaQuery>,
             ApiError,
         >,
-        State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<T>>,
+        EcuContext(WebserverEcuState { uds, ecu_name, .. }): EcuContext<T>,
     ) -> Response {
         let include_schema = query.include_schema;
         let schema = if include_schema {
@@ -89,7 +89,7 @@ pub(crate) mod single_ecu {
                 Query<sovd_interfaces::IncludeSchemaQuery>,
                 ApiError,
             >,
-            State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<T>>,
+            EcuContext(WebserverEcuState { uds, ecu_name, .. }): EcuContext<T>,
         ) -> Response {
             let include_schema = query.include_schema;
             let mut job = match uds

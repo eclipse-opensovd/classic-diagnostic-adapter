@@ -14,7 +14,7 @@
 use aide::{UseApi, axum::IntoApiResponse, transform::TransformOperation};
 use axum::{
     Json,
-    extract::{OriginalUri, Path, Query, State},
+    extract::{OriginalUri, Path, Query},
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
@@ -29,22 +29,22 @@ use super::super::{
 };
 use crate::{
     VendorErrorCode, openapi,
-    sovd::{self, WebserverEcuState},
+    sovd::{self, EcuContext, WebserverEcuState},
 };
 
 pub(crate) mod lock {
     use super::{
-        ApiError, Json, LockPathParam, LockScope, LockUpdateContext, Path, Query, Response,
-        Secured, State, TransformOperation, UdsEcu, UseApi, WebserverEcuState, WithRejection,
+        ApiError, EcuContext, Json, LockPathParam, LockScope, LockUpdateContext, Path, Query,
+        Response, Secured, TransformOperation, UdsEcu, UseApi, WebserverEcuState, WithRejection,
         delete_handler, get_id_handler, put_handler,
     };
     use crate::openapi;
     pub(crate) async fn delete<T: UdsEcu + Clone>(
         Path(lock): Path<LockPathParam>,
         UseApi(sec_plugin, _): UseApi<Secured, ()>,
-        State(WebserverEcuState {
+        EcuContext(WebserverEcuState {
             ecu_name, locks, ..
-        }): State<WebserverEcuState<T>>,
+        }): EcuContext<T>,
         Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
     ) -> Response {
         let claims = sec_plugin.as_auth_plugin().claims();
@@ -71,9 +71,9 @@ pub(crate) mod lock {
     pub(crate) async fn put<T: UdsEcu + Clone>(
         Path(lock): Path<LockPathParam>,
         UseApi(sec_plugin, _): UseApi<Secured, ()>,
-        State(WebserverEcuState {
+        EcuContext(WebserverEcuState {
             ecu_name, locks, ..
-        }): State<WebserverEcuState<T>>,
+        }): EcuContext<T>,
         Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
         WithRejection(Json(body), _): WithRejection<
             Json<sovd_interfaces::locking::UpdateRequest>,
@@ -106,9 +106,9 @@ pub(crate) mod lock {
     pub(crate) async fn get<T: UdsEcu + Clone>(
         Path(lock): Path<LockPathParam>,
         UseApi(sec_plugin, _): UseApi<Secured, ()>,
-        State(WebserverEcuState {
+        EcuContext(WebserverEcuState {
             ecu_name, locks, ..
-        }): State<WebserverEcuState<T>>,
+        }): EcuContext<T>,
         Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
     ) -> Response {
         let claims = sec_plugin.as_auth_plugin().claims();
@@ -136,12 +136,12 @@ pub(crate) mod lock {
 
 pub(crate) async fn post<T: UdsEcu + Clone>(
     UseApi(Secured(sec_plugin), _): UseApi<Secured, ()>,
-    State(WebserverEcuState {
+    EcuContext(WebserverEcuState {
         ecu_name,
         locks,
         uds,
         ..
-    }): State<WebserverEcuState<T>>,
+    }): EcuContext<T>,
     Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
     OriginalUri(uri): OriginalUri,
     WithRejection(Json(body), _): WithRejection<Json<sovd_interfaces::locking::Request>, ApiError>,
@@ -273,9 +273,9 @@ pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
 
 pub(crate) async fn get<T: UdsEcu + Clone>(
     UseApi(sec_plugin, _): UseApi<Secured, ()>,
-    State(WebserverEcuState {
+    EcuContext(WebserverEcuState {
         ecu_name, locks, ..
-    }): State<WebserverEcuState<T>>,
+    }): EcuContext<T>,
     Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
 ) -> Response {
     let claims = sec_plugin.as_auth_plugin().claims();

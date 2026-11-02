@@ -26,8 +26,9 @@ use cda_interfaces::{
         operation::{ActivationCause, DetectionCause},
     },
     runtime_update_api::{
-        BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider, ReloadError,
-        RuntimeFilesQuery, RuntimeFilesUpdatePlugin, RuntimeReloaderPlugin, RuntimeUpdateError,
+        BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider,
+        RejectedSetDisposition, ReloadFailure, RuntimeFileCatalog, RuntimeFileStore,
+        RuntimeFilesQuery, RuntimeReloaderPlugin, RuntimeUpdateError, RuntimeUpdateExecutor,
         RuntimeUpdateSecurityPlugin, UpdateCollections, UpdateExecution, UploadFile,
         VerificationError,
     },
@@ -179,8 +180,8 @@ pub struct FancyRuntimeReloader;
 impl RuntimeReloaderPlugin for FancyRuntimeReloader {
     async fn reload_databases(
         &self,
-        _mdd_paths: Vec<std::path::PathBuf>,
-    ) -> Result<(), ReloadError> {
+        _on_reject: RejectedSetDisposition,
+    ) -> Result<(), ReloadFailure> {
         Ok(())
     }
 }
@@ -193,7 +194,7 @@ where
     L: LockStateProvider,
     C: Collection + DirectFileAccess + Send + Sync + 'static,
 {
-    async fn check_apply_allowed(
+    async fn check_execution_allowed(
         &self,
         _lock_state_provider: &L,
         _collections: &UpdateCollections<C>,
@@ -207,7 +208,7 @@ where
 }
 
 #[async_trait]
-impl RuntimeFilesUpdatePlugin for FancyRuntimeUpdate {
+impl RuntimeFileCatalog for FancyRuntimeUpdate {
     async fn list_current(
         &self,
         _query: &RuntimeFilesQuery,
@@ -228,7 +229,10 @@ impl RuntimeFilesUpdatePlugin for FancyRuntimeUpdate {
     ) -> Result<BulkDataList, RuntimeUpdateError> {
         Ok(BulkDataList::default())
     }
+}
 
+#[async_trait]
+impl RuntimeFileStore for FancyRuntimeUpdate {
     async fn upload(
         &self,
         _files: Vec<UploadFile>,
@@ -247,7 +251,10 @@ impl RuntimeFilesUpdatePlugin for FancyRuntimeUpdate {
     async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
         Ok(Vec::new())
     }
+}
 
+#[async_trait]
+impl RuntimeUpdateExecutor for FancyRuntimeUpdate {
     async fn start_execution(&self, _mode: ExecutionMode) -> Result<String, RuntimeUpdateError> {
         Ok("fancy-execution".to_owned())
     }

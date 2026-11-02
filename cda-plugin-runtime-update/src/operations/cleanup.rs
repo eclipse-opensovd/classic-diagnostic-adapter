@@ -13,26 +13,21 @@
 
 use cda_interfaces::{
     runtime_update_api::RuntimeUpdateError,
-    storage_api::{Collection as _, CollectionName, Storage},
+    storage_api::{CollectionName, Storage},
 };
 
 use super::delete_collection_ignore_missing;
 
 /// Clear all staging and backup collections atomically.
 ///
-/// Deletes MDD staging and clears the MDD backup in a single transaction:
-/// - [`CollectionName::DiagnosticDatabaseNextUpdate`] - deleted (collection removed)
-/// - [`CollectionName::DiagnosticDatabaseBackup`] - cleared
+/// Deletes MDD staging and backup collections in a single transaction.
 ///
-/// This operation is idempotent - calling it when collections are already absent or empty succeeds.
+/// This operation is idempotent - calling it when collections are already absent succeeds.
 /// The current database ([`CollectionName::DiagnosticDatabase`]) is never touched.
 /// # Errors
 ///
 /// Returns [`RuntimeUpdateError`] if any storage operation fails.
 pub async fn execute_cleanup<S: Storage>(storage: &S) -> Result<(), RuntimeUpdateError> {
-    let mdd_backup = storage
-        .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
-        .await?;
     let mut tx = storage.begin_transaction()?;
 
     delete_collection_ignore_missing(
@@ -41,7 +36,8 @@ pub async fn execute_cleanup<S: Storage>(storage: &S) -> Result<(), RuntimeUpdat
         &CollectionName::DiagnosticDatabaseNextUpdate,
     )
     .await?;
-    mdd_backup.delete_all(&mut tx).await?;
+    delete_collection_ignore_missing(storage, &mut tx, &CollectionName::DiagnosticDatabaseBackup)
+        .await?;
 
     tx.commit().await?;
     Ok(())
@@ -89,17 +85,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_clears_diagnostic_database_backup() {
+    async fn cleanup_removes_diagnostic_database_backup() {
         let (storage, _dir) = make_storage();
         write_dummy(&storage, &CollectionName::DiagnosticDatabaseBackup, "b.mdd").await;
 
         execute_cleanup(&storage).await.unwrap();
 
-        let col = storage
-            .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
-            .await
-            .unwrap();
-        assert!(col.is_empty().await.unwrap());
+        let result = storage
+            .get_collection(&CollectionName::DiagnosticDatabaseBackup)
+            .await;
+        assert!(matches!(result, Err(StorageError::CollectionNotFound(_))));
     }
 
     #[tokio::test]
