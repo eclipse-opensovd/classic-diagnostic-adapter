@@ -52,3 +52,26 @@ pub trait DoipConnect: Send + Sync + 'static {
         endpoint: DoipEndpoint,
     ) -> Result<(), DiagServiceError>;
 }
+
+/// Connect-only [`DoipConnect`] view over a transport, so the holder gets none
+/// of its lifecycle control.
+struct TransportDoipConnect<G>(std::sync::Arc<G>);
+
+#[async_trait]
+impl<G: super::TransportControl> DoipConnect for TransportDoipConnect<G> {
+    async fn connect_ecu(
+        &self,
+        ecu_name: &str,
+        endpoint: DoipEndpoint,
+    ) -> Result<(), DiagServiceError> {
+        self.0.connect_ecu_direct(ecu_name, endpoint).await
+    }
+}
+
+/// Mints a connect-only [`DoipConnect`] view over `transport`.
+#[must_use]
+pub fn doip_connect_view<G: super::TransportControl>(
+    transport: std::sync::Arc<G>,
+) -> std::sync::Arc<dyn DoipConnect> {
+    std::sync::Arc::new(TransportDoipConnect(transport))
+}
