@@ -53,7 +53,7 @@ pub(crate) async fn get_vehicle_identification<T, F>(
     socket: &mut DoIPUdpSocket,
     netmask: u32,
     gateway_port: u16,
-    ecus: &Arc<HashMap<String, RwLock<T>>>,
+    ecus: &HashMap<String, RwLock<T>>,
     mut shutdown_signal: futures::future::Shared<F>,
 ) -> Result<Vec<DiscoveredGateway>, DiagServiceError>
 where
@@ -124,17 +124,17 @@ where
     clippy::too_many_lines,
     reason = "Contains nested private functions that should remain in scope"
 )]
-pub(crate) async fn listen_for_vams<T, F>(
+pub(crate) fn listen_for_vams<T, C, F>(
     transport_config: DoipTransportConfig,
     netmask: u32,
-    state: DoipGatewayState<T>,
+    state: DoipGatewayState<T, C>,
     connection_tasks: Arc<ConnectionTasks>,
     variant_detection: VariantDetectionSender,
-    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     mut shutdown_signal: futures::future::Shared<F>,
 ) -> tokio::task::JoinHandle<()>
 where
     T: EcuAddresses + DoipComParams,
+    C: EcuConnectivityHandler,
     F: Future<Output = ()> + Send + 'static,
 {
     #[derive(Debug)]
@@ -144,40 +144,30 @@ where
         netmask: u32,
     }
 
-    #[derive(Clone)]
-    struct VamNotifications {
-        variant_detection: VariantDetectionSender,
-        connectivity_handler: Arc<dyn EcuConnectivityHandler>,
-    }
-
     #[tracing::instrument(
-        skip(
-            state,
-            connection_tasks,
-            gateway_ecu_map,
-            gateway_ecu_name_map,
-            vam_notifications,
-            transport_config
-        ),
+        skip(state, connection_tasks, variant_detection, transport_config),
         fields(
             dlt_context = dlt_ctx!("DOIP")
         )
     )]
-    async fn handle_doip_response<T: EcuAddresses + DoipComParams>(
+    async fn handle_doip_response<T: EcuAddresses + DoipComParams, C: EcuConnectivityHandler>(
         transport_config: &DoipTransportConfig,
-        state: &DoipGatewayState<T>,
+        state: &DoipGatewayState<T, C>,
         connection_tasks: &Arc<ConnectionTasks>,
         doip_msg_ctx: DoipMessageContext,
-        gateway_ecu_map: &HashMap<u16, Vec<u16>>,
-        gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
-        vam_notifications: VamNotifications,
+        variant_detection: &VariantDetectionSender,
     ) {
         let DoipMessageContext {
             doip_msg,
             source_addr,
             netmask,
         } = doip_msg_ctx;
-        match handle_vam::<T>(&state.ecus, doip_msg, source_addr, netmask).await {
+        // Held for the whole handler, `handle_gateway_connection`'s TCP connect
+        // included: everything below reads one load, and a runtime update that
+        // would have to wait for it was already refused its disable lease.
+        let data = state.ecu_data.read().await;
+        let ecus = data.ecus();
+        match handle_vam::<T>(ecus, doip_msg, source_addr, netmask).await {
             Ok(Some(doip_target)) => {
                 tracing::debug!(
                     ecu_name = %doip_target.ecu_name,
@@ -188,6 +178,24 @@ where
                 // for an older connect to finish instead of dropping it; then
                 // recheck whether the gateway is already connected.
                 let _claim = state.claim(doip_target.logical_address).await;
+                // Grouped per message rather than once per listener: the load is
+                // replaced underneath this gateway, so a grouping kept across VAMs
+                // would describe a previous ECU set. One pass yields both
+                // vocabularies, addresses for the connection and names for detection.
+                let mut gateway_ecu_map: HashMap<u16, Vec<u16>> = HashMap::new();
+                let mut gateway_ecu_name_map: HashMap<u16, Vec<String>> = HashMap::new();
+                for ecu_lock in ecus.values() {
+                    let ecu = ecu_lock.read().await;
+                    let gateway_address = ecu.logical_gateway_address();
+                    gateway_ecu_map
+                        .entry(gateway_address)
+                        .or_default()
+                        .push(ecu.logical_address());
+                    gateway_ecu_name_map
+                        .entry(gateway_address)
+                        .or_default()
+                        .push(ecu.ecu_name().to_lowercase());
+                }
                 if state
                     .logical_address_to_connection
                     .read()
@@ -212,14 +220,16 @@ where
                     // sending variant detection, will update the ECU state
                     // (i.e. disconnected -> connected)
                     send_variant_detection(
-                        gateway_ecu_name_map,
-                        &vam_notifications.variant_detection,
+                        &gateway_ecu_name_map,
+                        variant_detection,
                         doip_target.logical_address,
                     )
                     .await;
                 } else {
                     tracing::info!(ecu_name = %doip_target.ecu_name, "New Gateway ECU detected");
 
+                    let connectivity_handler =
+                        Arc::clone(data.state_coordinator()) as Arc<dyn EcuConnectivityHandler>;
                     match handle_gateway_connection::<T>(
                         doip_target,
                         transport_config,
@@ -228,19 +238,19 @@ where
                             logical_address_to_connection: Arc::clone(
                                 &state.logical_address_to_connection,
                             ),
-                            ecus: Arc::clone(&state.ecus),
-                            gateway_ecu_map: gateway_ecu_map.clone(),
+                            ecus,
+                            connectivity_handler,
+                            gateway_ecu_map,
                             connection_tasks: Arc::clone(connection_tasks),
                         },
-                        vam_notifications.connectivity_handler,
                         None,
                     )
                     .await
                     {
                         Ok(logical_address) => {
                             send_variant_detection(
-                                gateway_ecu_name_map,
-                                &vam_notifications.variant_detection,
+                                &gateway_ecu_name_map,
+                                variant_detection,
                                 logical_address,
                             )
                             .await;
@@ -285,28 +295,7 @@ where
         }
     }
 
-    // create mapping gateway_logical_address -> Vec<ecu_logical_address>
-    let mut gateway_ecu_map: HashMap<u16, Vec<u16>> = HashMap::new();
-    let mut gateway_ecu_name_map: HashMap<u16, Vec<String>> = HashMap::new();
-    for ecu_lock in state.ecus.values() {
-        let ecu = ecu_lock.read().await;
-        let ecu_name = ecu.ecu_name();
-
-        let addr = ecu.logical_address();
-        let gateway_addr = ecu.logical_gateway_address();
-        gateway_ecu_map.entry(gateway_addr).or_default().push(addr);
-        gateway_ecu_name_map
-            .entry(gateway_addr)
-            .or_default()
-            .push(ecu_name.to_lowercase());
-    }
-
     tracing::info!("Listening for spontaneous VAMs");
-    let notifications = VamNotifications {
-        variant_detection,
-        connectivity_handler,
-    };
-
     cda_interfaces::spawn_named!(
         "vam-listen",
         Box::pin(async move {
@@ -358,9 +347,7 @@ where
                                             source_addr,
                                             netmask,
                                         },
-                                        &gateway_ecu_map,
-                                        &gateway_ecu_name_map,
-                                        notifications.clone(),
+                                        &variant_detection,
                                     ).await;
                                 }
                             }
@@ -381,7 +368,7 @@ where
     fields(dlt_context = dlt_ctx!("DOIP"))
 )]
 async fn handle_vam<T>(
-    ecus: &Arc<HashMap<String, RwLock<T>>>,
+    ecus: &HashMap<String, RwLock<T>>,
     doip_msg: doip_definitions::message::DoipMessage,
     source_addr: std::net::SocketAddr,
     netmask: u32,
@@ -409,7 +396,7 @@ where
         DoipPayload::VehicleAnnouncementMessage(vam) => {
             tracing::debug!("VAM received, parsing ...");
             let mut matched_ecu = None;
-            for (name, ecu) in ecus.iter() {
+            for (name, ecu) in ecus {
                 let ecu = ecu.read().await;
                 if ecu.logical_address().to_be_bytes() == vam.logical_address {
                     if !is_gateway(&*ecu) {

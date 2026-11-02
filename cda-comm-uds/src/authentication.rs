@@ -16,7 +16,6 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, ResetOutcome, UdsAuthentication,
-    UdsTransport,
     authentication::{
         AuthenticationState, AuthenticationStatus, AuthenticationSubFunction,
         return_value_completes_authentication,
@@ -31,19 +30,19 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     /// Derives the new tracked state from a positive response.
     /// Returns the new state and whether it completed the authentication.
     async fn authentication_state_after_positive(
-        &self,
+        ecu_db: &tokio::sync::RwLock<T>,
         ecu_name: &str,
         sub_function: AuthenticationSubFunction,
         raw_response: &[u8],
         expiration: Option<Duration>,
-    ) -> Result<(AuthenticationState, bool), DiagServiceError> {
-        let ecu = self.uds_ecu_db(ecu_name)?.read().await;
+    ) -> (AuthenticationState, bool) {
+        let ecu = ecu_db.read().await;
         let previous = ecu.authentication_state();
 
         if sub_function == AuthenticationSubFunction::DeAuthenticate {
             let state = AuthenticationState::deauthenticated(Some(sub_function));
             ecu.set_authentication_state(state.clone());
-            return Ok((state, false));
+            return (state, false);
         }
 
         let completes = match ecu.authentication_return_value(sub_function, raw_response) {
@@ -84,7 +83,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             }
         };
         ecu.set_authentication_state(state.clone());
-        Ok((state, completes))
+        (state, completes)
     }
 
     /// Clears `expires_at` of the tracked state after a failed reset when no
@@ -96,7 +95,8 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         if tasks.contains_key(ecu_name) {
             return;
         }
-        let Ok(ecu) = self.uds_ecu_db(ecu_name) else {
+        let data = self.ecu_data.read().await;
+        let Ok(ecu) = Self::db_lookup(&data, ecu_name) else {
             return;
         };
         let ecu = ecu.read().await;
@@ -129,7 +129,11 @@ impl<S: EcuGateway, T: EcuManager> UdsAuthentication for UdsManager<S, T> {
             ));
         }
 
-        let ecu = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
+        let communication_guard = self.acquire_communication_guard()?;
+        let data = self.ecu_data.read().await;
+        let ecu = self
+            .uds_ecu_variant_detection_concluded(&data, ecu_name)
+            .await?;
         let service = ecu
             .read()
             .await
@@ -137,19 +141,26 @@ impl<S: EcuGateway, T: EcuManager> UdsAuthentication for UdsManager<S, T> {
 
         tracing::info!(ecu_name, %sub_function, "Sending authentication request");
         let response = self
-            .send(ecu_name, service, security_plugin, parameters, true)
+            .send_service(
+                &communication_guard,
+                &ecu,
+                service,
+                security_plugin,
+                parameters,
+                true,
+            )
             .await?;
 
         match response.response_type() {
             DiagServiceResponseType::Positive => {
-                let (state, completes) = self
-                    .authentication_state_after_positive(
-                        ecu_name,
-                        sub_function,
-                        response.get_raw(),
-                        expiration,
-                    )
-                    .await?;
+                let (state, completes) = Self::authentication_state_after_positive(
+                    &ecu,
+                    ecu_name,
+                    sub_function,
+                    response.get_raw(),
+                    expiration,
+                )
+                .await;
                 if completes {
                     // Restarts a running expiration, or cancels it without expiration.
                     self.start_reset_task(ecu_name, expiration, ResetType::Authentication)
@@ -184,8 +195,15 @@ impl<S: EcuGateway, T: EcuManager> UdsAuthentication for UdsManager<S, T> {
         &self,
         ecu_name: &str,
     ) -> Result<ResetOutcome, DiagServiceError> {
-        let ecu = self.uds_ecu_db(ecu_name)?;
-        if !ecu.read().await.authentication_state().is_authenticated() {
+        let authenticated = {
+            let data = self.ecu_data.read().await;
+            Self::db_lookup(&data, ecu_name)?
+                .read()
+                .await
+                .authentication_state()
+                .is_authenticated()
+        };
+        if !authenticated {
             tracing::debug!(ecu_name, "Not authenticated, nothing to do");
             self.cancel_reset(ecu_name, ResetType::Authentication).await;
             return Ok(ResetOutcome::Completed);
@@ -239,15 +257,19 @@ impl<S: EcuGateway, T: EcuManager> UdsAuthentication for UdsManager<S, T> {
         &self,
         ecu_name: &str,
     ) -> Result<AuthenticationState, DiagServiceError> {
-        Ok(self
-            .uds_ecu_db(ecu_name)?
+        let data = self.ecu_data.read().await;
+        Ok(Self::db_lookup(&data, ecu_name)?
             .read()
             .await
             .authentication_state())
     }
 
     async fn has_authentication_services(&self, ecu_name: &str) -> bool {
-        let Ok(ecu) = self.uds_ecu_variant_detection_concluded(ecu_name).await else {
+        let data = self.ecu_data.read().await;
+        let Ok(ecu) = self
+            .uds_ecu_variant_detection_concluded(&data, ecu_name)
+            .await
+        else {
             return false;
         };
         let ecu = ecu.read().await;
@@ -281,7 +303,7 @@ mod tests {
 
     use crate::{
         UdsManager,
-        test_helpers::{TestEcuDb, TestGateway},
+        test_helpers::{TestEcuDb, TestGateway, UdsManagerParts, build_uds_manager, finished_task},
         types::ResetType,
     };
 
@@ -305,38 +327,34 @@ mod tests {
     ) -> (UdsManager<TestGateway, TestEcuDb>, Arc<AtomicUsize>) {
         let sent = Arc::new(AtomicUsize::new(0));
         let sent_clone = Arc::clone(&sent);
-        let gateway = TestGateway {
-            send_fn: Arc::new(move |response_tx, _| {
-                let index = sent_clone.fetch_add(1, Ordering::SeqCst);
-                let data = responses
-                    .get(index)
-                    .or_else(|| responses.last())
-                    .cloned()
-                    .unwrap_or_default();
-                let msg = TransportResponse::UdsResponse(ServicePayload {
-                    data,
-                    source_address: 0x0001,
-                    target_address: 0x0E00,
-                    new_session: None,
-                    new_security: None,
-                });
-                response_tx.try_send(Ok(Some(msg))).ok();
-                Ok(())
-            }),
-        };
-        let ecus = Arc::new(HashMap::from_iter([(
+        let gateway = TestGateway::new(move |_, response_tx, _| {
+            let index = sent_clone.fetch_add(1, Ordering::SeqCst);
+            let data = responses
+                .get(index)
+                .or_else(|| responses.last())
+                .cloned()
+                .unwrap_or_default();
+            let msg = TransportResponse::UdsResponse(ServicePayload {
+                data,
+                source_address: 0x0001,
+                target_address: 0x0E00,
+                new_session: None,
+                new_security: None,
+            });
+            response_tx.try_send(Ok(Some(msg))).ok();
+            Ok(finished_task())
+        });
+        let ecus = HashMap::from_iter([(
             ECU.to_owned(),
-            RwLock::new(TestEcuDb::new()),
-        )]));
-        (
-            UdsManager::new_for_raw_payload_tests(
-                gateway,
-                ecus,
-                FaultConfig::default(),
-                enabled_communication_access_for_test(),
-            ),
-            sent,
-        )
+            RwLock::new(TestEcuDb::with_detected_variant()),
+        )]);
+        let UdsManagerParts { manager, .. } = build_uds_manager(
+            gateway,
+            ecus,
+            FaultConfig::default(),
+            enabled_communication_access_for_test(),
+        );
+        (manager, sent)
     }
 
     async fn state(manager: &UdsManager<TestGateway, TestEcuDb>) -> AuthenticationState {
@@ -344,8 +362,8 @@ mod tests {
     }
 
     async fn set_state(manager: &UdsManager<TestGateway, TestEcuDb>, state: AuthenticationState) {
-        manager
-            .uds_ecu_db(ECU)
+        let data = manager.ecu_data.read().await;
+        UdsManager::<TestGateway, TestEcuDb>::db_lookup(&data, ECU)
             .unwrap()
             .read()
             .await

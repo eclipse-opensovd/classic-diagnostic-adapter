@@ -23,7 +23,7 @@ use tokio::{
     time::{MissedTickBehavior, interval as tokio_interval},
 };
 
-use crate::{UdsManager, transport::CommunicationReadiness, types::TesterPresentTaskId};
+use crate::{ResolvedEcu, UdsManager, types::TesterPresentTaskId};
 
 /// State of a tester-present map entry (keyed by `(type, ecu)` via
 /// [`TesterPresentTaskId`]).
@@ -113,23 +113,37 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 schedule.set_missed_tick_behavior(MissedTickBehavior::Delay);
                 loop {
                     schedule.tick().await;
-                    // Skip sending if the ECU is not online; the loop will
-                    // naturally resume once the ECU is detected online again.
-                    if let Ok(ecu) = uds.uds_ecu_db(&control_msg.ecu) {
-                        let ecu_state = ecu.read().await.runtime_state().status().connectivity;
-                        if ecu_state != Connectivity::Online {
-                            tracing::debug!(
-                                ecu = %control_msg.ecu,
-                                ecu_state = %ecu_state,
-                                "Skipping tester present for ECU that is not online"
-                            );
+                    let _communication_guard = match uds.acquire_communication_guard() {
+                        Ok(guard) => guard,
+                        Err(error) => {
+                            tracing::error!(%error, "Failed to send tester present");
                             continue;
                         }
+                    };
+                    // Skip sending if the ECU is not online; the loop will
+                    // naturally resume once the ECU is detected online again.
+                    let data = uds.ecu_data.read().await;
+                    let ecu = match Self::resolve_ecu(&data, &control_msg.ecu) {
+                        Ok(ecu) => ecu,
+                        Err(error) => {
+                            tracing::error!(%error, "Failed to send tester present");
+                            continue;
+                        }
+                    };
+                    let ecu_state = ecu.read().await.runtime_state().status().connectivity;
+                    if ecu_state != Connectivity::Online {
+                        tracing::debug!(
+                            ecu = %control_msg.ecu,
+                            ecu_state = %ecu_state,
+                            "Skipping tester present for ECU that is not online"
+                        );
+                        continue;
                     }
                     // abort sending if it takes longer than `interval` and log an
                     // error, but try to continue sending tester present afterwards.
                     if let Ok(result) =
-                        tokio::time::timeout(interval, uds.send_tester_present(&control_msg)).await
+                        tokio::time::timeout(interval, uds.send_tester_present(&ecu, &control_msg))
+                            .await
                     {
                         if let Err(error) = result {
                             tracing::error!(%error, "Failed to send tester present");
@@ -180,9 +194,13 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             }
         };
 
+        let data = self.ecu_data.read().await;
         let mut resolved = Vec::with_capacity(ecu_names.len());
         for ecu in ecu_names {
-            let interval = self.uds_ecu_db(&ecu)?.read().await.tester_present_time();
+            let interval = Self::db_lookup(&data, &ecu)?
+                .read()
+                .await
+                .tester_present_time();
             if interval.is_zero() {
                 // Can only happen in 'start' as a 'resume' should never see the 'zero'
                 // interval, as it was rejected in 'start'
@@ -192,6 +210,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             }
             resolved.push((ecu, interval));
         }
+        drop(data);
 
         let mut tester_presents = self.tester_present_tasks.write().await;
         for (ecu, interval) in resolved {
@@ -230,10 +249,10 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuSecurity> UdsManager<S, 
     /// Send a single tester present message to the ECU.
     async fn send_tester_present(
         &self,
+        ecu: &ResolvedEcu<'_, T>,
         control_msg: &TesterPresentControlMessage,
     ) -> Result<(), DiagServiceError> {
         let (mut data, expect_response, source_address, target_address) = {
-            let ecu = self.uds_ecu_db(&control_msg.ecu)?;
             let ecu = ecu.read().await;
             let target_address = match &control_msg.type_ {
                 TesterPresentType::Functional(_) => ecu.logical_functional_address(),
@@ -275,16 +294,7 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuSecurity> UdsManager<S, 
             new_security: None,
         };
 
-        match self
-            .send_with_raw_payload(
-                &control_msg.ecu,
-                payload,
-                None,
-                expect_response,
-                CommunicationReadiness::Enforce,
-            )
-            .await
-        {
+        match self.send_with_raw_payload(ecu, payload, None).await {
             Ok(_) => Ok(()),
             Err(e) => Err(e),
         }
@@ -297,7 +307,7 @@ impl<S: EcuGateway, T: EcuManager> UdsTesterPresent for UdsManager<S, T> {
         fields(dlt_context = dlt_ctx!("UDS"))
     )]
     async fn start_tester_present(&self, type_: TesterPresentType) -> Result<(), DiagServiceError> {
-        let _guard = self.require_communication_ready()?;
+        let _guard = self.acquire_communication_guard()?;
         self.activate_tester_present(type_, ActivateMode::Start)
             .await
     }
@@ -438,7 +448,10 @@ mod tests {
     use tokio::sync::{RwLock, mpsc};
 
     use super::*;
-    use crate::{test_helpers::TestEcuDb, types::TesterPresentTaskId};
+    use crate::{
+        test_helpers::{TestEcuDb, build_uds_manager},
+        types::TesterPresentTaskId,
+    };
 
     fn running() -> TesterPresentTask {
         TesterPresentTask::Running(tokio::spawn(std::future::pending()))
@@ -648,16 +661,24 @@ mod tests {
         gateway: CaptureGateway,
         ecu: TestEcuDb,
     ) -> UdsManager<CaptureGateway, TestEcuDb> {
-        let ecus = Arc::new(HashMap::from_iter([(
-            "TestECU".to_string(),
-            RwLock::new(ecu),
-        )]));
-        UdsManager::new_for_raw_payload_tests(
+        let ecus = HashMap::from_iter([("TestECU".to_string(), RwLock::new(ecu))]);
+        build_uds_manager(
             gateway,
             ecus,
             FaultConfig::default(),
             enabled_communication_access_for_test(),
         )
+        .manager
+    }
+
+    async fn send_tester_present(manager: &UdsManager<CaptureGateway, TestEcuDb>) {
+        let data = manager.ecu_data.read().await;
+        let ecu = UdsManager::<CaptureGateway, TestEcuDb>::resolve_ecu(&data, "TestECU")
+            .expect("test ECU");
+        manager
+            .send_tester_present(&ecu, &tester_present_control())
+            .await
+            .unwrap();
     }
 
     fn tester_present_control() -> TesterPresentControlMessage {
@@ -677,10 +698,7 @@ mod tests {
             TestEcuDb::with_tester_present_config(vec![0x3E, 0x00], true),
         );
 
-        manager
-            .send_tester_present(&tester_present_control())
-            .await
-            .unwrap();
+        send_tester_present(&manager).await;
 
         assert_eq!(
             *gateway.sends.lock().unwrap(),
@@ -696,10 +714,7 @@ mod tests {
             TestEcuDb::with_tester_present_config(vec![0x3E, 0x00], false),
         );
 
-        manager
-            .send_tester_present(&tester_present_control())
-            .await
-            .unwrap();
+        send_tester_present(&manager).await;
 
         assert_eq!(
             *gateway.sends.lock().unwrap(),

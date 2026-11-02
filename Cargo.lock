@@ -555,6 +555,7 @@ name = "cda-comm-uds"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "cda-build",
  "cda-interfaces",
  "cda-plugin-communication-management",

@@ -20,14 +20,13 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use cda_comm_can::{CanDiagGateway, config::CanConfig};
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
-use cda_comm_uds::{UdsManager, state_coordinator::EcuStateCoordinator};
+use cda_comm_uds::{UdsManager, VehicleEcuData, state_coordinator::EcuStateCoordinator};
 use cda_core::EcuManager;
 use cda_interfaces::{
-    EcuConnectivityHandler, EcuRuntimeState, FunctionalDescriptionConfig, HashMap,
-    HashMapExtensions, TransportType, VariantDetectionReceiver, VariantDetectionSender,
-    communication_control::CommunicationAccess, component_slot::ComponentSlot,
-    datatypes::FaultConfig, dlt_ctx, health::HealthProvider, lock_priority_api::LockPriorityPolicy,
-    request_authorization::RequestLockProvider,
+    EcuRuntimeState, HashMap, HashMapExtensions, Reloadable, ReloadableOwner, TransportType,
+    VariantDetectionReceiver, VariantDetectionSender, communication_control::CommunicationAccess,
+    component_slot::ComponentSlot, dlt_ctx, ecu_data::EcuData, health::HealthProvider,
+    lock_priority_api::LockPriorityPolicy, request_authorization::RequestLockProvider,
 };
 use cda_plugin_security::SecurityPlugin;
 use cda_sovd::Locks;
@@ -43,31 +42,40 @@ use crate::{
 
 pub type DatabaseMap<S> = HashMap<String, RwLock<EcuManager<S>>>;
 
-pub type UdsManagerType<S> = UdsManager<
-    DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>,
-    EcuManager<S>,
->;
+/// `DoIP` gateway over the database-derived state the UDS layer shares.
+pub type DoipGateway<S> = DoipDiagGateway<EcuManager<S>, EcuStateCoordinator>;
+
+/// Read access to the database-derived state shared by the UDS manager and the transports.
+pub type EcuDataReader<S> = Reloadable<VehicleEcuData<EcuManager<S>>>;
+
+/// What the CAN transport is built from; nothing without CAN support.
+#[cfg(feature = "can")]
+type CanTopologyPayload = cda_comm_can::CanTopology;
+#[cfg(not(feature = "can"))]
+type CanTopologyPayload = ();
+
+pub type UdsManagerType<S> =
+    UdsManager<DiagnosticTransportRouter<DoipGateway<S>, CanDiagGateway>, EcuManager<S>>;
 
 pub struct VehicleData<S: SecurityPlugin> {
     pub diagnostic_gateway:
-        ComponentSlot<DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>>,
+        ComponentSlot<DiagnosticTransportRouter<DoipGateway<S>, CanDiagGateway>>,
     pub locks: Arc<Locks>,
     pub(crate) prepared: PreparedVehicleComponents<S>,
-    pub databases: Arc<DatabaseMap<S>>,
+    pub database_count: usize,
     pub health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
 }
 
 pub struct VehicleComponents<S: SecurityPlugin> {
     pub uds_manager: UdsManagerType<S>,
-    pub diagnostic_gateway:
-        DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>,
+    pub diagnostic_gateway: DiagnosticTransportRouter<DoipGateway<S>, CanDiagGateway>,
 }
 
 pub(crate) struct PreparedVehicleComponents<S: SecurityPlugin> {
-    databases: Arc<DatabaseMap<S>>,
-    diagnostic_gateway: DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>,
+    database_count: usize,
+    ecu_data: EcuDataReader<S>,
+    diagnostic_gateway: DiagnosticTransportRouter<DoipGateway<S>, CanDiagGateway>,
     variant_detection_rx: VariantDetectionReceiver,
-    state_coordinator: EcuStateCoordinator,
 }
 
 /// The transport sections of the configuration, bundled for
@@ -148,45 +156,25 @@ pub async fn load_vehicle_data<S: SecurityPlugin>(
             config.locks.clone(),
             lock_priority_policy,
         )),
-        databases: Arc::clone(&prepared.databases),
+        database_count: prepared.database_count,
         health_providers,
         prepared,
     })
 }
 
-#[allow(
-    clippy::implicit_hasher,
-    reason = "Type alias does not allow specifying hasher. Hasher is set globally"
-)]
-#[tracing::instrument(skip_all,
-    fields(
-        database_count = databases.len(),
-        dlt_context = dlt_ctx!("MAIN"),
-    )
-)]
-#[allow(
-    clippy::too_many_arguments,
-    reason = "Combining parameters into a struct is not preferred here, to keep constructor call \
-              semantics explicit"
-)]
+#[tracing::instrument(skip_all, fields(dlt_context = dlt_ctx!("MAIN")))]
 pub fn create_uds_manager<S: SecurityPlugin>(
-    gateway: DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>,
-    databases: Arc<HashMap<String, RwLock<EcuManager<S>>>>,
+    gateway: DiagnosticTransportRouter<DoipGateway<S>, CanDiagGateway>,
+    ecu_data: EcuDataReader<S>,
     variant_detection_receiver: VariantDetectionReceiver,
-    state_coordinator: EcuStateCoordinator,
-    functional_description_config: &FunctionalDescriptionConfig,
-    fault_config: FaultConfig,
     request_lock_provider: Arc<dyn RequestLockProvider>,
     communication_access: Arc<dyn CommunicationAccess>,
     communication_retry_after: Duration,
 ) -> UdsManagerType<S> {
     UdsManager::new(
-        gateway,
-        databases,
+        Arc::new(gateway),
+        ecu_data,
         variant_detection_receiver,
-        state_coordinator,
-        functional_description_config,
-        fault_config,
         request_lock_provider,
         communication_access,
         communication_retry_after,
@@ -228,34 +216,70 @@ async fn prepare_vehicle_components<S: SecurityPlugin>(
         health_providers.and_then(|h| h.get(DOIP_HEALTH_COMPONENT_KEY));
 
     let databases = load_databases::<S>(config, mdd_paths, db_provider).await?;
+    let database_count = databases.len();
 
     let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
     let variant_detection_tx = VariantDetectionSender::new(variant_detection_tx);
     let variant_detection_rx = VariantDetectionReceiver::new(variant_detection_rx);
-    let databases = Arc::new(databases);
 
     let runtime_states = build_runtime_states(&databases).await;
     let state_coordinator = EcuStateCoordinator::new(runtime_states, variant_detection_tx.clone());
-    let connectivity_handler: Arc<dyn EcuConnectivityHandler> = Arc::new(state_coordinator.clone());
+    // Derived before the databases move into the shared state.
+    let can_topology = derive_can_topology(config, &databases).await?;
+    // Readers keep the data alive, so the owner is not retained: nothing replaces
+    // it yet.
+    let ecu_data = ReloadableOwner::new(EcuData::new(
+        databases,
+        &config.functional_description,
+        config.faults.clone(),
+        Arc::new(state_coordinator),
+    ))
+    .reader();
 
     let diagnostic_gateway = create_diagnostic_gateway(
-        Arc::clone(&databases),
+        ecu_data.clone(),
         TransportConfigs {
             doip: &config.doip,
             can: config.can.as_ref(),
         },
         variant_detection_tx,
-        connectivity_handler,
+        can_topology,
         doip_provider,
     )
     .await?;
 
     Ok(PreparedVehicleComponents {
-        databases,
+        database_count,
+        ecu_data,
         diagnostic_gateway,
         variant_detection_rx,
-        state_coordinator,
     })
+}
+
+/// Derives the CAN topology from the loaded databases when CAN is configured.
+#[cfg(feature = "can")]
+async fn derive_can_topology<S: SecurityPlugin>(
+    config: &Configuration,
+    databases: &DatabaseMap<S>,
+) -> Result<Option<CanTopologyPayload>, AppError> {
+    match config.can.as_ref() {
+        Some(can) => Ok(Some(
+            cda_comm_can::derive_can_topology(can, databases).await?,
+        )),
+        None => Ok(None),
+    }
+}
+
+#[cfg(not(feature = "can"))]
+#[expect(
+    clippy::unused_async,
+    reason = "Keeps the call site identical with and without CAN support"
+)]
+async fn derive_can_topology<S: SecurityPlugin>(
+    _config: &Configuration,
+    _databases: &DatabaseMap<S>,
+) -> Result<Option<CanTopologyPayload>, AppError> {
+    Ok(None)
 }
 
 async fn build_runtime_states<S: SecurityPlugin>(
@@ -281,11 +305,8 @@ pub(crate) fn finish_vehicle_components<S: SecurityPlugin>(
 ) -> VehicleComponents<S> {
     let uds_manager = create_uds_manager(
         prepared.diagnostic_gateway.clone(),
-        Arc::clone(&prepared.databases),
+        prepared.ecu_data,
         prepared.variant_detection_rx,
-        prepared.state_coordinator,
-        &config.functional_description,
-        config.faults.clone(),
         request_lock_provider,
         communication_access,
         Duration::from_secs(config.communication.deferred_retry_after_seconds),
@@ -297,11 +318,8 @@ pub(crate) fn finish_vehicle_components<S: SecurityPlugin>(
 }
 
 #[tracing::instrument(
-    skip(databases, transports, variant_detection, connectivity_handler, doip_health_provider),
-    fields(
-        database_count = databases.len(),
-        dlt_context = dlt_ctx!("MAIN"),
-    )
+    skip(ecu_data, transports, variant_detection, can_topology, doip_health_provider),
+    fields(dlt_context = dlt_ctx!("MAIN"))
 )]
 /// # Errors
 /// Returns [`AppError`] if the initialization of any configured transport
@@ -309,12 +327,16 @@ pub(crate) fn finish_vehicle_components<S: SecurityPlugin>(
 /// one of its configured transports cannot be told apart from a healthy one,
 /// and a supervisor restart is what actually recovers transient causes.
 pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
-    databases: Arc<DatabaseMap<S>>,
+    ecu_data: EcuDataReader<S>,
     transports: TransportConfigs<'_>,
     variant_detection: VariantDetectionSender,
-    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
+    #[cfg_attr(
+        not(feature = "can"),
+        expect(unused_variables, reason = "Only the CAN transport consumes it")
+    )]
+    can_topology: Option<CanTopologyPayload>,
     doip_health_provider: Option<&Arc<dyn HealthProvider>>,
-) -> Result<DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>, AppError> {
+) -> Result<DiagnosticTransportRouter<DoipGateway<S>, CanDiagGateway>, AppError> {
     let TransportConfigs {
         doip: doip_config,
         can: can_config,
@@ -330,9 +352,7 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
         .unwrap_or_default();
 
     let mut gateway =
-        DiagnosticTransportRouter::<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>::new(
-            transport_overrides,
-        );
+        DiagnosticTransportRouter::<DoipGateway<S>, CanDiagGateway>::new(transport_overrides);
 
     // Fail clearly when CAN is configured on a build without CAN support.
     // (validate_sanity rejects this too; kept as defense in depth for direct
@@ -348,10 +368,9 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     }
 
     if let Some(doip) = init_doip_gateway(
-        &databases,
+        ecu_data,
         doip_config,
         variant_detection.clone(),
-        connectivity_handler,
         doip_health_provider,
     )
     .await?
@@ -360,8 +379,8 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     }
 
     #[cfg(feature = "can")]
-    if let Some(can_cfg) = can_config {
-        gateway = gateway.with_can(init_can_gateway(&databases, can_cfg, variant_detection).await?);
+    if let (Some(can_cfg), Some(topology)) = (can_config, can_topology) {
+        gateway = gateway.with_can(init_can_gateway(can_cfg, topology, variant_detection)?);
     }
 
     Ok(gateway)
@@ -377,12 +396,11 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
 /// own `enable()`, reached only through an authorized `activate()` or
 /// `trigger_detection()`. Safe to call at startup in any `init_mode`.
 async fn init_doip_gateway<S: SecurityPlugin>(
-    databases: &Arc<DatabaseMap<S>>,
+    ecu_data: EcuDataReader<S>,
     doip_config: &DoipConfig,
     variant_detection: VariantDetectionSender,
-    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     doip_health_provider: Option<&Arc<dyn HealthProvider>>,
-) -> Result<Option<DoipDiagGateway<EcuManager<S>>>, AppError> {
+) -> Result<Option<DoipGateway<S>>, AppError> {
     if !doip_config.enabled {
         tracing::info!("DoIP transport disabled by config (doip.enabled = false)");
         if let Some(provider) = doip_health_provider {
@@ -394,13 +412,7 @@ async fn init_doip_gateway<S: SecurityPlugin>(
     if let Some(provider) = doip_health_provider {
         provider.set_status(cda_health::Status::Starting).await;
     }
-    let result = DoipDiagGateway::new(
-        doip_config,
-        Arc::clone(databases),
-        variant_detection,
-        connectivity_handler,
-    )
-    .await;
+    let result = DoipDiagGateway::new(doip_config, ecu_data, variant_detection).await;
     let status = if result.is_ok() {
         cda_health::Status::Up
     } else {
@@ -421,12 +433,11 @@ async fn init_doip_gateway<S: SecurityPlugin>(
 
 /// Initializes the CAN transport. Like for `DoIP`, an init failure is fatal.
 #[cfg(feature = "can")]
-async fn init_can_gateway<S: SecurityPlugin>(
-    databases: &Arc<DatabaseMap<S>>,
+fn init_can_gateway(
     can_cfg: &CanConfig,
+    topology: CanTopologyPayload,
     variant_detection: VariantDetectionSender,
 ) -> Result<CanDiagGateway, AppError> {
-    let topology = cda_comm_can::derive_can_topology(can_cfg, databases).await?;
     // The reload handle is dropped: databases are not yet reloaded in place,
     // so the topology stays as derived at startup.
     match CanDiagGateway::build(can_cfg, topology, variant_detection) {
