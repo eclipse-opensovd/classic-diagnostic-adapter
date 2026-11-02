@@ -19,6 +19,7 @@ use cda_interfaces::{
     component_slot::ReplaceComponent,
     datatypes::ComponentsConfig,
     health::HealthProvider,
+    mdd_chunks::EmbeddedFilesProvider,
     runtime_update_api::{
         ReloadError, RuntimeReloaderPlugin, VehicleComponentFactory, VehicleComponents,
     },
@@ -38,7 +39,7 @@ use tokio::sync::RwLock;
 /// no operational authority over it.
 pub struct DefaultReloadContext<Uds, Gateway, Config, S>
 where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
+    Uds: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone + Shutdown + Send + Sync + 'static,
     Gateway: Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     S: Storage + Send + Sync + 'static,
@@ -97,7 +98,7 @@ where
 /// implementation of `install_routes` without duplicating logic or fields.
 pub struct RouteInstallState<Uds, Gateway>
 where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
+    Uds: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone + Shutdown + Send + Sync + 'static,
     Gateway: Shutdown,
 {
     lock_provider: Arc<SovdLockStateProvider>,
@@ -114,21 +115,19 @@ where
 
 impl<Uds, Gateway> RouteInstallState<Uds, Gateway>
 where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
+    Uds: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone + Shutdown + Send + Sync + 'static,
     Gateway: Shutdown,
 {
-    async fn install_routes<M, SecurityLoader>(
+    async fn install_routes<SecurityLoader>(
         &self,
-        components: VehicleComponents<Uds, Gateway, M>,
+        components: VehicleComponents<Uds, Gateway>,
     ) -> Result<(), ReloadError>
     where
-        M: cda_interfaces::file_manager::FileManager,
         SecurityLoader: SecurityPluginLoader,
     {
         let VehicleComponents {
             uds_manager: new_uds,
             diagnostic_gateway: new_gateway,
-            file_managers,
             functional_group_config,
         } = components;
 
@@ -143,7 +142,7 @@ where
         }
         let current_locks = self.lock_provider.current_locks().await;
 
-        let vehicle_router = cda_sovd::build_vehicle_routes::<_, _, SecurityLoader>(
+        let vehicle_router = cda_sovd::build_vehicle_routes::<_, SecurityLoader>(
             cda_sovd::VehicleConfig {
                 flash_files_path: self.flash_files_path.clone(),
                 flash_functional_class_default: self.flash_functional_class_default.clone(),
@@ -152,7 +151,6 @@ where
             },
             cda_sovd::VehicleResources {
                 ecu_uds: new_uds.clone(),
-                file_managers,
                 locks: current_locks,
                 communication_access: Arc::clone(&self.communication_access),
                 doip_connect: self.doip_connect.clone(),
@@ -195,7 +193,7 @@ where
 /// plugin. `reload_databases` only replaces components.
 pub struct DefaultRuntimeReloaderPlugin<Uds, Gateway, Config, SecurityLoader, VehicleFactory, S>
 where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
+    Uds: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone + Shutdown + Send + Sync + 'static,
     Gateway: Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     SecurityLoader: SecurityPluginLoader,
@@ -215,7 +213,7 @@ where
 /// to simplify plugin construction.
 pub struct RuntimeReloaderConfig<Uds, Gateway, Config, VehicleFactory, S>
 where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
+    Uds: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone + Shutdown + Send + Sync + 'static,
     Gateway: Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
@@ -230,7 +228,7 @@ where
 impl<Uds, Gateway, Config, VehicleFactory, S>
     RuntimeReloaderConfig<Uds, Gateway, Config, VehicleFactory, S>
 where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
+    Uds: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone + Shutdown + Send + Sync + 'static,
     Gateway: Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
@@ -252,7 +250,7 @@ where
 impl<Uds, Gateway, Config, SecurityLoader, VehicleFactory, S>
     DefaultRuntimeReloaderPlugin<Uds, Gateway, Config, SecurityLoader, VehicleFactory, S>
 where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
+    Uds: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone + Shutdown + Send + Sync + 'static,
     Gateway: Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     SecurityLoader: SecurityPluginLoader,
@@ -297,7 +295,7 @@ where
         let components = self.factory.create(&cfg, mdd_paths).await?;
 
         self.route_state
-            .install_routes::<_, SecurityLoader>(components)
+            .install_routes::<SecurityLoader>(components)
             .await
     }
 }
@@ -306,7 +304,7 @@ where
 impl<Uds, Gateway, Config, SecurityLoader, VehicleFactory, S> RuntimeReloaderPlugin
     for DefaultRuntimeReloaderPlugin<Uds, Gateway, Config, SecurityLoader, VehicleFactory, S>
 where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
+    Uds: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone + Shutdown + Send + Sync + 'static,
     Gateway: Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     SecurityLoader: SecurityPluginLoader,
@@ -352,7 +350,7 @@ where
 /// its rollback-on-failure branch. This prevents infinite recursion during rollback.
 struct RollbackHandler<Uds, Gateway, Config, SecurityLoader, VehicleFactory>
 where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
+    Uds: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone + Shutdown + Send + Sync + 'static,
     Gateway: Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     SecurityLoader: SecurityPluginLoader,
@@ -368,7 +366,7 @@ where
 impl<Uds, Gateway, Config, SecurityLoader, VehicleFactory> RuntimeReloaderPlugin
     for RollbackHandler<Uds, Gateway, Config, SecurityLoader, VehicleFactory>
 where
-    Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
+    Uds: UdsEcu + SchemaProvider + EmbeddedFilesProvider + Clone + Shutdown + Send + Sync + 'static,
     Gateway: Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     SecurityLoader: SecurityPluginLoader,
@@ -383,7 +381,7 @@ where
         })?;
 
         self.route_state
-            .install_routes::<_, SecurityLoader>(components)
+            .install_routes::<SecurityLoader>(components)
             .await
     }
 }
