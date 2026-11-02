@@ -26,8 +26,6 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_comm_can::CanDiagGateway;
-use cda_comm_doip::DoipDiagGateway;
-use cda_core::EcuManager;
 use cda_interfaces::{
     HashMap, ShutdownSignal,
     communication_control::{
@@ -84,7 +82,7 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
     pub uds_manager_replacer: Arc<dyn ReplaceComponent<UdsManagerType<SP>>>,
     pub gateway_replacer: Arc<
         dyn ReplaceComponent<
-            DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
+            DiagnosticTransportRouter<crate::vehicle::DoipGateway<SP>, CanDiagGateway>,
         >,
     >,
     pub dynamic_router: cda_sovd::dynamic_router::DynamicRouter,
@@ -342,7 +340,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
 async fn build_communication_runtime_and_access<SP, CPB>(
     ws: &ApplicationState,
     gateway: ComponentSlot<
-        DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
+        DiagnosticTransportRouter<crate::vehicle::DoipGateway<SP>, CanDiagGateway>,
     >,
     communication_plugin: CPB,
     init_mode: CommunicationInitMode,

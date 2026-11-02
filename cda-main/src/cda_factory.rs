@@ -14,8 +14,6 @@ use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use cda_comm_can::CanDiagGateway;
-use cda_comm_doip::DoipDiagGateway;
-use cda_core::EcuManager;
 use cda_interfaces::{
     HashMap,
     communication_control::CommunicationAccess,
@@ -67,7 +65,7 @@ impl<SP>
     VehicleComponentFactory<
         Configuration,
         UdsManagerType<SP>,
-        DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
+        DiagnosticTransportRouter<crate::vehicle::DoipGateway<SP>, CanDiagGateway>,
     > for CdaMainVehicleFactory<SP>
 where
     SP: SecurityPlugin,
@@ -79,7 +77,7 @@ where
     ) -> Result<
         VehicleComponents<
             UdsManagerType<SP>,
-            DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
+            DiagnosticTransportRouter<crate::vehicle::DoipGateway<SP>, CanDiagGateway>,
         >,
         ReloadError,
     > {

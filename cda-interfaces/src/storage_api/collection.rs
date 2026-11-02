@@ -34,6 +34,8 @@ pub enum CollectionName {
     DiagnosticDatabaseNextUpdate,
     /// Backup of the diagnostic database before an update.
     DiagnosticDatabaseBackup,
+    /// Holds the displaced database while current and backup trade places in a rollback.
+    DiagnosticDatabaseRollback,
     /// A user-defined collection with an arbitrary name.
     Custom(String),
 }
@@ -46,6 +48,7 @@ impl CollectionName {
             Self::DiagnosticDatabase => "diagnostic_database",
             Self::DiagnosticDatabaseNextUpdate => "diagnostic_database_next_update",
             Self::DiagnosticDatabaseBackup => "diagnostic_database_backup",
+            Self::DiagnosticDatabaseRollback => "diagnostic_database_rollback",
             Self::Custom(name) => name.as_str(),
         }
     }

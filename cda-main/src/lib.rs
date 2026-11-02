@@ -427,7 +427,7 @@ where
         return Ok(());
     };
 
-    if vehicle_data.databases.is_empty() && config.database.exit_no_database_loaded {
+    if vehicle_data.database_count == 0 && config.database.exit_no_database_loaded {
         return Err(AppError::ResourceError(
             "No database loaded, exiting as configured".to_string(),
         ));

@@ -37,6 +37,7 @@ mod ecumanager;
 pub use ecumanager::*;
 mod ecuuds;
 pub use ecuuds::*;
+pub mod ecu_data;
 pub mod health;
 pub mod http_protection;
 pub mod lock_config;

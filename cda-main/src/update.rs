@@ -13,8 +13,6 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use cda_comm_can::CanDiagGateway;
-use cda_comm_doip::DoipDiagGateway;
-use cda_core::EcuManager;
 use cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin;
 use cda_plugin_runtime_update::{
     DefaultRuntimeUpdatePlugin, DefaultUpdateSecurityHandler,
@@ -164,7 +162,7 @@ where
 
     let reloader_plugin = Arc::new(DefaultRuntimeReloaderPlugin::<
         UdsManagerType<SP>,
-        DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
+        DiagnosticTransportRouter<crate::vehicle::DoipGateway<SP>, CanDiagGateway>,
         Configuration,
         SL,
         _,

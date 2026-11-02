@@ -28,7 +28,7 @@ pub mod disable;
 pub use access::{CommunicationAccess, CommunicationError, CommunicationGuard, CommunicationState};
 use async_trait::async_trait;
 pub use disable::{DisableCommunication, DisableError, DisableGuard, DisableReason};
-pub use doip_connect::{DoipConnect, DoipEndpoint};
+pub use doip_connect::{DoipConnect, DoipEndpoint, doip_connect_view};
 pub use error::CommControlError;
 pub use operation::{
     ActivationCause, CommunicationOperation, CommunicationOperationFailure, DetectionCause,
