@@ -1189,7 +1189,10 @@ Locks
     A POST that creates a lock returns HTTP 201 and a relative ``Location`` header for the new
     lock resource. For compatibility with existing CDA clients, POST by the owner of the active
     lock renews that lock and returns HTTP 200 with its representation and no ``Location`` header.
-    This does not create an independent lock resource. Clients should use PUT on
+    This does not create an independent lock resource. If the renewal request contains
+    vendor-specific properties, they replace the lock's metadata after the priority mechanism has
+    evaluated the request (see :need:`arch~sovd-api-lock-priority`); an empty set keeps the
+    existing metadata. Clients should use PUT on
     ``/locks/{lock-id}`` to modify an existing lock's expiration; successful PUT returns HTTP 204.
 
     **Response fields (GET /locks/{id})**
@@ -1419,7 +1422,10 @@ Locks
 
     When a vehicle lock POST request arrives and a lock is already held by a different client,
     the priority mechanism is additionally invoked to evaluate preemption before returning HTTP
-    423.
+    423. A same-owner POST renewal of a vehicle lock is also evaluated, as a ``PostRenew``
+    operation that names the renewed lock; the prior lock, including its metadata, is part of the
+    active-lock snapshot so the mechanism can detect a metadata change and re-evaluate the
+    client's priority. A renewal may be allowed or denied but never preempt other locks.
 
     **Mechanism input**
 
@@ -1455,6 +1461,17 @@ Locks
        function.
     4. A new lock is created for the preempting client and placed in the active slot with
        its own expiration task and cleanup function.
+    5. When the preempted client later acquires a new lock on the same scope, or one whose
+       coverage contains the defunct lock's coverage (always true for a vehicle lock), the
+       defunct entry is removed from the defunct store in the same state transition that
+       inserts the new lock, exactly as a ``DELETE`` on the defunct lock would remove it.
+       Defunct entries of other clients are unaffected, and the ``x-sovd2uds-current-holder``
+       chain of remaining entries is re-linked past the removed one.
+    6. An ECU or functional-group lock request of the preempted client whose coverage
+       overlaps an unexpired defunct lock of that client without containing it is rejected
+       with that defunct lock's HTTP 409 ``lock-broken`` error. The check runs in the
+       acquisition evaluation while the transition reservation is held, before the vehicle
+       lock ownership check, so the defunct store cannot change before the lock is committed.
 
     ``GET /locks`` returns both the active lock and any defunct locks for the entity.
     Defunct lock entries carry ``x-sovd2uds-broken-by``, ``x-sovd2uds-broken-at``, and

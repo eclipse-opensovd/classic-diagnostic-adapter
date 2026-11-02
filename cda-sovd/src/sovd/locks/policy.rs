@@ -51,6 +51,40 @@ pub(crate) struct AcquisitionGuard {
     pub(super) reservation: TransitionReservation,
     pub(super) evaluation_id: Option<String>,
     pub(super) policy: Arc<dyn LockPriorityPolicy>,
+    pub(super) renewal_metadata: Option<EvaluatedMetadata>,
+}
+
+/// Lock metadata the priority policy has accepted for replacing an existing lock's metadata.
+///
+/// It can only be created by [`Locks::evaluate_acquisition`], so metadata reaches a lock
+/// only after the policy has seen it: every scope passes
+/// [`LockPriorityPolicy::verify_metadata`], and a vehicle lock renewal is additionally
+/// evaluated as [`LockPriorityOperation::PostRenew`], where the policy can compare it with
+/// the renewed lock's current metadata. ECU and functional-group locks are never evaluated,
+/// matching their acquisition (see `req~sovd-api-lock-priority`).
+///
+/// An empty request carries none, so a plain renewal keeps the lock's metadata instead of
+/// dropping the vendor data the lock was acquired with.
+#[derive(Debug)]
+pub(crate) struct EvaluatedMetadata(serde_json::Map<String, serde_json::Value>);
+
+impl EvaluatedMetadata {
+    fn from_request(request: &LockRequest) -> Option<Self> {
+        (!request.metadata.is_empty()).then(|| Self(request.metadata.clone()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(metadata: serde_json::Map<String, serde_json::Value>) -> Self {
+        Self(metadata)
+    }
+
+    pub(crate) fn as_map(&self) -> &serde_json::Map<String, serde_json::Value> {
+        &self.0
+    }
+
+    pub(crate) fn into_inner(self) -> serde_json::Map<String, serde_json::Value> {
+        self.0
+    }
 }
 
 impl AcquisitionGuard {
@@ -203,11 +237,30 @@ impl Locks {
             .await?;
         if !is_vehicle_scope {
             let reservation = self.core.reserve_transition().await;
+            // A vehicle lock covers every defunct lock, so only narrower scopes can
+            // overlap one of the client's defunct locks without superseding it.
+            let broken = {
+                let store = reservation.write_store().await;
+                store
+                    .state
+                    .uncovered_defunct(
+                        claims.sub(),
+                        &ScopeKey::from(&scope),
+                        &coverage,
+                        SystemTime::now(),
+                    )
+                    .map(|defunct| defunct.broken_error(store.state.current_holder(defunct)))
+            };
+            if let Some(error) = broken {
+                reservation.finish();
+                return Err(error);
+            }
             return Ok((
                 AcquisitionGuard {
                     reservation,
                     evaluation_id: None,
                     policy,
+                    renewal_metadata: EvaluatedMetadata::from_request(&policy_request),
                 },
                 None,
                 policy_request,
@@ -258,6 +311,7 @@ impl Locks {
                             reservation,
                             evaluation_id: None,
                             policy,
+                            renewal_metadata: None,
                         },
                         None,
                         policy_request,
@@ -336,6 +390,9 @@ impl Locks {
                 reservation,
                 evaluation_id: Some(evaluation_id.clone()),
                 policy: Arc::clone(&policy),
+                renewal_metadata: matches!(operation, LockPriorityOperation::PostRenew { .. })
+                    .then(|| EvaluatedMetadata::from_request(&policy_request))
+                    .flatten(),
             };
             let result = self
                 .apply_priority_decision(

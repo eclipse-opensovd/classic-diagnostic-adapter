@@ -24,6 +24,8 @@ use cda_interfaces::{
 };
 use serde_json::{Map, Value};
 
+use super::locks::EvaluatedMetadata;
+
 /// Canonical, case-insensitive lock scope key.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ScopeKey {
@@ -349,11 +351,14 @@ impl LockState {
     }
 
     /// Renews an active lock by extending its expiration deadline.
+    ///
+    /// When `metadata` is given it replaces the lock's metadata.
     pub(super) fn renew(
         &mut self,
         lock_id: &str,
         expires_at: SystemTime,
         now: SystemTime,
+        metadata: Option<EvaluatedMetadata>,
     ) -> Result<(), StateError> {
         self.transaction(|state| {
             let lock = state
@@ -367,6 +372,9 @@ impl LockState {
                 return Err(StateError::RenewalNotExtension);
             }
             lock.expires_at = expires_at;
+            if let Some(metadata) = metadata {
+                lock.metadata = metadata.into_inner();
+            }
             Ok(())
         })
     }
@@ -672,10 +680,59 @@ impl LockState {
         }) {
             return Err(StateError::CoverageConflict(conflicting.id.clone()));
         }
+        for superseded_id in self.superseded_defunct_ids(&lock) {
+            self.remove_defunct_uncommitted(&superseded_id);
+        }
         self.active_by_scope
             .insert(lock.scope.clone(), lock.id.clone());
         self.active_by_id.insert(lock.id.clone(), lock);
         Ok(())
+    }
+
+    /// Defunct locks of the same client that a newly acquired lock supersedes.
+    ///
+    /// A preempted lock is kept so its owner can learn who took over and
+    /// whether that holder is still active. Once the same client holds a new
+    /// lock that covers everything the defunct lock protected, that signal is
+    /// obsolete and would only block the client's requests through the
+    /// defunct-lock pre-check (see `validation::validate_defunct_lock`), so the
+    /// new lock acknowledges it like a `DELETE` on the defunct lock would.
+    /// A new lock that covers only part of a defunct lock must be rejected
+    /// before it gets here (see [`LockState::uncovered_defunct`]).
+    fn superseded_defunct_ids(&self, lock: &ActiveLock) -> Vec<LockId> {
+        self.defunct_by_id
+            .values()
+            .filter(|defunct| {
+                defunct.principal.subject == lock.principal.subject
+                    && covers_defunct(&lock.scope, &lock.coverage, defunct)
+            })
+            .map(|defunct| defunct.id.clone())
+            .collect()
+    }
+
+    /// An unexpired defunct lock of `subject` that a new lock on `scope` with
+    /// `coverage` would overlap without covering it.
+    ///
+    /// Such a lock could not be used: the defunct-lock pre-check would reject
+    /// all of its requests, and it would not supersede the defunct lock either.
+    /// Its acquisition is therefore rejected with the defunct lock's
+    /// `lock-broken` error until the client deletes the defunct lock or
+    /// acquires a lock that covers it.
+    pub(super) fn uncovered_defunct(
+        &self,
+        subject: &str,
+        scope: &ScopeKey,
+        coverage: &LockCoverage,
+        now: SystemTime,
+    ) -> Option<&DefunctLock> {
+        self.defunct_by_id.values().find(|defunct| {
+            defunct.principal.subject == subject
+                && defunct.original_expires_at > now
+                && (defunct.scope == ScopeKey::Vehicle
+                    || defunct.scope == *scope
+                    || defunct.coverage.overlaps(coverage))
+                && !covers_defunct(scope, coverage, defunct)
+        })
     }
 
     fn remove_active_tree_uncommitted(&mut self, lock_id: &str) -> Vec<ActiveLock> {
@@ -750,6 +807,11 @@ impl LockState {
 
 fn normalize_name(name: &str) -> String {
     name.to_ascii_lowercase()
+}
+
+/// Whether a lock on `scope` with `coverage` protects everything `defunct` protected.
+fn covers_defunct(scope: &ScopeKey, coverage: &LockCoverage, defunct: &DefunctLock) -> bool {
+    *scope == ScopeKey::Vehicle || *scope == defunct.scope || coverage.contains(&defunct.coverage)
 }
 
 #[cfg(test)]
@@ -1241,7 +1303,7 @@ mod tests {
             .expect("Test expiration should fit");
 
         state
-            .renew("ecu", expires_at, now)
+            .renew("ecu", expires_at, now, None)
             .expect("Renewal should succeed");
 
         assert!(matches!(
@@ -1271,7 +1333,7 @@ mod tests {
 
         for expires_at in [equal_deadline, shorter_deadline] {
             assert_eq!(
-                state.renew("ecu", expires_at, now),
+                state.renew("ecu", expires_at, now, None),
                 Err(StateError::RenewalNotExtension)
             );
             assert_eq!(state.revision(), before.revision());
@@ -1292,7 +1354,7 @@ mod tests {
             .expect("Insertion should succeed");
 
         assert_eq!(
-            state.renew("ecu", SystemTime::now(), SystemTime::now()),
+            state.renew("ecu", SystemTime::now(), SystemTime::now(), None),
             Err(StateError::LockExpired)
         );
     }
@@ -1428,10 +1490,13 @@ mod tests {
                 None,
             ))
             .expect("Initial insertion should succeed");
+        let mut replacement =
+            active_lock("new", ScopeKey::Ecu("engine".to_owned()), &["engine"], None);
+        replacement.principal = principal("new-owner");
         state
             .commit_replacement(
                 &["old".into()],
-                active_lock("new", ScopeKey::Ecu("engine".to_owned()), &["engine"], None),
+                replacement,
                 "priority-app",
                 SystemTime::UNIX_EPOCH,
             )
@@ -1506,10 +1571,13 @@ mod tests {
                 None,
             ))
             .expect("Initial insertion should succeed");
+        let mut replacement =
+            active_lock("new", ScopeKey::Ecu("engine".to_owned()), &["engine"], None);
+        replacement.principal = principal("new-owner");
         state
             .commit_replacement(
                 &["old".into()],
-                active_lock("new", ScopeKey::Ecu("engine".to_owned()), &["engine"], None),
+                replacement,
                 "priority-app",
                 SystemTime::UNIX_EPOCH,
             )
@@ -1526,6 +1594,298 @@ mod tests {
                 .expect("Repeated acknowledgement should be a no-op")
         );
         assert_eq!(state.defunct().count(), 0);
+    }
+
+    fn vehicle_lock(id: &str) -> ActiveLock {
+        ActiveLock {
+            coverage: LockCoverage::vehicle(),
+            ..active_lock(id, ScopeKey::Vehicle, &[], None)
+        }
+    }
+
+    /// Test time `seconds` after the epoch; [`active_lock`] expires at 100 seconds.
+    fn at(seconds: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_secs(seconds))
+            .expect("Test time should fit")
+    }
+
+    /// Preempts `owner`'s vehicle lock `preempted_id` with a lock of `preemptor`, then
+    /// releases the preemptor's lock so only the defunct record remains.
+    fn preempt_and_release(state: &mut LockState, preempted_id: &str, preemptor: &str) {
+        let mut replacement = vehicle_lock("preemptor");
+        replacement.principal = principal(preemptor);
+        state
+            .commit_replacement(
+                &[preempted_id.into()],
+                replacement,
+                preemptor,
+                SystemTime::UNIX_EPOCH,
+            )
+            .expect("Preemption should commit");
+        state
+            .delete("preemptor")
+            .expect("Preemptor release should succeed");
+        assert!(state.defunct_by_id(preempted_id).is_some());
+    }
+
+    #[test]
+    fn new_vehicle_lock_supersedes_same_owner_defunct_lock() {
+        let mut state = LockState::default();
+        state
+            .insert_active(vehicle_lock("old"))
+            .expect("Initial insertion should succeed");
+        preempt_and_release(&mut state, "old", "other-client");
+
+        state
+            .insert_vehicle(vehicle_lock("new"), &[])
+            .expect("Re-acquisition should succeed");
+
+        assert!(state.defunct_by_id("old").is_none());
+        assert_eq!(state.defunct().count(), 0);
+        assert!(state.active_by_id("new").is_some());
+    }
+
+    #[test]
+    fn new_lock_supersedes_only_covered_defunct_locks() {
+        let mut state = LockState::default();
+        state
+            .insert_active(active_lock(
+                "engine-old",
+                ScopeKey::Ecu("engine".to_owned()),
+                &["engine"],
+                None,
+            ))
+            .expect("Engine insertion should succeed");
+        state
+            .insert_active(active_lock(
+                "body-old",
+                ScopeKey::Ecu("body".to_owned()),
+                &["body"],
+                None,
+            ))
+            .expect("Body insertion should succeed");
+        let mut vehicle = vehicle_lock("foreign-vehicle");
+        vehicle.principal = principal("other-client");
+        state
+            .commit_replacement(
+                &["engine-old".into(), "body-old".into()],
+                vehicle,
+                "other-client",
+                SystemTime::UNIX_EPOCH,
+            )
+            .expect("Preemption should commit");
+        state
+            .delete("foreign-vehicle")
+            .expect("Preemptor release should succeed");
+        assert_eq!(state.defunct().count(), 2);
+
+        state
+            .insert_active(active_lock(
+                "engine-new",
+                ScopeKey::Ecu("engine".to_owned()),
+                &["engine"],
+                None,
+            ))
+            .expect("Engine re-acquisition should succeed");
+
+        assert!(state.defunct_by_id("engine-old").is_none());
+        assert!(state.defunct_by_id("body-old").is_some());
+    }
+
+    #[test]
+    fn new_ecu_lock_keeps_same_owner_defunct_vehicle_lock() {
+        let mut state = LockState::default();
+        state
+            .insert_active(vehicle_lock("vehicle-old"))
+            .expect("Initial insertion should succeed");
+        preempt_and_release(&mut state, "vehicle-old", "other-client");
+        let engine_scope = ScopeKey::Ecu("engine".to_owned());
+        let engine_coverage = LockCoverage::new(["engine".to_owned()]);
+
+        assert_eq!(
+            state
+                .uncovered_defunct("owner", &engine_scope, &engine_coverage, at(50))
+                .map(|defunct| defunct.id.as_str()),
+            Some("vehicle-old")
+        );
+        state
+            .insert_active(active_lock("engine", engine_scope, &["engine"], None))
+            .expect("State insertion does not check defunct locks");
+
+        assert!(state.defunct_by_id("vehicle-old").is_some());
+    }
+
+    #[test]
+    fn functional_group_lock_supersedes_covered_defunct_ecu_lock() {
+        let mut state = LockState::default();
+        state
+            .insert_active(active_lock(
+                "engine-old",
+                ScopeKey::Ecu("engine".to_owned()),
+                &["engine"],
+                None,
+            ))
+            .expect("Initial insertion should succeed");
+        preempt_and_release(&mut state, "engine-old", "other-client");
+        let powertrain_scope = ScopeKey::FunctionalGroup("powertrain".to_owned());
+        let powertrain_coverage =
+            LockCoverage::new(["engine".to_owned(), "transmission".to_owned()]);
+
+        assert!(
+            state
+                .uncovered_defunct("owner", &powertrain_scope, &powertrain_coverage, at(50))
+                .is_none()
+        );
+        state
+            .insert_active(active_lock(
+                "powertrain",
+                powertrain_scope,
+                &["engine", "transmission"],
+                None,
+            ))
+            .expect("Functional-group acquisition should succeed");
+
+        assert!(state.defunct_by_id("engine-old").is_none());
+    }
+
+    #[test]
+    fn uncovered_defunct_reports_only_partially_covered_same_owner_locks() {
+        let mut state = LockState::default();
+        state
+            .insert_active(active_lock(
+                "powertrain-old",
+                ScopeKey::FunctionalGroup("powertrain".to_owned()),
+                &["engine", "transmission"],
+                None,
+            ))
+            .expect("Initial insertion should succeed");
+        preempt_and_release(&mut state, "powertrain-old", "other-client");
+        let uncovered = |subject: &str, scope: ScopeKey, coverage: &[&str], now: SystemTime| {
+            state
+                .uncovered_defunct(
+                    subject,
+                    &scope,
+                    &LockCoverage::new(coverage.iter().map(ToString::to_string)),
+                    now,
+                )
+                .map(|defunct| defunct.id.to_string())
+        };
+        let functional = |name: &str| ScopeKey::FunctionalGroup(name.to_owned());
+        let ecu = |name: &str| ScopeKey::Ecu(name.to_owned());
+
+        assert_eq!(
+            uncovered("owner", ecu("engine"), &["engine"], at(50)).as_deref(),
+            Some("powertrain-old")
+        );
+        assert_eq!(
+            uncovered(
+                "owner",
+                functional("chassis"),
+                &["transmission", "brakes"],
+                at(50)
+            )
+            .as_deref(),
+            Some("powertrain-old")
+        );
+        assert!(
+            uncovered(
+                "owner",
+                functional("drive"),
+                &["engine", "transmission", "brakes"],
+                at(50)
+            )
+            .is_none()
+        );
+        assert!(uncovered("owner", functional("powertrain"), &["engine"], at(50)).is_none());
+        assert!(uncovered("owner", ScopeKey::Vehicle, &[], at(50)).is_none());
+        assert!(uncovered("owner", ecu("body"), &["body"], at(50)).is_none());
+        assert!(uncovered("other-client", ecu("engine"), &["engine"], at(50)).is_none());
+        assert!(uncovered("owner", ecu("engine"), &["engine"], at(200)).is_none());
+    }
+
+    #[test]
+    fn new_lock_keeps_other_owners_defunct_locks() {
+        let mut state = LockState::default();
+        let mut foreign = vehicle_lock("foreign-old");
+        foreign.principal = principal("other-client");
+        state
+            .insert_active(foreign)
+            .expect("Initial insertion should succeed");
+        preempt_and_release(&mut state, "foreign-old", "third-client");
+
+        state
+            .insert_vehicle(vehicle_lock("new"), &[])
+            .expect("Acquisition should succeed");
+
+        assert!(state.defunct_by_id("foreign-old").is_some());
+    }
+
+    #[test]
+    fn replacement_supersedes_preemptors_own_defunct_lock_but_not_the_preempted_one() {
+        let mut state = LockState::default();
+        state
+            .insert_active(vehicle_lock("old"))
+            .expect("Initial insertion should succeed");
+        preempt_and_release(&mut state, "old", "other-client");
+        let mut foreign = vehicle_lock("foreign");
+        foreign.principal = principal("other-client");
+        state
+            .insert_active(foreign)
+            .expect("Foreign insertion should succeed");
+
+        state
+            .commit_replacement(
+                &["foreign".into()],
+                vehicle_lock("new"),
+                "owner",
+                SystemTime::UNIX_EPOCH,
+            )
+            .expect("Preemption should commit");
+
+        assert!(state.defunct_by_id("old").is_none());
+        let foreign = state
+            .defunct_by_id("foreign")
+            .expect("Preempted foreign lock should be defunct");
+        assert_eq!(state.current_holder(foreign), "owner");
+    }
+
+    #[test]
+    fn renewal_replaces_metadata_only_when_given() {
+        let mut state = LockState::default();
+        let mut lock = active_lock("ecu", ScopeKey::Ecu("engine".to_owned()), &["engine"], None);
+        lock.metadata
+            .insert("use_case".to_owned(), Value::from("old"));
+        state.insert_active(lock).expect("Insertion should succeed");
+        let now = SystemTime::UNIX_EPOCH;
+        let later = |seconds: u64| {
+            now.checked_add(Duration::from_secs(seconds))
+                .expect("Test expiration should fit")
+        };
+
+        state
+            .renew("ecu", later(200), now, None)
+            .expect("Renewal should succeed");
+        assert_eq!(
+            state
+                .active_by_id("ecu")
+                .and_then(|lock| lock.metadata.get("use_case")),
+            Some(&Value::from("old"))
+        );
+
+        let new_metadata = Map::from_iter([("use_case".to_owned(), Value::from("new"))]);
+        state
+            .renew(
+                "ecu",
+                later(300),
+                now,
+                Some(EvaluatedMetadata::for_test(new_metadata.clone())),
+            )
+            .expect("Renewal should succeed");
+        assert_eq!(
+            state.active_by_id("ecu").map(|lock| &lock.metadata),
+            Some(&new_metadata)
+        );
     }
 
     #[test]
