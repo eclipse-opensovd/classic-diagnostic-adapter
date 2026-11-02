@@ -13,6 +13,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # 🚗 Classic Diagnostic Adapter 🏥
 
+[![Nightly workflow status](https://github.com/eclipse-opensovd/classic-diagnostic-adapter/actions/workflows/nightly.yml/badge.svg?event=schedule)](https://github.com/eclipse-opensovd/classic-diagnostic-adapter/actions/workflows/nightly.yml)
+
 This repository will contain the Classic Diagnostic Adapter of the Eclipse OpenSOVD project and its documentation.
 
 In the SOVD (Service-Oriented Vehicle Diagnostics) context, a Classic Diagnostic Adapter serves as a
