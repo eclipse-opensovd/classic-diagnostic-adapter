@@ -135,6 +135,45 @@ Database Loading
     database files may be inconsistent or corrupted.
 
 
+.. req:: Initial Diagnostic Database Provisioning
+    :id: req~dt-initial-database-provisioning
+    :links: arch~dt-database-loading, arch~plugin-diagnostic-database-update
+    :status: draft
+
+    The CDA shall support deployments in which the executable and initial MDD files are delivered on a
+    read-only file system while the CDA storage is located on a separate writable file system.
+
+    The MDD decompression configuration shall support the following policies:
+
+    - ``always``: When no active diagnostic database collection exists, the CDA shall provision it from the
+      configured database directory before loading the diagnostic databases. Compressed MDD files shall be
+      decompressed in the new collection. Compressed MDD files introduced by runtime updates shall also be
+      decompressed.
+    - ``never``: Startup shall not create an active collection, and the CDA shall not decompress MDD files while
+      seeding storage or applying updates.
+
+    The following requirements apply whenever storage is provisioned or seeded:
+
+    - The configured database directory shall be treated as a read-only source and shall not be modified.
+    - MDD files containing compressed chunks shall be copied to CDA storage before being decompressed.
+    - MDD files that are already uncompressed shall be copied without modification.
+    - A newly provisioned or seeded collection shall become the source from which the CDA loads its diagnostic
+      databases.
+    - If an active diagnostic database collection already exists, the CDA shall use that collection and
+      shall not provision or seed it again from the configured database directory.
+    - The existence of the active collection, rather than whether it contains any files, shall determine
+      whether provisioning or seeding has already occurred.
+    - Provisioning and seeding shall be atomic. If copying or decompressing any MDD file fails, no partially
+      populated active collection shall become visible, and the source files shall remain unchanged.
+
+    **Rationale**
+
+    Production deployments may deliver the CDA and compressed initial MDD files as part of an immutable
+    system image. Keeping the MDD files compressed reduces image size, while provisioning decompressed copies
+    into writable runtime storage enables memory-efficient read-only memory mapping without modifying the
+    system image.
+
+
 DoIP Gateway Initialization
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
