@@ -1412,7 +1412,17 @@ async fn wait_for_ack_or_response_until_timeout(
                         "Error while waiting for ACK/NACK, {e}"
                     )));
                 }
-                Err(_) => {
+                // Lagging only drops the oldest messages; the channel is still
+                // open and the ACK may be among the retained ones.
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(
+                        ecu_name = %ecu_name,
+                        skipped,
+                        "ECU receiver lagged while waiting for ACK/NACK, continuing"
+                    );
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => {
                     tracing::error!(
                         ecu_name = %ecu_name,
                         "ECU receiver unexpectedly closed while waiting for ACK/NACK"
@@ -1528,49 +1538,57 @@ async fn read_ecu_responses(
             // because it is unlikely that both fire at the exact same time.
             biased;
             res = receiver.recv() => {
-                if let Ok(res) = res {
-                    match res {
-                        Ok(event) => {
-                            if !try_send_transport_response(
-                                response_sender,
-                                diagnostic_response_to_transport(event),
-                            )
-                            .await
-                            {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                ecu_name = %ecu_name,
-                                error = %e,
-                                "Error while waiting for response message"
-                            );
-                            if !try_send_transport_response(
-                                response_sender,
-                                Err(DiagServiceError::NoResponse(format!(
-                                    "Error while waiting for message, {e}"
-                                ))),
-                            )
-                            .await
-                            {
-                                break;
-                            }
+                match res {
+                    Ok(Ok(event)) => {
+                        if !try_send_transport_response(
+                            response_sender,
+                            diagnostic_response_to_transport(event),
+                        )
+                        .await
+                        {
+                            break;
                         }
                     }
-                } else {
-                    tracing::error!(
-                        ecu_name = %ecu_name,
-                        "ECU receiver unexpectedly closed while waiting for response"
-                    );
-                    try_send_transport_response(
-                        response_sender,
-                        Err(DiagServiceError::NoResponse(
-                            "ECU receiver unexpectedly closed".to_owned(),
-                        )),
-                    )
-                    .await;
-                    break;
+                    Ok(Err(e)) => {
+                        tracing::error!(
+                            ecu_name = %ecu_name,
+                            error = %e,
+                            "Error while waiting for response message"
+                        );
+                        if !try_send_transport_response(
+                            response_sender,
+                            Err(DiagServiceError::NoResponse(format!(
+                                "Error while waiting for message, {e}"
+                            ))),
+                        )
+                        .await
+                        {
+                            break;
+                        }
+                    }
+                    // Lagging only drops the oldest messages; the channel is
+                    // still open, so keep reading the retained ones.
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(
+                            ecu_name = %ecu_name,
+                            skipped,
+                            "ECU receiver lagged while waiting for response, continuing"
+                        );
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::error!(
+                            ecu_name = %ecu_name,
+                            "ECU receiver unexpectedly closed while waiting for response"
+                        );
+                        try_send_transport_response(
+                            response_sender,
+                            Err(DiagServiceError::NoResponse(
+                                "ECU receiver unexpectedly closed".to_owned(),
+                            )),
+                        )
+                        .await;
+                        break;
+                    }
                 }
             }
             () = response_sender.closed() => {
@@ -3138,6 +3156,71 @@ mod tests {
             matches!(result, Err(DiagServiceError::Nack(_))),
             "expected Nack, got {result:?}"
         );
+    }
+
+    /// A lagged receiver is still open: waiting for the ACK must continue with
+    /// the retained messages instead of reporting the receiver as closed.
+    #[tokio::test]
+    async fn wait_for_ack_or_response_continues_after_lag() {
+        let (tx, mut rx) = broadcast::channel(2);
+        let msg = diag_msg();
+
+        tx.send(Ok(DiagnosticResponse::AliveCheckResponse))
+            .expect("Failed to send alive check response");
+        tx.send(Ok(DiagnosticResponse::AliveCheckResponse))
+            .expect("Failed to send alive check response");
+        tx.send(Ok(DiagnosticResponse::AliveCheckResponse))
+            .expect("Failed to send alive check response");
+        tx.send(Ok(DiagnosticResponse::Ack((ECU_ADDR, vec![]))))
+            .expect("Failed to send ack");
+
+        let result = wait_for_ack_or_response_until_timeout(
+            &mut rx,
+            "test-ecu",
+            &msg,
+            Duration::from_secs(1),
+            &no_activity(),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Ok(None)),
+            "expected Ok(None), got {result:?}"
+        );
+    }
+
+    /// A lagged receiver is still open: reading responses must continue with
+    /// the retained messages instead of failing the request as closed.
+    #[tokio::test]
+    async fn read_ecu_responses_continues_after_lag() {
+        let (tx, mut rx) = broadcast::channel(2);
+        let (resp_tx, mut resp_rx) = make_response_channel();
+
+        for _ in 0..3 {
+            tx.send(Ok(ecu_msg_response()))
+                .expect("Failed to send response");
+        }
+        // Keep tx alive so the channel does not close while reading.
+        let _tx = tx;
+
+        let handle = tokio::spawn(async move {
+            read_ecu_responses(&mut rx, "test-ecu", &resp_tx, None).await;
+        });
+
+        let item = tokio::time::timeout(Duration::from_secs(1), resp_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("closed");
+        assert!(
+            matches!(item, Ok(Some(TransportResponse::UdsResponse(_)))),
+            "expected Message, got {item:?}"
+        );
+
+        drop(resp_rx);
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("task did not exit")
+            .expect("task panicked");
     }
 
     /// A `GenericNack` returns `Err(Nack(_))`.
