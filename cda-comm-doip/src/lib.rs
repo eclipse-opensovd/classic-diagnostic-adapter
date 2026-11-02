@@ -2810,6 +2810,48 @@ mod tests {
         );
     }
 
+    /// Messages that piled up between requests until the receiver lagged must
+    /// not leak into the next request. If the pre-send drain stops at the lag,
+    /// the stale messages stay queued: the ACK then overwrites one of them
+    /// (lagging the receiver again) and any stale NACK read before the ACK
+    /// fails a request the gateway acknowledged.
+    #[tokio::test]
+    async fn stale_nack_from_lagged_receiver_does_not_fail_next_request() {
+        use doip_definitions::payload::{DiagnosticMessageNack, DiagnosticNackCode};
+
+        let (tx, mut rx) = make_broadcast_pair();
+        let msg = diag_msg();
+
+        // More messages than the channel holds, so the receiver lags.
+        for _ in 0..20 {
+            tx.send(Ok(DiagnosticResponse::Nack(DiagnosticMessageNack {
+                source_address: ECU_ADDR.to_be_bytes(),
+                target_address: TESTER_ADDR.to_be_bytes(),
+                nack_code: DiagnosticNackCode::TransportProtocolError,
+            })))
+            .expect("Failed to send stale nack");
+        }
+
+        // Same sequence as the request path: drain, send, wait for the ACK.
+        cda_interfaces::util::tokio_ext::clear_pending_messages(&mut rx);
+        tx.send(Ok(DiagnosticResponse::Ack((ECU_ADDR, vec![]))))
+            .expect("Failed to send ack");
+
+        let result = wait_for_ack_or_response_until_timeout(
+            &mut rx,
+            "test-ecu",
+            &msg,
+            Duration::from_secs(1),
+            &no_activity(),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Ok(None)),
+            "expected Ok(None), got {result:?}"
+        );
+    }
+
     /// A lagged receiver is still open: waiting for the ACK must continue with
     /// the retained messages instead of reporting the receiver as closed.
     #[tokio::test]
