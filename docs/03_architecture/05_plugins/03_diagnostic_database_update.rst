@@ -205,6 +205,16 @@ Diagnostic Database Update Plugin
     currently tracked execution identifiers and always contains at most one entry. No vehicle lock is
     required to use the list or status endpoints.
 
+    While an execution is running, requests to other routes are rejected with ``409 Conflict`` and a
+    ``Retry-After`` header. Exempt are the health and ``/data/version`` endpoints, authorization,
+    reading and acquiring locks, and the execution list and status endpoints. Applications embedding
+    CDA can exempt further routes they register themselves, e.g. vendor-specific version or health
+    endpoints, via ``Setup::with_always_accessible_routes``. These routes are exempt from every
+    protection that denies all non-exempt routes, not only from the update protection. A route is
+    a path prefix matched at segment boundaries, not an exact path: ``/vehicle/v15/apps/sovd2uds/x-vendor/version``
+    also exempts ``/vehicle/v15/apps/sovd2uds/x-vendor/version/history`` but not
+    ``/vehicle/v15/apps/sovd2uds/x-vendor/version-info``.
+
     After applying, or rolling back the diagnostic database, the new database must be active immediately, without
     requiring a restart of the CDA, and the old state must be available as a backup until the next update is applied,
     the backup is deleted, or a cleanup is initiated. The state of nextupdate must also be reset after applying or
