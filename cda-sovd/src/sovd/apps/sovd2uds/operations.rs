@@ -464,6 +464,10 @@ pub(crate) mod runtimefilesupdate {
             HttpRouteMatcher::new("/health", vec![HttpMethod::GET]),
             HttpRouteMatcher::new("/vehicle/v15/data/version", vec![HttpMethod::GET]),
             HttpRouteMatcher::new(
+                "/vehicle/v15/apps/sovd2uds/data/version",
+                vec![HttpMethod::GET],
+            ),
+            HttpRouteMatcher::new(
                 "/vehicle/v15/authorize",
                 vec![HttpMethod::GET, HttpMethod::POST],
             ),

@@ -206,7 +206,8 @@ Diagnostic Database Update Plugin
     required to use the list or status endpoints.
 
     While an execution is running, requests to other routes are rejected with ``409 Conflict`` and a
-    ``Retry-After`` header. Exempt are the health and ``/data/version`` endpoints, authorization,
+    ``Retry-After`` header. Exempt are the health and both ``/data/version`` endpoints
+    (``/vehicle/v15/data/version`` and ``/vehicle/v15/apps/sovd2uds/data/version``), authorization,
     reading and acquiring locks, and the execution list and status endpoints. Applications embedding
     CDA can exempt further routes they register themselves, e.g. vendor-specific version or health
     endpoints, via ``Setup::with_always_accessible_routes``. These routes are exempt from every
