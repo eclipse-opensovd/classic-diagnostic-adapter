@@ -20,6 +20,8 @@
 //! `init_mode`-aware communication plugin, before handing the `Setup` to one of the
 //! `run_*` functions.
 //! Lock-priority policies are selected with [`Setup::with_lock_priority_plugin`].
+//! Routes that must stay reachable while a global HTTP protection is active are added with
+//! [`Setup::with_always_accessible_routes`].
 //!
 //! [`RuntimeFilesUpdatePlugin`]: cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin
 
@@ -37,7 +39,7 @@ use cda_interfaces::{
     },
     component_slot::{ComponentSlot, ReplaceComponent},
     health::HealthProvider,
-    http_protection::registry::HttpProtectionRegistry,
+    http_protection::registry::{HttpProtectionRegistry, HttpRouteMatcher},
     lock_priority_api::LockPriorityPolicy,
 };
 use cda_plugin_communication_management::{
@@ -206,6 +208,9 @@ pub struct Setup<
     pub(crate) shutdown_signal: Option<ShutdownSignal>,
     /// Lock-priority policy fixed for the lifetime of the lock store.
     pub(crate) lock_priority_policy: Arc<dyn LockPriorityPolicy>,
+    /// Routes exempt from every global HTTP protection, see
+    /// [`Setup::with_always_accessible_routes`].
+    pub(crate) always_accessible_routes: Vec<HttpRouteMatcher>,
 }
 
 impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Default for Setup<SP, SL> {
@@ -226,6 +231,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Setup<SP, SL> {
             initialize_tracing: true,
             shutdown_signal: None,
             lock_priority_policy: Arc::new(cda_plugin_lock_priority::NoPreemptionPolicy),
+            always_accessible_routes: Vec::new(),
         }
     }
 }
@@ -297,6 +303,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
             initialize_tracing: self.initialize_tracing,
             shutdown_signal: self.shutdown_signal,
             lock_priority_policy: self.lock_priority_policy,
+            always_accessible_routes: self.always_accessible_routes,
         }
     }
 
@@ -315,6 +322,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
             initialize_tracing: self.initialize_tracing,
             shutdown_signal: self.shutdown_signal,
             lock_priority_policy: self.lock_priority_policy,
+            always_accessible_routes: self.always_accessible_routes,
         }
     }
 
@@ -329,6 +337,39 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
     #[must_use]
     pub fn with_lock_priority_plugin(mut self, plugin: Arc<dyn LockPriorityPolicy>) -> Self {
         self.lock_priority_policy = plugin;
+        self
+    }
+
+    /// Adds routes that stay reachable while any global HTTP protection is active.
+    ///
+    /// Global protections, such as the one a runtime update holds while it owns
+    /// communication, deny every route except their built-in exemptions. Routes added here
+    /// are exempt from all of them, so an embedding application can keep endpoints it
+    /// registers itself (e.g. via [`Setup::with_preload`]) reachable, such as version or
+    /// health routes. Protections limited to selected routes still deny their routes.
+    ///
+    /// Each route is a path prefix matched at segment boundaries, not an exact path (see
+    /// [`HttpRouteMatcher`]): `/x-vendor/version` also exempts `/x-vendor/version/history`,
+    /// but not `/x-vendor/version-info`.
+    ///
+    /// Repeated calls extend the list. The routes are validated when the CDA starts; an
+    /// empty or relative prefix, or a route without methods, aborts the startup.
+    ///
+    /// ```rust,ignore
+    /// use cda_interfaces::http_protection::registry::{HttpMethod, HttpRouteMatcher};
+    ///
+    /// let setup = Setup::<MySecurityPlugin, MySecurityLoader>::new()
+    ///     .with_always_accessible_routes([HttpRouteMatcher::new(
+    ///         "/vehicle/v15/apps/sovd2uds/x-vendor/version",
+    ///         vec![HttpMethod::GET],
+    ///     )]);
+    /// ```
+    #[must_use]
+    pub fn with_always_accessible_routes(
+        mut self,
+        routes: impl IntoIterator<Item = HttpRouteMatcher>,
+    ) -> Self {
+        self.always_accessible_routes.extend(routes);
         self
     }
 }
@@ -465,6 +506,7 @@ pub(crate) async fn setup_runtime_routes<SP, SL, UPB, CPB>(
     build_update_plugin: Option<UPB>,
     communication_plugin: CPB,
     storage: Arc<LocalStorage>,
+    http_protections: HttpProtectionRegistry,
 ) -> Result<CommunicationRuntime, AppError>
 where
     SP: SecurityPlugin,
@@ -504,7 +546,6 @@ where
         }
         None
     };
-    let http_protections = HttpProtectionRegistry::new();
 
     let (communication_runtime, communication_access) = build_communication_runtime_and_access(
         ws,
@@ -598,6 +639,7 @@ mod tests {
         communication_control::{
             CommControlError, CommunicationState, TransportControl, TransportState,
         },
+        http_protection::registry::HttpMethod,
         runtime_update_api::{
             BulkDataCreatedList, BulkDataList, ExecutionMode, RuntimeFilesQuery,
             RuntimeFilesUpdatePlugin, RuntimeUpdateError, UpdateExecution,
@@ -800,5 +842,26 @@ mod tests {
             s.build_update_plugin.is_some(),
             "plugin builder must survive chaining"
         );
+    }
+
+    #[test]
+    fn always_accessible_routes_accumulate_and_survive_chaining() {
+        let builder: UpdatePluginFn<_> =
+            update_plugin_fn(|_infra: CdaRuntime<DefaultSecurityPluginData>| async {
+                Ok(NoOpPlugin)
+            });
+        let version = HttpRouteMatcher::new(
+            "/vehicle/v15/apps/sovd2uds/data/version",
+            vec![HttpMethod::GET],
+        );
+        let health = HttpRouteMatcher::new("/health/vendor", vec![HttpMethod::GET]);
+
+        let s = TestSetup::new()
+            .with_always_accessible_routes([version.clone()])
+            .with_update_plugin(builder)
+            .with_communication_plugin(DefaultCommunicationPluginBuilder)
+            .with_always_accessible_routes([health.clone()]);
+
+        assert_eq!(s.always_accessible_routes, vec![version, health]);
     }
 }
