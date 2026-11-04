@@ -160,7 +160,7 @@ Entities
     - A ``last_seen`` timestamp of the last reply of the ECU (see :need:`arch~dt-ecu-states`), if the ECU has
       ever been contacted (either in the current session, or, when loaded from a persisted ECU list, in a
       previous session). It is formatted as RFC 3339 in UTC with second precision and omitted if the ECU was never contacted.
-    - URI references to the standardized resource collection endpoints: data, operations, configurations, faults, modes, locks, and extension endpoints
+    - URI references to the standardized resource collection endpoints: data, operations, configurations, faults, modes, locks, bulk-data, and extension endpoints
 
     The connectivity state of an ECU reflects its current diagnostic reachability and variant detection status:
 
