@@ -20,8 +20,8 @@ use cda_interfaces::{
 };
 
 use crate::coordinator::{
-    EcuConnected, EcuCoordinatorHandle, EcuDisconnected, EcuResponded, RestoreDisconnectHandling,
-    SuppressDisconnectHandling,
+    EcuConnected, EcuConnectionLost, EcuCoordinatorHandle, EcuDisconnected, EcuResponded,
+    RestoreDisconnectHandling, SuppressDisconnectHandling,
 };
 
 /// Coordinates ECU state transitions in response to connectivity events.
@@ -91,9 +91,9 @@ impl EcuStateCoordinator {
             let transitioned = handle.actor_ref.ask(EcuConnected).await.unwrap_or_default();
             // Push a re-detection whenever the reconnected ECU has no valid
             // variant: a real Offline -> Online transition resets it to
-            // NotTested, and a reconnect during variant detection (when
-            // disconnect events are suppressed, so no transition is seen)
-            // can leave a stale offline verdict behind. Triggering on every
+            // NotTested, and a reconnect of an ECU that a detection already
+            // concluded on (a suppressed send timeout is no transition) can
+            // leave a stale offline verdict behind. Triggering on every
             // such reconnect mirrors the transport announcing the ECU;
             // detection runs are coalesced downstream.
             let needs_detection =
@@ -124,6 +124,25 @@ impl EcuStateCoordinator {
             && let Err(error) = handle.actor_ref.ask(EcuDisconnected).await
         {
             tracing::warn!(ecu_name, %error, "Failed to report ECU disconnect to coordinator");
+        }
+    }
+
+    /// The gateway connection of the ECU is lost: mark it Offline, also during
+    /// variant detection, see [`EcuConnectionLost`].
+    ///
+    /// Waits until the coordinator actor has applied the event, like
+    /// [`Self::handle_ecu_disconnected`].
+    #[tracing::instrument(skip_all, fields(ecu_name, dlt_context = dlt_ctx!("UDS")))]
+    async fn handle_gateway_connection_lost(&self, ecu_name: &str) {
+        tracing::info!(
+            ecu_name,
+            "Gateway connection lost - setting connectivity to Offline"
+        );
+
+        if let Some(handle) = self.handles.get(ecu_name)
+            && let Err(error) = handle.actor_ref.ask(EcuConnectionLost).await
+        {
+            tracing::warn!(ecu_name, %error, "Failed to report lost connection to coordinator");
         }
     }
 
@@ -186,7 +205,7 @@ impl EcuConnectivityHandler for EcuStateCoordinator {
 
     async fn on_gateway_disconnected(&self, ecu_names: &[String]) {
         for ecu_name in ecu_names {
-            self.handle_ecu_disconnected(ecu_name).await;
+            self.handle_gateway_connection_lost(ecu_name).await;
         }
     }
 
@@ -279,6 +298,53 @@ mod tests {
             .await;
 
         assert_eq!(runtime_state.status().connectivity, Connectivity::Offline);
+    }
+
+    /// A lost connection is a fact, not a verdict of the detection: the ECU must
+    /// not stay `Online` on a connection that no longer exists.
+    #[tokio::test]
+    async fn gateway_disconnect_during_detection_sets_offline() {
+        let (coordinator, runtime_state, _) = coordinator(Connectivity::Online, "TestVariant");
+        coordinator.suppress_disconnect_handling("TestECU").await;
+
+        coordinator
+            .on_gateway_disconnected(&["TestECU".to_owned()])
+            .await;
+
+        assert_eq!(runtime_state.status().connectivity, Connectivity::Offline);
+    }
+
+    /// The members of a duplicate group share one transport: a timeout of a
+    /// detection request must not mark them offline, no reconnect would follow.
+    #[tokio::test]
+    async fn send_timeout_during_detection_keeps_ecu_online() {
+        let (coordinator, runtime_state, _) = coordinator(Connectivity::Online, "TestVariant");
+        coordinator.suppress_disconnect_handling("TestECU").await;
+
+        coordinator.handle_ecu_disconnected("TestECU").await;
+
+        assert_eq!(runtime_state.status().connectivity, Connectivity::Online);
+    }
+
+    #[tokio::test]
+    async fn reconnect_after_gateway_disconnect_during_detection_redetects() {
+        let (coordinator, runtime_state, mut redetect_rx) =
+            coordinator(Connectivity::Online, "TestVariant");
+        coordinator.suppress_disconnect_handling("TestECU").await;
+        let ecu_names = ["TestECU".to_owned()];
+
+        coordinator.on_gateway_disconnected(&ecu_names).await;
+        coordinator.on_gateway_connected(&ecu_names).await;
+
+        assert_eq!(runtime_state.status().connectivity, Connectivity::Online);
+        assert_eq!(
+            runtime_state.status().variant_state,
+            VariantState::NotTested
+        );
+        assert!(
+            redetect_rx.try_recv().is_ok(),
+            "the reconnected ECU must be detected again"
+        );
     }
 
     #[tokio::test]

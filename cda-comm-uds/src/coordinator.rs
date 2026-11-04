@@ -45,8 +45,40 @@ pub struct EcuCoordinator {
     ecu_name: String,
     /// When `true`, `EcuDisconnected` messages are suppressed.
     /// Set during variant detection to prevent timeout-triggered disconnects
-    /// from racing with the detection result.
+    /// from racing with the detection result. `EcuConnectionLost` is not
+    /// affected: nothing would report a lost connection a second time.
     suppress_disconnect: bool,
+}
+
+impl EcuCoordinator {
+    fn mark_disconnected(&self) {
+        let mut ecu_state = std_ext::lock_write(&self.state.ecu_state);
+
+        if ecu_state.connectivity.is_online() {
+            tracing::info!(
+                ecu = %self.ecu_name,
+                dlt_context = dlt_ctx!("UDS"),
+                previous = ?ecu_state.connectivity,
+                "ECU disconnected. Setting connectivity to Offline"
+            );
+            let variant_reset = ecu_state.mark_unreachable();
+            let variant_state = variant_reset.then(|| ecu_state.variant_state.clone());
+            drop(ecu_state);
+            if let Some(variant_state) = variant_state {
+                self.state.publish_variant_state(variant_state);
+            }
+            // The ECU may lose its authenticated state while unreachable. A pending
+            // expiration finds the ECU deauthenticated and sends nothing.
+            *std_ext::lock_write(&self.state.authentication) =
+                cda_interfaces::authentication::AuthenticationState::default();
+        } else {
+            tracing::debug!(
+                ecu = %self.ecu_name,
+                current = ?ecu_state.connectivity,
+                "ECU disconnect received but already Offline..skipping"
+            );
+        }
+    }
 }
 
 /// Cloneable handle providing read access and actor messaging for one ECU.
@@ -283,32 +315,27 @@ impl Message<EcuDisconnected> for EcuCoordinator {
             return;
         }
 
-        let mut ecu_state = std_ext::lock_write(&self.state.ecu_state);
+        self.mark_disconnected();
+    }
+}
 
-        if ecu_state.connectivity.is_online() {
-            tracing::info!(
-                ecu = %self.ecu_name,
-                dlt_context = dlt_ctx!("UDS"),
-                previous = ?ecu_state.connectivity,
-                "ECU disconnected. Setting connectivity to Offline"
-            );
-            let variant_reset = ecu_state.mark_unreachable();
-            let variant_state = variant_reset.then(|| ecu_state.variant_state.clone());
-            drop(ecu_state);
-            if let Some(variant_state) = variant_state {
-                self.state.publish_variant_state(variant_state);
-            }
-            // The ECU may lose its authenticated state while unreachable. A pending
-            // expiration finds the ECU deauthenticated and sends nothing.
-            *std_ext::lock_write(&self.state.authentication) =
-                cda_interfaces::authentication::AuthenticationState::default();
-        } else {
-            tracing::debug!(
-                ecu = %self.ecu_name,
-                current = ?ecu_state.connectivity,
-                "ECU disconnect received but already Offline..skipping"
-            );
-        }
+/// The transport lost the connection to the ECU's gateway -> sets connectivity to Offline.
+///
+/// Unlike [`EcuDisconnected`] this is applied during variant detection too. A send
+/// timeout there says little, and the members of a duplicate group sharing the
+/// transport would stay offline without a reconnect event. A lost connection is
+/// reported once and is followed by [`EcuConnected`] after the reconnect.
+pub struct EcuConnectionLost;
+
+impl Message<EcuConnectionLost> for EcuCoordinator {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _msg: EcuConnectionLost,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.mark_disconnected();
     }
 }
 
