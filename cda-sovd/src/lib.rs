@@ -203,8 +203,29 @@ where
     M: FileManager + Send + Sync + 'static,
     S: SecurityPluginLoader,
 {
+    #[cfg(feature = "doip-direct-connect")]
+    let doip_connect_enabled = resources.doip_connect.is_some();
     let vehicle_router = build_vehicle_routes::<T, M, S>(config, resources).await;
 
+    dynamic_router
+        .register_bulk_data_category(sovd::apps::sovd2uds::bulk_data::FLASHFILES_PATH)
+        .await;
+    #[cfg(feature = "doip-direct-connect")]
+    if doip_connect_enabled {
+        dynamic_router
+            .register_operation(
+                sovd::apps::sovd2uds::operations::doip_connect_ecu::PATH,
+                false,
+            )
+            .await;
+    }
+
+    dynamic_router
+        .register_data_resource(
+            sovd::apps::sovd2uds::data::NETWORKSTRUCTURE_PATH,
+            sovd::apps::sovd2uds::data::NETWORKSTRUCTURE_CATEGORY,
+        )
+        .await;
     let handle = dynamic_router.add_routes(vehicle_router).await;
 
     tracing::info!("Vehicle routes added to webserver");
@@ -268,6 +289,15 @@ where
         sovd::apps::sovd2uds::operations::runtimefilesupdate::routes::<S, P, L>(route_state);
     let router = bulk_data_router.merge(operations_router);
     let handle = dynamic_router.add_routes(router.into()).await;
+    for path in sovd::apps::sovd2uds::bulk_data::runtimefiles::CATEGORY_PATHS {
+        dynamic_router.register_bulk_data_category(path).await;
+    }
+    dynamic_router
+        .register_operation(
+            sovd::apps::sovd2uds::operations::runtimefilesupdate::PATH,
+            true,
+        )
+        .await;
     tracing::info!("Runtime update routes added to webserver");
     handle
 }

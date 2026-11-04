@@ -644,10 +644,16 @@ async fn register_version_endpoints(dynamic_router: &cda_sovd::dynamic_router::D
         dynamic_router,
         version_info.clone(),
         "/vehicle/v15/apps/sovd2uds/data/version",
+        "identData",
     )
     .await;
-    cda_sovd::add_static_data_endpoint(dynamic_router, version_info, "/vehicle/v15/data/version")
-        .await;
+    cda_sovd::add_static_data_endpoint(
+        dynamic_router,
+        version_info,
+        "/vehicle/v15/data/version",
+        "identData",
+    )
+    .await;
 }
 
 /// Collected webserver state produced by [`init_webserver`].

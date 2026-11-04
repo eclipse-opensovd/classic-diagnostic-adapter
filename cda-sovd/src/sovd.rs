@@ -77,6 +77,7 @@ pub(crate) mod error;
 pub(crate) mod functions;
 mod lock_state;
 pub(crate) mod locks;
+pub(crate) mod vehicle;
 
 trait IntoSovd {
     type SovdType;
@@ -670,6 +671,32 @@ pub(crate) fn resource_response(
     (StatusCode::OK, Json(components)).into_response()
 }
 
+/// Builds a data list from `(id, category)` pairs, using the id as name.
+pub(crate) fn data_list_response(data: Vec<(String, String)>, include_schema: bool) -> Response {
+    let items = data
+        .into_iter()
+        .map(
+            |(id, category)| sovd_interfaces::components::ecu::ComponentDataInfo {
+                category,
+                name: id.clone(),
+                id,
+            },
+        )
+        .collect();
+    let schema = if include_schema {
+        Some(create_schema!(
+            sovd_interfaces::components::ecu::ComponentData
+        ))
+    } else {
+        None
+    };
+    (
+        StatusCode::OK,
+        Json(sovd_interfaces::components::ecu::ComponentData { items, schema }),
+    )
+        .into_response()
+}
+
 /// Flash API related configuration.
 pub struct FlashConfig {
     /// Folder that contains the flash files.
@@ -758,14 +785,24 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
                     locks::vehicle::lock::docs_delete,
                 ),
         )
+        .route("/vehicle/v15", routing::get(vehicle::get))
+        .route(vehicle::DATA_PATH, routing::get(vehicle::data_get))
         .route("/vehicle/v15/apps", routing::get(apps::get))
         .route(
             "/vehicle/v15/apps/sovd2uds",
             routing::get(apps::sovd2uds::get),
         )
         .route(
-            "/vehicle/v15/apps/sovd2uds/bulk-data",
+            apps::sovd2uds::DATA_PATH,
+            routing::get(apps::sovd2uds::data_get),
+        )
+        .route(
+            apps::sovd2uds::BULK_DATA_PATH,
             routing::get(apps::sovd2uds::bulk_data::get),
+        )
+        .route(
+            apps::sovd2uds::OPERATIONS_PATH,
+            routing::get(apps::sovd2uds::operations_get),
         )
         .api_route(
             "/vehicle/v15/apps/sovd2uds/bulk-data/flashfiles",
@@ -777,7 +814,7 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
         .route("/vehicle/v15/authorize", routing::post(S::authorize))
         .with_state(state)
         .api_route(
-            "/vehicle/v15/apps/sovd2uds/data/networkstructure",
+            apps::sovd2uds::data::NETWORKSTRUCTURE_PATH,
             routing::get_with(
                 apps::sovd2uds::data::networkstructure::get::<T>,
                 apps::sovd2uds::data::networkstructure::docs_get,
@@ -1314,15 +1351,20 @@ pub(crate) mod static_data {
     /// The standard defines these routes for version data:
     /// * `/vehicle/v15/apps/sovd2uds/data/version`.
     /// * `/vehicle/v15/data/version`
+    ///
+    /// The endpoint is listed in its `/data` collection with the given category.
     /// # Arguments
     /// * `dynamic_router` - The dynamic router to add the endpoint to.
     /// * `data` - The version data to return.
     /// * `path` - The path to serve the data from.
     ///   There is no processing of this, it will be returned as is in the response.
+    /// * `category` - The data category the collection lists the endpoint with,
+    ///   e.g. `identData` (ISO 17978-3 Table 70).
     pub async fn add_static_data_endpoint(
         dynamic_router: &DynamicRouter,
         data: serde_json::Map<String, serde_json::Value>,
         path: &str,
+        category: &str,
     ) {
         let data_docs = data.clone();
         let router = ApiRouter::new()
@@ -1333,6 +1375,7 @@ pub(crate) mod static_data {
                 }),
             )
             .with_state(data);
+        dynamic_router.register_data_resource(path, category).await;
         dynamic_router.add_routes(router).await;
     }
 
@@ -1493,6 +1536,30 @@ pub(crate) mod tests {
         fn variant_detection(&self) -> VariantDetectionMode {
             VariantDetectionMode::Always
         }
+    }
+
+    #[tokio::test]
+    async fn data_list_response_lists_id_name_and_category() {
+        let response = data_list_response(
+            vec![
+                ("version".to_owned(), "identData".to_owned()),
+                ("networkstructure".to_owned(), "sysInfo".to_owned()),
+            ],
+            false,
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({ "items": [
+                { "id": "version", "name": "version", "category": "identData" },
+                { "id": "networkstructure", "name": "networkstructure", "category": "sysInfo" },
+            ]})
+        );
     }
 
     /// [[ test~deferred-sovd-admission, Deferred request admission triggers activation and returns a retry hint, test ]]

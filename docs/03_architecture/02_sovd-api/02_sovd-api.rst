@@ -1582,6 +1582,12 @@ Version Endpoint
     Both endpoint types are available immediately after the HTTP server starts and do not require
     any ECU communication.
 
+    The vendor-specific endpoints are registered as static data endpoints with the data category
+    ``identData``. Registering a static data endpoint also lists it in its ``data`` collection
+    (``/data`` or ``/apps/sovd2uds/data``), so endpoints added at runtime, e.g. by an embedding
+    application, are listed as well. Resources served by other routes, like
+    ``/apps/sovd2uds/data/networkstructure`` (``sysInfo``), are registered for listing separately.
+
     .. uml:: images/version_registration.puml
 
     .. note:: The current implementation only registers ``/data/version`` and ``/apps/sovd2uds/data/version``

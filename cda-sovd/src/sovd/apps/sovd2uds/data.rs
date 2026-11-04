@@ -12,3 +12,7 @@
  */
 
 pub(crate) mod networkstructure;
+
+/// Path of the network structure, listed in the app's data collection as `sysInfo`.
+pub(crate) const NETWORKSTRUCTURE_PATH: &str = "/vehicle/v15/apps/sovd2uds/data/networkstructure";
+pub(crate) const NETWORKSTRUCTURE_CATEGORY: &str = "sysInfo";
