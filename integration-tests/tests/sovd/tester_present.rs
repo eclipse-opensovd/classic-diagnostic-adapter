@@ -235,8 +235,9 @@ async fn tester_present_sent_after_doip_reconnection() -> Result<(), TestingErro
         "Hard reset request failed: {reset_result:?}"
     );
 
-    // Wait for the ECU to come back online after the hard reset (5s reset + reconnection time)
-    cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(10)).await;
+    // Wait until the hard-reset ECU has reconnected and is online before recording
+    // Tester Present traffic.
+    wait_for_ecus_online(&test_env.config).await?;
 
     // Start recording AFTER reconnection to verify TP resumes
     let recorder = test_env
