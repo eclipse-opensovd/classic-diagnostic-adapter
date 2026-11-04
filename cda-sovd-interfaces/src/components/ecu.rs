@@ -55,7 +55,12 @@ pub struct Ecu {
     pub sdgs: Option<Vec<SdSdg>>,
     #[serde(rename = "x-single-ecu-jobs")]
     pub single_ecu_jobs: String,
+    #[serde(rename = "x-sovd2uds-bulk-data")]
+    pub x_sovd2uds_bulk_data: String,
+    #[serde(rename = "x-sovd2uds-download")]
+    pub x_sovd2uds_download: String,
     pub faults: String,
+    pub genericservice: String,
     pub modes: String,
     #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
