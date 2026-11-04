@@ -50,6 +50,20 @@ use crate::lifecycle::{
     disable::{DisableError, DisableLease, DisableReason},
 };
 
+/// Completes an explicit activation after a lazy start: connects all pending
+/// gateways, then runs the variant detection of an activation. No-op without
+/// pending gateways.
+async fn complete_lazy_activation(
+    handle: &CommunicationHandle,
+) -> Result<(), CommunicationOperationFailure> {
+    if !handle.has_pending_gateways().await {
+        return Ok(());
+    }
+    tracing::debug!("Explicit activation connects the gateways pending after a lazy start");
+    handle.connect_pending_gateways().await;
+    handle.detect_if_needed().await.map(|_| ())
+}
+
 /// Default communication plugin: applies `init_mode` policy on top of the
 /// framework-serialized lifecycle handle.
 /// [[ dimpl~default-communication-policy, Default deferred communication policy, dimpl ]]
@@ -77,6 +91,11 @@ impl CommunicationPlugin for DefaultCommunicationPlugin {
         self.handle.acquire()
     }
 
+    /// Enables communication and detects. After a lazy start the pending gateways
+    /// are connected and detected as well.
+    ///
+    /// If that follow-up detection is refused, the error is returned although
+    /// pending gateways may already be connected.
     async fn activate(
         &self,
         cause: ActivationCause,
@@ -86,7 +105,11 @@ impl CommunicationPlugin for DefaultCommunicationPlugin {
             | CommunicationInitMode::WhenNotPersisted
             | CommunicationInitMode::OnDemand => {
                 tracing::debug!(?cause, mode = ?self.mode, "Activating communication");
-                self.handle.enable_and_detect().await
+                let state = self.handle.enable_and_detect().await?;
+                // A lazy start left gateways pending: an activation that is not
+                // a diagnostic request initializes all of them.
+                complete_lazy_activation(&self.handle).await?;
+                Ok(state)
             }
             // `Disabled` authorizes no bring-up through this plugin.
             CommunicationInitMode::Disabled => {
@@ -104,7 +127,25 @@ impl CommunicationPlugin for DefaultCommunicationPlugin {
             | CommunicationInitMode::WhenNotPersisted
             | CommunicationInitMode::OnDemand => {
                 tracing::debug!(?cause, mode = ?self.mode, "Requesting activation (non-blocking)");
-                self.handle.request_enable_and_detect()
+                let state = self.handle.request_enable_and_detect();
+                if cause != ActivationCause::DiagnosticRequest
+                    && matches!(
+                        state,
+                        CommunicationState::Enabled | CommunicationState::Enabling(_)
+                    )
+                {
+                    // Joins an activation in flight, then connects the gateways a
+                    // lazy start left pending.
+                    let handle = self.handle.clone();
+                    cda_interfaces::spawn_named!("communication-activate-pending", async move {
+                        if handle.enable_and_detect().await.is_ok()
+                            && let Err(error) = complete_lazy_activation(&handle).await
+                        {
+                            tracing::warn!(%error, "Connecting pending gateways failed");
+                        }
+                    });
+                }
+                state
             }
             // See the `Disabled` arm of `activate` above.
             CommunicationInitMode::Disabled => {
@@ -178,11 +219,13 @@ mod tests {
 
     use async_trait::async_trait;
     use cda_interfaces::communication_control::{
-        CommControlError, TransportControl, TransportState,
+        CommControlError, DetectionPhase, TransportControl, TransportState,
     };
 
     use super::*;
-    use crate::lifecycle::controller::test_utils::communication_handle_new;
+    use crate::lifecycle::controller::test_utils::{
+        communication_handle_new, communication_handle_with_pending_gateways,
+    };
 
     struct RecordingControl {
         enable_count: AtomicUsize,
@@ -452,5 +495,144 @@ mod tests {
         assert_eq!(a.await.unwrap(), Ok(CommunicationState::Enabled));
         assert_eq!(b.await.unwrap(), Ok(CommunicationState::Enabled));
         assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
+    }
+
+    /// Fake transport view: `connect_all_pending` clears the pending flag.
+    struct FakePending {
+        pending: AtomicBool,
+        connects: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl cda_interfaces::topology::PendingGateways for FakePending {
+        async fn has_pending(&self) -> bool {
+            self.pending.load(Ordering::Relaxed)
+        }
+
+        async fn connect_all_pending(&self) {
+            self.connects.fetch_add(1, Ordering::Relaxed);
+            self.pending.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// Counts the two kinds of detection.
+    #[derive(Default)]
+    struct CountingDetector {
+        detects: AtomicUsize,
+        if_needed: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl CommunicationVariantDetection for CountingDetector {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+
+        async fn detect(&self, phase: DetectionPhase) -> Result<(), CommControlError> {
+            let counter = match phase {
+                DetectionPhase::Activation => &self.if_needed,
+                DetectionPhase::Redetection => &self.detects,
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    /// An enabled plugin with a fake pending-gateway view and a counting detector
+    /// registered after the initial activation.
+    async fn enabled_plugin_with_pending(
+        pending: bool,
+    ) -> (
+        DefaultCommunicationPlugin,
+        Arc<FakePending>,
+        Arc<CountingDetector>,
+    ) {
+        let control = Arc::new(RecordingControl {
+            enable_count: AtomicUsize::new(0),
+            disable_count: AtomicUsize::new(0),
+            fail_enable: AtomicBool::new(false),
+        });
+        let fake = Arc::new(FakePending {
+            pending: AtomicBool::new(pending),
+            connects: AtomicUsize::new(0),
+        });
+        let handle = communication_handle_with_pending_gateways(
+            control as Arc<dyn TransportControl>,
+            Arc::clone(&fake) as Arc<dyn cda_interfaces::topology::PendingGateways>,
+        );
+        // The lazy start: communication is enabled without connecting everything.
+        assert_eq!(handle.enable().await, Ok(CommunicationState::Enabled));
+        let detector = Arc::new(CountingDetector::default());
+        handle
+            .register_variant_detection(
+                Arc::clone(&detector) as Arc<dyn CommunicationVariantDetection>
+            )
+            .await
+            .unwrap();
+        (
+            DefaultCommunicationPlugin::new(handle, CommunicationInitMode::OnDemand),
+            fake,
+            detector,
+        )
+    }
+
+    /// An explicit activation of an enabled runtime with pending gateways
+    /// connects them once and runs the activation's detection, not the explicit
+    /// re-detection. Without pending gateways it does neither.
+    /// [[ test~communication-explicit-activation-connects-pending-gateways-and-detects-if-needed, An explicit activation after a lazy start connects all pending gateways and runs the activation's detection, test ]]
+    #[tokio::test]
+    async fn explicit_activation_connects_pending_gateways_and_detects_if_needed() {
+        let (plugin, fake, detector) = enabled_plugin_with_pending(true).await;
+        assert_eq!(
+            plugin.activate(ActivationCause::Explicit).await,
+            Ok(CommunicationState::Enabled)
+        );
+        assert_eq!(fake.connects.load(Ordering::Relaxed), 1);
+        assert_eq!(detector.if_needed.load(Ordering::Relaxed), 1);
+        assert_eq!(detector.detects.load(Ordering::Relaxed), 0);
+
+        // Nothing is pending any more: a repeated activation is a no-op.
+        assert_eq!(
+            plugin.activate(ActivationCause::Explicit).await,
+            Ok(CommunicationState::Enabled)
+        );
+        assert_eq!(fake.connects.load(Ordering::Relaxed), 1);
+        assert_eq!(detector.if_needed.load(Ordering::Relaxed), 1);
+
+        let (plugin, fake, detector) = enabled_plugin_with_pending(false).await;
+        assert_eq!(
+            plugin.activate(ActivationCause::Explicit).await,
+            Ok(CommunicationState::Enabled)
+        );
+        assert_eq!(fake.connects.load(Ordering::Relaxed), 0);
+        assert_eq!(detector.if_needed.load(Ordering::Relaxed), 0);
+        assert_eq!(detector.detects.load(Ordering::Relaxed), 0);
+    }
+
+    /// The non-awaiting explicit activation does the same work in the
+    /// background. A diagnostic-request activation never does.
+    #[tokio::test]
+    async fn request_activate_connects_pending_gateways_only_for_explicit_causes() {
+        let (plugin, fake, detector) = enabled_plugin_with_pending(true).await;
+        assert_eq!(
+            plugin.request_activate(ActivationCause::DiagnosticRequest),
+            CommunicationState::Enabled
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(fake.connects.load(Ordering::Relaxed), 0);
+
+        assert_eq!(
+            plugin.request_activate(ActivationCause::Explicit),
+            CommunicationState::Enabled
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while detector.if_needed.load(Ordering::Relaxed) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background activation did not finish");
+        assert_eq!(fake.connects.load(Ordering::Relaxed), 1);
+        assert_eq!(detector.detects.load(Ordering::Relaxed), 0);
     }
 }

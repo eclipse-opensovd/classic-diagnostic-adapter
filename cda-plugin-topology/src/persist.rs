@@ -508,7 +508,7 @@ impl CommunicationLifecycle for TopologyPersistence {
 ///   current state. Ignored while no gateway is connected (vehicle presumably
 ///   asleep), for gateways that are not stored, and for gateways that are
 ///   connected.
-/// - Any other gateway (e.g. without network address) is left untouched (not
+/// - Any other gateway (e.g. pending until first use) is left untouched (not
 ///   part of the result).
 ///
 /// [[ dimpl~ecu-topology-persist-unreachable, Persist the state of unreachable gateways, dimpl ]]
@@ -1158,6 +1158,21 @@ mod tests {
                 ecu.name
             );
         }
+    }
+
+    /// [[ test~ecu-list-persistence-snapshot-leaves-pending-gateway-untouched, A gateway pending until its first use is not written, test ]]
+    #[test]
+    fn snapshot_leaves_pending_gateway_untouched() {
+        // Offline ECUs behind a gateway that was never tried, but not reported.
+        let gateways = snapshot(
+            &vehicle_with_down_gateway(VariantState::NotTested),
+            &[known("GW", 0x1000)],
+            &[],
+            false,
+            &stored_with_down_gateway(),
+        );
+        assert_eq!(gateways.len(), 1);
+        assert!(gateway_at(&gateways, 0x2000).is_none());
     }
 
     /// [[ test~ecu-list-persistence-persisted-state-follows-sovd-mapping, Persisted states follow the SOVD mapping and `AssumedOnline` is persisted as Online, test ]]

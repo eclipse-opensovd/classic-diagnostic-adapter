@@ -199,6 +199,13 @@ impl VariantDetectionSender {
     ) -> Result<(), tokio::sync::mpsc::error::SendError<VariantDetectionRequest>> {
         self.sender.send(request).await
     }
+
+    /// Queues `request` without waiting for channel capacity. Returns `false`
+    /// if the channel is full or closed.
+    #[must_use = "a dropped request means no detection is queued"]
+    pub fn try_send(&self, request: VariantDetectionRequest) -> bool {
+        self.sender.try_send(request).is_ok()
+    }
 }
 
 /// Receives requests for the variant-detection listener.

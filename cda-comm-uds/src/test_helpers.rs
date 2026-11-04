@@ -113,6 +113,82 @@ impl cda_interfaces::Shutdown for TestGateway {
     async fn shutdown(&self) {}
 }
 
+/// A [`TestGateway`] whose `route_pending` answer is fixed and whose
+/// `ecu_online` always reports the ECU offline (like a route check that does
+/// not connect a gateway).
+#[derive(Clone)]
+pub(crate) struct RoutePendingGateway {
+    pub(crate) inner: TestGateway,
+    pub(crate) pending: bool,
+}
+
+impl PhysicalTransport for RoutePendingGateway {
+    fn send(
+        &self,
+        transmission_params: TransmissionParameters,
+        message: ServicePayload,
+        response_sender: mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
+        expect_uds_reply: bool,
+    ) -> impl Future<Output = Result<tokio::task::JoinHandle<()>, DiagServiceError>> + Send {
+        self.inner.send(
+            transmission_params,
+            message,
+            response_sender,
+            expect_uds_reply,
+        )
+    }
+
+    fn ecu_online<T: EcuAddresses>(
+        &self,
+        ecu_name: &str,
+        _ecu_db: &RwLock<T>,
+    ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
+        std::future::ready(Err(DiagServiceError::EcuOffline(ecu_name.to_owned())))
+    }
+}
+
+impl FunctionalTransport for RoutePendingGateway {
+    fn send_functional(
+        &self,
+        transmission_params: TransmissionParameters,
+        message: ServicePayload,
+        expected_ecu_logical_addrs: HashMap<u16, String>,
+        timeout: Duration,
+        expect_positive_response: bool,
+    ) -> impl Future<
+        Output = Result<
+            HashMap<String, Result<ServicePayload, DiagServiceError>>,
+            DiagServiceError,
+        >,
+    > + Send {
+        self.inner.send_functional(
+            transmission_params,
+            message,
+            expected_ecu_logical_addrs,
+            timeout,
+            expect_positive_response,
+        )
+    }
+}
+
+impl NetworkTopology for RoutePendingGateway {
+    fn get_gateway_network_address(
+        &self,
+        logical_address: u16,
+    ) -> impl Future<Output = Option<String>> + Send {
+        self.inner.get_gateway_network_address(logical_address)
+    }
+
+    fn route_pending(&self, _ecu_name: &str) -> impl Future<Output = bool> + Send {
+        std::future::ready(self.pending)
+    }
+}
+
+#[async_trait]
+impl cda_interfaces::Shutdown for RoutePendingGateway {
+    async fn shutdown(&self) {}
+}
+
 /// Decoded response produced by [`TestEcuDb`]'s [`PayloadDecoder`].
 ///
 /// Classifies itself as negative purely from the raw bytes, so tests drive the
@@ -571,7 +647,7 @@ impl VariantDetection for TestEcuDb {
 }
 
 impl TestEcuDb {
-    fn set_status(&self, update: impl FnOnce(&mut EcuState)) {
+    pub(crate) fn set_status(&self, update: impl FnOnce(&mut EcuState)) {
         update(&mut std::sync::Mutex::lock(&self.status).expect("test status lock"));
     }
 

@@ -65,9 +65,9 @@ use crate::util::{
     http::{auth_header, poll_until, response_to_t, send_cda_request, vehicle_url},
     test_containers::{
         ContainerOwner, ECU_SIM_STARTUP_TIMEOUT, PORT_CONFLICT_ATTEMPTS, PUBLISH_HOST, Service,
-        SocketCanEndpoint, cda_container_for, current_test_name, ecu_sim_container_for,
-        is_port_conflict, read_only_bind, save_coverage, session_network_prefix,
-        socketcand_container_for, start_stopped,
+        SocketCanEndpoint, cda_container_for, container_logs_since, current_test_name,
+        ecu_sim_container_for, is_port_conflict, read_only_bind, save_coverage,
+        session_network_prefix, socketcand_container_for, start_stopped,
     },
 };
 
@@ -317,6 +317,30 @@ impl TestEnv {
         wait_for_cda_online(&self.config.server).await
     }
 
+    /// Like [`Self::restart_cda`], but the restarted CDA runs with `config`,
+    /// which becomes [`Self::config`]. The storage is kept, so this tests a
+    /// configuration change across a restart, e.g. another `init_mode`.
+    ///
+    /// # Errors
+    /// Returns an error if the configuration cannot be written into the CDA
+    /// container, or see [`Self::restart_cda`].
+    pub(crate) async fn restart_cda_with(
+        &mut self,
+        config: &Configuration,
+    ) -> Result<(), TestingError> {
+        let toml = self.spec.cda_config_toml(config)?;
+        // A quoted here-document keeps the file as it is.
+        self.exec_in_cda_container(&format!(
+            "cat > {CDA_CONFIG_FILE} <<'CDA_TEST_CONFIG_EOF'\n{toml}\nCDA_TEST_CONFIG_EOF"
+        ))
+        .await?;
+        self.restart_cda().await?;
+        let server = self.config.server.clone();
+        self.config = config.clone();
+        self.config.server = server;
+        Ok(())
+    }
+
     /// Points [`Self::config`] and the default configuration at the CDA on
     /// the host port `port`.
     fn set_cda_port(&mut self, port: u16) {
@@ -384,6 +408,16 @@ impl TestEnv {
     ) -> Result<String, TestingError> {
         let cda = self.cda_container()?;
         exec_in_container(cda, command).await
+    }
+
+    /// The log output of the CDA since the Unix time `since`.
+    ///
+    /// # Errors
+    /// Returns an error if there is no CDA container or Docker does not return
+    /// the logs.
+    pub(crate) async fn cda_logs_since(&self, since: i32) -> Result<String, TestingError> {
+        let id = self.cda_container()?.id().to_owned();
+        on_shared_runtime(async move { container_logs_since(&id, since).await }).await
     }
 
     /// Runs `command` with `sh -c` in the ecu-sim container and returns its

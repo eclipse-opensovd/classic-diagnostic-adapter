@@ -168,6 +168,18 @@ impl EcuStateCoordinator {
         }
     }
 
+    /// Queues a variant detection for `ecu_name`, without waiting. Used when a
+    /// request finds the ECU undetected while communication is enabled, e.g.
+    /// behind a gateway that connects on its first use.
+    pub(crate) fn request_detection(&self, ecu_name: &str) {
+        if !self
+            .redetect
+            .try_send(VariantDetectionRequest::new(vec![ecu_name.to_owned()]))
+        {
+            tracing::debug!(ecu_name, "Variant detection queue full, request dropped");
+        }
+    }
+
     /// Get the coordinator handle for a specific ECU.
     #[must_use]
     pub fn get_handle(&self, ecu_name: &str) -> Option<&EcuCoordinatorHandle> {

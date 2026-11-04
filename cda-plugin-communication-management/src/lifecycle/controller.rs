@@ -21,9 +21,10 @@ use cda_interfaces::{
     communication_control::{
         CommunicationError, CommunicationGuard, CommunicationInitMode, CommunicationLifecycle,
         CommunicationOperation, CommunicationOperationFailure, CommunicationState,
-        CommunicationVariantDetection, TransportControl, VariantDetectionMode,
+        CommunicationVariantDetection, DetectionPhase, TransportControl, VariantDetectionMode,
     },
     dlt_ctx,
+    topology::PendingGateways,
 };
 use tokio::{
     sync::{oneshot, watch},
@@ -69,6 +70,8 @@ pub struct CommunicationHandle {
     state: Arc<CommunicationStateStore>,
     worker: WorkerSender,
     worker_task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
+    /// Gateways a lazy start left pending, if the transport has such.
+    pending_gateways: Option<Arc<dyn PendingGateways>>,
 }
 
 /// Failure while constructing the authoritative communication plugin runtime.
@@ -211,7 +214,11 @@ impl CommunicationHandle {
     pub async fn enable_and_detect(
         &self,
     ) -> Result<CommunicationState, CommunicationOperationFailure> {
-        self.run_claimed(LifecycleRequest::EnableAndDetect).await
+        self.run_claimed(
+            LifecycleRequest::EnableAndDetect,
+            DetectionPhase::Redetection,
+        )
+        .await
     }
 
     /// Non-awaiting counterpart to
@@ -244,7 +251,8 @@ impl CommunicationHandle {
     /// exclusive disable lease currently owns the state, or the lifecycle
     /// worker is shutting down.
     pub async fn enable(&self) -> Result<CommunicationState, CommunicationOperationFailure> {
-        self.run_claimed(LifecycleRequest::Enable).await
+        self.run_claimed(LifecycleRequest::Enable, DetectionPhase::Redetection)
+            .await
     }
 
     /// Non-awaiting counterpart to [`enable`](Self::enable), mirroring
@@ -275,7 +283,42 @@ impl CommunicationHandle {
     /// [`CommunicationOperationFailure::GuardsHeld`]), or the lifecycle worker
     /// is shutting down.
     pub async fn redetect(&self) -> Result<CommunicationState, CommunicationOperationFailure> {
-        self.run_claimed(LifecycleRequest::Detect).await
+        self.run_claimed(LifecycleRequest::Detect, DetectionPhase::Redetection)
+            .await
+    }
+
+    /// Runs the whole-vehicle variant detection of an activation against a live
+    /// transport: like [`redetect`](Self::redetect), but ECUs that need no new
+    /// detection (assumed online with a detected variant) are skipped instead of
+    /// being reset to `NotTested`.
+    ///
+    /// If a detection is already in flight, this joins it.
+    ///
+    /// # Errors
+    ///
+    /// As for [`redetect`](Self::redetect).
+    pub async fn detect_if_needed(
+        &self,
+    ) -> Result<CommunicationState, CommunicationOperationFailure> {
+        self.run_claimed(LifecycleRequest::Detect, DetectionPhase::Activation)
+            .await
+    }
+
+    /// `true` if a lazy start left gateways pending, which an explicit
+    /// activation has to connect.
+    pub async fn has_pending_gateways(&self) -> bool {
+        match &self.pending_gateways {
+            Some(pending) => pending.has_pending().await,
+            None => false,
+        }
+    }
+
+    /// Connects all gateways a lazy start left pending (with broadcast
+    /// fallback) and waits for the result. No-op without pending gateways.
+    pub async fn connect_pending_gateways(&self) {
+        if let Some(pending) = &self.pending_gateways {
+            pending.connect_all_pending().await;
+        }
     }
 
     /// Returns the effective detection policy for the runtime that is currently
@@ -294,9 +337,10 @@ impl CommunicationHandle {
     async fn run_claimed(
         &self,
         request: LifecycleRequest,
+        phase: DetectionPhase,
     ) -> Result<CommunicationState, CommunicationOperationFailure> {
         let operation = request.operation();
-        let mut rx = match self.claim_or_join(request) {
+        let mut rx = match self.claim_or_join(request, phase) {
             ClaimOutcome::Settled(result) => return result,
             ClaimOutcome::LeaseHeld(_) => {
                 return Err(CommunicationOperationFailure::DisableLeaseHeld { operation });
@@ -315,7 +359,7 @@ impl CommunicationHandle {
     }
 
     fn request_claimed(&self, request: LifecycleRequest) -> CommunicationState {
-        match self.claim_or_join(request) {
+        match self.claim_or_join(request, DetectionPhase::Redetection) {
             ClaimOutcome::Settled(Ok(settled)) => settled,
             ClaimOutcome::Settled(Err(failure)) => CommunicationState::Error(failure),
             ClaimOutcome::LeaseHeld(current) => current,
@@ -325,13 +369,13 @@ impl CommunicationHandle {
 
     /// Applies the verdict [`transition::decide`] returns for `request`. All
     /// joined callers observe the same final result via the returned receiver.
-    fn claim_or_join(&self, request: LifecycleRequest) -> ClaimOutcome {
+    fn claim_or_join(&self, request: LifecycleRequest, phase: DetectionPhase) -> ClaimOutcome {
         let operation = request.operation();
         let mut state = self.state.lock();
         match transition::decide(&state, self.worker.is_shutting_down(), request) {
             // Detection leaves transport and hooks untouched and writes its own
             // slot rather than `state.state`.
-            LifecycleDecision::ClaimDetection => self.spawn_redetect(&mut state),
+            LifecycleDecision::ClaimDetection => self.spawn_redetect(&mut state, phase),
             LifecycleDecision::JoinDetection => Self::join_detection(&mut state),
             LifecycleDecision::Claim(shape) => self.spawn_enabling(&mut state, shape),
             LifecycleDecision::Join(in_flight) => {
@@ -419,6 +463,7 @@ impl CommunicationHandle {
     fn spawn_redetect(
         &self,
         state: &mut std::sync::MutexGuard<'_, super::state::CommunicationStateData>,
+        phase: DetectionPhase,
     ) -> ClaimOutcome {
         let (tx, rx) = watch::channel(None);
         let detector = state.variant_detector();
@@ -428,7 +473,7 @@ impl CommunicationHandle {
 
         let handle = self.clone();
         cda_interfaces::spawn_named!("communication-redetect", async move {
-            let result = handle.run_redetect_operation(detector).await;
+            let result = handle.run_redetect_operation(detector, phase).await;
             let result = handle.finish_detection(result);
             let _ = tx.send(Some(result));
         });
@@ -495,9 +540,14 @@ impl CommunicationHandle {
     async fn run_redetect_operation(
         &self,
         detector: Option<Arc<dyn CommunicationVariantDetection>>,
+        phase: DetectionPhase,
     ) -> Result<CommunicationState, CommunicationOperationFailure> {
         self.submit_and_await(CommunicationOperation::Detect, |reply| {
-            LifecycleCommand::Redetect { detector, reply }
+            LifecycleCommand::Redetect {
+                detector,
+                phase,
+                reply,
+            }
         })
         .await
     }
@@ -825,6 +875,9 @@ impl Drop for WorkerBuildGuard {
 /// The lifecycle worker is started before the plugin builder receives its
 /// fully functional [`CommunicationHandle`].
 ///
+/// `pending_gateways` is the transport's view of gateways a lazy start left
+/// unconnected, or `None` if it has none.
+///
 /// `init_mode` is passed through unchanged for the plugin to interpret.
 /// `variant_detection` is framework policy, applied by the worker.
 ///
@@ -834,6 +887,7 @@ impl Drop for WorkerBuildGuard {
 pub async fn build_communication_runtime<B>(
     builder: B,
     transport_control: Arc<dyn TransportControl>,
+    pending_gateways: Option<Arc<dyn PendingGateways>>,
     init_mode: CommunicationInitMode,
     variant_detection: VariantDetectionMode,
 ) -> Result<CommunicationRuntime, BuildCommunicationRuntimeError<B::Error>>
@@ -851,6 +905,7 @@ where
         state: Arc::clone(&state),
         worker: sender,
         worker_task: Arc::clone(&worker_task),
+        pending_gateways,
     };
 
     *worker_task.lock().await = Some(worker::spawn(state, resources, receivers));
@@ -878,7 +933,7 @@ mod tests {
 
     use async_trait::async_trait;
     use cda_interfaces::communication_control::{
-        DetectionPhase, TransportControl, TransportState, error::CommControlError,
+        TransportControl, TransportState, error::CommControlError,
     };
     use tokio::sync::Notify;
 

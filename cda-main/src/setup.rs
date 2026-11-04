@@ -34,7 +34,8 @@ use cda_core::EcuManager;
 use cda_interfaces::{
     HashMap, ShutdownSignal,
     communication_control::{
-        ActivationCause, CommunicationAccess, CommunicationInitMode, CommunicationLifecycle,
+        ActivationCause, CommunicationAccess, CommunicationError, CommunicationGuard,
+        CommunicationInitMode, CommunicationLifecycle, CommunicationState,
         CommunicationVariantDetection, DetectionPhase, DoipConnect, PostUpdateCommunicationMode,
         VariantDetectionMode, error::CommControlError,
     },
@@ -42,6 +43,7 @@ use cda_interfaces::{
     health::HealthProvider,
     http_protection::registry::{HttpProtectionRegistry, HttpRouteMatcher},
     lock_priority_api::LockPriorityPolicy,
+    topology::TopologyState,
 };
 use cda_plugin_communication_management::{
     lifecycle::{
@@ -441,6 +443,7 @@ where
     let communication_runtime = build_communication_runtime(
         communication_plugin,
         transport_control,
+        Some(gateway.pending_gateways()),
         init_mode,
         variant_detection,
     )
@@ -452,6 +455,55 @@ where
     );
 
     Ok((communication_runtime, communication_access))
+}
+
+/// Records diagnostic-request activations for the `OnDemand` per-gateway scope:
+/// with a persisted topology, such an activation connects each gateway only on
+/// its first use instead of all gateways at once.
+struct LazyActivationAccess {
+    inner: Arc<dyn CommunicationAccess>,
+    topology: Arc<TopologyState>,
+}
+
+impl CommunicationAccess for LazyActivationAccess {
+    fn state(&self) -> CommunicationState {
+        self.inner.state()
+    }
+
+    fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+        self.inner.acquire()
+    }
+
+    fn request_activate(&self, cause: ActivationCause) -> CommunicationState {
+        let lazy = cause == ActivationCause::DiagnosticRequest
+            && self.topology.persisted_topology_available()
+            && self.inner.state() == CommunicationState::Disabled;
+        if lazy {
+            self.topology.request_lazy_start();
+        }
+        let state = self.inner.request_activate(cause);
+        if lazy
+            && !matches!(
+                state,
+                CommunicationState::Enabling(_) | CommunicationState::Enabled
+            )
+        {
+            // Refused: a stale request must not make a later start lazy.
+            // A concurrent request that was accepted between the two calls loses its
+            // lazy start here, so its start connects all gateways. The window is
+            // narrow and the outcome correct, only not lazy.
+            let _ = self.topology.take_lazy_start();
+        }
+        state
+    }
+
+    fn retry_after(&self) -> Duration {
+        self.inner.retry_after()
+    }
+
+    fn variant_detection(&self) -> VariantDetectionMode {
+        self.inner.variant_detection()
+    }
 }
 
 /// Registers the topology persistence hook after the UDS manager hooks, if ECU
@@ -548,6 +600,23 @@ where
     Ok(())
 }
 
+/// Wraps `access` so the first qualifying request activates the lazily started
+/// transport, if persistence and `OnDemand` initialization are in effect.
+fn with_lazy_activation(
+    access: Arc<dyn CommunicationAccess>,
+    topology: &dyn TopologyPlugin,
+    init_mode: CommunicationInitMode,
+) -> Arc<dyn CommunicationAccess> {
+    if topology.is_enabled() && init_mode == CommunicationInitMode::OnDemand {
+        Arc::new(LazyActivationAccess {
+            inner: access,
+            topology: topology.state(),
+        })
+    } else {
+        access
+    }
+}
+
 /// Registers all SOVD routes, the runtime-update plugin, `OpenAPI` routes, and the update guard.
 ///
 /// This is called after vehicle data has been loaded. The `build_update_plugin` optional
@@ -616,6 +685,11 @@ where
     )
     .await?;
     let plugin = Arc::clone(&communication_runtime.plugin);
+    let communication_access = with_lazy_activation(
+        communication_access,
+        topology.as_ref(),
+        config.communication.init_mode,
+    );
 
     let components = crate::vehicle::finish_vehicle_components(
         vehicle_data.prepared,
@@ -715,6 +789,45 @@ mod tests {
 
     use super::*;
     use crate::update::{UpdatePluginFn, update_plugin_fn};
+
+    /// Reports `0` as its state and answers an activation request with `1`.
+    struct FixedAccess(CommunicationState, CommunicationState);
+
+    impl CommunicationAccess for FixedAccess {
+        fn state(&self) -> CommunicationState {
+            self.0.clone()
+        }
+
+        fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+            Err(CommunicationError::Disabled)
+        }
+
+        fn request_activate(&self, _cause: ActivationCause) -> CommunicationState {
+            self.1.clone()
+        }
+
+        fn variant_detection(&self) -> VariantDetectionMode {
+            VariantDetectionMode::Always
+        }
+    }
+
+    /// [[ test~lazy-start-flag-dropped-when-refused, A refused diagnostic request activation leaves no lazy start behind, test ]]
+    #[test]
+    fn refused_activation_drops_the_lazy_start_request() {
+        for (answer, lazy) in [
+            (CommunicationState::Disabled, false),
+            (CommunicationState::Enabled, true),
+        ] {
+            let topology = TopologyState::new(cda_interfaces::topology::DiscoveryStrategy::Vir);
+            topology.set_persisted_topology_available();
+            let access = LazyActivationAccess {
+                inner: Arc::new(FixedAccess(CommunicationState::Disabled, answer.clone())),
+                topology: Arc::clone(&topology),
+            };
+            access.request_activate(ActivationCause::DiagnosticRequest);
+            assert_eq!(topology.take_lazy_start(), lazy, "{answer:?}");
+        }
+    }
 
     // Minimal no-op plugin for type-checking.
     struct NoOpPlugin;
@@ -817,6 +930,7 @@ mod tests {
             let runtime = build_communication_runtime(
                 DefaultCommunicationPluginBuilder,
                 Arc::new(NoopTransport),
+                None,
                 mode,
                 VariantDetectionMode::Always,
             )
