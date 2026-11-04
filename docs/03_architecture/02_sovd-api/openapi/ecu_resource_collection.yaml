@@ -77,6 +77,11 @@ components:
           format: uri-reference
           description: "path to single ECU jobs"
           example: 'http://localhost:1234/components/ecu112/x-single-ecu-jobs'
+        bulk-data:
+          type: string
+          format: uri-reference
+          description: "path to bulk data"
+          example: 'http://localhost:1234/components/ecu112/bulk-data'
         x-sovd2uds-bulk-data:
           type: string
           format: uri-reference

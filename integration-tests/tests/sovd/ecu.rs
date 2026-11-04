@@ -88,6 +88,60 @@ async fn test_tmcc3000_ecu_online() {
     assert_ecu_answers_on_bus(&test_env, sovd::COMPONENTS_TMCC3000_BASE).await;
 }
 
+/// The `bulk-data` collection of a component is an alias of `x-sovd2uds-bulk-data`:
+/// both list the same categories and the same embedded files.
+#[tokio::test]
+async fn test_component_bulk_data_alias() {
+    let test_env = TestEnv::builder().await.unwrap();
+    let ecu = sovd::COMPONENTS_FLXC1000_BASE;
+
+    let component = get_ecu_component(&test_env.config, ecu, StatusCode::OK, None)
+        .await
+        .expect("FLXC1000 component should be reachable");
+    for link in ["bulk-data", "x-sovd2uds-bulk-data"] {
+        let href: String = extract_field_from_json(&component, link)
+            .unwrap_or_else(|e| panic!("capability document should link {link}: {e:?}"));
+        assert!(
+            href.ends_with(&format!("{ecu}/{link}")),
+            "{link} link: {href}"
+        );
+    }
+
+    let mut listings = Vec::new();
+    for collection in ["bulk-data", "x-sovd2uds-bulk-data"] {
+        let mut ids = Vec::new();
+        for path in [
+            collection.to_owned(),
+            format!("{collection}/mdd-embedded-files"),
+        ] {
+            let response = send_authenticated_cda_request(
+                &test_env,
+                &format!("{ecu}/{path}"),
+                StatusCode::OK,
+                Method::GET,
+                None,
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("GET {path} should succeed: {e:?}"));
+            let items: Vec<serde_json::Value> =
+                extract_field_from_json(&response_to_json(&response).unwrap(), "items").unwrap();
+            ids.push(
+                items
+                    .iter()
+                    .map(|item| item.get("id").cloned())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        listings.push(ids);
+    }
+    assert_eq!(
+        listings.first(),
+        listings.get(1),
+        "bulk-data and x-sovd2uds-bulk-data should list the same resources"
+    );
+}
+
 /// HOVR4000 uses a non-default protocol (`DMC_DoIP`) in its MDD. The global
 /// protocol is `UDS_Ethernet_DoIP_DOBT`, so without a per-ECU protocol override
 /// the CDA would fail to load this ECU.  The test verifies that the per-ECU
