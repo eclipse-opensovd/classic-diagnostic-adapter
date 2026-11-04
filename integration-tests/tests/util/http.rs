@@ -265,7 +265,7 @@ pub(crate) async fn send_request(
 }
 
 /// Sends a request and returns the response whatever its status.
-async fn send_request_any_status(
+pub(crate) async fn send_request_any_status(
     method: Method,
     data: Option<&str>,
     headers: Option<&HeaderMap>,

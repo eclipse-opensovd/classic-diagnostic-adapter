@@ -27,6 +27,90 @@ use tokio::sync::RwLock;
 use crate::{create_trace_layer, sovd};
 
 type RouteFinalizer = Arc<dyn Fn(axum::Router) -> axum::Router + Send + Sync>;
+
+/// The resources served under a collection, so the collection can list them.
+///
+/// Maps the collection path (e.g. `/vehicle/v15/data`) to the id of each resource in it
+/// and one value per resource, in registration order.
+#[derive(Clone)]
+struct Catalog<V>(Arc<RwLock<IndexMap<String, IndexMap<String, V>>>>);
+
+impl<V> Default for Catalog<V> {
+    fn default() -> Self {
+        Self(Arc::default())
+    }
+}
+
+impl<V: Clone> Catalog<V> {
+    async fn register(&self, path: &str, value: V) {
+        let Some((collection, id)) = path.trim_end_matches('/').rsplit_once('/') else {
+            tracing::warn!(path, "Resource path has no collection, not listed");
+            return;
+        };
+        self.0
+            .write()
+            .await
+            .entry(collection.to_owned())
+            .or_default()
+            .insert(id.to_owned(), value);
+    }
+
+    async fn list(&self, collection: &str) -> Vec<(String, V)> {
+        self.0
+            .read()
+            .await
+            .get(collection)
+            .map(|resources| {
+                resources
+                    .iter()
+                    .map(|(id, value)| (id.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// The resources served under each `/data` collection, with their data category.
+/// Handlers read it as a request extension.
+#[derive(Clone, Default)]
+pub(crate) struct DataResources(Catalog<String>);
+
+impl DataResources {
+    /// Returns `(id, category)` of each resource registered in `collection`.
+    pub(crate) async fn list(&self, collection: &str) -> Vec<(String, String)> {
+        self.0.list(collection).await
+    }
+}
+
+/// The operations served under each `operations` collection, with whether their execution
+/// is asynchronous. Handlers read it as a request extension.
+#[derive(Clone, Default)]
+pub(crate) struct OperationResources(Catalog<bool>);
+
+impl OperationResources {
+    /// Returns `(id, asynchronous)` of each operation registered in `collection`.
+    pub(crate) async fn list(&self, collection: &str) -> Vec<(String, bool)> {
+        self.0.list(collection).await
+    }
+}
+
+/// The categories served under each `bulk-data` collection. Handlers read it as a
+/// request extension.
+#[derive(Clone, Default)]
+pub(crate) struct BulkDataCategories(Catalog<()>);
+
+impl BulkDataCategories {
+    /// Returns the id of each category registered in `collection`.
+    pub(crate) async fn list(&self, collection: &str) -> Vec<String> {
+        self.0
+            .list(collection)
+            .await
+            .into_iter()
+            .map(|(id, ())| id)
+            .collect()
+    }
+}
+
 /// Insertion order determines override precedence in the fallback chain.
 type RouteGroups = Arc<RwLock<IndexMap<u64, RouteGroup>>>;
 
@@ -107,6 +191,9 @@ pub struct DynamicRouter {
     finalizers: Arc<RwLock<Vec<RouteFinalizer>>>,
     router: Arc<RwLock<axum::Router>>,
     next_id: Arc<AtomicU64>,
+    data_resources: DataResources,
+    operation_resources: OperationResources,
+    bulk_data_categories: BulkDataCategories,
 }
 
 impl DynamicRouter {
@@ -126,14 +213,59 @@ impl DynamicRouter {
         let route_groups = Arc::new(RwLock::new(IndexMap::new()));
         let finalizers: Arc<RwLock<Vec<RouteFinalizer>>> = Arc::new(RwLock::new(Vec::new()));
 
-        let initial_router = Self::apply_base_layers(axum::Router::new());
+        let data_resources = DataResources::default();
+        let operation_resources = OperationResources::default();
+        let bulk_data_categories = BulkDataCategories::default();
+        let initial_router = Self::apply_base_layers(
+            axum::Router::new(),
+            &data_resources,
+            &operation_resources,
+            &bulk_data_categories,
+        );
 
         Self {
             route_groups,
             finalizers,
             router: Arc::new(RwLock::new(initial_router)),
             next_id: Arc::new(AtomicU64::new(0)),
+            data_resources,
+            operation_resources,
+            bulk_data_categories,
         }
+    }
+
+    /// Registers a resource served under a `/data` collection, so that the collection
+    /// lists it with the given data category (ISO 17978-3 Table 70, e.g. `identData`).
+    ///
+    /// `path` is the full path of the resource, e.g. `/vehicle/v15/data/version`; its
+    /// parent is the collection, its last segment the id. Registering the same path
+    /// again replaces the category.
+    pub async fn register_data_resource(&self, path: &str, category: &str) {
+        self.data_resources
+            .0
+            .register(path, category.to_owned())
+            .await;
+    }
+
+    /// Registers an operation served under an `operations` collection, so that the
+    /// collection lists it.
+    ///
+    /// `path` is the full path of the operation, e.g.
+    /// `/vehicle/v15/apps/sovd2uds/operations/runtimefilesupdate`; its parent is the
+    /// collection, its last segment the id. `asynchronous` tells whether its execution is
+    /// asynchronous. Registering the same path again replaces the flag.
+    pub async fn register_operation(&self, path: &str, asynchronous: bool) {
+        self.operation_resources
+            .0
+            .register(path, asynchronous)
+            .await;
+    }
+
+    /// Registers a category served under a `bulk-data` collection, so that the collection
+    /// lists it. `path` is the full path of the category, e.g.
+    /// `/vehicle/v15/apps/sovd2uds/bulk-data/flashfiles`.
+    pub async fn register_bulk_data_category(&self, path: &str) {
+        self.bulk_data_categories.0.register(path, ()).await;
     }
 
     /// Returns a clone of the current composed router.
@@ -249,7 +381,12 @@ impl DynamicRouter {
             |acc, (_id, group)| group.router.clone().fallback_service(acc),
         );
 
-        let composed = Self::apply_base_layers(composed);
+        let composed = Self::apply_base_layers(
+            composed,
+            &self.data_resources,
+            &self.operation_resources,
+            &self.bulk_data_categories,
+        );
 
         let composed = finalizers.iter().fold(composed, |acc, f| f(acc));
 
@@ -257,15 +394,25 @@ impl DynamicRouter {
         *router = composed;
     }
 
-    fn apply_base_layers(router: axum::Router) -> axum::Router {
-        create_trace_layer(router)
-            .layer(tower_http::timeout::TimeoutLayer::with_status_code(
-                http::StatusCode::REQUEST_TIMEOUT,
-                std::time::Duration::from_secs(30),
-            ))
-            .layer(middleware::from_fn(
-                sovd::error::sovd_method_not_allowed_handler,
-            ))
+    fn apply_base_layers(
+        router: axum::Router,
+        data_resources: &DataResources,
+        operation_resources: &OperationResources,
+        bulk_data_categories: &BulkDataCategories,
+    ) -> axum::Router {
+        create_trace_layer(
+            router
+                .layer(axum::Extension(data_resources.clone()))
+                .layer(axum::Extension(operation_resources.clone()))
+                .layer(axum::Extension(bulk_data_categories.clone())),
+        )
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            http::StatusCode::REQUEST_TIMEOUT,
+            std::time::Duration::from_secs(30),
+        ))
+        .layer(middleware::from_fn(
+            sovd::error::sovd_method_not_allowed_handler,
+        ))
     }
 }
 
@@ -302,6 +449,130 @@ mod tests {
             ReferenceOr::Item(item) => item.get.as_ref()?.description.clone(),
             ReferenceOr::Reference { .. } => None,
         }
+    }
+
+    #[tokio::test]
+    async fn operations_collection_lists_registered_operations() {
+        let dr = DynamicRouter::new();
+        let operations = crate::sovd::apps::sovd2uds::OPERATIONS_PATH;
+        dr.add_routes(ApiRouter::new().route(
+            crate::sovd::apps::sovd2uds::OPERATIONS_PATH,
+            axum::routing::get(crate::sovd::apps::sovd2uds::operations_get),
+        ))
+        .await;
+        dr.register_operation(&format!("{operations}/update"), true)
+            .await;
+        dr.register_operation(&format!("{operations}/connect"), false)
+            .await;
+        // Resources of other collections are not listed.
+        dr.register_bulk_data_category("/vehicle/v15/apps/sovd2uds/bulk-data/flashfiles")
+            .await;
+
+        let resp = dr
+            .get_router()
+            .await
+            .oneshot(request("GET", operations))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({ "items": [
+                {
+                    "id": "update",
+                    "name": "update",
+                    "proximity_proof_required": false,
+                    "asynchronous_execution": true,
+                },
+                {
+                    "id": "connect",
+                    "name": "connect",
+                    "proximity_proof_required": false,
+                    "asynchronous_execution": false,
+                },
+            ]})
+        );
+    }
+
+    #[tokio::test]
+    async fn app_links_operations_only_if_one_is_registered() {
+        let dr = DynamicRouter::new();
+        dr.add_routes(ApiRouter::new().route(
+            "/vehicle/v15/apps/sovd2uds",
+            axum::routing::get(crate::sovd::apps::sovd2uds::get),
+        ))
+        .await;
+        let get = |dr: DynamicRouter| async move {
+            let request = http::Request::builder()
+                .uri("/vehicle/v15/apps/sovd2uds")
+                .header("host", "localhost:20002")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = dr.get_router().await.oneshot(request).await.unwrap();
+            serde_json::from_str::<serde_json::Value>(&body_to_string(resp.into_body()).await)
+                .unwrap()
+        };
+
+        assert!(get(dr.clone()).await.get("operations").is_none());
+
+        dr.register_operation("/vehicle/v15/apps/sovd2uds/operations/update", true)
+            .await;
+        assert_eq!(
+            get(dr).await.get("operations").and_then(|v| v.as_str()),
+            Some("http://localhost:20002/vehicle/v15/apps/sovd2uds/operations")
+        );
+    }
+
+    #[tokio::test]
+    async fn data_collection_lists_registered_resources_with_category() {
+        let dr = DynamicRouter::new();
+        dr.add_routes(ApiRouter::new().route(
+            sovd::vehicle::DATA_PATH,
+            axum::routing::get(sovd::vehicle::data_get),
+        ))
+        .await;
+        crate::add_static_data_endpoint(
+            &dr,
+            serde_json::Map::new(),
+            "/vehicle/v15/data/version",
+            "identData",
+        )
+        .await;
+        dr.register_data_resource("/vehicle/v15/data/x-vendor-info", "sysInfo")
+            .await;
+        // Resources of other collections are not listed.
+        dr.register_data_resource(
+            "/vehicle/v15/apps/sovd2uds/data/networkstructure",
+            "sysInfo",
+        )
+        .await;
+
+        let resp = dr
+            .get_router()
+            .await
+            .oneshot(request("GET", sovd::vehicle::DATA_PATH))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({ "items": [
+                { "id": "version", "name": "version", "category": "identData" },
+                { "id": "x-vendor-info", "name": "x-vendor-info", "category": "sysInfo" },
+            ]})
+        );
+
+        let resp = dr
+            .get_router()
+            .await
+            .oneshot(request("GET", "/vehicle/v15/data/version"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
