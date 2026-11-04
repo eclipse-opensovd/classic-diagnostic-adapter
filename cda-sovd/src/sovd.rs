@@ -656,7 +656,7 @@ pub(crate) fn resource_response(
         .map(|(name, href)| sovd_interfaces::Resource {
             name: name.to_string(),
             href: format!("{base_path}/{}", href.unwrap_or(name)),
-            id: None,
+            id: Some(name.to_string()),
         })
         .collect();
 
