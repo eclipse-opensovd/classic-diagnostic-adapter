@@ -12,16 +12,15 @@
 
 use std::{
     sync::{
-        Arc, OnceLock,
+        Arc,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 use cda_interfaces::{
-    DoipComParams, EcuAddresses, EcuConnectivityHandler, HashMap, HashMapExtensions,
-    VariantDetectionSender, topology::TopologyState,
-    util::test_utils::RecordingConnectivityHandler,
+    EcuAddresses, EcuConnectivityHandler, HashMap, HashMapExtensions, VariantDetectionSender,
+    topology::TopologyState, util::test_utils::RecordingConnectivityHandler,
 };
 use doip_definitions::header::ProtocolVersion;
 use tokio::sync::{RwLock, mpsc};
@@ -104,40 +103,7 @@ impl EcuAddresses for TestEcu {
     }
 }
 
-impl DoipComParams for TestEcu {
-    fn nack_number_of_retries(&self) -> &HashMap<u8, u32> {
-        static EMPTY: OnceLock<HashMap<u8, u32>> = OnceLock::new();
-        EMPTY.get_or_init(HashMap::new)
-    }
-
-    fn diagnostic_ack_timeout(&self) -> Duration {
-        Duration::from_secs(2)
-    }
-
-    fn retry_period(&self) -> Duration {
-        Duration::from_millis(100)
-    }
-
-    fn routing_activation_timeout(&self) -> Duration {
-        Duration::from_secs(5)
-    }
-
-    fn repeat_request_count_transmission(&self) -> u32 {
-        3
-    }
-
-    fn connection_timeout(&self) -> Duration {
-        Duration::from_secs(5)
-    }
-
-    fn connection_retry_delay(&self) -> Duration {
-        Duration::from_secs(1)
-    }
-
-    fn connection_retry_attempts(&self) -> u32 {
-        3
-    }
-}
+cda_interfaces::impl_test_doip_com_params!(TestEcu);
 
 /// `DoIP` gateway on the loopback interface that accepts every routing activation
 /// and counts the TCP connections it receives. Routing activation responses can

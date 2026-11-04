@@ -105,68 +105,7 @@ pub mod tokio_ext {
 }
 
 #[cfg(feature = "test-utils")]
-pub mod test_utils {
-    use std::time::Duration;
-
-    const POLL_INTERVAL: Duration = Duration::from_millis(10);
-    const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
-
-    /// Polls `condition` until it holds, panicking if it does not hold before the timeout.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `condition` does not return `true` within 10 seconds, or if
-    /// `condition` itself panics.
-    pub async fn wait_until<F, Fut>(description: &str, mut condition: F)
-    where
-        F: FnMut() -> Fut,
-        Fut: Future<Output = bool>,
-    {
-        let poll = async {
-            while !condition().await {
-                crate::util::tokio_ext::sleep_for(POLL_INTERVAL).await;
-            }
-        };
-        assert!(
-            tokio::time::timeout(WAIT_TIMEOUT, poll).await.is_ok(),
-            "Timed out waiting until {description}"
-        );
-    }
-
-    /// Connectivity handler that records the ECUs reported as replied.
-    #[derive(Default)]
-    pub struct RecordingConnectivityHandler {
-        replied: std::sync::Mutex<Vec<String>>,
-    }
-
-    impl RecordingConnectivityHandler {
-        /// The ECU names reported through `on_ecu_replied`, in order.
-        ///
-        /// # Panics
-        ///
-        /// Panics if the internal lock is poisoned.
-        pub fn replied(&self) -> Vec<String> {
-            // A poisoned lock means a test already panicked while recording,
-            // so panicking here as well makes that failure visible instead of
-            // silently continuing with possibly inconsistent results.
-            self.replied.lock().expect("lock replied").clone()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl crate::EcuConnectivityHandler for RecordingConnectivityHandler {
-        async fn on_gateway_connected(&self, _ecu_names: &[String]) {}
-
-        async fn on_gateway_disconnected(&self, _ecu_names: &[String]) {}
-
-        async fn on_ecu_replied(&self, ecu_name: &str) {
-            self.replied
-                .lock()
-                .expect("lock replied")
-                .push(ecu_name.to_owned());
-        }
-    }
-}
+pub mod test_utils;
 
 pub mod dlt_ext {
     #[macro_export]
