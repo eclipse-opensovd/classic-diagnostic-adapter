@@ -326,6 +326,9 @@ pub struct TopologyState {
     /// Whether a persisted topology is available, which the VAM policy checks in
     /// [`VamHandlingMode::PersistedOnly`].
     persisted_topology_available: std::sync::atomic::AtomicBool,
+    /// Whether the next transport start is lazy, see
+    /// [`request_lazy_start`](Self::request_lazy_start).
+    lazy_start: std::sync::atomic::AtomicBool,
     /// Gateways connected or found unreachable in the current discovery, keyed by
     /// logical address. Cleared by [`begin_discovery`](Self::begin_discovery).
     gateways: RwLock<HashMap<u16, GatewayStatus>>,
@@ -348,6 +351,7 @@ impl TopologyState {
             discovery_strategy: RwLock::new(discovery_strategy),
             vam_policy: RwLock::new(VamPolicy::default()),
             persisted_topology_available: std::sync::atomic::AtomicBool::new(false),
+            lazy_start: std::sync::atomic::AtomicBool::new(false),
             gateways: RwLock::new(HashMap::default()),
             unreachable_changes: tokio::sync::watch::Sender::new(0),
             progress: tokio::sync::watch::Sender::new(DiscoveryProgress::Idle),
@@ -391,7 +395,7 @@ impl TopologyState {
     /// Records a gateway whose connect was attempted and failed in the current
     /// discovery generation, and wakes the subscribers of
     /// [`subscribe_unreachable`](Self::subscribe_unreachable). Gateways that
-    /// were not attempted must not be recorded.
+    /// were not attempted (pending until first use) must not be recorded.
     pub fn record_unreachable(&self, logical_address: u16) {
         std_ext::lock_write(&self.gateways).insert(logical_address, GatewayStatus::Unreachable);
         self.unreachable_changes
@@ -463,6 +467,21 @@ impl TopologyState {
     pub fn persisted_topology_available(&self) -> bool {
         self.persisted_topology_available
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Requests that the next transport start with a reconnect plan connects no
+    /// gateway up front: each gateway connects on its first use. Used for the
+    /// `OnDemand` first-diagnostic-request trigger.
+    pub fn request_lazy_start(&self) {
+        self.lazy_start
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Consumes a [`request_lazy_start`](Self::request_lazy_start).
+    #[must_use]
+    pub fn take_lazy_start(&self) -> bool {
+        self.lazy_start
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 
     /// Whether the spontaneous VAM listener is started at all.
@@ -585,6 +604,21 @@ pub trait EcuTopologyStore: Send + Sync + 'static {
         keep: &HashMap<u16, crate::HashSet<String>>,
         gateways: &[PersistedGateway],
     ) -> Result<usize, TopologyStoreError>;
+}
+
+/// Gateways that a lazy start registered but did not connect yet.
+///
+/// Implemented by transports that connect persisted gateways on their first
+/// use. A communication plugin uses it so that an explicit activation connects
+/// every pending gateway, as an activation without a prior lazy start does.
+#[async_trait]
+pub trait PendingGateways: Send + Sync + 'static {
+    /// `true` if gateways registered by a lazy start are still pending.
+    async fn has_pending(&self) -> bool;
+
+    /// Connects all pending gateways (with broadcast fallback) and waits for
+    /// the result. Returns without work if nothing is pending.
+    async fn connect_all_pending(&self);
 }
 
 /// No-op store used when ECU list persistence is disabled: nothing is ever

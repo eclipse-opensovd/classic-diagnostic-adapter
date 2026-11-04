@@ -217,7 +217,7 @@ impl ConnectionTasks {
                 tasks.retain(|task| !task.is_finished());
                 tasks.push(task);
             }
-            // E.g. a VAM or fallback connect racing with the transport stop.
+            // E.g. a connect on first use racing with the transport stop.
             None => task.abort(),
         }
     }
@@ -567,6 +567,9 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             ));
         }
 
+        // Consumed on every start, so a stale request cannot make a later start lazy.
+        let lazy_start = self.state.topology.take_lazy_start();
+
         let config = &self.config;
         // Checked here and not at startup, so that communication can be enabled
         // later (e.g. on demand) while the network interface is not up yet.
@@ -655,6 +658,13 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                 drop(socket_guard);
                 let db_gateways = self.db_gateways().await;
                 let plan = reconnect::plan_reconnect(&known, &search, &db_gateways);
+                if lazy_start {
+                    session.register_lazy(plan);
+                    discovery.finish(false);
+                    return self
+                        .finish_start(operation, listens_for_vams, &session, shutdown)
+                        .await;
+                }
                 tracing::info!(
                     unicast = plan.unicast.len(),
                     vir = plan.vir_for.len(),
@@ -842,7 +852,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     }
 
     async fn stop(&self, operation: &mut DoipGatewayOperation) {
-        // Before the tasks are shut down, so no VAM or fallback connect starts after.
+        // Before the tasks are shut down, so no connect on first use starts after.
         // The session is dropped, not reused: the next start creates its own.
         let session = self.state.session.write().await.take();
         if let Some(session) = &session {
@@ -865,6 +875,18 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     }
 
     async fn get_doip_connection(
+        &self,
+        logical_address: u16,
+    ) -> Result<Arc<DoipConnection>, DiagServiceError> {
+        match self.lookup_doip_connection(logical_address).await {
+            Err(DiagServiceError::EcuOffline(_)) if self.connect_pending(logical_address).await => {
+                self.lookup_doip_connection(logical_address).await
+            }
+            result => result,
+        }
+    }
+
+    async fn lookup_doip_connection(
         &self,
         logical_address: u16,
     ) -> Result<Arc<DoipConnection>, DiagServiceError> {
@@ -1040,14 +1062,16 @@ impl<T: EcuAddresses + DoipComParams> PhysicalTransport for DoipDiagGateway<T> {
         ecu_name: &str,
         ecu_db: &RwLock<E>,
     ) -> Result<(), DiagServiceError> {
-        let ecu_lock = ecu_db.read().await;
-
-        let doip_conn = self
-            .get_doip_connection(ecu_lock.logical_gateway_address())
-            .await?;
+        let (gateway_address, logical_address) = {
+            let ecu = ecu_db.read().await;
+            (ecu.logical_gateway_address(), ecu.logical_address())
+        };
+        // A reachability check never connects a gateway pending after a lazy
+        // start: whole-vehicle detection must not connect every gateway.
+        let doip_conn = self.lookup_doip_connection(gateway_address).await?;
         doip_conn
             .ecus
-            .get(&ecu_lock.logical_address())
+            .get(&logical_address)
             .ok_or_else(|| DiagServiceError::EcuOffline(ecu_name.to_owned()))?;
         Ok(())
     }
@@ -1199,6 +1223,14 @@ impl<T: EcuAddresses + DoipComParams> FunctionalTransport for DoipDiagGateway<T>
 }
 
 impl<T: EcuAddresses + DoipComParams> NetworkTopology for DoipDiagGateway<T> {
+    async fn route_pending(&self, ecu_name: &str) -> bool {
+        let Some(ecu_lock) = self.state.ecus.get(&ecu_name.to_lowercase()) else {
+            return false;
+        };
+        let gateway_addr = ecu_lock.read().await.logical_gateway_address();
+        self.state.gateway_pending_attemptable(gateway_addr).await
+    }
+
     async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
         self.state.connection_ip(logical_address).await
     }
@@ -1244,10 +1276,8 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
 
         let Some(session) = self
             .state
-            .session
-            .read()
+            .current_session()
             .await
-            .clone()
             .filter(|session| !session.cancel_token.is_cancelled())
         else {
             return Err(DiagServiceError::CommunicationDisabled(
@@ -1335,9 +1365,13 @@ impl<T: EcuAddresses + DoipComParams> TransportProbe for DoipDiagGateway<T> {
         let Some(ecu_lock) = self.state.ecus.get(&ecu_name) else {
             return RouteStatus::NotConfigured;
         };
-        // Check if the gateway connection for this ECU is established
+        // Check if the gateway connection for this ECU is established. A gateway
+        // pending after a lazy start is routable too: it connects on the first
+        // send, never on a route check.
         let gateway_addr = ecu_lock.read().await.logical_gateway_address();
-        if self.get_doip_connection(gateway_addr).await.is_ok() {
+        if self.lookup_doip_connection(gateway_addr).await.is_ok()
+            || self.state.gateway_pending(gateway_addr).await
+        {
             RouteStatus::Ready
         } else {
             // DoIP addressing is gateway-scoped, so there is
@@ -1972,8 +2006,8 @@ mod tests {
         tasks.shutdown().await;
     }
 
-    /// A task pushed after shutdown (e.g. a VAM or fallback connect racing with
-    /// the transport stop) must not outlive it.
+    /// A task pushed after shutdown (e.g. a connect on first use racing with the
+    /// transport stop) must not outlive it.
     #[tokio::test]
     async fn connection_task_pushed_after_shutdown_is_aborted() {
         let tasks = Arc::new(ConnectionTasks::new());
@@ -1983,6 +2017,25 @@ mod tests {
         tasks.push(task);
         cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(10)).await;
         assert!(abort.is_finished());
+    }
+
+    /// A requested lazy start is consumed by every start, also one that does not
+    /// reconnect, so it cannot make a later start lazy.
+    /// [[ test~doip-lazy-start-consumed, Every transport start consumes a lazy start request, test ]]
+    #[tokio::test]
+    async fn every_start_consumes_a_lazy_start_request() {
+        // An address that is not local, so the start fails early.
+        let config = DoipConfig {
+            tester_address: "192.0.2.1".to_owned(),
+            ..DoipConfig::default()
+        };
+        let gateway = crate::test_helpers::gateway_with_config(&config, &[("gw", 0x1000)]).await;
+        gateway.state.topology.request_lazy_start();
+
+        let mut operation = crate::DoipGatewayOperation::default();
+        assert!(gateway.start(&mut operation).await.is_err());
+        operation.shutdown().await;
+        assert!(!gateway.state.topology.take_lazy_start());
     }
 
     /// A start that fails before any gateway is connected must not leave the

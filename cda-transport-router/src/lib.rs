@@ -51,6 +51,7 @@ use cda_interfaces::{
         DoipEndpoint, TransportControl, TransportState, TransportStateTracker,
         error::CommControlError,
     },
+    topology::PendingGateways,
 };
 use tokio::sync::{Mutex, RwLock, mpsc};
 
@@ -156,6 +157,14 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe>
         }
     }
 
+    /// The transport the ECU is pinned or bound to, without binding it.
+    async fn selected_transport(&self, ecu_name_lower: &str) -> Option<TransportType> {
+        if let Some(&pinned) = self.transport_overrides.get(ecu_name_lower) {
+            return Some(pinned);
+        }
+        self.ecu_bindings.read().await.get(ecu_name_lower).copied()
+    }
+
     /// Tries to detect and bind an ECU on a single transport.
     async fn try_bind_transport(
         &self,
@@ -187,14 +196,9 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe>
     async fn resolve_transport(&self, ecu_name: &str) -> Result<TransportType, DiagServiceError> {
         let ecu_name_lower = ecu_name.to_lowercase();
 
-        // 1. Check override
-        if let Some(&pinned) = self.transport_overrides.get(&ecu_name_lower) {
-            return Ok(pinned);
-        }
-
-        // 2. Check existing binding
-        if let Some(&bound) = self.ecu_bindings.read().await.get(&ecu_name_lower) {
-            return Ok(bound);
+        // 1. and 2. Check override, then existing binding
+        if let Some(selected) = self.selected_transport(&ecu_name_lower).await {
+            return Ok(selected);
         }
 
         // 3. First-detection: check transports in priority order (DoIP first)
@@ -338,6 +342,26 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe> FunctionalT
 impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe> NetworkTopology
     for DiagnosticTransportRouter<D, C>
 {
+    /// Answered by the transport the ECU is pinned or bound to; an ECU that is
+    /// not bound yet is answered by the first transport that would be bound on
+    /// first use (`DoIP` before CAN).
+    async fn route_pending(&self, ecu_name: &str) -> bool {
+        let ecu_name = ecu_name.to_lowercase();
+        let selected = self.selected_transport(&ecu_name).await;
+        if selected != Some(TransportType::Can)
+            && let Some(ref doip) = self.doip_gateway
+            && doip.route_pending(&ecu_name).await
+        {
+            return true;
+        }
+        if selected != Some(TransportType::DoIP)
+            && let Some(ref can) = self.can_gateway
+        {
+            return can.route_pending(&ecu_name).await;
+        }
+        false
+    }
+
     async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
         // DoIP addresses are returned verbatim (bare IP) to keep the SOVD
         // network-structure API compatible with pre-multi-transport releases.
@@ -366,12 +390,10 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe> NetworkTopo
         let ecu_name = ecu_name.to_lowercase();
 
         // Check override or existing binding first
-        if let Some(&pinned) = self.transport_overrides.get(&ecu_name) {
-            return self.network_address_for_transport(&ecu_name, pinned).await;
-        }
-
-        if let Some(&bound) = self.ecu_bindings.read().await.get(&ecu_name) {
-            return self.network_address_for_transport(&ecu_name, bound).await;
+        if let Some(selected) = self.selected_transport(&ecu_name).await {
+            return self
+                .network_address_for_transport(&ecu_name, selected)
+                .await;
         }
 
         // No binding yet - try DoIP first, then CAN
@@ -555,6 +577,26 @@ impl<
     }
 }
 
+/// Reports and connects the gateways a lazy start left pending. Only the `DoIP`
+/// gateway connects persisted gateways lazily, so a router without one has none.
+#[async_trait]
+impl<D: EcuGateway + TransportProbe + PendingGateways, C: EcuGateway + TransportProbe>
+    PendingGateways for DiagnosticTransportRouter<D, C>
+{
+    async fn has_pending(&self) -> bool {
+        match &self.doip_gateway {
+            Some(doip) => doip.has_pending().await,
+            None => false,
+        }
+    }
+
+    async fn connect_all_pending(&self) {
+        if let Some(doip) = &self.doip_gateway {
+            doip.connect_all_pending().await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -584,6 +626,7 @@ mod tests {
         disable_calls: Arc<AtomicUsize>,
         shutdown_calls: Arc<AtomicUsize>,
         state: Arc<RwLock<TransportState>>,
+        pending: bool,
     }
 
     impl FakeGateway {
@@ -595,7 +638,13 @@ mod tests {
                 disable_calls: Arc::new(AtomicUsize::new(0)),
                 shutdown_calls: Arc::new(AtomicUsize::new(0)),
                 state: Arc::new(RwLock::new(TransportState::Disabled)),
+                pending: false,
             }
+        }
+
+        fn with_pending_route(mut self) -> Self {
+            self.pending = true;
+            self
         }
 
         fn with_failing_disable(mut self) -> Self {
@@ -658,6 +707,10 @@ mod tests {
             _logical_address: u16,
         ) -> impl Future<Output = Option<String>> {
             std::future::ready(None)
+        }
+
+        fn route_pending(&self, _ecu_name: &str) -> impl Future<Output = bool> + Send {
+            std::future::ready(self.pending)
         }
     }
 
@@ -751,6 +804,43 @@ mod tests {
             router.connect_ecu_direct("ECU_A", test_endpoint()).await,
             Err(DiagServiceError::RequestNotSupported(_))
         ));
+    }
+
+    /// [[ test~transport-router-route-pending, A pending route is asked from the transport the ECU is bound to, test ]]
+    #[tokio::test]
+    async fn route_pending_follows_the_selected_transport() {
+        let router: DiagnosticTransportRouter<FakeGateway, FakeGateway> =
+            DiagnosticTransportRouter::new(HashMap::from_iter([(
+                "can_ecu".to_owned(),
+                TransportType::Can,
+            )]))
+            .with_doip(FakeGateway::new(false).with_pending_route())
+            .with_can(FakeGateway::new(false));
+
+        assert!(
+            router.route_pending("Unbound").await,
+            "DoIP pending, unbound"
+        );
+        assert!(
+            !router.route_pending("can_ecu").await,
+            "an ECU pinned to CAN ignores a pending DoIP gateway"
+        );
+        router
+            .ecu_bindings
+            .write()
+            .await
+            .insert("bound_can".to_owned(), TransportType::Can);
+        assert!(!router.route_pending("bound_can").await);
+
+        let not_pending: DiagnosticTransportRouter<FakeGateway, FakeGateway> =
+            DiagnosticTransportRouter::new(HashMap::default())
+                .with_doip(FakeGateway::new(false))
+                .with_can(FakeGateway::new(false));
+        assert!(!not_pending.route_pending("ecu").await);
+
+        let none: DiagnosticTransportRouter<FakeGateway, FakeGateway> =
+            DiagnosticTransportRouter::new(HashMap::default());
+        assert!(!none.route_pending("ecu").await, "no transport configured");
     }
 
     /// A runtime update disables the transport before replacing the ECU data.

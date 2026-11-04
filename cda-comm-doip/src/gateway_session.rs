@@ -12,15 +12,17 @@
  */
 
 //! Gateway connect state of one transport start; see [`connect`] for how
-//! connects are coordinated.
+//! connects are coordinated, and [`pending`] for the gateways that wait for
+//! their first use after a lazy start.
 
 mod connect;
+mod pending;
 
 use std::sync::{Arc, Mutex};
 
 use cda_interfaces::{
-    EcuAddresses, EcuConnectivityHandler, HashMap, HashMapExtensions, VariantDetectionSender,
-    util::std_ext::lock_mutex,
+    EcuAddresses, EcuConnectivityHandler, HashMap, HashMapExtensions, HashSet,
+    VariantDetectionSender, util::std_ext::lock_mutex,
 };
 pub(crate) use connect::{ConnectFailure, DirectRejection, GatewayConnectGuard, PendingConnect};
 use tokio::sync::RwLock;
@@ -61,6 +63,12 @@ pub(crate) async fn ecu_names_by_gateway<T: EcuAddresses>(
 /// Gateway connect state of one transport start. Replaced on every start, so
 /// work left over from an earlier start cannot change the current one.
 pub(crate) struct GatewaySession {
+    /// Gateways waiting for their first use (lazy start). `None`: no usable address.
+    pending: Mutex<HashMap<u16, Option<DiscoveredGateway>>>,
+    /// The pending gateways that are persisted without a usable address. Without
+    /// VIR, the explicit activation reports them unreachable, like a start
+    /// without lazy start does.
+    pending_unusable: Mutex<HashSet<u16>>,
     /// The connect lock of each gateway, see [`connect`].
     connect_mutexes: Mutex<HashMap<u16, Arc<tokio::sync::Mutex<()>>>>,
     /// Gateways with an announcement waiting for their connect lock, with the
@@ -97,6 +105,8 @@ impl GatewaySession {
         discovery: DiscoveryMode,
     ) -> Self {
         Self {
+            pending: Mutex::new(HashMap::new()),
+            pending_unusable: Mutex::new(HashSet::default()),
             connect_mutexes: Mutex::new(HashMap::new()),
             pending_announcements: Mutex::new(HashMap::new()),
             commit_tasks: Arc::new(ConnectionTasks::new()),
@@ -122,6 +132,11 @@ impl GatewaySession {
                 .entry(logical_address)
                 .or_default(),
         )
+    }
+
+    /// Whether a connect of the gateway `logical_address` holds its lock.
+    pub(crate) fn is_connecting(&self, logical_address: u16) -> bool {
+        self.mutex_for_gateway(logical_address).try_lock().is_err()
     }
 
     /// Waits for the connect lock of the gateway `logical_address`.
@@ -159,5 +174,12 @@ impl GatewaySession {
         &self,
     ) -> std::sync::MutexGuard<'_, HashMap<u16, DiscoveredGateway>> {
         lock_mutex(&self.pending_announcements)
+    }
+}
+
+impl<T: EcuAddresses + cda_interfaces::DoipComParams> crate::DoipGatewayState<T> {
+    /// The session of the current transport start, `None` while stopped.
+    pub(crate) async fn current_session(&self) -> Option<Arc<GatewaySession>> {
+        self.session.read().await.clone()
     }
 }

@@ -242,6 +242,13 @@ pub(crate) fn discovered_at(name: &str, logical_address: u16, ip: &str) -> Disco
 }
 
 pub(crate) async fn gateway_with_gateways(gateways: &[(&str, u16)]) -> DoipDiagGateway<TestEcu> {
+    gateway_with_config(&DoipConfig::default(), gateways).await
+}
+
+pub(crate) async fn gateway_with_config(
+    config: &DoipConfig,
+    gateways: &[(&str, u16)],
+) -> DoipDiagGateway<TestEcu> {
     let mut ecus = HashMap::new();
     for (name, logical_address) in gateways {
         ecus.insert(
@@ -250,7 +257,7 @@ pub(crate) async fn gateway_with_gateways(gateways: &[(&str, u16)]) -> DoipDiagG
         );
     }
     DoipDiagGateway::<TestEcu>::new(
-        &DoipConfig::default(),
+        config,
         Arc::new(ecus),
         VariantDetectionSender::new(mpsc::channel(16).0),
         Arc::new(RecordingConnectivityHandler::default()),

@@ -386,7 +386,7 @@ Communication Initialization Mode
 
 .. arch:: Communication Initialization Mode
     :id: arch~dt-deferred-initialization
-    :links: test~ecu-topology-reconnect-search, test~doip-aborted-discovery-finishes, dimpl~doip-persisted-reconnect, dimpl~doip-reconnect-discovery-mode, test~doip-vam-only-reconnect-without-search, dimpl~doip-failed-announcement-connect-reported, test~doip-failed-announcement-connect-reported, test~doip-unreachable-reported-after-state-change, dimpl~ecu-topology-restore, dimpl~ecu-state-restore, test~doip-plan-reconnect, dimpl~communication-control-contracts, dimpl~communication-control-access, dimpl~communication-control-operations, dimpl~communication-lifecycle-controller, dimpl~default-communication-policy, dimpl~deferred-communication-startup, dimpl~deferred-sovd-admission, dimpl~deferred-doip-transport, test~deferred-communication-config, test~deferred-startup-policy, test~deferred-admitting-modes-activate, test~deferred-disabled-rejects-activation, test~deferred-request-activation-policy, test~deferred-activation-retry, test~deferred-sovd-admission, test~deferred-doip-passive-construction, itest~deferred-on-demand-pending, itest~deferred-on-demand-uds-silence, itest~deferred-disabled-uds-silence, test~doip-reconnect-plan-reconnect-rejects-renamed-gateway, test~ecu-state-restore-without-assume-online-only-last-seen-is-restored, test~ecu-state-restore-variant-missing-from-the-database-is-detected-again, test~ecu-state-restore-address-mismatch-restores-nothing, test~ecu-state-restore-can-pinned-ecu-is-not-assumed-online, test~ecu-state-restore-inconsistent-duplicate-group-is-detected-again, test~doip-vam-during-reconnect-does-not-connect-twice, dimpl~doip-vam-during-connect-connects-after-failure, test~doip-vam-during-connect-connects-after-failure, dimpl~doip-discovery-connect-waits-for-direct-connect, test~doip-discovery-connect-waits-for-direct-connect, dimpl~doip-cancelled-connect-reverts-ecu-states, test~doip-cancelled-connect-reverts-ecu-states, test~doip-vam-only-reconnect-reports-unusable, test~ecu-state-restore-independent-of-discovery-mode
+    :links: test~ecu-topology-reconnect-search, test~doip-aborted-discovery-finishes, dimpl~doip-persisted-reconnect, dimpl~doip-reconnect-discovery-mode, test~doip-vam-only-reconnect-without-search, dimpl~doip-failed-announcement-connect-reported, test~doip-failed-announcement-connect-reported, test~doip-unreachable-reported-after-state-change, dimpl~ecu-topology-restore, dimpl~ecu-state-restore, test~doip-plan-reconnect, dimpl~communication-control-contracts, dimpl~communication-control-access, dimpl~communication-control-operations, dimpl~communication-lifecycle-controller, dimpl~default-communication-policy, dimpl~deferred-communication-startup, dimpl~deferred-sovd-admission, dimpl~deferred-doip-transport, test~deferred-communication-config, test~deferred-startup-policy, test~deferred-admitting-modes-activate, test~deferred-disabled-rejects-activation, test~deferred-request-activation-policy, test~deferred-activation-retry, test~deferred-sovd-admission, test~deferred-doip-passive-construction, itest~deferred-on-demand-pending, itest~deferred-on-demand-uds-silence, itest~deferred-disabled-uds-silence, test~doip-reconnect-plan-reconnect-rejects-renamed-gateway, test~ecu-state-restore-without-assume-online-only-last-seen-is-restored, test~ecu-state-restore-variant-missing-from-the-database-is-detected-again, test~ecu-state-restore-address-mismatch-restores-nothing, test~ecu-state-restore-can-pinned-ecu-is-not-assumed-online, test~ecu-state-restore-inconsistent-duplicate-group-is-detected-again, test~doip-vam-during-reconnect-does-not-connect-twice, dimpl~doip-vam-during-connect-connects-after-failure, test~doip-vam-during-connect-connects-after-failure, dimpl~doip-discovery-connect-waits-for-direct-connect, test~doip-discovery-connect-waits-for-direct-connect, dimpl~doip-cancelled-connect-reverts-ecu-states, test~doip-cancelled-connect-reverts-ecu-states, test~doip-vam-only-reconnect-reports-unusable, test~ecu-state-restore-independent-of-discovery-mode, test~doip-lazy-start-consumed, test~doip-unknown-address-without-vir-not-reported, dimpl~doip-direct-connect-ends-pending, test~doip-direct-connect-ends-pending, dimpl~doip-lazy-gateway-connect, dimpl~doip-lazy-activate-all, test~doip-lazy-activate-all, dimpl~doip-gateway-connect-once, test~doip-gateway-connect-once, test~transport-router-route-pending, test~doip-stale-lazy-connect-does-not-touch-new-session
     :status: draft
 
     The CDA supports a configurable ``[communication] init_mode`` to enable scenarios where
@@ -519,9 +519,10 @@ Communication Initialization Mode
       announcement.
       With ``Disabled`` no persisted gateway is reconnected and no announcement is handled; gateways are
       only connected through ``doip-connect-ecu``.
-    - The broadcast fallback belongs to the persisted reconnect only: the gateways it could not reach are
-      searched by one VIR together. A connect started for any other reason does not search a gateway it
-      could not reach.
+    - The broadcast fallback belongs to the persisted reconnect and to the first use after a lazy start: the
+      gateways the persisted reconnect could not reach are searched by one VIR together, and a first use
+      searches its gateway alone by one VIR. A connect started for any other reason does not search a
+      gateway it could not reach.
     - A spontaneous announcement of an unconnected gateway starts its connect in the background: the VAM
       listener does not wait for it and handles the next announcement meanwhile. If that connect fails, the
       gateway is reported unreachable without a broadcast: it has just announced its address itself.
@@ -529,8 +530,8 @@ Communication Initialization Mode
       connected again by its spontaneous announcement (subject to ``vam_handling_mode``) or the next
       transport start.
     - With ``init_mode = Always``, only ``last_seen`` is restored and the full broadcast discovery runs.
-    - Every connect of a gateway (startup discovery, persisted reconnect, spontaneous announcement, direct
-      connect) holds the gateway's connect lock while it runs, so connects of one gateway never overlap. A
+    - Every connect of a gateway (startup discovery, persisted reconnect, spontaneous announcement, first
+      use, direct connect) holds the gateway's connect lock while it runs, so connects of one gateway never overlap. A
       connect that gets the lock connects only if the gateway is not connected by then. Connect state
       belongs to one transport start; work left over from an earlier start does not change it. A connect
       that reports its ECUs connected runs this report, the topology record and the variant detection
@@ -542,10 +543,32 @@ Communication Initialization Mode
       replace the address it connects. If the gateway is connected by then, the connection is kept and a
       different announced address is logged as a warning. Otherwise the task connects the newest announced
       address like a new announcement.
+    - **OnDemand, first diagnostic request:** the activation is recorded as a lazy start when a topology is
+      persisted. The transport then registers the persisted gateways as pending instead of connecting them,
+      and the discovery counts as complete right away. A pending gateway connects on its first use (a
+      request to one of its ECUs, a functional request through it, or a variant detection of one of its
+      ECUs), with the broadcast fallback for that gateway alone if its address does not work. A first use
+      holds the gateway's connect lock like every other connect and runs in a task of its own, so concurrent
+      requests wait for one connect and a dropped caller does not start a second one.
+      An announcement of a pending gateway only refreshes its address, unless a connect of it is in flight
+      (its first-use connect or a ``doip-connect-ecu``, see above); then the announcement also waits for the
+      lock like above and connects the announced address if that connect failed. Reachability checks (e.g.
+      by the activation's variant detection) never connect a pending gateway. A request for an ECU that is
+      not detected yet queues its variant detection (only if its gateway is still pending; an ECU that was
+      detected unreachable is not detected again by requests), whose first request connects the gateway; the
+      client gets the usual pending response with a retry hint meanwhile.
+    - Without VIR (``doip.discovery = VamOnly``) a pending gateway without an address is not searched on its
+      first use: it is not attempted, so it is not reported unreachable, and it stays pending. Its
+      announcement gives it the address that its next use connects to. Until then it does not count as
+      pending for requests: a request to one of its ECUs that are not detected yet gets the normal offline
+      answer and queues no variant detection.
     - A direct connect through ``doip-connect-ecu`` (see :need:`arch~plugin-vehicle-topology-connect-ecu`) is
       rejected if a connect of the gateway holds its lock or the gateway is connected. It is not recorded in
-      the topology, so its address is not persisted and the next start does not reconnect to it.
-    - A discovery connect (startup VIR result, persisted reconnect) that finds a direct connect in flight
+      the topology, so its address is not persisted and the next start does not reconnect to it. A pending
+      gateway that is connected directly no longer waits for its first use; a failed direct connect leaves it
+      pending at its persisted address.
+    - A discovery connect (startup VIR result, persisted reconnect, first use after a
+      lazy start) that finds a direct connect in flight
       does not take its result, since the direct address may be wrong: it waits for the lock and, if the
       direct connect did not connect, connects itself. A gateway found by the startup VIR is recorded at its
       announced address once it is connected, also if the direct connect connected it.
@@ -602,7 +625,7 @@ Post-Update Deferred Communication
 
 .. arch:: Post-Update Deferred Communication
     :id: arch~dt-post-update-deferred-communication
-    :links: dimpl~communication-control-contracts, dimpl~communication-lifecycle-controller, dimpl~post-update-deferred-communication, test~deferred-communication-config, test~deferred-post-update-apply, test~deferred-post-update-rollback, itest~deferred-post-update
+    :links: dimpl~communication-control-contracts, dimpl~communication-lifecycle-controller, dimpl~post-update-deferred-communication, test~deferred-communication-config, test~deferred-post-update-apply, test~deferred-post-update-rollback, itest~deferred-post-update, test~lazy-start-flag-dropped-when-refused
     :status: draft
 
     Runtime database updates acquire the communication lifecycle controller's exclusive disable lease

@@ -19,13 +19,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::{CommControlError, DoipConnect, DoipEndpoint, TransportControl, TransportState};
-use crate::{DiagServiceError, Shutdown, component_slot::ComponentSlot};
+use crate::{DiagServiceError, Shutdown, component_slot::ComponentSlot, topology::PendingGateways};
 
-/// [`TransportControl`] proxy over a hot-swappable gateway slot, delegating every
-/// call to whatever gateway [`ComponentSlot`] currently holds.
+/// [`TransportControl`], [`DoipConnect`] and [`PendingGateways`] proxy over a
+/// hot-swappable gateway slot, delegating every call to whatever gateway
+/// [`ComponentSlot`] currently holds.
 ///
-/// Private: the only way to obtain one is [`ComponentSlot::transport_control`],
-/// which requires owning the slot. The runtime-update plugin only replaces the
+/// Private: the only ways to obtain one are [`ComponentSlot::transport_control`],
+/// [`ComponentSlot::doip_connect`] and [`ComponentSlot::pending_gateways`], which
+/// require owning the slot. The runtime-update plugin only replaces the
 /// gateway and is handed a [`crate::component_slot::ReplaceComponent`] instead.
 ///
 /// Each call takes a read guard on the slot rather than a `Mutex`, so `state()`
@@ -89,6 +91,25 @@ impl<G: TransportControl + Shutdown> DoipConnect for SwappableGateway<G> {
         endpoint: DoipEndpoint,
     ) -> Result<(), DiagServiceError> {
         TransportControl::connect_ecu_direct(self, ecu_name, endpoint).await
+    }
+}
+
+impl<G: PendingGateways + Shutdown> ComponentSlot<G> {
+    /// Mints a [`PendingGateways`] view over this slot. See [`SwappableGateway`].
+    #[must_use]
+    pub fn pending_gateways(&self) -> Arc<dyn PendingGateways> {
+        Arc::new(SwappableGateway { slot: self.clone() })
+    }
+}
+
+#[async_trait]
+impl<G: PendingGateways + Shutdown> PendingGateways for SwappableGateway<G> {
+    async fn has_pending(&self) -> bool {
+        self.slot.read().await.has_pending().await
+    }
+
+    async fn connect_all_pending(&self) {
+        self.slot.read().await.connect_all_pending().await;
     }
 }
 

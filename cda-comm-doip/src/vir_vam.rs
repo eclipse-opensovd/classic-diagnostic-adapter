@@ -121,8 +121,10 @@ where
 }
 
 /// Handles the announcement of a configured gateway: refreshes its variant
-/// detection if it is connected, and otherwise connects it, see
-/// [`connect_announced`].
+/// detection if it is connected, its address if it is pending, and otherwise
+/// connects it, see [`connect_announced`]. A pending gateway with a connect in
+/// flight is connected as well if that connect fails, so the announcement is
+/// not lost if that connect ends its pending state.
 pub(crate) async fn handle_announcement<T: EcuAddresses + DoipComParams>(
     state: &DoipGatewayState<T>,
     session: &Arc<GatewaySession>,
@@ -136,6 +138,13 @@ pub(crate) async fn handle_announcement<T: EcuAddresses + DoipComParams>(
         // sending variant detection, will update the ECU state
         // (i.e. disconnected -> connected)
         send_variant_detection(gateway_ecu_name_map, variant_detection, logical_address).await;
+    } else if session.update_pending(&doip_target) && !session.is_connecting(logical_address) {
+        // Lazy start: the gateway connects on its first request, the
+        // announcement only refreshes its address.
+        tracing::debug!(
+            ecu_name = %doip_target.ecu_name,
+            "VAM from a pending gateway, updated its address"
+        );
     } else {
         tracing::info!(ecu_name = %doip_target.ecu_name, "New Gateway ECU detected");
         connect_announced(state, session, doip_target);
@@ -207,6 +216,7 @@ fn connect_announced<T: EcuAddresses + DoipComParams>(
                 .await
                 .is_err()
             {
+                task_session.end_pending(logical_address);
                 state
                     .report_unreachable(&task_session, [logical_address])
                     .await;

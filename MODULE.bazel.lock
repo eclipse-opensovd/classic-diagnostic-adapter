@@ -3724,7 +3724,7 @@
           "@@//cda-sovd/Cargo.toml": "80ada2610bc7d59afef14e465da258ce4d99122a6e6f70b5832af98d9b768edd",
           "@@//cda-storage/Cargo.toml": "7d91d69894b2870b0fa5ee771f9bd971ba96b76cc00f07ac10d8c88fef585981",
           "@@//cda-tracing/Cargo.toml": "b455561645f9a290c450d7e9bb2a59d2aba00ee089fa21b550ed5d2875dad267",
-          "@@//cda-transport-router/Cargo.toml": "0373be9009bb489fe589ca453a0cf1cbf435d47e19a63543e69049679c622f84",
+          "@@//cda-transport-router/Cargo.toml": "f2e2ec16a597c7698bfdc66dec28212b1f9819e056c5203b48f0364142a508dd",
           "@@//integration-tests/Cargo.toml": "b4f429d126caeb03320281aaed39c2b7e90a76650f645e237ab953fefa22ab57",
           "@@//opensovd-axum-extra/Cargo.toml": "7426a001c347cc406031f68290cdf37aae692b347139f2e461a9066f45f8e8cb",
           "@@//override-macros/Cargo.toml": "010f1e4626fdb249d64778b7d996d64ead16bf965587703a0c1210be0a4cd1ab",

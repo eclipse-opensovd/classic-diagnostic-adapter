@@ -12,7 +12,7 @@
  */
 
 //! Connect coordination. Every connect of a gateway (startup discovery,
-//! persisted reconnect, announcement, direct connect) holds the gateway's
+//! persisted reconnect, announcement, first use, direct connect) holds the gateway's
 //! connect lock of the session while it runs, so connects of one gateway
 //! never overlap. A connect that gets the lock connects only if the gateway is
 //! not connected by then. So a discovery connect that waited for a failed
@@ -289,9 +289,16 @@ impl<T: EcuAddresses + DoipComParams> DoipGatewayState<T> {
             },
         );
         // The sender is dropped without a result if the commit panicked.
-        result_receiver
+        let result = result_receiver
             .await
-            .unwrap_or(Err(ConnectFailure::TaskEnded))
+            .unwrap_or(Err(ConnectFailure::TaskEnded));
+        if result.is_ok() {
+            // Also for a direct connect: a failure says nothing about the
+            // persisted address, a success ends the wait for the first use.
+            // [[ dimpl~doip-direct-connect-ends-pending, A successful direct connect ends the pending state of the gateway, dimpl ]]
+            session.end_pending(logical_address);
+        }
+        result
     }
 
     /// Reports the ECUs of a connected gateway, records it in the topology (if
@@ -414,14 +421,6 @@ mod tests {
         ));
     }
 
-    /// Whether a connect of `logical_address` holds its lock.
-    fn is_connecting(session: &GatewaySession, logical_address: u16) -> bool {
-        session
-            .mutex_for_gateway(logical_address)
-            .try_lock()
-            .is_err()
-    }
-
     /// A fake gateway that holds back its connects, and the gateway 0x1000
     /// with a session in `discovery` mode that reports to an [`OrderRecorder`],
     /// installed as the current one.
@@ -536,6 +535,57 @@ mod tests {
         session.connection_tasks.shutdown().await;
     }
 
+    /// Without VIR a gateway without a known address cannot be connected: it is
+    /// not attempted, so it is not reported unreachable and stays pending.
+    /// [[ test~doip-unknown-address-without-vir-not-reported, Without VIR a gateway without a known address is not reported unreachable, test ]]
+    #[tokio::test]
+    async fn unknown_address_without_vir_is_not_reported() {
+        let (fake, gateway, session, _) = blocked_gateway(DiscoveryMode::VamOnly).await;
+        session.set_pending(0x1000, None);
+
+        assert!(!gateway.connect_pending(0x1000).await);
+
+        assert!(gateway.state.topology.unreachable().is_empty());
+        assert_eq!(fake.connects(), 0);
+        assert!(
+            session.is_pending(0x1000),
+            "a gateway that was not attempted stays pending"
+        );
+        session.connection_tasks.shutdown().await;
+    }
+
+    /// [[ test~doip-gateway-connect-once, A dropped caller does not start a second connect of the same gateway, test ]]
+    #[tokio::test]
+    async fn dropped_caller_does_not_start_a_second_connect() {
+        let (fake, gateway, session, _) = blocked_gateway(DiscoveryMode::Full).await;
+        session.set_pending(0x1000, Some(discovered("gw", 0x1000)));
+
+        let first = {
+            let gateway = gateway.clone();
+            tokio::spawn(async move { gateway.connect_pending(0x1000).await })
+        };
+        wait_until("first use to reach the fake gateway", || async {
+            fake.connects() == 1
+        })
+        .await;
+        first.abort();
+        let _ = first.await;
+
+        let second = {
+            let gateway = gateway.clone();
+            tokio::spawn(async move { gateway.connect_pending(0x1000).await })
+        };
+        wait_until("connect to go on without its caller", || async {
+            session.is_connecting(0x1000)
+        })
+        .await;
+        fake.release_connects();
+
+        assert!(second.await.unwrap(), "the second caller got the connect");
+        assert_eq!(fake.connects(), 1, "exactly one connection was opened");
+        session.connection_tasks.shutdown().await;
+    }
+
     /// An announcement of a gateway the startup reconnect is connecting, at
     /// the same or another address, does not open a second connection and
     /// keeps the connection of the connect in flight.
@@ -552,7 +602,7 @@ mod tests {
                 fake.connects() == 1
             })
             .await;
-            assert!(is_connecting(&session, 0x1000));
+            assert!(session.is_connecting(0x1000));
             announce(
                 &gateway,
                 &session,
@@ -600,7 +650,7 @@ mod tests {
         fake.release_connects();
         wait_until(
             "both announcement connects to release their locks",
-            || async { !is_connecting(&session, 0x1000) && !is_connecting(&session, 0x2000) },
+            || async { !session.is_connecting(0x1000) && !session.is_connecting(0x2000) },
         )
         .await;
         assert_eq!(
@@ -658,7 +708,7 @@ mod tests {
             })
             .await;
             wait_until("announcement retry to release the gateway lock", || async {
-                !is_connecting(&session, 0x1000)
+                !session.is_connecting(0x1000)
             })
             .await;
             assert_eq!(
@@ -730,7 +780,7 @@ mod tests {
         .await;
         wait_until(
             "waiting announcement to release the gateway lock",
-            || async { !is_connecting(&session, 0x1000) },
+            || async { !session.is_connecting(0x1000) },
         )
         .await;
         assert_eq!(fake.connects(), 1);

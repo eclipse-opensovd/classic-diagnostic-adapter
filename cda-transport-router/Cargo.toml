@@ -32,6 +32,9 @@ async-trait = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
 [features]
 default = []
 dlt-tracing = ["cda-interfaces/dlt-tracing"]
