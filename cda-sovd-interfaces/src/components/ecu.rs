@@ -55,6 +55,8 @@ pub struct Ecu {
     pub sdgs: Option<Vec<SdSdg>>,
     #[serde(rename = "x-single-ecu-jobs")]
     pub single_ecu_jobs: String,
+    #[serde(rename = "bulk-data")]
+    pub bulk_data: String,
     #[serde(rename = "x-sovd2uds-bulk-data")]
     pub x_sovd2uds_bulk_data: String,
     #[serde(rename = "x-sovd2uds-download")]

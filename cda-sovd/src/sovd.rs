@@ -1158,6 +1158,21 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
                 x_sovd2uds_bulk_data::mdd_embedded_files::id::docs_get,
             ),
         )
+        .route("/bulk-data", routing::get(x_sovd2uds_bulk_data::get))
+        .api_route(
+            "/bulk-data/mdd-embedded-files",
+            routing::get_with(
+                x_sovd2uds_bulk_data::mdd_embedded_files::get,
+                x_sovd2uds_bulk_data::mdd_embedded_files::docs_get,
+            ),
+        )
+        .api_route(
+            "/bulk-data/mdd-embedded-files/{id}",
+            routing::get_with(
+                x_sovd2uds_bulk_data::mdd_embedded_files::id::get,
+                x_sovd2uds_bulk_data::mdd_embedded_files::id::docs_get,
+            ),
+        )
         .api_route(
             "/faults",
             routing::get_with(faults::get, faults::docs_get)

@@ -1238,6 +1238,10 @@ MDD Embedded files
     ``/components/{ecuName}/x-sovd2uds-bulk-data/mdd-embedded-files`` endpoint (listing) and
     ``/components/{ecuName}/x-sovd2uds-bulk-data/mdd-embedded-files/{id}`` endpoint (retrieval).
 
+    The same endpoints must also be available under the standardized ``bulk-data`` collection,
+    ``/components/{ecuName}/bulk-data/mdd-embedded-files`` and
+    ``/components/{ecuName}/bulk-data/mdd-embedded-files/{id}``.
+
     **Rationale**
 
     Some data required for communication with ECUs might be embedded in the mdd file. To allow clients to retrieve this data, it must be made available through the API.
