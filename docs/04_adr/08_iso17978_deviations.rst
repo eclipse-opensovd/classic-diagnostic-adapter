@@ -9,7 +9,7 @@
 ..
 .. SPDX-License-Identifier: Apache-2.0
 
-ADR-007: Deliberate Deviations from ISO 17978-3
+ADR-008: Deliberate Deviations from ISO 17978-3
 ================================================
 
 Status
@@ -85,12 +85,13 @@ mandates it there.
 **CDA.** The ``x-sovd2uds-`` prefix is used where it already exists and is
 not enforced on custom or free-text properties. Unprefixed or partially
 prefixed names remain: ``sdgs`` and ``x-errorsource`` as body attributes, the
-``x-single-ecu-jobs`` collection, and the ``parameters`` / ``errors``
-attributes added to the asynchronous operation start response. Custom data
+``x-single-ecu-jobs`` collection, the ``genericservice`` resource of a
+component, and the ``parameters`` / ``errors`` attributes added to the
+asynchronous operation start response. Custom data
 categories are accepted as given.
 
 **Reason.** Renaming is a breaking change for every client that reads these
-names, and the prefix does not change what a generic client can do with a
+names (for ``genericservice`` it changes the path), and the prefix does not change what a generic client can do with a
 property it does not know: it ignores it either way.
 
 **Client impact.** A client cannot rely on the ``x-`` prefix to recognise CDA
@@ -99,6 +100,32 @@ authoritative list of what the CDA serves.
 
 **Record.** This ADR. The affected names are listed in
 classic-diagnostic-adapter#553 under "Accepted deviations".
+
+Deviation 3: Functional groups below ``functions``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+**Standard.** Table 8 grants the Function entity no resource collections, and
+§5.3.4 builds an entity path from the collection and the entity identifier
+(``functions/{id}``). §5.4.5 requires a custom collection to be named
+``x-<ext>-<name>``.
+
+**CDA.** Functional addressing is served below
+``/functions/functionalgroups/{group}``, with ``data``, ``modes``,
+``operations`` and ``locks`` as resource collections of the group. The
+``functionalgroups`` collection is not prefixed.
+
+**Reason.** A functional group is addressed by the services of its ECUs, so it
+needs the resource collections the standard does not give a Function. Existing
+clients use this path; moving it to a prefixed collection or onto the
+component tree would break them.
+
+**Client impact.** A generic SOVD client that expects ``functions/{id}`` to be a
+function without collections does not find the groups there. Clients written for
+the CDA start at ``/functions/functionalgroups``, which the ``functions``
+capability document links.
+
+**Record.** :need:`req~sovd-api-functional-communication`,
+:need:`req~sovd-api-lock-fg-enforcement`.
 
 Rationale
 ---------
@@ -115,7 +142,7 @@ requirements model and shows up in traceability, not only in prose.
 Consequences
 ------------
 
-* The conformance statement for the CDA becomes "ISO 17978-3 except ADR-007".
+* The conformance statement for the CDA becomes "ISO 17978-3 except ADR-008".
 * Audits against the standard compare against this list first; a departure
   listed here is not a finding.
 * Each new deviation costs one ADR edit, which is intended: the cost is the
@@ -126,5 +153,5 @@ Consequences
 References
 ----------
 
-* ISO 17978-3, §5.4.5, §7.9.1, §7.17.1, Table 241
+* ISO 17978-3, §5.3.4, §5.4.5, §7.9.1, §7.17.1, Table 8, Table 241
 * classic-diagnostic-adapter#553 (conformance audit), #600 (P0 work list)
