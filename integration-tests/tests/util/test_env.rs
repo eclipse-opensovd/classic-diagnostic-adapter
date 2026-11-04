@@ -1013,6 +1013,35 @@ pub(crate) async fn wait_for_ecus_online(config: &Configuration) -> Result<(), T
     .await
 }
 
+/// Returns the network address of the gateway serving `ecu_name`.
+///
+/// # Errors
+/// Returns [`TestingError::SetupError`] if no gateway serves the ECU, or the
+/// error of a failed request.
+pub(crate) async fn gateway_address(
+    config: &Configuration,
+    ecu_name: &str,
+) -> Result<String, TestingError> {
+    let response = send_cda_request(
+        config,
+        APPS_SOVD2UDS_DATA_NETWORKSTRUCTURE,
+        StatusCode::OK,
+        Method::GET,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    let structure: NetworkStructureResponse = response_to_t(&response)?;
+    structure
+        .data
+        .iter()
+        .flat_map(|data| data.gateways.iter())
+        .find(|gateway| gateway.ecus.iter().any(|ecu| ecu.qualifier == ecu_name))
+        .map(|gateway| gateway.network_address.clone())
+        .ok_or_else(|| TestingError::SetupError(format!("No gateway serves {ecu_name}")))
+}
+
 /// Waits until the CDA reports `ecu_name` as `Disconnected` or `Offline`.
 ///
 /// # Errors
