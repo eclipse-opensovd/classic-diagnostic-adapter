@@ -11,17 +11,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{panic::AssertUnwindSafe, time::Duration};
+use std::time::Duration;
 
-use futures::FutureExt;
 use http::{HeaderMap, Method, StatusCode};
 use serde::{self, Deserialize};
 
 use crate::{
     sovd,
-    sovd::{ECU_FLXC1000, set_dtc_setting},
+    sovd::{ECU_FLXC1000, force_variant_detection, set_dtc_setting},
     util::{
-        TestingError, ecusim,
+        TestingError,
         http::{
             bearer_token_header, extract_field_from_json, poll_while, response_to_json,
             response_to_json_to_field, send_authenticated_cda_request, send_cda_request,
@@ -31,7 +30,10 @@ use crate::{
             NON_OWNER_BEARER_TOKEN, create_lock, create_lock_with_payload, default_timeout,
             lock_expiration, lock_operation,
         },
-        test_env::{TestEnv, Transport, skip_unless, wait_for_ecu_offline, wait_for_ecus_online},
+        test_env::{
+            TestEnv, Transport, gateway_address, skip_unless, wait_for_ecu_offline,
+            wait_for_ecus_online,
+        },
     },
 };
 
@@ -580,88 +582,44 @@ async fn vehicle_lock_exclusivity_controls_foreign_communication() -> Result<(),
 
 #[tokio::test]
 async fn lock_when_ecu_offline() -> Result<(), TestingError> {
-    if skip_unless(
-        Transport::uses_doip,
-        "hard reset exercises DoIP disconnection",
-    ) {
+    if skip_unless(Transport::uses_doip, "stops a DoIP gateway") {
         return Ok(());
     }
-    let test_env = TestEnv::builder().await?;
+    let mut test_env = TestEnv::builder().await?;
+    let gateway = gateway_address(&test_env.config, "FLXC1000").await?;
 
-    let reset_lock = create_lock(
-        Duration::from_secs(60),
-        LOCKS,
-        StatusCode::CREATED,
+    // An ECU hard reset closes the connection before the listening socket, and
+    // a CDA that reconnects in between is left with a connection nobody serves.
+    test_env.stop_gateway(&gateway).await?;
+    // The gateway is gone without a FIN reaching the CDA: only a send tells.
+    send_authenticated_cda_request(
+        &test_env,
+        sovd::COMPONENTS_FLXC1000_BASE,
+        StatusCode::GATEWAY_TIMEOUT,
+        Method::PUT,
+        None,
+        None,
+    )
+    .await?;
+    wait_for_ecu_offline(&test_env.config, "FLXC1000").await?;
+
+    let response = create_lock(
+        Duration::from_secs(30),
+        COMPONENTS_FLXC1000_LOCKS,
+        StatusCode::SERVICE_UNAVAILABLE,
         &test_env,
     )
     .await;
-    let reset_lock_id: String = response_to_json_to_field(&reset_lock, "id")?;
+    assert_eq!(
+        response_to_json(&response)?
+            .get("message")
+            .and_then(serde_json::Value::as_str),
+        Some("ecu is offline"),
+    );
 
-    // Keep the network interface alive while the DoIP entity reboots.
-    ecusim::set_hard_reset_duration(&test_env.ecu_sim, "FLXC1000", 20).await?;
-    let outcome = AssertUnwindSafe(async {
-        // The reset may close the connection before its response reaches CDA.
-        let mut reset_headers = test_env.auth_header().await?;
-        reset_headers.insert(
-            http::header::ACCEPT,
-            http::HeaderValue::from_static("application/octet-stream"),
-        );
-        reset_headers.insert(
-            http::header::CONTENT_TYPE,
-            http::HeaderValue::from_static("application/octet-stream"),
-        );
-        let reset_result = send_cda_request(
-            &test_env.config,
-            &format!("{}/genericservice", sovd::COMPONENTS_FLXC1000_BASE),
-            StatusCode::OK,
-            Method::PUT,
-            Some("\x11\x01"),
-            Some(&reset_headers),
-            None,
-        )
-        .await;
-        assert!(
-            reset_result.is_ok(),
-            "Hard reset request failed: {reset_result:?}"
-        );
-
-        lock_operation(
-            LOCKS,
-            Some(&reset_lock_id),
-            &test_env,
-            StatusCode::NO_CONTENT,
-            Method::DELETE,
-        )
-        .await;
-
-        wait_for_ecu_offline(&test_env.config, "FLXC1000").await?;
-
-        let response = create_lock(
-            Duration::from_secs(30),
-            COMPONENTS_FLXC1000_LOCKS,
-            StatusCode::SERVICE_UNAVAILABLE,
-            &test_env,
-        )
-        .await;
-        assert_eq!(
-            response_to_json(&response)?
-                .get("message")
-                .and_then(serde_json::Value::as_str),
-            Some("ecu is offline"),
-        );
-        Ok::<(), TestingError>(())
-    })
-    .catch_unwind()
-    .await;
-
-    let cleanup = test_env.reset().await;
-    let recovery = wait_for_ecus_online(&test_env.config).await;
-    match outcome {
-        Ok(result) => result?,
-        Err(panic) => std::panic::resume_unwind(panic),
-    }
-    cleanup?;
-    recovery?;
+    test_env.start_gateway(&gateway).await?;
+    force_variant_detection(&test_env, sovd::COMPONENTS_FLXC1000_BASE).await?;
+    wait_for_ecus_online(&test_env.config).await?;
 
     let ecu_lock = create_lock(
         Duration::from_secs(30),
