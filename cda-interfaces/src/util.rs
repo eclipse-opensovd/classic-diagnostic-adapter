@@ -310,6 +310,24 @@ pub fn decode_hex(value: &str) -> Result<Vec<u8>, DiagServiceError> {
     })
 }
 
+/// Decode hex bytes, accepting optional `0x` prefixes and space/comma separators.
+/// # Errors
+/// Returns `DiagServiceError::ParameterConversionError` if any token is invalid.
+pub fn decode_hex_with_optional_prefix(value: &str) -> Result<Vec<u8>, DiagServiceError> {
+    value
+        .split([' ', ','])
+        .filter(|token: &&str| !token.is_empty())
+        .map(|token| {
+            if let Some(stripped) = try_strip_hex_prefix(token) {
+                decode_hex(stripped)
+            } else {
+                decode_hex(token)
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|tokens| tokens.into_iter().flatten().collect())
+}
+
 /// Read a given number of bits from the data slice starting at the given bit position.
 /// Used to extract bits from a PDU payload.
 /// # Arguments

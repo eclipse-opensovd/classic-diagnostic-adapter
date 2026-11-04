@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, ResetOutcome, SecurityAccess,
-    UdsSecurity, UdsTransport,
+    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, ResetOutcome,
+    SecurityAccess, SendKeyParameterInfo, UdsSecurity, UdsTransport,
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
 };
 
@@ -126,25 +126,37 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
         }
     }
 
-    async fn get_send_key_param_name(
+    async fn get_send_key_parameter_info(
         &self,
         ecu_name: &str,
         level: &str,
-    ) -> Result<String, DiagServiceError> {
+    ) -> Result<SendKeyParameterInfo, DiagServiceError> {
         let ecu_diag_service = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
         let security_access = ecu_diag_service
             .read()
             .await
             .lookup_security_access_change(level, true)
             .await?;
-        match &security_access {
-            SecurityAccess::RequestSeed(_) => {
-                unreachable!("Not reached, because has key is set to true above")
-            }
-            SecurityAccess::SendKey(dc) => {
-                let ecu = ecu_diag_service.read().await;
-                ecu.get_send_key_param_name(dc).await
-            }
-        }
+        let SecurityAccess::SendKey(diag_service) = security_access else {
+            unreachable!("has_key is true for SendKey request size lookup")
+        };
+        ecu_diag_service
+            .read()
+            .await
+            .get_send_key_parameter_info(&diag_service)
+            .await
+    }
+
+    async fn get_request_seed_response_data_size(
+        &self,
+        ecu_name: &str,
+        diag_service: &DiagComm,
+    ) -> Result<Option<usize>, DiagServiceError> {
+        let ecu_diag_service = self.uds_ecu_variant_detection_concluded(ecu_name).await?;
+        ecu_diag_service
+            .read()
+            .await
+            .get_request_seed_response_data_size(diag_service)
+            .await
     }
 }

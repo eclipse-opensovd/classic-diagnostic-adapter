@@ -17,7 +17,8 @@ use async_trait::async_trait;
 
 use crate::{
     DiagComm, DiagServiceError, DoipComParams, DynamicPlugin, EcuAddresses, EcuState,
-    EcuStateManager, HashMap, SecurityAccess, TesterPresentType, UdsComParams, VariantState,
+    EcuStateManager, HashMap, SecurityAccess, SendKeyParameterInfo, TesterPresentType,
+    UdsComParams, VariantState,
     authentication::{AuthenticationState, AuthenticationSubFunction},
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
@@ -180,14 +181,22 @@ pub trait UdsSecurity: UdsTransport {
         ecu_name: &str,
     ) -> Result<ResetOutcome, DiagServiceError>;
 
-    /// Get the name of the parameter used to send the key for the given ECU and security level.
+    /// Get the `SendKey` DATA parameter name and fixed byte size for the ECU and security level.
     /// # Errors
-    /// Returns an error if the ECU or security level is not found.
-    async fn get_send_key_param_name(
+    /// Returns an error if the ECU, security level, or DATA parameter cannot be resolved.
+    async fn get_send_key_parameter_info(
         &self,
         ecu_name: &str,
         level: &str,
-    ) -> Result<String, DiagServiceError>;
+    ) -> Result<SendKeyParameterInfo, DiagServiceError>;
+
+    /// Returns the fixed raw positive-response data length from the `RequestSeed` service definition.
+    /// Returns `Ok(None)` when the response definition does not provide a fixed length.
+    async fn get_request_seed_response_data_size(
+        &self,
+        ecu_name: &str,
+        diag_service: &DiagComm,
+    ) -> Result<Option<usize>, DiagServiceError>;
 }
 
 /// UDS Authentication (SID 0x29) interface.
@@ -747,9 +756,9 @@ pub mod mock {
     use super::{FlashTransferStartParams, ResetOutcome};
     use crate::{
         Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuState, HashMap, SecurityAccess,
-        TesterPresentType, UdsAuthentication, UdsDataTransfer, UdsDtc, UdsEcu, UdsFunctionalGroup,
-        UdsQuery, UdsSecurity, UdsSession, UdsTesterPresent, UdsTransport, UdsVariant,
-        VariantState,
+        SendKeyParameterInfo, TesterPresentType, UdsAuthentication, UdsDataTransfer, UdsDtc,
+        UdsEcu, UdsFunctionalGroup, UdsQuery, UdsSecurity, UdsSession, UdsTesterPresent,
+        UdsTransport, UdsVariant, VariantState,
         authentication::{AuthenticationState, AuthenticationSubFunction},
         datatypes::{
             ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
@@ -844,11 +853,16 @@ pub mod mock {
                 security_plugin: &DynamicPlugin,
                 expiration: Option<Duration>,
             ) -> Result<(SecurityAccess, <MockUdsEcu as UdsTransport>::Response), DiagServiceError>;
-            async fn get_send_key_param_name(
+            async fn get_send_key_parameter_info(
                 &self,
                 ecu_name: &str,
                 level: &str,
-            ) -> Result<String, DiagServiceError>;
+            ) -> Result<SendKeyParameterInfo, DiagServiceError>;
+            async fn get_request_seed_response_data_size(
+                &self,
+                ecu_name: &str,
+                diag_service: &DiagComm,
+            ) -> Result<Option<usize>, DiagServiceError>;
         }
 
         #[async_trait]

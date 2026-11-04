@@ -709,10 +709,17 @@ impl EcuSecurity for TestEcuDb {
         unimplemented!()
     }
 
-    async fn get_send_key_param_name(
+    async fn get_send_key_parameter_info(
         &self,
         _diag_service: &DiagComm,
-    ) -> Result<String, DiagServiceError> {
+    ) -> Result<cda_interfaces::SendKeyParameterInfo, DiagServiceError> {
+        unimplemented!()
+    }
+
+    async fn get_request_seed_response_data_size(
+        &self,
+        _diag_service: &DiagComm,
+    ) -> Result<Option<usize>, DiagServiceError> {
         unimplemented!()
     }
 
