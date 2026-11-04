@@ -2782,6 +2782,10 @@ pub(crate) fn create_ecu_manager_with_security_access_services() -> (
     let protocol_name = Protocol::default().to_string();
     let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
     let cp_ref = db_builder.create_com_param_ref(None, None, None, Some(protocol), None);
+    let key_diag_type = db_builder.create_diag_coded_type_standard_length(8, DataType::ByteField);
+    let key_compu_method =
+        db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
+    let key_dop = db_builder.create_regular_normal_dop("key_dop", key_diag_type, key_compu_method);
 
     let sid = service_ids::SECURITY_ACCESS;
 
@@ -2829,6 +2833,24 @@ pub(crate) fn create_ecu_manager_with_security_access_services() -> (
         Some(vec![request_seed_12_sid, request_seed_12_sub_func]),
         None,
     );
+    let request_seed_12_response = {
+        let response_sid = db_builder.create_coded_const_param(
+            "pos_sid",
+            &(sid + cda_interfaces::UDS_ID_RESPONSE_BITMASK).to_string(),
+            0,
+            0,
+            8,
+            DataType::UInt32,
+        );
+        let response_sub_func =
+            db_builder.create_coded_const_param("sub_func", "18", 1, 0, 8, DataType::UInt32);
+        let seed = db_builder.create_value_param_with_semantic("seed", "DATA", key_dop, 2);
+        db_builder.create_response(
+            ResponseType::Positive,
+            Some(vec![response_sid, response_sub_func, seed]),
+            None,
+        )
+    };
     let request_seed_12_diag_comm = db_builder.create_diag_comm(DiagCommParams {
         short_name: request_seed_12_name,
         protocols: Some(vec![protocol]),
@@ -2838,7 +2860,7 @@ pub(crate) fn create_ecu_manager_with_security_access_services() -> (
         db_builder,
         request_seed_12_diag_comm,
         request_seed_12_request,
-        vec![],
+        vec![request_seed_12_response],
         vec![]
     );
 
@@ -2880,8 +2902,7 @@ pub(crate) fn create_ecu_manager_with_security_access_services() -> (
     );
     let send_key_01_sub_func =
         db_builder.create_coded_const_param("sub_func", "2", 1, 0, 8, DataType::UInt32);
-    let send_key_01_key =
-        db_builder.create_coded_const_param("key", "0", 2, 0, 8, DataType::UInt32);
+    let send_key_01_key = db_builder.create_value_param_with_semantic("key", "DATA", key_dop, 2);
     let send_key_01_request = db_builder.create_request(
         Some(vec![send_key_01_sid, send_key_01_sub_func, send_key_01_key]),
         None,
