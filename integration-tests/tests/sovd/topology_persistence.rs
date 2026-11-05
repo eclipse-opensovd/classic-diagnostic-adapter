@@ -13,7 +13,7 @@
 
 //! ECU list persistence: storing and reusing the vehicle topology.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cda_interfaces::{
     communication_control::{CommunicationInitMode, CommunicationSettings},
@@ -30,7 +30,6 @@ use crate::{
         ecusim,
         http::{CdaClient, poll_until, send_authenticated_cda_request},
         locks::{COMPONENTS_FLXC1000_LOCKS, Lock, default_timeout},
-        test_containers::unix_time_secs,
         test_env::{Lease, TestEnv, Transport, skip_unless, wait_for_ecus_online},
     },
 };
@@ -563,17 +562,38 @@ async fn env_with_persisted_gateways() -> Lease {
 }
 
 /// Restarts the CDA of `env` with `init_mode = OnDemand` and returns the Unix
-/// time from which its logs show only the restarted CDA.
+/// time from which its logs include the restarted CDA.
 async fn restart_on_demand(env: &mut Lease) -> i32 {
     let mut on_demand = env.config.clone();
     on_demand.communication = persistence_settings(CommunicationInitMode::OnDemand);
-    // The logs have a resolution of seconds, and the previous CDA may have
-    // logged within the current one.
-    let logs_since = unix_time_secs().saturating_add(1);
+    // Docker timestamps use the container host's clock, not the test host's.
+    // Include the current second so even an immediate restart is captured.
+    let logs_since = env
+        .exec_in_cda_container("date +%s")
+        .await
+        .expect("Failed to read the container clock")
+        .trim()
+        .parse::<i32>()
+        .expect("Invalid container clock");
     env.restart_cda_with(&on_demand)
         .await
         .expect("Failed to restart CDA");
     logs_since
+}
+
+/// Discards any previous run included in the second-resolution log window.
+/// `None` while Docker has not delivered the startup line of the restarted
+/// CDA yet, so callers poll again.
+fn latest_cda_run(logs: &str) -> Option<&str> {
+    logs.rsplit_once("Starting CDA - version ")
+        .map(|(_, latest)| latest)
+}
+
+#[test]
+fn latest_cda_run_excludes_previous_run() {
+    let logs = "Starting CDA - version old\nBroadcasting VIR\nStarting CDA - version new\nready";
+    assert_eq!(latest_cda_run(logs), Some("new\nready"));
+    assert_eq!(latest_cda_run("Broadcasting VIR"), None);
 }
 
 /// Whether `logs` report the connect of the gateway of the ECU `ecu_name`.
@@ -581,6 +601,40 @@ fn logged_ecu_connect(logs: &str, ecu_name: &str) -> bool {
     let name = format!("\"{ecu_name}\"");
     logs.lines()
         .any(|line| line.contains("ECU connected") && line.contains(&name))
+}
+
+/// Polls the logs of the latest CDA run since `logs_since` for `window`, checks
+/// them with `check` at every poll and returns the latest run's logs of the
+/// last poll. Polls until the startup of the latest run is in the logs.
+/// An absence assertion needs such an observation window: background work and
+/// log delivery can lag behind what is observed.
+async fn observe_cda_logs(
+    env: &TestEnv,
+    logs_since: i32,
+    window: Duration,
+    check: impl Fn(&str),
+) -> String {
+    let check = &check;
+    let observation = Instant::now();
+    poll_until(
+        // Well beyond the window, so slow log reads cannot fail the observation.
+        window.saturating_add(Duration::from_secs(8)),
+        Duration::from_millis(100),
+        || async move {
+            let logs = env.cda_logs_since(logs_since).await?;
+            let Some(latest) = latest_cda_run(&logs) else {
+                return Ok(Err("waiting for the CDA startup in the logs".to_owned()));
+            };
+            check(latest);
+            Ok(if observation.elapsed() >= window {
+                Ok(latest.to_owned())
+            } else {
+                Err("observing the logs".to_owned())
+            })
+        },
+    )
+    .await
+    .expect("Failed to observe logs")
 }
 
 /// `OnDemand` with a persisted topology: nothing is connected before the first
@@ -595,14 +649,13 @@ async fn on_demand_first_request_connects_all_gateways() {
     let mut env = Box::pin(env_with_persisted_gateways()).await;
     let logs_since = restart_on_demand(&mut env).await;
 
-    let logs = env
-        .cda_logs_since(logs_since)
-        .await
-        .expect("Failed to read logs");
-    assert!(
-        !logs.contains("Connected to gateway"),
-        "no gateway may connect before the first request: {logs}"
-    );
+    observe_cda_logs(&env, logs_since, Duration::from_secs(2), |logs| {
+        assert!(
+            !logs.contains("Connected to gateway"),
+            "no gateway may connect before the first request: {logs}"
+        );
+    })
+    .await;
 
     get_until_ok(
         &env,
@@ -618,16 +671,19 @@ async fn on_demand_first_request_connects_all_gateways() {
                 .cda_logs_since(logs_since)
                 .await
                 .expect("Failed to read logs");
-            logged_ecu_connect(&logs, "flxc1000") && logged_ecu_connect(&logs, "fsnr2000")
+            latest_cda_run(&logs).is_some_and(|logs| {
+                logged_ecu_connect(logs, "flxc1000") && logged_ecu_connect(logs, "fsnr2000")
+            })
         },
     )
     .await;
+    // Logs only grow, so the startup found above is still in them.
     let logs = env
         .cda_logs_since(logs_since)
         .await
         .expect("Failed to read logs");
     assert!(
-        !logs.contains("Broadcasting VIR"),
+        latest_cda_run(&logs).is_some_and(|logs| !logs.contains("Broadcasting VIR")),
         "all gateways are reachable at their persisted address: {logs}"
     );
 }
@@ -658,21 +714,24 @@ async fn on_demand_first_request_sends_one_vir() {
     .await;
     assert_persisted_offline(&env, "FSNR2000", "FSNR2000_App_0101").await;
 
-    let result = send_authenticated_cda_request(
+    // The stopped gateway's ECU was never detected in this run, so the CDA
+    // reports it not ready (503) instead of sending the request.
+    send_authenticated_cda_request(
         &env,
         &format!("{COMPONENTS_FSNR2000_BASE}/data/vindataidentifier"),
-        StatusCode::OK,
+        StatusCode::SERVICE_UNAVAILABLE,
         Method::GET,
         None,
         None,
     )
-    .await;
-    assert!(result.is_err(), "the stopped gateway's ECU must not answer");
+    .await
+    .expect("The stopped gateway's ECU must not answer");
 
-    let logs = env
-        .cda_logs_since(logs_since)
-        .await
-        .expect("Failed to read logs");
+    let logs = observe_cda_logs(&env, logs_since, Duration::from_secs(2), |logs| {
+        let count = logs.matches("Broadcasting VIR").count();
+        assert!(count <= 1, "more than one VIR per transport start: {logs}");
+    })
+    .await;
     assert_eq!(
         logs.matches("Broadcasting VIR").count(),
         1,
