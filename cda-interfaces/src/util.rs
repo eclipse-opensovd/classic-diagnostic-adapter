@@ -91,6 +91,9 @@ pub mod tokio_ext {
     }
 }
 
+#[cfg(feature = "test-utils")]
+pub mod test_utils;
+
 pub mod dlt_ext {
     #[macro_export]
     #[cfg(feature = "dlt-tracing")]

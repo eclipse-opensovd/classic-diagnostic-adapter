@@ -23,10 +23,10 @@ use std::{
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    ComponentInfos, Connectivity, DiagComm, DiagCommLookup, DiagCommType, DiagServiceError,
-    DoipComParams, Dtc, DynamicPlugin, EcuAddresses, EcuRuntimeState, EcuSchemas, EcuSecurity,
-    EcuState, EcuStateManager, FunctionalTransport, HashMap, HashMapExtensions, HashSet,
-    MuxCaseInfo, NetworkTopology, PayloadDecoder, PayloadEncoder, PhysicalTransport, Protocol,
+    ComponentInfos, Connectivity, DiagComm, DiagCommLookup, DiagCommType, DiagServiceError, Dtc,
+    DynamicPlugin, EcuAddresses, EcuRuntimeState, EcuSchemas, EcuSecurity, EcuState,
+    EcuStateManager, FunctionalTransport, HashMap, HashMapExtensions, HashSet, MuxCaseInfo,
+    NetworkTopology, PayloadDecoder, PayloadEncoder, PhysicalTransport, Protocol,
     ResponseParameterInfo, SchemaDescription, SecurityAccess, ServiceParameterMetadata,
     ServicePayload, TransmissionParameters, TransportResponse, UDS_ID_RESPONSE_BITMASK,
     UdsComParams, VariantDetection, VariantState,
@@ -384,33 +384,7 @@ impl EcuAddresses for TestEcuDb {
     }
 }
 
-impl DoipComParams for TestEcuDb {
-    fn nack_number_of_retries(&self) -> &HashMap<u8, u32> {
-        static EMPTY: std::sync::OnceLock<HashMap<u8, u32>> = std::sync::OnceLock::new();
-        EMPTY.get_or_init(HashMap::new)
-    }
-    fn diagnostic_ack_timeout(&self) -> Duration {
-        Duration::from_secs(2)
-    }
-    fn retry_period(&self) -> Duration {
-        Duration::from_millis(100)
-    }
-    fn routing_activation_timeout(&self) -> Duration {
-        Duration::from_secs(5)
-    }
-    fn repeat_request_count_transmission(&self) -> u32 {
-        3
-    }
-    fn connection_timeout(&self) -> Duration {
-        Duration::from_secs(5)
-    }
-    fn connection_retry_delay(&self) -> Duration {
-        Duration::from_secs(1)
-    }
-    fn connection_retry_attempts(&self) -> u32 {
-        3
-    }
-}
+cda_interfaces::impl_test_doip_com_params!(TestEcuDb);
 
 impl UdsComParams for TestEcuDb {
     fn tester_present_retry_policy(&self) -> bool {

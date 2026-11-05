@@ -972,7 +972,7 @@ mod tests {
     /// answer but reported as a reply of the ECU; the answer is not reported.
     #[tokio::test]
     async fn frame_with_other_sid_is_dropped_and_reported_as_reply() {
-        let handler = crate::test_helpers::RecordingConnectivityHandler::default();
+        let handler = cda_interfaces::util::test_utils::RecordingConnectivityHandler::default();
 
         assert!(!check_answer_or_report(&handler, "ecu1", 0x22, &[0x7F, 0x3E, 0x12]).await);
         assert!(check_answer_or_report(&handler, "ecu1", 0x22, &[0x62, 0xF1, 0x90]).await);
