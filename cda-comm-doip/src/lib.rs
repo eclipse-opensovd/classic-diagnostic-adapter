@@ -1762,6 +1762,7 @@ mod tests {
         VariantDetectionSender,
         communication_control::{DoipEndpoint, GatewayLifecycle, TransportControl, TransportState},
         nrc, service_ids,
+        util::test_utils::RecordingConnectivityHandler,
     };
     use doip_definitions::{
         header::ProtocolVersion,
@@ -1775,7 +1776,7 @@ mod tests {
         DoipDiagGateway, DoipEcu, DoipGatewayState,
         config::DiscoveryMode,
         read_ecu_responses, spawn_connection_task,
-        test_helpers::{RecordingConnectivityHandler, TestEcu, activity_reporter, no_activity},
+        test_helpers::{TestEcu, activity_reporter, no_activity},
         wait_for_ack_or_response_until_timeout,
     };
 

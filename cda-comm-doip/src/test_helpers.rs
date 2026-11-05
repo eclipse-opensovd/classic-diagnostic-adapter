@@ -10,43 +10,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{
-    sync::{Arc, OnceLock},
-    time::Duration,
-};
+use std::sync::Arc;
 
 use cda_interfaces::{
-    DoipComParams, EcuAddresses, EcuConnectivityHandler, HashMap, HashMapExtensions,
+    EcuAddresses, EcuConnectivityHandler, HashMap, HashMapExtensions,
+    util::test_utils::RecordingConnectivityHandler,
 };
 
 use crate::EcuActivityReporter;
-
-/// Connectivity handler that records the ECUs reported as replied.
-#[derive(Default)]
-pub(crate) struct RecordingConnectivityHandler {
-    replied: std::sync::Mutex<Vec<String>>,
-}
-
-impl RecordingConnectivityHandler {
-    /// The ECU names reported through `on_ecu_replied`, in order.
-    pub(crate) fn replied(&self) -> Vec<String> {
-        self.replied.lock().expect("lock replied").clone()
-    }
-}
-
-#[async_trait::async_trait]
-impl EcuConnectivityHandler for RecordingConnectivityHandler {
-    async fn on_gateway_connected(&self, _ecu_names: &[String]) {}
-
-    async fn on_gateway_disconnected(&self, _ecu_names: &[String]) {}
-
-    async fn on_ecu_replied(&self, ecu_name: &str) {
-        self.replied
-            .lock()
-            .expect("lock replied")
-            .push(ecu_name.to_owned());
-    }
-}
 
 /// A reply reporter that knows no ECU.
 pub(crate) fn no_activity() -> EcuActivityReporter {
@@ -119,40 +90,7 @@ impl EcuAddresses for TestEcu {
     }
 }
 
-impl DoipComParams for TestEcu {
-    fn nack_number_of_retries(&self) -> &HashMap<u8, u32> {
-        static EMPTY: OnceLock<HashMap<u8, u32>> = OnceLock::new();
-        EMPTY.get_or_init(HashMap::new)
-    }
-
-    fn diagnostic_ack_timeout(&self) -> Duration {
-        Duration::from_secs(2)
-    }
-
-    fn retry_period(&self) -> Duration {
-        Duration::from_millis(100)
-    }
-
-    fn routing_activation_timeout(&self) -> Duration {
-        Duration::from_secs(5)
-    }
-
-    fn repeat_request_count_transmission(&self) -> u32 {
-        3
-    }
-
-    fn connection_timeout(&self) -> Duration {
-        Duration::from_secs(5)
-    }
-
-    fn connection_retry_delay(&self) -> Duration {
-        Duration::from_secs(1)
-    }
-
-    fn connection_retry_attempts(&self) -> u32 {
-        3
-    }
-}
+cda_interfaces::impl_test_doip_com_params!(TestEcu);
 
 #[cfg(test)]
 mod tests {

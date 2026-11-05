@@ -330,11 +330,11 @@ struct GatewayIdentity {
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::HashMapExtensions;
+    use cda_interfaces::{HashMapExtensions, util::test_utils::RecordingConnectivityHandler};
     use tokio::sync::broadcast;
 
     use super::*;
-    use crate::test_helpers::{RecordingConnectivityHandler, activity_reporter, no_activity};
+    use crate::test_helpers::{activity_reporter, no_activity};
 
     type EcuResponse = Result<DiagnosticResponse, EcuError>;
     type OutTxMap = HashMap<u16, broadcast::Sender<EcuResponse>>;
