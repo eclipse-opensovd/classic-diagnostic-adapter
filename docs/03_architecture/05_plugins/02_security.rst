@@ -38,6 +38,31 @@ authentication, authorization, and access control.
     once for the whole CDA instance.
 
 
+.. arch:: Security Plugin - Default Implementation
+    :id: arch~plugin-security-default-implementation
+    :links: arch~plugin-security-core-traits
+    :status: draft
+
+    The default security plugin exists for development and test. Production deployments replace
+    it with a vendor implementation. It has two modes, selected at startup:
+
+    - Built-in tokens: without a JWKS, the plugin issues its own tokens on the authorization
+      endpoint. Their signature is only verified if the ``auth`` feature is enabled.
+    - Externally issued tokens: with a JWKS file set in ``CDA_AUTH_JWKS_FILE``, the plugin
+      verifies the signature of every token against the public keys of that file, in every build.
+      The issuer in ``CDA_AUTH_ISSUER`` is mandatory, and accepted audiences can be restricted
+      with the comma-separated ``CDA_AUTH_AUDIENCE``. The authorization endpoint refuses
+      requests, because the plugin would not accept tokens issued by itself.
+
+    A token selects its key by ``kid``. The algorithm comes from the JWKS entry, never from the
+    token. Every key needs a ``kid`` and an ``alg``, and symmetric keys are refused. The settings
+    are environment variables because the plugin is created per request, without access to the
+    CDA configuration.
+
+    An invalid JWKS configuration stops the CDA at startup through the plugin loader's
+    configuration check. The JWKS is read once, so a restart picks up a new file.
+
+
 Plugin Lifecycle
 -----------------
 
