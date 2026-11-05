@@ -24,7 +24,7 @@ use crate::{
             send_cda_request,
         },
         locks::{COMPONENTS_FLXC1000_LOCKS as ECU_LOCK_ENDPOINT, create_lock, lock_operation},
-        test_env::{TestEnv, wait_for_ecus_online},
+        test_env::{TestEnv, wait_for_ecu_offline, wait_for_ecus_online},
     },
 };
 
@@ -236,7 +236,9 @@ async fn tester_present_sent_after_doip_reconnection() -> Result<(), TestingErro
     );
 
     // Wait until the hard-reset ECU has reconnected and is online before recording
-    // Tester Present traffic.
+    // Tester Present traffic. The disconnect comes first: right after the reset
+    // request the ECU may still be reported online.
+    wait_for_ecu_offline(&test_env.config, "FLXC1000").await?;
     wait_for_ecus_online(&test_env.config).await?;
 
     // Start recording AFTER reconnection to verify TP resumes
