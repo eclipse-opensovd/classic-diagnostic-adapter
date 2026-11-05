@@ -68,6 +68,26 @@ curl -s -X PUT -H "Content-Type: application/json" -H "Authorization: Bearer $AC
 
 ```
 
+## Verifying externally issued tokens
+
+By default the CDA issues its own tokens and does not verify their signature. To verify tokens
+from an external issuer instead, such as the dev issuer of the OpenSOVD gateway, set these before
+`docker compose up`:
+
+```sh
+# Host directory with the JWKS file, mounted to /app/auth
+export CDA_AUTH_JWKS_DIR=/path/to/keys
+export CDA_AUTH_JWKS_FILE=/app/auth/dev-issuer-jwks.json
+# Must match the `iss` of the tokens, required with a JWKS file
+export CDA_AUTH_ISSUER=dev-stack
+# Optional, comma-separated. Unset accepts any `aud`
+export CDA_AUTH_AUDIENCE=cda
+```
+
+The CDA then verifies every token against the JWKS and answers `/authorize` with 403. An invalid
+JWKS stops the CDA at startup. Every key needs a `kid` and an `alg`, and symmetric keys are
+refused. This is meant for development and test, production uses a vendor security plugin.
+
 ## Managing MDD files
 
 The repository contains MDDs file which have been generated via `odxtools` and the python scripts located in `testcontainer/odx/`.
