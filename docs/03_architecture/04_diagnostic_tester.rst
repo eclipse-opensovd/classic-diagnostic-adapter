@@ -73,17 +73,16 @@ Startup Sequence
        - Parallel MDD file loading proceeds as normal
        - DoIP gateway creation, UDS manager creation, and variant detection are **not** performed
          during startup. Instead, these steps are postponed until a trigger event occurs: in
-         **OnDemand** mode, either a whole-vehicle plugin-API activation, or a first diagnostic request to
-         a specific ECU (scoped to just that ECU's gateway when a persisted topology exists, or triggering
-         a full broadcast otherwise); in **Disabled** mode, only an explicitly initiated detection run --
+         **OnDemand** mode, either a plugin-API activation or a first diagnostic request, both of which
+         start all gateways; in **Disabled** mode, only an explicitly initiated detection run --
          typically via ``networkreset``, but potentially via a plugin or other custom code -- applies
 
     6. **Route Registration Phase**: Register SOVD API routes, version endpoints, and
        OpenAPI documentation routes on the dynamic router. In on-demand/disabled mode, ECU-specific
-       routes are registered with handlers that trigger initialization on first access (single-ECU scope,
-       **OnDemand** only) or return a pending status until a detection run is explicitly initiated
-       (whole-vehicle scope: plugin API in **OnDemand**, or the equivalent explicit trigger in
-       **Disabled** mode).
+       routes are registered with handlers that trigger initialization on first access (**OnDemand**
+       only) or return a pending status until a detection run is explicitly initiated (plugin API in
+       **OnDemand**, or the equivalent explicit trigger in **Disabled** mode). Every trigger initializes
+       the whole vehicle.
 
     7. **Ready Phase**: When the health feature is enabled, update the main health status to
        "Up" indicating the CDA's HTTP API is operational. In deferred/disabled mode, the DoIP health
@@ -386,7 +385,7 @@ Communication Initialization Mode
 
 .. arch:: Communication Initialization Mode
     :id: arch~dt-deferred-initialization
-    :links: test~ecu-topology-reconnect-search, test~doip-aborted-discovery-finishes, dimpl~doip-persisted-reconnect, dimpl~doip-reconnect-discovery-mode, test~doip-vam-only-reconnect-without-search, dimpl~doip-failed-announcement-connect-reported, test~doip-failed-announcement-connect-reported, test~doip-unreachable-reported-after-state-change, dimpl~ecu-topology-restore, dimpl~ecu-state-restore, test~doip-plan-reconnect, dimpl~communication-control-contracts, dimpl~communication-control-access, dimpl~communication-control-operations, dimpl~communication-lifecycle-controller, dimpl~default-communication-policy, dimpl~deferred-communication-startup, dimpl~deferred-sovd-admission, dimpl~deferred-doip-transport, test~deferred-communication-config, test~deferred-startup-policy, test~deferred-admitting-modes-activate, test~deferred-disabled-rejects-activation, test~deferred-request-activation-policy, test~deferred-activation-retry, test~deferred-sovd-admission, test~deferred-doip-passive-construction, itest~deferred-on-demand-pending, itest~deferred-on-demand-uds-silence, itest~deferred-disabled-uds-silence, test~doip-reconnect-plan-reconnect-rejects-renamed-gateway, test~ecu-state-restore-without-assume-online-only-last-seen-is-restored, test~ecu-state-restore-variant-missing-from-the-database-is-detected-again, test~ecu-state-restore-address-mismatch-restores-nothing, test~ecu-state-restore-can-pinned-ecu-is-not-assumed-online, test~ecu-state-restore-inconsistent-duplicate-group-is-detected-again, test~doip-vam-during-reconnect-does-not-connect-twice, dimpl~doip-vam-during-connect-connects-after-failure, test~doip-vam-during-connect-connects-after-failure, dimpl~doip-discovery-connect-waits-for-direct-connect, test~doip-discovery-connect-waits-for-direct-connect, dimpl~doip-cancelled-connect-reverts-ecu-states, test~doip-cancelled-connect-reverts-ecu-states, test~doip-vam-only-reconnect-reports-unusable, test~ecu-state-restore-independent-of-discovery-mode
+    :links: itest~deferred-on-demand-all-gateways, itest~deferred-on-demand-one-vir, test~ecu-topology-reconnect-search, test~doip-aborted-discovery-finishes, dimpl~doip-persisted-reconnect, dimpl~doip-reconnect-discovery-mode, test~doip-vam-only-reconnect-without-search, dimpl~doip-failed-announcement-connect-reported, test~doip-failed-announcement-connect-reported, test~doip-unreachable-reported-after-state-change, dimpl~ecu-topology-restore, dimpl~ecu-state-restore, test~doip-plan-reconnect, dimpl~communication-control-contracts, dimpl~communication-control-access, dimpl~communication-control-operations, dimpl~communication-lifecycle-controller, dimpl~default-communication-policy, dimpl~deferred-communication-startup, dimpl~deferred-sovd-admission, dimpl~deferred-doip-transport, test~deferred-communication-config, test~deferred-startup-policy, test~deferred-admitting-modes-activate, test~deferred-disabled-rejects-activation, test~deferred-request-activation-policy, test~deferred-activation-retry, test~deferred-sovd-admission, test~deferred-doip-passive-construction, itest~deferred-on-demand-pending, itest~deferred-on-demand-uds-silence, itest~deferred-disabled-uds-silence, test~doip-reconnect-plan-reconnect-rejects-renamed-gateway, test~ecu-state-restore-without-assume-online-only-last-seen-is-restored, test~ecu-state-restore-variant-missing-from-the-database-is-detected-again, test~ecu-state-restore-address-mismatch-restores-nothing, test~ecu-state-restore-can-pinned-ecu-is-not-assumed-online, test~ecu-state-restore-inconsistent-duplicate-group-is-detected-again, test~doip-vam-during-reconnect-does-not-connect-twice, dimpl~doip-vam-during-connect-connects-after-failure, test~doip-vam-during-connect-connects-after-failure, dimpl~doip-discovery-connect-waits-for-direct-connect, test~doip-discovery-connect-waits-for-direct-connect, dimpl~doip-cancelled-connect-reverts-ecu-states, test~doip-cancelled-connect-reverts-ecu-states, test~doip-vam-only-reconnect-reports-unusable, test~ecu-state-restore-independent-of-discovery-mode
     :status: draft
 
     The CDA supports a configurable ``[communication] init_mode`` to enable scenarios where
@@ -427,25 +426,23 @@ Communication Initialization Mode
       full VIR/VAM broadcast discovery is only performed when no persisted topology is available (e.g. on
       the first-ever startup, or any time after the persisted topology has been cleared). Whenever a
       persisted topology exists, the CDA instead attempts a direct (unicast) DoIP connection to each
-      persisted gateway's known network address, skipping the broadcast VIR step; if a gateway cannot be
-      reached at its persisted address, the CDA falls back to broadcast-based discovery for that specific
-      gateway, as described in :need:`arch~doip-vehicle-identification`, before marking its ECUs as Offline.
+      persisted gateway's known network address, skipping the broadcast VIR step; for the gateways that
+      cannot be reached at their persisted address or have no usable persisted address, the CDA falls back
+      to one broadcast-based discovery, as described in :need:`arch~doip-vehicle-identification`, before
+      marking the ECUs of gateways still not found as Offline. This is one VIR for all of these gateways,
+      not one per gateway, since a VIR is a broadcast that every gateway answers.
       Requires ECU list persistence to be enabled; behaves identically to **Always** if persistence is
       disabled, since no persisted topology can ever exist in that configuration.
     - **OnDemand**: DoIP gateway creation and ECU discovery are postponed until one of the following
-      triggers, which intentionally differ in scope:
+      triggers. They differ only in what causes them; both trigger a full initialization of all
+      gateways/ECUs at once, applying the same persisted-vs-broadcast behavior as **WhenNotPersisted**
+      described above:
 
-      - **Plugin API** (whole-vehicle scope): a custom plugin calls the initialization API based on
-        application-specific conditions (e.g., security unlock, session establishment). This triggers a
-        full initialization of all gateways/ECUs at once, applying the same persisted-vs-broadcast
-        behavior as **WhenNotPersisted** described above.
-      - **On-demand** (single-ECU scope): the first diagnostic request to a specific ECU endpoint triggers
-        initialization. If a persisted topology exists, this establishes a connection only to that ECU's
-        gateway (direct reconnect, with broadcast fallback for that gateway alone, as in
-        **WhenNotPersisted**); other persisted gateways remain unconnected until their own first request.
-        If no persisted topology exists, no gateway network address is yet known, so this necessarily
-        triggers a full, vehicle-wide VIR broadcast, discovering and connecting all gateways at once,
-        since VIR-based discovery is inherently broadcast-based and cannot be scoped to a single ECU.
+      - **Plugin API**: a custom plugin calls the initialization API based on application-specific
+        conditions (e.g., security unlock, session establishment).
+      - **On-demand**: the first diagnostic request to any ECU endpoint.
+
+      Until one of these triggers occurs, no gateway is connected and no VIR is sent.
 
     - **Disabled**: DoIP gateway creation and ECU discovery are postponed exactly as in **OnDemand** mode,
       except that only an explicitly initiated detection run applies -- typically via the ``networkreset``
@@ -454,12 +451,12 @@ Communication Initialization Mode
       equally initiate it directly; the on-demand (first-request) and plugin-API triggers are not
       recognized in this mode. No socket is opened and no VIR is broadcast until that detection run is
       explicitly initiated. Once triggered, this always initializes all gateways/ECUs at once (there is no
-      per-ECU auto-trigger in this mode), applying the same persisted-vs-broadcast behavior as
+      first-request trigger in this mode), applying the same persisted-vs-broadcast behavior as
       **WhenNotPersisted**.
 
-    **OnDemand** and **Disabled** always behave like **WhenNotPersisted** once triggered (at whichever
-    scope applies), rather than offering their own **Always**/**WhenNotPersisted** choice, since these
-    modes exist specifically to minimize vehicle network traffic until explicitly authorized.
+    **OnDemand** and **Disabled** always behave like **WhenNotPersisted** once triggered, rather than
+    offering their own **Always**/**WhenNotPersisted** choice, since these modes exist specifically to
+    minimize vehicle network traffic until explicitly authorized.
 
     .. uml::
         :caption: Communication Initialization Mode State Flow
@@ -587,12 +584,10 @@ Communication Initialization Mode
     **Initialization Sequence**
 
     Once triggered, initialization proceeds identically to the immediate initialization path (subject to
-    the **Always**/**WhenNotPersisted** distinction described above, and, for **OnDemand**, scoped to a
-    single gateway or all gateways depending on which trigger fired): DoIP gateway creation (broadcast
-    discovery or direct reconnect), TCP connection establishment, UDS manager creation, and variant
-    detection. Upon completion, SOVD routes are registered and, when health monitoring is enabled, health
-    status transitions to "Up" (for **OnDemand**'s single-ECU trigger, this refers to the routes/health of
-    the affected gateway only). The resulting topology is persisted as described in
+    the **Always**/**WhenNotPersisted** distinction described above) for all gateways: DoIP gateway
+    creation (broadcast discovery or direct reconnect), TCP connection establishment, UDS manager creation,
+    and variant detection. Upon completion, SOVD routes are registered and, when health monitoring is
+    enabled, health status transitions to "Up". The resulting topology is persisted as described in
     :need:`arch~dt-ecu-list-persistence`, so that subsequent startups can reuse it (unless ``init_mode`` is
     ``Always``).
 
