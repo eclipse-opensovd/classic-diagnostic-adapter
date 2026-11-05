@@ -62,7 +62,10 @@ use crate::util::{
     },
     ecusim::{self, EcuSim, Recorder},
     endpoints::APPS_SOVD2UDS_DATA_NETWORKSTRUCTURE,
-    http::{auth_header, poll_until, response_to_t, send_cda_request, server_url, vehicle_url},
+    http::{
+        auth_header, poll_until, response_to_t, send_authenticated_cda_request, send_cda_request,
+        server_url, vehicle_url,
+    },
     test_containers::{
         ContainerOwner, ECU_SIM_STARTUP_TIMEOUT, PORT_CONFLICT_ATTEMPTS, PUBLISH_HOST, Service,
         SocketCanEndpoint, cda_container_for, container_logs_since, current_test_name,
@@ -463,6 +466,35 @@ impl TestEnv {
         ecusim::disconnect(&self.ecu_sim).await
     }
 
+    /// Stops the gateway at `ip` like [`Self::stop_gateway`] and waits until
+    /// the CDA reports `ecu_name` offline.
+    ///
+    /// The gateway is gone without a FIN reaching the CDA, so only a send
+    /// tells: a variant detection on `component`, the SOVD component of
+    /// `ecu_name`, times out (504) and lets the CDA notice the lost gateway.
+    ///
+    /// # Errors
+    /// Returns an error if the gateway cannot be stopped, the request does not
+    /// time out, or the ECU is not reported offline in time.
+    pub(crate) async fn stop_gateway_until_offline(
+        &mut self,
+        ip: &str,
+        ecu_name: &str,
+        component: &str,
+    ) -> Result<(), TestingError> {
+        self.stop_gateway(ip).await?;
+        send_authenticated_cda_request(
+            &*self,
+            component,
+            StatusCode::GATEWAY_TIMEOUT,
+            Method::PUT,
+            None,
+            None,
+        )
+        .await?;
+        wait_for_ecu_offline(&self.config, ecu_name).await
+    }
+
     /// Makes an address stopped by [`Self::stop_gateway`] reachable again.
     ///
     /// # Errors
@@ -540,6 +572,22 @@ impl TestEnv {
     /// See [`ecusim::reset_sim`].
     pub(crate) async fn reset(&self) -> Result<(), TestingError> {
         ecusim::reset_sim(&self.ecu_sim).await
+    }
+
+    /// Configures a hard reset that takes the ECU's `DoIP` entity offline.
+    ///
+    /// The environment is discarded because an interrupted reset can leave
+    /// the simulator's listener unavailable even after its state is reset.
+    ///
+    /// # Errors
+    /// Returns an error if ecu-sim cannot be configured.
+    pub(crate) async fn set_hard_reset_duration(
+        &mut self,
+        ecu: &str,
+        seconds: i32,
+    ) -> Result<(), TestingError> {
+        self.dirty = true;
+        ecusim::set_hard_reset_duration(&self.ecu_sim, ecu, seconds).await
     }
 
     /// Creates an environment with socketcand (CAN and mixed only) and ecu-sim

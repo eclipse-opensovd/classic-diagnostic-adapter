@@ -603,6 +603,7 @@ Tester Present
 
 .. arch:: UDS Tester Present
     :id: arch~uds-tester-present
+    :links: testset~uds-tester-present-recovery
     :status: draft
 
     The CDA maintains active diagnostic sessions with ECUs by periodically sending UDS
