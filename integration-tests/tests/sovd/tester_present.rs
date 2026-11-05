@@ -20,11 +20,14 @@ use crate::{
     util::{
         TestingError, ecusim,
         http::{
-            extract_field_from_json, response_to_json, send_authenticated_cda_request,
+            extract_field_from_json, poll_until, response_to_json, send_authenticated_cda_request,
             send_cda_request,
         },
         locks::{COMPONENTS_FLXC1000_LOCKS as ECU_LOCK_ENDPOINT, create_lock, lock_operation},
-        test_env::{TestEnv, wait_for_ecus_online},
+        test_env::{
+            TestEnv, Transport, gateway_address, skip_unless, wait_for_ecu_offline,
+            wait_for_ecus_online,
+        },
     },
 };
 
@@ -34,6 +37,38 @@ const TESTER_PRESENT_FRAME: &str = "3e80";
 /// Tester Present frame: SID 0x3E with the suppressPositiveResponse bit cleared
 /// (0x00), i.e. a positive response is expected.
 const TESTER_PRESENT_FRAME_RESPOND: &str = "3e00";
+
+async fn wait_for_tester_present(recorder: ecusim::Recorder) -> Result<(), TestingError> {
+    let result = poll_until(
+        Duration::from_secs(10),
+        Duration::from_millis(200),
+        || async {
+            let frames = recorder.frames().await?;
+            Ok(
+                if frames
+                    .iter()
+                    .any(|frame| frame.eq_ignore_ascii_case(TESTER_PRESENT_FRAME))
+                {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "waiting for Tester Present; recorded frames: {frames:?}"
+                    ))
+                },
+            )
+        },
+    )
+    .await;
+    let stopped = recorder.stop().await;
+    match (result, stopped) {
+        (Err(error), Err(stop_error)) => {
+            eprintln!("Failed to stop ECU sim recording: {stop_error}");
+            Err(error)
+        }
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(()), stopped) => stopped.map(|_| ()),
+    }
+}
 
 /// Verifies that Tester Present frames (0x3E 0x80) are sent to the ECU while
 /// an ECU lock is held.
@@ -174,22 +209,34 @@ async fn tester_present_sent_after_programming_session_switch() -> Result<(), Te
     Ok(())
 }
 
-/// Verifies that Tester Present frames are sent after the ECU reconnects following
-/// a `DoIP` TCP connection drop while the lock is held.
+/// Verifies that Tester Present resumes after an ECU hard reset while the ECU
+/// lock is held.
 ///
-/// This reproduces a reconnection scenario where Tester Present could stop:
-/// 1. An ECU lock is acquired (starts Tester Present)
-/// 2. The `DoIP` TCP connection is forcefully closed (simulates ECU reboot / network glitch)
-/// 3. The ECU re-announces itself and the CDA reconnects
-/// 4. Tester Present should resume after reconnection
+/// 1. An ECU lock is acquired, which starts Tester Present.
+/// 2. A UDS `ECUReset` (0x11 0x01) reboots the ECU: ecu-sim takes its `DoIP`
+///    entity offline for 5 s, closing the connection and the listener.
+/// 3. The CDA reports the ECU offline, and online again once the rebooted
+///    ECU can be reached.
+/// 4. Tester Present is sent again for the held lock, without a further
+///    diagnostic request.
 ///
-/// In this scenario, Tester Present frames may be missing after the
-/// connection is re-established, which is the bug this test aims to reproduce.
+/// Known flake: ecu-sim is built on `doip-sim-ecu-dsl` 0.25.1 (see
+/// `testcontainer/ecu-sim/settings.gradle.kts`), which has a race in the
+/// listener shutdown on a hard reset that can leave the rebooted entity
+/// without a listener, so the ECU never comes back online. The fix is
+/// expected in a release after 0.25.1; until ecu-sim is bumped to it, a
+/// timeout waiting for the ECU to come back online after the reset is most
+/// likely this race, not a CDA bug.
+/// [[ itest~tester-present-after-hard-reset, Tester Present resumes after an ECU hard reset, itest ]]
 #[tokio::test]
 async fn tester_present_sent_after_doip_reconnection() -> Result<(), TestingError> {
-    let test_env = TestEnv::builder().await?;
+    if skip_unless(Transport::uses_doip, "hard reset reboots a DoIP entity") {
+        return Ok(());
+    }
+    let mut test_env = TestEnv::builder().await?;
     wait_for_ecus_online(&test_env.config).await?;
 
+    let recorder = test_env.record(ECU_FLXC1000).await?;
     // Create an ECU lock - this should trigger Tester Present to start
     create_lock(
         Duration::from_secs(100),
@@ -199,18 +246,13 @@ async fn tester_present_sent_after_doip_reconnection() -> Result<(), TestingErro
     )
     .await;
 
-    // Wait briefly to confirm TP is running before we disconnect
-    cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(3)).await;
+    wait_for_tester_present(recorder).await?;
 
-    // Simulate a DoIP TCP connection drop by configuring the ECU sim to perform
-    // a hard reset (which closes the TCP connection) for 5 seconds, then triggering
-    // the reset via UDS ECU Reset (0x11 0x01) through the CDA's genericservice.
-    ecusim::set_hard_reset_duration(&test_env.ecu_sim, "FLXC1000", 5)
-        .await
-        .expect("failed to set hard reset duration");
+    // Simulate an ECU reboot by closing its DoIP connection for 5 seconds.
+    // Mark the environment dirty in case the reset is interrupted.
+    test_env.set_hard_reset_duration("FLXC1000", 5).await?;
 
-    // Send UDS ECU Reset (0x11 0x01) via genericservice - this triggers the ECU sim
-    // to close the TCP connection for 5 seconds (simulating a real ECU reboot)
+    // Trigger the reset via UDS ECU Reset (0x11 0x01) through genericservice.
     let mut reset_headers = test_env.auth_header().await?;
     reset_headers.insert(
         http::header::ACCEPT,
@@ -220,7 +262,7 @@ async fn tester_present_sent_after_doip_reconnection() -> Result<(), TestingErro
         http::header::CONTENT_TYPE,
         http::HeaderValue::from_static("application/octet-stream"),
     );
-    let reset_result = send_cda_request(
+    send_cda_request(
         &test_env.config,
         &format!("{}/genericservice", sovd::COMPONENTS_FLXC1000_BASE),
         StatusCode::OK,
@@ -229,44 +271,61 @@ async fn tester_present_sent_after_doip_reconnection() -> Result<(), TestingErro
         Some(&reset_headers),
         None,
     )
-    .await;
-    assert!(
-        reset_result.is_ok(),
-        "Hard reset request failed: {reset_result:?}"
-    );
+    .await?;
 
-    // Wait until the hard-reset ECU has reconnected and is online before recording
-    // Tester Present traffic.
+    // Observe the offline transition before waiting for reconnection.
+    wait_for_ecu_offline(&test_env.config, "FLXC1000").await?;
     wait_for_ecus_online(&test_env.config).await?;
 
     // Start recording AFTER reconnection to verify TP resumes
-    let recorder = test_env
-        .record(ECU_FLXC1000)
-        .await
-        .expect("failed to start ECU sim recording");
+    let recorder = test_env.record(ECU_FLXC1000).await?;
+    wait_for_tester_present(recorder).await?;
 
-    // Wait for multiple TP intervals
-    cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(5)).await;
+    Ok(())
+}
 
-    // Stop recording and collect all UDS frames received by the ECU simulator
-    let recorded_frames = recorder
-        .stop()
-        .await
-        .expect("failed to stop ECU sim recording");
+/// Tester Present must also recover when the gateway becomes unreachable.
+/// [[ itest~tester-present-after-gateway-restart, Tester Present resumes after a gateway restart, itest ]]
+#[tokio::test]
+async fn tester_present_resumes_after_gateway_restart() -> Result<(), TestingError> {
+    if skip_unless(Transport::uses_doip, "stops a DoIP gateway") {
+        return Ok(());
+    }
+    let mut test_env = TestEnv::builder().await?;
+    wait_for_ecus_online(&test_env.config).await?;
+    let gateway = gateway_address(&test_env.config, "FLXC1000").await?;
 
-    // Assert that at least one Tester Present frame was received after reconnection
-    let tp_count = recorded_frames
-        .iter()
-        .filter(|frame| frame.eq_ignore_ascii_case(TESTER_PRESENT_FRAME))
-        .count();
+    let recorder = test_env.record(ECU_FLXC1000).await?;
+    create_lock(
+        Duration::from_secs(100),
+        ECU_LOCK_ENDPOINT,
+        StatusCode::CREATED,
+        &test_env,
+    )
+    .await;
+    wait_for_tester_present(recorder).await?;
 
-    assert!(
-        tp_count > 0,
-        "Expected at least one Tester Present frame ({TESTER_PRESENT_FRAME}) to be sent after \
-         DoIP reconnection while ECU lock is held, but none were found in 5s of recording after \
-         reconnection.\nRecorded frames: {recorded_frames:?}",
-    );
+    test_env
+        .stop_gateway_until_offline(&gateway, "FLXC1000", sovd::COMPONENTS_FLXC1000_BASE)
+        .await?;
+    test_env.start_gateway(&gateway).await?;
+    wait_for_ecus_online(&test_env.config).await?;
 
+    // Check Tester Present before sending another diagnostic request, so that
+    // the request cannot itself trigger the recovery being tested.
+    let recorder = test_env.record(ECU_FLXC1000).await?;
+    wait_for_tester_present(recorder).await?;
+
+    // Online topology alone does not prove that the ECU answers requests.
+    send_authenticated_cda_request(
+        &test_env,
+        &format!("{}/data/identification", sovd::COMPONENTS_FLXC1000_BASE),
+        StatusCode::OK,
+        Method::GET,
+        None,
+        None,
+    )
+    .await?;
     Ok(())
 }
 

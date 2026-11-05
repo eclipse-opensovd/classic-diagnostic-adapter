@@ -34,3 +34,11 @@ Communication
     :status: draft
 
     Verifies that a cancelled connect or gateway session leaves no partial state behind.
+
+.. testset:: Tester Present Recovery
+    :id: testset~uds-tester-present-recovery
+    :links: itest~tester-present-after-hard-reset, itest~tester-present-after-gateway-restart
+    :status: draft
+
+    Verifies that Tester Present resumes while an ECU lock is held after an ECU hard
+    reset or a gateway restart.
