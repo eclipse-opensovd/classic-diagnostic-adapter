@@ -25,10 +25,12 @@ use opensovd_cda_lib::config::configfile::{Configuration, TransportOverride, Tra
 use crate::{
     sovd::{COMPONENTS_FLXC1000_BASE, COMPONENTS_FSNR2000_BASE, force_variant_detection},
     util::{
+        TestingError,
         config::CDA_STORAGE_DIR,
         ecusim,
-        http::{poll_until, send_authenticated_cda_request},
+        http::{CdaClient, poll_until, send_authenticated_cda_request},
         locks::{COMPONENTS_FLXC1000_LOCKS, Lock, default_timeout},
+        test_containers::unix_time_secs,
         test_env::{Lease, TestEnv, Transport, skip_unless, wait_for_ecus_online},
     },
 };
@@ -498,6 +500,180 @@ async fn unreachable_gateway_is_persisted_as_offline() {
     assert!(
         requests.is_empty(),
         "no further detection may run after the restart: {requests:?}"
+    );
+
+    env.start_gateway(&address)
+        .await
+        .expect("Failed to start the gateway again");
+}
+
+/// Polls a GET until it answers 200: under `OnDemand` the first requests report
+/// pending (503) while communication starts. Any other error fails at once.
+async fn get_until_ok(cda: &impl CdaClient, endpoint: &str) {
+    poll_until(
+        Duration::from_secs(60),
+        Duration::from_millis(500),
+        || async {
+            match send_authenticated_cda_request(
+                cda,
+                endpoint,
+                StatusCode::OK,
+                Method::GET,
+                None,
+                None,
+            )
+            .await
+            {
+                Ok(_) => Ok(Ok(())),
+                Err(TestingError::UnexpectedResponse {
+                    actual: StatusCode::SERVICE_UNAVAILABLE,
+                    ..
+                }) => Ok(Err(format!("{endpoint} still pending"))),
+                Err(error) => panic!("{endpoint} failed: {error}"),
+            }
+        },
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{endpoint} did not answer 200: {e:?}"));
+}
+
+/// A test environment that has persisted the topology with both gateways.
+async fn env_with_persisted_gateways() -> Lease {
+    let mut env = TestEnv::builder()
+        .await
+        .expect("Failed to set up the test environment");
+    let config = persistence_config_with_fsnr2000_on_doip(&env);
+    env.replace_cda(&config).await.expect("Failed to start CDA");
+    wait_for_ecus_online(&env.config)
+        .await
+        .expect("ECUs did not come online");
+    wait_for(
+        "the persisted topology",
+        Duration::from_secs(30),
+        || async {
+            is_persisted_state(&env, "FSNR2000", PersistedEcuState::Online).await
+                && is_persisted_state(&env, "FLXC1000", PersistedEcuState::Online).await
+        },
+    )
+    .await;
+    env
+}
+
+/// Restarts the CDA of `env` with `init_mode = OnDemand` and returns the Unix
+/// time from which its logs show only the restarted CDA.
+async fn restart_on_demand(env: &mut Lease) -> i32 {
+    let mut on_demand = env.config.clone();
+    on_demand.communication = persistence_settings(CommunicationInitMode::OnDemand);
+    // The logs have a resolution of seconds, and the previous CDA may have
+    // logged within the current one.
+    let logs_since = unix_time_secs().saturating_add(1);
+    env.restart_cda_with(&on_demand)
+        .await
+        .expect("Failed to restart CDA");
+    logs_since
+}
+
+/// Whether `logs` report the connect of the gateway of the ECU `ecu_name`.
+fn logged_ecu_connect(logs: &str, ecu_name: &str) -> bool {
+    let name = format!("\"{ecu_name}\"");
+    logs.lines()
+        .any(|line| line.contains("ECU connected") && line.contains(&name))
+}
+
+/// `OnDemand` with a persisted topology: nothing is connected before the first
+/// diagnostic request, which connects all gateways at once at their persisted
+/// addresses, without a VIR.
+/// [[ itest~deferred-on-demand-all-gateways, The first diagnostic request connects all persisted gateways without a VIR, itest ]]
+#[tokio::test]
+async fn on_demand_first_request_connects_all_gateways() {
+    if skip_unless(Transport::uses_doip, "DoIP topology only") {
+        return;
+    }
+    let mut env = Box::pin(env_with_persisted_gateways()).await;
+    let logs_since = restart_on_demand(&mut env).await;
+
+    let logs = env
+        .cda_logs_since(logs_since)
+        .await
+        .expect("Failed to read logs");
+    assert!(
+        !logs.contains("Connected to gateway"),
+        "no gateway may connect before the first request: {logs}"
+    );
+
+    get_until_ok(
+        &env,
+        &format!("{COMPONENTS_FLXC1000_BASE}/data/vindataidentifier"),
+    )
+    .await;
+
+    wait_for(
+        "the connects of both gateways",
+        Duration::from_secs(30),
+        || async {
+            let logs = env
+                .cda_logs_since(logs_since)
+                .await
+                .expect("Failed to read logs");
+            logged_ecu_connect(&logs, "flxc1000") && logged_ecu_connect(&logs, "fsnr2000")
+        },
+    )
+    .await;
+    let logs = env
+        .cda_logs_since(logs_since)
+        .await
+        .expect("Failed to read logs");
+    assert!(
+        !logs.contains("Broadcasting VIR"),
+        "all gateways are reachable at their persisted address: {logs}"
+    );
+}
+
+/// `OnDemand` with a persisted topology: a gateway that cannot be reached at its
+/// persisted address is searched by one VIR at the start, and a later request
+/// to its ECU does not send another one.
+/// [[ itest~deferred-on-demand-one-vir, The first diagnostic request sends one VIR for unreachable gateways, itest ]]
+#[tokio::test]
+async fn on_demand_first_request_sends_one_vir() {
+    if skip_unless(Transport::uses_doip, "DoIP topology only") {
+        return;
+    }
+    let mut env = Box::pin(env_with_persisted_gateways()).await;
+
+    // The stop closes all `DoIP` connections of the simulator; the other
+    // gateways stay reachable.
+    let address = persisted_gateway_address(&env, "FSNR2000").await;
+    env.stop_gateway(&address)
+        .await
+        .expect("Failed to stop the gateway");
+
+    let logs_since = restart_on_demand(&mut env).await;
+    get_until_ok(
+        &env,
+        &format!("{COMPONENTS_FLXC1000_BASE}/data/vindataidentifier"),
+    )
+    .await;
+    assert_persisted_offline(&env, "FSNR2000", "FSNR2000_App_0101").await;
+
+    let result = send_authenticated_cda_request(
+        &env,
+        &format!("{COMPONENTS_FSNR2000_BASE}/data/vindataidentifier"),
+        StatusCode::OK,
+        Method::GET,
+        None,
+        None,
+    )
+    .await;
+    assert!(result.is_err(), "the stopped gateway's ECU must not answer");
+
+    let logs = env
+        .cda_logs_since(logs_since)
+        .await
+        .expect("Failed to read logs");
+    assert_eq!(
+        logs.matches("Broadcasting VIR").count(),
+        1,
+        "one VIR per transport start: {logs}"
     );
 
     env.start_gateway(&address)
