@@ -598,6 +598,38 @@ fn follow_logs_since(container_id: String, service: Service, owner: ContainerOwn
     });
 }
 
+/// The logs of `container_id` since the Unix time `since`.
+///
+/// # Errors
+/// Returns [`TestingError::ProcessFailed`] if Docker cannot be reached or does
+/// not return the logs.
+pub(crate) async fn container_logs_since(
+    container_id: &str,
+    since: i32,
+) -> Result<String, TestingError> {
+    let docker = docker_client_instance()
+        .await
+        .map_err(|e| TestingError::ProcessFailed(format!("Failed to reach Docker: {e}")))?;
+    let options = LogsOptionsBuilder::new()
+        .stdout(true)
+        .stderr(true)
+        .since(since)
+        .build();
+    let mut logs = docker.logs(container_id, Some(options));
+    let mut output = Vec::new();
+    while let Some(frame) = logs.next().await {
+        match frame.map_err(|e| {
+            TestingError::ProcessFailed(format!("Failed to read the logs of {container_id}: {e}"))
+        })? {
+            LogOutput::StdErr { message }
+            | LogOutput::StdOut { message }
+            | LogOutput::Console { message } => output.extend_from_slice(&message),
+            LogOutput::StdIn { .. } => {}
+        }
+    }
+    Ok(String::from_utf8_lossy(&output).into_owned())
+}
+
 /// Seconds since the Unix epoch.
 pub(crate) fn unix_time_secs() -> i32 {
     SystemTime::now()
