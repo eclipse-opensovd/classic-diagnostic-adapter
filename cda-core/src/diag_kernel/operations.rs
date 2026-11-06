@@ -19,7 +19,7 @@ use cda_database::datatypes::{
 };
 use cda_interfaces::{
     DiagServiceError,
-    util::{decode_hex, tracing::print_hex, try_strip_hex_prefix},
+    util::{decode_hex_with_optional_prefix, tracing::print_hex},
 };
 
 use crate::diag_kernel::{
@@ -797,21 +797,6 @@ pub(in crate::diag_kernel) fn json_value_to_uds_data(
             ))
             .map(|s| s.as_bytes().to_vec()),
     }
-}
-
-fn decode_hex_with_optional_prefix(value: &str) -> Result<Vec<u8>, DiagServiceError> {
-    value
-        .split([' ', ','])
-        .filter(|v: &&str| !v.is_empty())
-        .map(|value| {
-            if let Some(stripped) = try_strip_hex_prefix(value) {
-                decode_hex(stripped)
-            } else {
-                decode_hex(value)
-            }
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map(|vecs| vecs.into_iter().flatten().collect())
 }
 
 fn decode_u32_octal_with_optional_prefix(value: &str) -> Result<Vec<u8>, DiagServiceError> {

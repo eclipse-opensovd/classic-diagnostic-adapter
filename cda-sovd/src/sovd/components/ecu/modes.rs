@@ -447,6 +447,57 @@ pub(crate) mod security {
         }
     }
 
+    pub(super) fn validate_send_key_size(
+        key: &str,
+        expected_size: Option<usize>,
+    ) -> Result<(), ApiError> {
+        let Some(expected_size) = expected_size else {
+            return Ok(());
+        };
+        let actual_size = cda_interfaces::util::decode_hex_with_optional_prefix(key)
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?
+            .len();
+        if actual_size != expected_size {
+            return Err(ApiError::BadRequest(format!(
+                "SendKey must contain {expected_size} bytes, received {actual_size}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_request_seed_size(
+        raw_seed: &[u8],
+        expected_size: Option<usize>,
+    ) -> Result<(), ApiError> {
+        if let Some(expected_size) = expected_size
+            && raw_seed.len() != expected_size
+        {
+            return Err(ApiError::InternalServerError(Some(format!(
+                "Expected a {expected_size}-byte seed from ECU, received {} bytes",
+                raw_seed.len(),
+            ))));
+        }
+        Ok(())
+    }
+
+    async fn create_send_key_payload<T: UdsEcu>(
+        uds: &T,
+        ecu_name: &str,
+        level: &str,
+        key: &str,
+    ) -> Result<UdsPayloadData, ApiError> {
+        let parameter_info = uds
+            .get_send_key_parameter_info(ecu_name, level)
+            .await
+            .map_err(ApiError::from)?;
+        validate_send_key_size(key, parameter_info.byte_size)?;
+        let value = serde_json::to_value(key)
+            .map_err(|_| ApiError::BadRequest("Failed to serialize key".to_owned()))?;
+        let mut data = HashMap::new();
+        data.insert(parameter_info.name, value);
+        Ok(UdsPayloadData::ParameterMap(data))
+    }
+
     pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
@@ -486,26 +537,17 @@ pub(crate) mod security {
             .into_response();
         }
         let (seed_payload, key_payload) = if let Some(key) = key {
-            let mut data = HashMap::new();
-            let Ok(value) = serde_json::to_value(&key) else {
-                return ErrorWrapper {
-                    error: ApiError::BadRequest("Failed to serialize key".to_string()),
-                    include_schema,
-                }
-                .into_response();
-            };
-            let param_name = match uds.get_send_key_param_name(&ecu_name, &level).await {
-                Ok(n) => n,
-                Err(e) => {
+            let payload = match create_send_key_payload(&uds, &ecu_name, &level, &key).await {
+                Ok(payload) => payload,
+                Err(error) => {
                     return ErrorWrapper {
-                        error: ApiError::from(e),
+                        error,
                         include_schema,
                     }
                     .into_response();
                 }
             };
-            data.insert(param_name, value);
-            (None, Some(UdsPayloadData::ParameterMap(data)))
+            (None, Some(payload))
         } else {
             let seed_payload = request_body
                 .parameters
@@ -526,14 +568,35 @@ pub(crate) mod security {
         {
             Ok((security_access, response)) => match response.response_type() {
                 DiagServiceResponseType::Positive => match security_access {
-                    SecurityAccess::RequestSeed(_) => {
+                    SecurityAccess::RequestSeed(request_seed_service) => {
                         let schema = if query.include_schema {
                             Some(create_schema!(RequestSeedResponse))
                         } else {
                             None
                         };
-                        let seed = response
-                            .get_raw()
+                        let expected_seed_size = match uds
+                            .get_request_seed_response_data_size(&ecu_name, &request_seed_service)
+                            .await
+                        {
+                            Ok(size) => size,
+                            Err(e) => {
+                                return ErrorWrapper {
+                                    error: ApiError::from(e),
+                                    include_schema,
+                                }
+                                .into_response();
+                            }
+                        };
+                        let raw_seed = response.get_raw();
+                        if let Err(error) = validate_request_seed_size(raw_seed, expected_seed_size)
+                        {
+                            return ErrorWrapper {
+                                error,
+                                include_schema,
+                            }
+                            .into_response();
+                        }
+                        let seed = raw_seed
                             .iter()
                             .map(|byte| format!("0x{byte:02x}"))
                             .collect::<Vec<String>>()
@@ -1124,7 +1187,7 @@ mod tests {
     use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
     use sovd_interfaces::components::ecu::modes as sovd_modes;
 
-    use super::authentication;
+    use super::{authentication, security};
     use crate::sovd::tests::create_test_webserver_state;
 
     const ECU: &str = "TestECU";
@@ -1167,6 +1230,15 @@ mod tests {
             })
         });
         response
+    }
+
+    #[test]
+    fn send_key_size_mismatch_is_bad_request() {
+        assert!(security::validate_send_key_size("0x01, 0x02", Some(2)).is_ok());
+        assert!(matches!(
+            security::validate_send_key_size("0x01", Some(2)),
+            Err(crate::sovd::error::ApiError::BadRequest(_))
+        ));
     }
 
     #[tokio::test]

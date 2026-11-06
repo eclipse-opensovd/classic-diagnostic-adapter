@@ -24,6 +24,36 @@ use cda_plugin_security::SecurityPlugin;
 
 use super::ecumanager::EcuManager;
 
+fn fixed_data_range_size(
+    data_start: u32,
+    parameter_layout: impl IntoIterator<Item = (u32, Option<u32>)>,
+) -> Result<Option<usize>, DiagServiceError> {
+    let mut data_end = data_start;
+    for (byte_position, byte_size) in parameter_layout {
+        if byte_position < data_start {
+            continue;
+        }
+        let Some(byte_size) = byte_size else {
+            return Ok(None);
+        };
+        let Some(parameter_end) = byte_position.checked_add(byte_size) else {
+            return Err(DiagServiceError::InvalidDatabase(
+                "Diagnostic data size overflows its byte position".to_owned(),
+            ));
+        };
+        data_end = data_end.max(parameter_end);
+    }
+
+    let data_size = data_end.checked_sub(data_start).ok_or_else(|| {
+        DiagServiceError::InvalidDatabase(
+            "Diagnostic data ends before its DATA parameter".to_owned(),
+        )
+    })?;
+    usize::try_from(data_size).map(Some).map_err(|_| {
+        DiagServiceError::InvalidDatabase("Diagnostic data size does not fit in usize".to_owned())
+    })
+}
+
 impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
     async fn lookup_security_access_change(
         &self,
@@ -44,10 +74,12 @@ impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
         }
     }
 
-    async fn get_send_key_param_name(
+    async fn get_send_key_parameter_info(
         &self,
         diag_service: &cda_interfaces::DiagComm,
-    ) -> Result<String, DiagServiceError> {
+    ) -> Result<cda_interfaces::SendKeyParameterInfo, DiagServiceError> {
+        use super::param_metadata::byte_size_from_value_param;
+
         let mapped_service = self.lookup_diag_service(diag_service, None, None).await?;
         let request = mapped_service
             .request()
@@ -55,23 +87,92 @@ impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
                 "Service '{}' is not supported",
                 diag_service.name
             )))?;
-
-        request
+        let data_parameter = request
             .params()
             .and_then(|params| {
-                params.iter().find_map(|p| {
-                    if p.semantic()
-                        .is_some_and(|s| s == self.database_naming_convention.semantics.data)
-                    {
-                        p.short_name().map(ToOwned::to_owned)
-                    } else {
-                        None
-                    }
+                params.iter().map(datatypes::Parameter).find(|parameter| {
+                    parameter.semantic().is_some_and(|semantic| {
+                        semantic == self.database_naming_convention.semantics.data
+                    })
                 })
             })
             .ok_or(DiagServiceError::InvalidDatabase(
                 "No parameter found for sending key".to_owned(),
-            ))
+            ))?;
+        let name = data_parameter.short_name().map(ToOwned::to_owned).ok_or(
+            DiagServiceError::InvalidDatabase(
+                "SendKey DATA parameter has no short name".to_owned(),
+            ),
+        )?;
+        let (byte_size, is_mux) = byte_size_from_value_param(&data_parameter);
+        let byte_size = if is_mux {
+            None
+        } else {
+            fixed_data_range_size(
+                data_parameter.byte_position(),
+                [(data_parameter.byte_position(), byte_size)],
+            )?
+        };
+
+        Ok(cda_interfaces::SendKeyParameterInfo { name, byte_size })
+    }
+
+    async fn get_request_seed_response_data_size(
+        &self,
+        diag_service: &cda_interfaces::DiagComm,
+    ) -> Result<Option<usize>, DiagServiceError> {
+        use super::param_metadata::{byte_size_from_coded_const, byte_size_from_value_param};
+
+        let mapped_service = self.lookup_diag_service(diag_service, None, None).await?;
+        let Some(positive_responses) = mapped_service.pos_responses() else {
+            return Ok(None);
+        };
+        let Some(params) = positive_responses
+            .iter()
+            .next()
+            .and_then(|response| response.params())
+        else {
+            return Ok(None);
+        };
+
+        let data_semantic = &self.database_naming_convention.semantics.data;
+        let response_parameters: Vec<_> = params
+            .iter()
+            .map(datatypes::Parameter)
+            .map(|parameter| {
+                let byte_size = match parameter.param_type()? {
+                    datatypes::ParamType::CodedConst => byte_size_from_coded_const(&parameter),
+                    datatypes::ParamType::MatchingRequestParam => parameter
+                        .specific_data_as_matching_request_param()
+                        .map(|matching| matching.byte_length()),
+                    datatypes::ParamType::Value => {
+                        let (size, is_mux) = byte_size_from_value_param(&parameter);
+                        if is_mux { None } else { size }
+                    }
+                    _ => None,
+                };
+                Ok((
+                    parameter.semantic().map(ToOwned::to_owned),
+                    parameter.byte_position(),
+                    byte_size,
+                ))
+            })
+            .collect::<Result<_, DiagServiceError>>()?;
+        let Some(data_start) = response_parameters
+            .iter()
+            .filter(|(semantic, _, _)| semantic.as_ref() == Some(data_semantic))
+            .map(|(_, byte_position, _)| *byte_position)
+            .min()
+        else {
+            return Ok(None);
+        };
+
+        fixed_data_range_size(
+            data_start,
+            response_parameters
+                .iter()
+                .map(|(_, byte_position, byte_size)| (*byte_position, *byte_size)),
+        )
     }
 
     fn default_security_access(&self) -> Result<String, DiagServiceError> {
@@ -445,8 +546,8 @@ mod tests {
 
     use cda_database::datatypes::database_builder::EcuDataBuilder;
     use cda_interfaces::{
-        DiagServiceError, DynamicPlugin, EcuSecurity, HashMap, Protocol, SecurityAccess,
-        ServicePayload,
+        DiagComm, DiagCommType, DiagServiceError, DynamicPlugin, EcuSecurity, HashMap, Protocol,
+        SecurityAccess, ServicePayload,
         datatypes::SdMappingsTruthyValue,
         request_authorization::{UdsRequestSendContext, UdsRequestTarget},
         service_ids,
@@ -561,6 +662,20 @@ mod tests {
             seen: Arc::clone(&seen),
         };
         (Box::new(plugin), seen)
+    }
+
+    #[tokio::test]
+    async fn request_seed_response_data_size_starts_at_data_parameter() {
+        let (ecu_manager, _, request_seed_service_name, _) =
+            create_ecu_manager_with_security_access_services();
+        let diag_service = DiagComm::new(request_seed_service_name, DiagCommType::Modes);
+
+        let response_data_size = ecu_manager
+            .get_request_seed_response_data_size(&diag_service)
+            .await
+            .expect("response metadata should be available");
+
+        assert_eq!(response_data_size, Some(1));
     }
 
     fn request_manager() -> EcuManager<RecordingPlugin> {
@@ -826,5 +941,11 @@ mod tests {
             panic!("expected SecurityAccess::SendKey");
         };
         assert_eq!(dc.name, send_key_01_name);
+        let parameter_info = ecu_manager
+            .get_send_key_parameter_info(&dc)
+            .await
+            .expect("SendKey request metadata should be available");
+        assert_eq!(parameter_info.name, "key");
+        assert_eq!(parameter_info.byte_size, Some(1));
     }
 }
