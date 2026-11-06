@@ -11,8 +11,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::time::Duration;
+use std::{panic::AssertUnwindSafe, time::Duration};
 
+use futures::FutureExt;
 use http::{HeaderMap, Method, StatusCode};
 use serde::{self, Deserialize};
 
@@ -20,7 +21,7 @@ use crate::{
     sovd,
     sovd::{ECU_FLXC1000, force_variant_detection, set_dtc_setting},
     util::{
-        TestingError,
+        TestingError, ecusim,
         http::{
             bearer_token_header, extract_field_from_json, poll_while, response_to_json,
             response_to_json_to_field, send_authenticated_cda_request, send_cda_request,
