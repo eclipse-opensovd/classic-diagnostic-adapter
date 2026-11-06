@@ -535,8 +535,14 @@ Communication Initialization Mode
       belongs to one transport start; work left over from an earlier start does not change it. A connect
       that reports its ECUs connected runs this report, the topology record and the variant detection
       request as a commit that the transport stop does not abort. The stop waits for the commits, so a
-      commit that finds the stop's cancel after its report reports the ECUs disconnected again itself.
+      commit that finds the stop's cancel after its report reports the ECUs it brought from Offline to
+      Online disconnected again, and none if it brought none; ECUs that were already Online or
+      AssumedOnline keep their state. A cancelled commit requests no variant detection.
       A connect aborted before the commit started reports nothing.
+    - Reporting ECUs connected only changes their connectivity state and tells the caller which ECUs need a
+      variant detection. The caller requests it: the commit of a connect for all ECUs behind the gateway
+      (an ECU that needs none, like an AssumedOnline ECU with its restored variant, is skipped by the
+      detection), and the reconnect after a connection reset for the ECUs the report lists.
     - An announcement of a gateway with a connect in flight (of any kind, at the same or another address)
       opens no parallel connection. One task per gateway waits for the lock; further announcements only
       replace the address it connects. If the gateway is connected by then, the connection is kept and a

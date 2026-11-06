@@ -251,6 +251,7 @@ impl<T: EcuAddresses + DoipComParams> DoipGatewayState<T> {
             &session.transport_config,
             &gateway_state,
             Arc::clone(&session.connectivity_handler),
+            session.variant_detection.clone(),
             control,
         )
         .await
@@ -310,17 +311,21 @@ impl<T: EcuAddresses + DoipComParams> DoipGatewayState<T> {
         if !session.is_active() {
             return Err(ConnectFailure::Cancelled);
         }
-        session
+        let report = session
             .connectivity_handler
             .on_gateway_connected(&connected_ecu_names)
             .await;
         if !session.is_active() {
-            // The stop does not reset ECU states, so revert the report here.
-            // [[ dimpl~doip-cancelled-connect-reverts-ecu-states, A connect that sees the stop after reporting its ECUs connected reports them disconnected again; a stop lets the commit finish and the connect reverts itself, dimpl ]]
-            session
-                .connectivity_handler
-                .on_gateway_disconnected(&gateway_ecu_names)
-                .await;
+            // The stop does not reset ECU states, so revert what the connect
+            // brought online; other ECUs keep their state, and a cancelled
+            // connect requests no detection.
+            // [[ dimpl~doip-cancelled-connect-reverts-ecu-states, A connect that sees the stop after reporting its ECUs connected reports only the ECUs it brought online as disconnected again and requests no detection; a stop lets the commit finish and the connect reverts itself, dimpl ]]
+            if !report.brought_online.is_empty() {
+                session
+                    .connectivity_handler
+                    .on_gateway_disconnected(&report.brought_online)
+                    .await;
+            }
             return Err(ConnectFailure::Cancelled);
         }
         // A direct connect is ad hoc (e.g. ECU development): it is not
@@ -398,7 +403,7 @@ mod tests {
         config::DiscoveryMode,
         test_helpers::{
             FakeGateway, OrderRecorder, TestEcu, discovered, discovered_at, gateway_with_gateways,
-            session_with, session_with_handler,
+            gateway_with_two_ecus, session_with, session_with_detection, session_with_handler,
         },
         vir_vam::handle_announcement,
     };
@@ -782,20 +787,38 @@ mod tests {
         session.connection_tasks.shutdown().await;
     }
 
+    /// The report of `on_gateway_connected` that lists `ecus` as brought online
+    /// and as needing detection.
+    fn report(ecus: &[&str]) -> cda_interfaces::GatewayConnectReport {
+        let names = ecus
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        cda_interfaces::GatewayConnectReport {
+            brought_online: names.clone(),
+            needs_detection: names,
+        }
+    }
+
     /// Cancels the session as soon as the ECUs of a gateway are reported
-    /// connected, and records the disconnect reports.
+    /// connected, answers with `report`, and records the disconnect reports.
     #[derive(Default)]
     struct CancelOnConnect {
         cancel: std::sync::OnceLock<tokio_util::sync::CancellationToken>,
+        report: std::sync::Mutex<cda_interfaces::GatewayConnectReport>,
         disconnected: std::sync::Mutex<Vec<Vec<String>>>,
     }
 
     #[async_trait::async_trait]
     impl cda_interfaces::EcuConnectivityHandler for CancelOnConnect {
-        async fn on_gateway_connected(&self, _ecu_names: &[String]) {
+        async fn on_gateway_connected(
+            &self,
+            _ecu_names: &[String],
+        ) -> cda_interfaces::GatewayConnectReport {
             if let Some(cancel) = self.cancel.get() {
                 cancel.cancel();
             }
+            self.report.lock().unwrap().clone()
         }
 
         async fn on_gateway_disconnected(&self, ecu_names: &[String]) {
@@ -805,7 +828,8 @@ mod tests {
         async fn on_ecu_replied(&self, _ecu_name: &str) {}
     }
 
-    /// Reports to a [`BlockingReport`] handler, in order.
+    /// Reports to a [`BlockingReport`] handler, in order, with the ECU names of
+    /// the call.
     #[derive(Default)]
     struct BlockingReport {
         /// Notified when the connected report begins.
@@ -813,21 +837,32 @@ mod tests {
         /// Lets the connected report return.
         release: tokio::sync::Notify,
         block: bool,
-        calls: std::sync::Mutex<Vec<&'static str>>,
+        report: std::sync::Mutex<cda_interfaces::GatewayConnectReport>,
+        calls: std::sync::Mutex<Vec<(&'static str, Vec<String>)>>,
     }
 
     #[async_trait::async_trait]
     impl cda_interfaces::EcuConnectivityHandler for BlockingReport {
-        async fn on_gateway_connected(&self, _ecu_names: &[String]) {
-            self.calls.lock().unwrap().push("connected");
+        async fn on_gateway_connected(
+            &self,
+            ecu_names: &[String],
+        ) -> cda_interfaces::GatewayConnectReport {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(("connected", ecu_names.to_vec()));
             if self.block {
                 self.started.notify_one();
                 self.release.notified().await;
             }
+            self.report.lock().unwrap().clone()
         }
 
-        async fn on_gateway_disconnected(&self, _ecu_names: &[String]) {
-            self.calls.lock().unwrap().push("disconnected");
+        async fn on_gateway_disconnected(&self, ecu_names: &[String]) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(("disconnected", ecu_names.to_vec()));
         }
 
         async fn on_ecu_replied(&self, _ecu_name: &str) {}
@@ -841,9 +876,10 @@ mod tests {
         let gateway = gateway_with_gateways(&[("gw", 0x1000)]).await;
         let handler = Arc::new(BlockingReport {
             block: true,
+            report: std::sync::Mutex::new(report(&["gw"])),
             ..BlockingReport::default()
         });
-        let session = session_with_handler(&fake, Arc::clone(&handler) as _);
+        let (session, mut detection) = session_with_detection(&fake, Arc::clone(&handler) as _);
         *gateway.state.session.write().await = Some(Arc::clone(&session));
         let connect = gateway
             .state
@@ -868,8 +904,13 @@ mod tests {
 
         assert_eq!(
             *handler.calls.lock().unwrap(),
-            ["connected", "disconnected"]
+            [
+                // The connected names are the keys of the ECU map.
+                ("connected", vec!["gw".to_owned()]),
+                ("disconnected", vec!["gw".to_owned()])
+            ]
         );
+        assert!(detection.try_recv().is_err());
         assert!(gateway.state.topology.connected().is_empty());
         assert!(connect.wait().await.is_err());
     }
@@ -901,14 +942,15 @@ mod tests {
     }
 
     /// A connect cut short by the stop after its ECUs were reported connected
-    /// reports them disconnected again.
-    /// [[ test~doip-cancelled-connect-reverts-ecu-states, A connect cut short by the stop after its ECUs were reported connected reports them disconnected, test ]]
+    /// reports the ones it brought online disconnected again.
+    /// [[ test~doip-cancelled-connect-reverts-ecu-states, A connect cut short by the stop after its ECUs were reported connected reports only the ECUs it brought online as disconnected and requests no detection, test ]]
     #[tokio::test]
     async fn connect_cancelled_after_reporting_connected_reverts_the_ecu_states() {
         let fake = FakeGateway::start().await;
         let gateway = gateway_with_gateways(&[("gw", 0x1000)]).await;
         let handler = Arc::new(CancelOnConnect::default());
-        let session = session_with_handler(&fake, Arc::clone(&handler) as _);
+        *handler.report.lock().unwrap() = report(&["gw"]);
+        let (session, mut detection) = session_with_detection(&fake, Arc::clone(&handler) as _);
         handler.cancel.set(session.cancel_token.clone()).unwrap();
 
         let connect = gateway
@@ -918,10 +960,87 @@ mod tests {
         assert!(connect.wait().await.is_err());
         assert_eq!(
             *handler.disconnected.lock().unwrap(),
-            // The names come from the test ECU fixture.
-            [vec!["test".to_owned()]]
+            [vec!["gw".to_owned()]]
+        );
+        assert!(
+            detection.try_recv().is_err(),
+            "a cancelled commit requests no detection"
         );
         assert!(gateway.state.topology.connected().is_empty());
+        session.connection_tasks.shutdown().await;
+    }
+
+    /// A cancelled connect that brought no ECU online has nothing to revert:
+    /// the ECUs keep the state they had, and no detection is requested.
+    /// [[ test~doip-cancelled-connect-without-brought-online-ecus-reports-nothing, A cancelled connect that brought no ECU online calls neither disconnected nor detection, test ]]
+    #[tokio::test]
+    async fn connect_cancelled_without_brought_online_ecus_reports_nothing() {
+        let fake = FakeGateway::start().await;
+        let gateway = gateway_with_two_ecus().await;
+        let handler = Arc::new(CancelOnConnect::default());
+        // The ECUs need a detection but were already online.
+        *handler.report.lock().unwrap() = cda_interfaces::GatewayConnectReport {
+            brought_online: Vec::new(),
+            needs_detection: vec!["ecu_a".to_owned()],
+        };
+        let (session, mut detection) = session_with_detection(&fake, Arc::clone(&handler) as _);
+        handler.cancel.set(session.cancel_token.clone()).unwrap();
+
+        let connect = gateway
+            .state
+            .spawn_gateway_connect(&session, discovered("gw", 0x1000));
+
+        assert!(connect.wait().await.is_err());
+        assert!(handler.disconnected.lock().unwrap().is_empty());
+        assert!(detection.try_recv().is_err());
+        assert!(gateway.state.topology.connected().is_empty());
+        session.connection_tasks.shutdown().await;
+    }
+
+    /// Only the ECUs the connect brought online are reported disconnected, not
+    /// the other ECUs behind the gateway.
+    /// [[ test~doip-cancelled-connect-reverts-only-brought-online-ecus, A cancelled connect reports exactly the ECUs it brought online as disconnected, test ]]
+    #[tokio::test]
+    async fn connect_cancelled_reverts_only_the_brought_online_subset() {
+        let fake = FakeGateway::start().await;
+        let gateway = gateway_with_two_ecus().await;
+        let handler = Arc::new(CancelOnConnect::default());
+        *handler.report.lock().unwrap() = report(&["ecu_a"]);
+        let (session, mut detection) = session_with_detection(&fake, Arc::clone(&handler) as _);
+        handler.cancel.set(session.cancel_token.clone()).unwrap();
+
+        let connect = gateway
+            .state
+            .spawn_gateway_connect(&session, discovered("gw", 0x1000));
+
+        assert!(connect.wait().await.is_err());
+        assert_eq!(
+            *handler.disconnected.lock().unwrap(),
+            [vec!["ecu_a".to_owned()]]
+        );
+        assert!(detection.try_recv().is_err());
+        session.connection_tasks.shutdown().await;
+    }
+
+    /// A connect that is not cancelled requests the detection of all ECUs
+    /// behind the gateway, which covers the ones that need it.
+    #[tokio::test]
+    async fn connect_requests_detection_of_the_gateway_ecus() {
+        let fake = FakeGateway::start().await;
+        let gateway = gateway_with_two_ecus().await;
+        let handler = Arc::new(CancelOnConnect::default());
+        *handler.report.lock().unwrap() = report(&["ecu_a"]);
+        let (session, mut detection) = session_with_detection(&fake, Arc::clone(&handler) as _);
+
+        let connect = gateway
+            .state
+            .spawn_gateway_connect(&session, discovered("gw", 0x1000));
+
+        assert!(connect.wait().await.is_ok());
+        let mut requested = detection.try_recv().unwrap().into_ecus();
+        requested.sort();
+        assert_eq!(requested, ["ecu_a", "ecu_b", "gw"]);
+        assert!(handler.disconnected.lock().unwrap().is_empty());
         session.connection_tasks.shutdown().await;
     }
 }

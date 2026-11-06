@@ -15,7 +15,8 @@ use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
     DataParseError, DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, HashMap,
-    HashMapExtensions, dlt_ctx, is_tester_present_nrc,
+    HashMapExtensions, VariantDetectionRequest, VariantDetectionSender, dlt_ctx,
+    is_tester_present_nrc,
 };
 use doip_definitions::payload::{ActivationType, DoipPayload, RoutingActivationRequest};
 use thiserror::Error;
@@ -117,7 +118,7 @@ impl From<EcuError> for DiagServiceError {
 /// Connects the gateway and registers its connection and route. Returns the
 /// names of the ECUs behind it; reporting them connected is up to the caller.
 #[tracing::instrument(
-    skip(transport, state, connectivity_handler, control),
+    skip(transport, state, connectivity_handler, variant_detection, control),
     fields(
         tester_ip = transport.tester_ip.clone(),
         port = transport.port,
@@ -133,6 +134,7 @@ pub(crate) async fn handle_gateway_connection<T>(
     transport: &DoipTransportConfig,
     state: &GatewayState<T>,
     connectivity_handler: Arc<dyn EcuConnectivityHandler>,
+    variant_detection: VariantDetectionSender,
     control: Option<&ConnectControl>,
 ) -> Result<Vec<String>, EcuError>
 where
@@ -214,6 +216,7 @@ where
         ecus: ecu_ids.clone(),
         ecu_names: ecu_names_for_gateway.clone(),
         connectivity_handler: Arc::clone(&connectivity_handler),
+        variant_detection,
         activity_reporter: activity.clone(),
     };
     let GatewayConnectionHandles { sender, receivers } =
@@ -425,10 +428,21 @@ fn spawn_connection_reset_task(
                                     &mut conn_guard,
                                     conn,
                                 );
-                                gateway
+                                let report = gateway
                                     .connectivity_handler
                                     .on_gateway_connected(&gateway.ecu_names)
                                     .await;
+                                if !report.needs_detection.is_empty()
+                                    && let Err(error) = gateway
+                                        .variant_detection
+                                        .send(VariantDetectionRequest::new(report.needs_detection))
+                                        .await
+                                {
+                                    tracing::warn!(
+                                        error = ?error,
+                                        "Failed to trigger variant detection after connection reset"
+                                    );
+                                }
                                 while !conn_reset_rx.is_empty() {
                                     // drain the receiver to avoid resetting the connection again
                                     // immediately after a reset
@@ -543,4 +557,166 @@ pub(crate) async fn try_read(
     tokio::time::timeout(timeout, read_response(reader))
         .await
         .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use cda_interfaces::{
+        EcuConnectivityHandler, GatewayConnectReport, VariantDetectionSender,
+        util::test_utils::wait_until,
+    };
+    use doip_definitions::{
+        header::ProtocolVersion,
+        payload::{ActivationType, RoutingActivationRequest},
+    };
+    use tokio::sync::mpsc;
+
+    use super::{ConnectionResetReason, spawn_connection_reset_task};
+    use crate::{
+        DoipTransportConfig, EcuTimeouts, GatewayConnectionConfig, GatewayDoipConfig, GatewaySetup,
+        ecu_connection::establish_ecu_connection,
+        test_helpers::{FakeGateway, no_activity},
+    };
+
+    /// Answers `on_gateway_connected` with a fixed report and counts the calls.
+    struct FixedReport {
+        report: GatewayConnectReport,
+        connected: std::sync::Mutex<Vec<Vec<String>>>,
+        disconnected: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl EcuConnectivityHandler for FixedReport {
+        async fn on_gateway_connected(&self, ecu_names: &[String]) -> GatewayConnectReport {
+            self.connected.lock().unwrap().push(ecu_names.to_vec());
+            self.report.clone()
+        }
+
+        async fn on_gateway_disconnected(&self, _ecu_names: &[String]) {
+            self.disconnected
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        async fn on_ecu_replied(&self, _ecu_name: &str) {}
+    }
+
+    fn setup(
+        fake: &FakeGateway,
+        handler: Arc<dyn EcuConnectivityHandler>,
+        variant_detection: VariantDetectionSender,
+    ) -> GatewaySetup {
+        GatewaySetup {
+            connection: GatewayConnectionConfig {
+                doip: GatewayDoipConfig {
+                    gateway_ip: "127.0.0.1".to_owned(),
+                    name: "gw".to_owned(),
+                    tester_address: 0x0E80u16.to_be_bytes(),
+                    protocol_version: ProtocolVersion::Iso13400_2012,
+                    transport: DoipTransportConfig {
+                        tester_ip: "127.0.0.1".to_owned(),
+                        port: fake.port(),
+                        tls_port: 0,
+                        send_diagnostic_message_ack: false,
+                        send_timeout: Duration::from_secs(1),
+                        alive_check_interval: Duration::ZERO,
+                    },
+                },
+                routing_activation_request: RoutingActivationRequest {
+                    source_address: 0x0E80u16.to_be_bytes(),
+                    activation_type: ActivationType::Default,
+                    buffer: [0, 0, 0, 0],
+                },
+                ecu_timeouts: EcuTimeouts {
+                    routing_activation: Duration::from_secs(1),
+                    retry_delay: Duration::from_millis(10),
+                    connection: Duration::from_secs(1),
+                    max_retry_attempts: 3,
+                },
+            },
+            ecus: vec![0x1000, 0x1001],
+            ecu_names: vec!["gw".to_owned(), "ecu_a".to_owned(), "ecu_b".to_owned()],
+            connectivity_handler: handler,
+            variant_detection,
+            activity_reporter: no_activity(),
+        }
+    }
+
+    /// Resets the connection of a gateway with the handler answering `report`,
+    /// and returns the detection requests that went out.
+    async fn requests_after_reset(report: GatewayConnectReport) -> Vec<Vec<String>> {
+        let fake = FakeGateway::start().await;
+        let handler = Arc::new(FixedReport {
+            report,
+            connected: std::sync::Mutex::new(Vec::new()),
+            disconnected: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let (detection_tx, mut detection_rx) = mpsc::channel(8);
+        let gateway = setup(
+            &fake,
+            Arc::clone(&handler) as _,
+            VariantDetectionSender::new(detection_tx),
+        );
+        let connection = Arc::new(
+            establish_ecu_connection(&gateway.connection)
+                .await
+                .expect("connect to the fake gateway"),
+        );
+        let (reset_tx, reset_rx) = mpsc::channel::<ConnectionResetReason>(1);
+        let task = spawn_connection_reset_task(gateway, reset_rx, connection);
+
+        // The task reports the disconnect first thing for every reset, so the
+        // second one shows that it finished the first, including its detection
+        // request. A reset that arrives while the task is still draining is
+        // discarded, hence the repeated sends.
+        wait_until("the task to take a second reset", || async {
+            let _ = reset_tx.try_send("test".to_owned());
+            handler
+                .disconnected
+                .load(std::sync::atomic::Ordering::SeqCst)
+                >= 2
+        })
+        .await;
+        task.abort();
+        let _ = task.await;
+
+        let all_ecus = vec!["gw".to_owned(), "ecu_a".to_owned(), "ecu_b".to_owned()];
+        let connected = handler.connected.lock().unwrap().clone();
+        assert!(!connected.is_empty());
+        assert!(connected.iter().all(|names| *names == all_ecus));
+        let mut requests = Vec::new();
+        while let Ok(request) = detection_rx.try_recv() {
+            requests.push(request.into_ecus());
+        }
+        requests
+    }
+
+    /// [[ test~doip-connection-reset-requests-detection-for-the-report, After a connection reset a variant detection is requested for exactly the ECUs the connect report lists, test ]]
+    #[tokio::test]
+    async fn reconnect_after_a_reset_requests_detection_for_the_report() {
+        let requests = requests_after_reset(GatewayConnectReport {
+            brought_online: vec!["ecu_a".to_owned(), "ecu_b".to_owned()],
+            needs_detection: vec!["ecu_a".to_owned()],
+        })
+        .await;
+
+        assert!(!requests.is_empty());
+        assert!(
+            requests
+                .iter()
+                .all(|request| *request == vec!["ecu_a".to_owned()])
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnect_after_a_reset_requests_nothing_if_no_ecu_needs_detection() {
+        let requests = requests_after_reset(GatewayConnectReport {
+            brought_online: vec!["ecu_a".to_owned()],
+            needs_detection: Vec::new(),
+        })
+        .await;
+
+        assert!(requests.is_empty());
+    }
 }

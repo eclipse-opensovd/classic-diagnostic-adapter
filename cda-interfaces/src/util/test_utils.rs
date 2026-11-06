@@ -103,7 +103,12 @@ impl RecordingConnectivityHandler {
 
 #[async_trait::async_trait]
 impl crate::EcuConnectivityHandler for RecordingConnectivityHandler {
-    async fn on_gateway_connected(&self, _ecu_names: &[String]) {}
+    async fn on_gateway_connected(&self, ecu_names: &[String]) -> crate::GatewayConnectReport {
+        crate::GatewayConnectReport {
+            brought_online: ecu_names.to_vec(),
+            needs_detection: ecu_names.to_vec(),
+        }
+    }
 
     async fn on_gateway_disconnected(&self, _ecu_names: &[String]) {}
 

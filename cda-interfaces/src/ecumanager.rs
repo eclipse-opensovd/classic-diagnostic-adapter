@@ -1050,6 +1050,17 @@ pub trait VariantDetection: Send + Sync + 'static {
     async fn set_base_variant_online(&mut self) -> Result<(), DiagServiceError>;
 }
 
+/// Outcome of [`EcuConnectivityHandler::on_gateway_connected`].
+///
+/// Both lists use the ECU names exactly as the caller passed them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GatewayConnectReport {
+    /// ECUs this call took from `Offline` to `Online` (the ones to revert).
+    pub brought_online: Vec<String>,
+    /// ECUs that need a variant detection after this connect.
+    pub needs_detection: Vec<String>,
+}
+
 /// Callback interface of the transports: connectivity changes for ECUs behind a
 /// `DoIP` gateway, and replies of ECUs that the transport does not pass on.
 ///
@@ -1060,7 +1071,13 @@ pub trait EcuConnectivityHandler: Send + Sync + 'static {
     /// Called when a `DoIP` gateway connection is established or re-established.
     ///
     /// Notifies for all ECUs behind (and including) the gateway.
-    async fn on_gateway_connected(&self, ecu_names: &[String]);
+    ///
+    /// Only changes the connectivity state; it does not request a variant
+    /// detection itself. Requesting detection for
+    /// [`GatewayConnectReport::needs_detection`] is the job of the caller.
+    /// Both lists of the report use the names exactly as passed in
+    /// `ecu_names`.
+    async fn on_gateway_connected(&self, ecu_names: &[String]) -> GatewayConnectReport;
 
     /// Called when a `DoIP` gateway connection is lost.
     ///

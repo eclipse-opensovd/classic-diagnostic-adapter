@@ -19,8 +19,9 @@ use std::{
 };
 
 use cda_interfaces::{
-    EcuAddresses, EcuConnectivityHandler, HashMap, HashMapExtensions, VariantDetectionSender,
-    topology::TopologyState, util::test_utils::RecordingConnectivityHandler,
+    EcuAddresses, EcuConnectivityHandler, HashMap, HashMapExtensions, VariantDetectionRequest,
+    VariantDetectionSender, topology::TopologyState,
+    util::test_utils::RecordingConnectivityHandler,
 };
 use doip_definitions::header::ProtocolVersion;
 use tokio::sync::{RwLock, mpsc};
@@ -60,6 +61,7 @@ pub(crate) fn activity_reporter(
 pub(crate) struct TestEcu {
     logical_address: u16,
     gateway_address: u16,
+    name: &'static str,
 }
 
 impl TestEcu {
@@ -67,7 +69,14 @@ impl TestEcu {
         Self {
             logical_address,
             gateway_address,
+            name: "test",
         }
+    }
+
+    /// The same ECU with the name `name`, to tell several ECUs apart.
+    pub(crate) const fn named(mut self, name: &'static str) -> Self {
+        self.name = name;
+        self
     }
 }
 
@@ -95,7 +104,7 @@ impl EcuAddresses for TestEcu {
     }
 
     fn ecu_name(&self) -> String {
-        "test".to_owned()
+        self.name.to_owned()
     }
 
     fn logical_address_eq<T: EcuAddresses>(&self, other: &T) -> bool {
@@ -241,6 +250,33 @@ pub(crate) fn discovered_at(name: &str, logical_address: u16, ip: &str) -> Disco
     }
 }
 
+/// A transport with the gateway `gw` at 0x1000 and the ECUs `ecu_a` and
+/// `ecu_b` behind it.
+pub(crate) async fn gateway_with_two_ecus() -> DoipDiagGateway<TestEcu> {
+    let ecus = HashMap::from_iter([
+        (
+            "gw".to_owned(),
+            RwLock::new(TestEcu::new(0x1000, 0x1000).named("gw")),
+        ),
+        (
+            "ecu_a".to_owned(),
+            RwLock::new(TestEcu::new(0x1001, 0x1000).named("ecu_a")),
+        ),
+        (
+            "ecu_b".to_owned(),
+            RwLock::new(TestEcu::new(0x1002, 0x1000).named("ecu_b")),
+        ),
+    ]);
+    DoipDiagGateway::<TestEcu>::new(
+        &DoipConfig::default(),
+        Arc::new(ecus),
+        VariantDetectionSender::new(mpsc::channel(16).0),
+        Arc::new(RecordingConnectivityHandler::default()),
+    )
+    .await
+    .unwrap()
+}
+
 pub(crate) async fn gateway_with_gateways(gateways: &[(&str, u16)]) -> DoipDiagGateway<TestEcu> {
     let mut ecus = HashMap::new();
     for (name, logical_address) in gateways {
@@ -287,6 +323,36 @@ pub(crate) fn session_with(
     handler: Arc<dyn EcuConnectivityHandler>,
     discovery: DiscoveryMode,
 ) -> Arc<GatewaySession> {
+    session_with_sender(
+        fake,
+        handler,
+        discovery,
+        VariantDetectionSender::new(mpsc::channel(16).0),
+    )
+}
+
+/// Like [`session_with_handler`], and the receiver of the session's variant
+/// detection requests.
+pub(crate) fn session_with_detection(
+    fake: &FakeGateway,
+    handler: Arc<dyn EcuConnectivityHandler>,
+) -> (Arc<GatewaySession>, mpsc::Receiver<VariantDetectionRequest>) {
+    let (sender, receiver) = mpsc::channel(16);
+    let session = session_with_sender(
+        fake,
+        handler,
+        DiscoveryMode::Full,
+        VariantDetectionSender::new(sender),
+    );
+    (session, receiver)
+}
+
+fn session_with_sender(
+    fake: &FakeGateway,
+    handler: Arc<dyn EcuConnectivityHandler>,
+    discovery: DiscoveryMode,
+    variant_detection: VariantDetectionSender,
+) -> Arc<GatewaySession> {
     Arc::new(GatewaySession::new(
         DoipTransportConfig {
             tester_ip: "127.0.0.1".to_owned(),
@@ -298,7 +364,7 @@ pub(crate) fn session_with(
         },
         Arc::new(ConnectionTasks::new()),
         CancellationToken::new(),
-        VariantDetectionSender::new(mpsc::channel(16).0),
+        variant_detection,
         handler,
         discovery,
     ))
@@ -330,7 +396,15 @@ pub(crate) fn connect_control(session: &GatewaySession) -> ConnectControl {
 
 #[async_trait::async_trait]
 impl EcuConnectivityHandler for OrderRecorder {
-    async fn on_gateway_connected(&self, _ecu_names: &[String]) {}
+    async fn on_gateway_connected(
+        &self,
+        ecu_names: &[String],
+    ) -> cda_interfaces::GatewayConnectReport {
+        cda_interfaces::GatewayConnectReport {
+            brought_online: ecu_names.to_vec(),
+            needs_detection: ecu_names.to_vec(),
+        }
+    }
 
     async fn on_gateway_disconnected(&self, _ecu_names: &[String]) {
         self.unreachable_at_disconnect

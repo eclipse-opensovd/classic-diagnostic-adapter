@@ -262,7 +262,7 @@ async fn prepare_vehicle_components<S: SecurityPlugin>(
     let databases = Arc::new(databases);
 
     let runtime_states = build_runtime_states(&databases).await;
-    let state_coordinator = EcuStateCoordinator::new(runtime_states, variant_detection_tx.clone());
+    let state_coordinator = EcuStateCoordinator::new(runtime_states);
     let connectivity_handler: Arc<dyn EcuConnectivityHandler> = Arc::new(state_coordinator.clone());
 
     let diagnostic_gateway = create_diagnostic_gateway(

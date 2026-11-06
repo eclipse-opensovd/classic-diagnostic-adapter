@@ -570,7 +570,7 @@ mod tests {
     use cda_interfaces::{
         DiagCommType, DiagServiceError, EcuAddresses, EcuRuntimeState, FunctionalTransport,
         HashMap, HashMapExtensions, NetworkTopology, PhysicalTransport, ServicePayload,
-        TransmissionParameters, TransportResponse, VariantDetectionSender,
+        TransmissionParameters, TransportResponse,
         datatypes::FaultConfig,
         request_authorization::{RequestLockContext, RequestLockProvider, UdsRequestTarget},
     };
@@ -660,7 +660,6 @@ mod tests {
             "functional".to_owned(),
             RwLock::new(functional_ecu),
         )]));
-        let (redetect_tx, _redetect_rx) = mpsc::channel(1);
         UdsManager {
             ecus,
             gateway: RecordingGateway {
@@ -673,10 +672,7 @@ mod tests {
             session_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
             security_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
             authentication_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
-            state_coordinator: EcuStateCoordinator::new(
-                HashMap::<String, EcuRuntimeState>::new(),
-                VariantDetectionSender::new(redetect_tx),
-            ),
+            state_coordinator: EcuStateCoordinator::new(HashMap::<String, EcuRuntimeState>::new()),
             functional_description_database: "functional".to_owned(),
             fault_config: FaultConfig::default(),
             request_lock_provider,
@@ -811,14 +807,10 @@ mod tests {
             .iter()
             .map(|(ecu_name, data)| ((*ecu_name).to_owned(), Ok(response(data.clone()))))
             .collect();
-        let (redetect_tx, _redetect_rx) = mpsc::channel(1);
-        manager.state_coordinator = EcuStateCoordinator::new(
-            HashMap::from_iter([
-                ("gateway".to_owned(), EcuRuntimeState::new()),
-                ("child".to_owned(), EcuRuntimeState::new()),
-            ]),
-            VariantDetectionSender::new(redetect_tx),
-        );
+        manager.state_coordinator = EcuStateCoordinator::new(HashMap::from_iter([
+            ("gateway".to_owned(), EcuRuntimeState::new()),
+            ("child".to_owned(), EcuRuntimeState::new()),
+        ]));
 
         let results = manager
             .send_functional_to_gateway(

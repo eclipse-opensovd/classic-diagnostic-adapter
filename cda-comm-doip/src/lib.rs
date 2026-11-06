@@ -437,6 +437,7 @@ pub(crate) struct GatewaySetup {
     pub(crate) ecus: Vec<u16>,
     pub(crate) ecu_names: Vec<String>,
     pub(crate) connectivity_handler: Arc<dyn EcuConnectivityHandler>,
+    pub(crate) variant_detection: VariantDetectionSender,
     pub(crate) activity_reporter: EcuActivityReporter,
 }
 

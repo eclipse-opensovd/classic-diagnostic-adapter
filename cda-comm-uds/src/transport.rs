@@ -1094,11 +1094,7 @@ pub(crate) mod send_tests {
                 .keys()
                 .map(|name| (name.clone(), EcuRuntimeState::new()))
                 .collect();
-            let (redetect_tx, _redetect_rx) = mpsc::channel(8);
-            let state_coordinator = EcuStateCoordinator::new(
-                runtime_states,
-                cda_interfaces::VariantDetectionSender::new(redetect_tx),
-            );
+            let state_coordinator = EcuStateCoordinator::new(runtime_states);
             Self {
                 ecus,
                 gateway,

@@ -46,7 +46,7 @@ Diagnostic Tester
 
 .. testset:: Persisted Topology Reconnect
     :id: testset~persisted-topology-reconnect
-    :links: test~ecu-topology-reconnect-search, test~doip-aborted-discovery-finishes, test~doip-vam-only-reconnect-without-search, test~doip-failed-announcement-connect-reported, test~doip-unreachable-reported-after-state-change, test~doip-plan-reconnect, test~doip-reconnect-plan-reconnect-rejects-renamed-gateway, test~doip-vam-during-reconnect-does-not-connect-twice, test~doip-vam-during-connect-connects-after-failure, test~doip-discovery-connect-waits-for-direct-connect, test~doip-cancelled-connect-reverts-ecu-states, test~doip-vam-only-reconnect-reports-unusable
+    :links: test~ecu-topology-reconnect-search, test~doip-aborted-discovery-finishes, test~doip-vam-only-reconnect-without-search, test~doip-failed-announcement-connect-reported, test~doip-unreachable-reported-after-state-change, test~doip-plan-reconnect, test~doip-reconnect-plan-reconnect-rejects-renamed-gateway, test~doip-vam-during-reconnect-does-not-connect-twice, test~doip-vam-during-connect-connects-after-failure, test~doip-discovery-connect-waits-for-direct-connect, test~doip-cancelled-connect-reverts-ecu-states, test~doip-cancelled-connect-without-brought-online-ecus-reports-nothing, test~doip-cancelled-connect-reverts-only-brought-online-ecus, test~doip-connection-reset-requests-detection-for-the-report, test~doip-vam-only-reconnect-reports-unusable
     :status: draft
 
     Verifies the direct reconnect to persisted gateways, the broadcast fallback for
@@ -62,7 +62,7 @@ Diagnostic Tester
 
 .. testset:: ECU States
     :id: testset~ecu-states
-    :links: test~ecu-last-seen, test~uds-ecu-reply-contact, test~uds-gateway-disconnect-applied-before-return, test~uds-suppressed-response-no-contact, test~uds-state-assumed-online-becomes-online-on-response, test~uds-state-restored-duplicate-survives-connect-but-real-reconnect-redetects, test~ecu-state-assumed-online-keeps-state-without-gateway, test~ecu-state-assumed-online-reported-as-online, test~ecu-state-assumed-online-unreachable-is-offline, test~ecu-state-assumed-online-failed-detection-is-offline
+    :links: test~ecu-last-seen, test~uds-ecu-reply-contact, test~uds-gateway-disconnect-applied-before-return, test~uds-suppressed-response-no-contact, test~uds-state-assumed-online-becomes-online-on-response, test~uds-state-restored-duplicate-survives-connect-but-real-reconnect-redetects, test~uds-gateway-connect-report-lists-only-offline-ecus, test~uds-gateway-connect-undo-keeps-assumed-online-ecu, test~uds-gateway-connect-undo-leaves-offline-ecu-offline, test~ecu-state-assumed-online-keeps-state-without-gateway, test~ecu-state-assumed-online-reported-as-online, test~ecu-state-assumed-online-unreachable-is-offline, test~ecu-state-assumed-online-failed-detection-is-offline
     :status: draft
 
     Verifies the ECU connectivity states, including ``AssumedOnline`` for restored ECUs,
