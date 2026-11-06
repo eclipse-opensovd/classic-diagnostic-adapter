@@ -659,6 +659,17 @@
 # Affix applied for [`DiagCommAction::Write`].
 # write = "_Write"
 
+# Mappings for `/data` and `/configurations`.
+[database.naming_convention.component_resource_mapping]
+# Identifier type used by both mappings.
+# key_type = "functional_class"
+
+# Maps service identifiers to categories for `/configurations`.
+[database.naming_convention.component_resource_mapping.configurations]
+
+# Maps service identifiers to categories for `/data`.
+[database.naming_convention.component_resource_mapping.data]
+
 # Database semantics to identify the type of service
 [database.naming_convention.semantics]
 # Semantic to identify `data` parameter within a UDS response, by matching the
