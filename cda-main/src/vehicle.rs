@@ -435,10 +435,13 @@ async fn init_can_gateway<S: SecurityPlugin>(
     variant_detection: VariantDetectionSender,
     connectivity_handler: Arc<dyn EcuConnectivityHandler>,
 ) -> Result<CanDiagGateway, AppError> {
-    match CanDiagGateway::new(can_cfg, databases, variant_detection, connectivity_handler).await {
-        Ok(c) => {
+    let topology = cda_comm_can::derive_can_topology(can_cfg, databases).await?;
+    // The reload handle is dropped: databases are not yet reloaded in place,
+    // so the topology stays as derived at startup.
+    match CanDiagGateway::build(can_cfg, topology, variant_detection, connectivity_handler) {
+        Ok((gateway, _reloader)) => {
             tracing::info!(interface = %can_cfg.interface, "CAN gateway initialized");
-            Ok(c)
+            Ok(gateway)
         }
         // Fatal; main reports the error on exit.
         Err(e) => Err(e.into()),
