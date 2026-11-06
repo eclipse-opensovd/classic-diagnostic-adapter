@@ -77,6 +77,9 @@ services:
       # (DoIP), cda-test-config-can.toml or cda-test-config-mixed.toml.
       - ./${CDA_TEST_CONFIG:-cda-test-config.toml}:/app/cda-test-config.toml:ro
       - ./flash_files:/app/flash:ro
+      # Optional directory with a JWKS file, for CDA_AUTH_JWKS_FILE below. The default only
+      # exists because a mount needs a source, and does not enable anything.
+      - ${CDA_AUTH_JWKS_DIR:-./odx}:/app/auth:ro
     hostname: cda
     networks:
       - testcontainer-net
@@ -86,6 +89,10 @@ services:
     environment:
       - RUST_LOG=debug
       - CDA_CONFIG_FILE=/app/cda-test-config.toml
+      # Verify externally issued tokens, see testcontainer/README.md. Unset by default.
+      - CDA_AUTH_JWKS_FILE=${CDA_AUTH_JWKS_FILE:-}
+      - CDA_AUTH_ISSUER=${CDA_AUTH_ISSUER:-}
+      - CDA_AUTH_AUDIENCE=${CDA_AUTH_AUDIENCE:-}
     command: ["-d", "/app/odx"]
     restart: unless-stopped
 

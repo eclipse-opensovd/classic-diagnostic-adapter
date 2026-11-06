@@ -346,6 +346,16 @@ pub trait AuthorizationRequestHandler: Send + Sync {
 pub trait SecurityPluginLoader:
     SecurityPluginInitializer + AuthorizationRequestHandler + Default + 'static
 {
+    /// Checks the plugin's configuration once at startup, before any request is served.
+    ///
+    /// Plugins are created per request, so this is the place to report a broken configuration
+    /// as a startup failure. The default does nothing.
+    ///
+    /// # Errors
+    /// Returns a description of the problem if the plugin must not be started.
+    fn check_config() -> Result<(), String> {
+        Ok(())
+    }
 }
 
 type SecurityPluginInitializerType = Arc<dyn SecurityPluginInitializer>;

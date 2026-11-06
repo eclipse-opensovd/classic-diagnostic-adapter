@@ -393,6 +393,13 @@ where
         .naming_convention
         .warn_on_non_standard_categories();
 
+    // After tracing, so the result is logged, and before the webserver, so a broken security
+    // configuration never serves a request.
+    SL::check_config().map_err(|message| AppError::ConfigurationError {
+        message,
+        source: None,
+    })?;
+
     // Validated before anything starts, so invalid routes do not fail after the database load.
     let http_protections =
         HttpProtectionRegistry::with_always_accessible_routes(setup.always_accessible_routes)?;
