@@ -2466,6 +2466,37 @@ pub(crate) mod send_tests {
         }
     }
 
+    /// A send the transport gate refused (communication quiesced) is not a
+    /// contact attempt: an assumed online ECU keeps its state.
+    #[tokio::test]
+    async fn quiesced_send_keeps_an_assumed_online_ecu() {
+        use cda_interfaces::{Connectivity, communication_control::TransportGate};
+
+        let gate = TransportGate::with_retry_after(Duration::from_secs(7));
+        gate.close();
+        let quiesced = gate.quiesced_error();
+        let gateway = TestGateway {
+            send_fn: Arc::new(move |_, _| Err(quiesced.clone())),
+        };
+        let manager = make_manager(gateway);
+        let state = &manager
+            .state_coordinator
+            .get_handle("TestECU")
+            .expect("handle exists")
+            .state;
+        state.ecu_state.write().unwrap().connectivity = Connectivity::AssumedOnline;
+
+        let result = send_for_contact(
+            &manager,
+            make_test_payload(service_ids::SESSION_CONTROL, &[0x01]),
+            true,
+        )
+        .await;
+
+        assert_eq!(result.err(), Some(gate.quiesced_error()));
+        assert_eq!(state.status().connectivity, Connectivity::AssumedOnline);
+    }
+
     /// 0x78 followed by silence ends in a timeout, but the ECU replied.
     /// [[ test~uds-ecu-reply-contact, A response-pending reply counts as contact even if the request times out, test ]]
     #[tokio::test(start_paused = true)]

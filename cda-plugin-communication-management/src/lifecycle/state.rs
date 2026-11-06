@@ -19,12 +19,15 @@ use cda_interfaces::{
     HashSet,
     communication_control::{
         CommunicationOperation, CommunicationOperationFailure, CommunicationState,
-        CommunicationVariantDetection, VariantDetectionMode,
+        CommunicationVariantDetection, TransportGate, VariantDetectionMode,
     },
     util::std_ext,
 };
 
-use super::{disable::DisableOwner, guard::CommunicationGuardId};
+use super::{
+    disable::{DisableOwner, QuiesceLeaseId},
+    guard::CommunicationGuardId,
+};
 
 /// Slot carrying the eventual outcome of an in-flight enabling operation
 /// (`Enable`, `Detect`, or a lease `Resume`).
@@ -54,6 +57,10 @@ pub(crate) struct CommunicationStateData {
     /// The current exclusive disable owner, carrying both its identity and
     /// whether releasing it re-enables the transport (see [`DisableOwner`]).
     pub(crate) disable_owner: Option<DisableOwner>,
+    /// The current exclusive quiesce owner. While set, no guard is admitted and
+    /// no lifecycle transition or detection starts, but the transport is left
+    /// alone.
+    pub(crate) quiesce_owner: Option<QuiesceLeaseId>,
     /// Set while a claimed enabling operation is in flight, so concurrent
     /// callers join it instead of claiming a transition of their own.
     /// [`transition::decide`](crate::lifecycle::transition::decide) decides
@@ -148,6 +155,8 @@ impl CommunicationStateData {
 /// communication guards must release state synchronously in `Drop`.
 pub(crate) struct CommunicationStateStore {
     state: std::sync::Mutex<CommunicationStateData>,
+    /// Closed while a quiesce lease is held, so transports start no traffic.
+    pub(crate) gate: TransportGate,
 }
 
 impl CommunicationStateStore {
@@ -166,6 +175,7 @@ impl CommunicationStateStore {
                 state: initial,
                 active_guards: HashSet::default(),
                 disable_owner: None,
+                quiesce_owner: None,
                 enabling_result: None,
                 detection_in_flight: None,
                 configured_variant_detection,
@@ -173,7 +183,15 @@ impl CommunicationStateStore {
                 variant_detection: VariantDetectionMode::Never,
                 shutting_down: false,
             }),
+            gate: TransportGate::new(),
         }
+    }
+
+    /// Uses `gate`, which a quiesce lease closes while it is held.
+    #[must_use]
+    pub(crate) fn with_gate(mut self, gate: TransportGate) -> Self {
+        self.gate = gate;
+        self
     }
 
     pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, CommunicationStateData> {

@@ -48,7 +48,7 @@ use cda_interfaces::{
     PhysicalTransport, RouteStatus, ServicePayload, Shutdown, TransmissionParameters,
     TransportProbe, TransportResponse,
     communication_control::{
-        DoipEndpoint, TransportControl, TransportState, TransportStateTracker,
+        DoipEndpoint, TransportControl, TransportGate, TransportState, TransportStateTracker,
         error::CommControlError,
     },
 };
@@ -79,6 +79,9 @@ pub struct DiagnosticTransportRouter<D: EcuGateway + TransportProbe, C: EcuGatew
     /// Serializes a complete lifecycle operation (status check, gateway
     /// fan-out, final transition) against concurrent enable/disable callers.
     operation_lock: Arc<Mutex<()>>,
+    /// Closed while communication is quiesced: no send starts. Its refusal
+    /// carries the retry hint.
+    gate: TransportGate,
 }
 
 impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe>
@@ -95,7 +98,16 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe>
             ecu_bindings: Arc::new(RwLock::new(HashMap::default())),
             transport_state: Arc::new(tracker),
             operation_lock: Arc::new(Mutex::new(())),
+            gate: TransportGate::new(),
         }
+    }
+
+    /// Uses `gate`, closed while communication is quiesced. A send refused by
+    /// it carries the gate's retry hint.
+    #[must_use]
+    pub fn with_gate(mut self, gate: TransportGate) -> Self {
+        self.gate = gate;
+        self
     }
 
     /// Adds a `DoIP` gateway to this diagnostic transport router.
@@ -217,9 +229,19 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe>
         Err(DiagServiceError::EcuOffline(ecu_name.to_owned()))
     }
 
+    /// Rejects work while communication is quiesced, with the retry hint.
+    fn ensure_gate_open(&self) -> Result<(), DiagServiceError> {
+        if self.gate.is_open() {
+            Ok(())
+        } else {
+            Err(self.gate.quiesced_error())
+        }
+    }
+
     /// Router-level send gate, rejecting datapath traffic while communication is
     /// inhibited.
     async fn ensure_communication_active(&self) -> Result<(), DiagServiceError> {
+        self.ensure_gate_open()?;
         if self.transport_state.active().await {
             Ok(())
         } else {
@@ -409,6 +431,7 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe> Clone
             ecu_bindings: Arc::clone(&self.ecu_bindings),
             transport_state: Arc::clone(&self.transport_state),
             operation_lock: Arc::clone(&self.operation_lock),
+            gate: self.gate.clone(),
         }
     }
 }
@@ -551,6 +574,8 @@ impl<
                 "DoIP is not enabled".to_owned(),
             ));
         };
+        // A direct connect is a new connect: refused while quiesced, like sends.
+        self.ensure_gate_open()?;
         doip.connect_ecu_direct(ecu_name, endpoint).await
     }
 }
@@ -563,7 +588,9 @@ mod tests {
     };
 
     use cda_interfaces::{
-        EcuAddresses, RouteStatus, communication_control::DoipEndpoint, uds::TransportResponse,
+        EcuAddresses, RouteStatus,
+        communication_control::{DoipEndpoint, access::QUIESCED_MESSAGE},
+        uds::TransportResponse,
     };
 
     use super::*;
@@ -751,6 +778,109 @@ mod tests {
             router.connect_ecu_direct("ECU_A", test_endpoint()).await,
             Err(DiagServiceError::RequestNotSupported(_))
         ));
+    }
+
+    fn payload(data: &[u8]) -> ServicePayload {
+        ServicePayload {
+            data: data.to_vec(),
+            source_address: 0,
+            target_address: 0,
+            new_session: None,
+            new_security: None,
+        }
+    }
+
+    const READ_VIN: [u8; 3] = [0x22, 0xF1, 0x90];
+    const RETRY_AFTER: Duration = Duration::from_secs(7);
+
+    /// The refusal of the closed gate, which maps like a quiesced `acquire`.
+    fn paused(result: &Result<(), DiagServiceError>) -> bool {
+        matches!(
+            result,
+            Err(DiagServiceError::CommunicationNotReady { message, retry_after })
+                if message == QUIESCED_MESSAGE && *retry_after == RETRY_AFTER
+        )
+    }
+
+    fn quiesced_router(
+        gate: &TransportGate,
+    ) -> DiagnosticTransportRouter<FakeGateway, FakeGateway> {
+        DiagnosticTransportRouter::new(HashMap::from_iter([
+            ("doip_ecu".to_owned(), TransportType::DoIP),
+            ("can_ecu".to_owned(), TransportType::Can),
+        ]))
+        .with_gate(gate.clone())
+        .with_doip(FakeGateway::new(false))
+        .with_can(FakeGateway::new(false))
+    }
+
+    async fn send(
+        router: &DiagnosticTransportRouter<FakeGateway, FakeGateway>,
+        ecu: &str,
+        data: &[u8],
+    ) -> Result<(), DiagServiceError> {
+        let params = TransmissionParameters {
+            gateway_address: 0,
+            timeout_ack: Duration::from_secs(1),
+            ecu_name: ecu.to_owned(),
+            repeat_request_count_transmission: 0,
+        };
+        router
+            .send(params, payload(data), mpsc::channel(1).0, true)
+            .await
+            .map(|_| ())
+    }
+
+    /// [[ test~transport-gate-refuses-send-while-quiesced, A closed gate refuses sends on both transports, test ]]
+    #[tokio::test]
+    async fn closed_gate_refuses_sends_on_both_transports() {
+        let gate = TransportGate::with_retry_after(RETRY_AFTER);
+        let router = quiesced_router(&gate);
+        router.enable().await.unwrap();
+
+        gate.close();
+        assert!(paused(&send(&router, "doip_ecu", &READ_VIN).await));
+        assert!(paused(&send(&router, "can_ecu", &READ_VIN).await));
+        let functional = router
+            .send_functional(
+                TransmissionParameters {
+                    gateway_address: 0,
+                    timeout_ack: Duration::from_secs(1),
+                    ecu_name: "doip_ecu".to_owned(),
+                    repeat_request_count_transmission: 0,
+                },
+                payload(&READ_VIN),
+                HashMap::default(),
+                Duration::from_secs(1),
+                true,
+            )
+            .await;
+        assert!(paused(&functional.map(|_| ())));
+
+        gate.open();
+        assert!(
+            !paused(&send(&router, "doip_ecu", &READ_VIN).await),
+            "an open gate lets the send through"
+        );
+        assert!(!paused(&send(&router, "can_ecu", &READ_VIN).await));
+    }
+
+    /// [[ test~transport-gate-refuses-direct-connect-while-quiesced, A closed gate refuses a direct connect with the retry hint, test ]]
+    #[tokio::test]
+    async fn closed_gate_refuses_a_direct_connect() {
+        let gate = TransportGate::with_retry_after(RETRY_AFTER);
+        let router = quiesced_router(&gate);
+
+        gate.close();
+        assert!(paused(
+            &router.connect_ecu_direct("doip_ecu", test_endpoint()).await
+        ));
+
+        gate.open();
+        assert_eq!(
+            router.connect_ecu_direct("doip_ecu", test_endpoint()).await,
+            Ok(())
+        );
     }
 
     /// A runtime update disables the transport before replacing the ECU data.

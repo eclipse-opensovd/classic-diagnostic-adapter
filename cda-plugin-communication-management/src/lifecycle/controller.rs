@@ -21,7 +21,7 @@ use cda_interfaces::{
     communication_control::{
         CommunicationError, CommunicationGuard, CommunicationInitMode, CommunicationLifecycle,
         CommunicationOperation, CommunicationOperationFailure, CommunicationState,
-        CommunicationVariantDetection, TransportControl, VariantDetectionMode,
+        CommunicationVariantDetection, TransportControl, TransportGate, VariantDetectionMode,
     },
     dlt_ctx,
 };
@@ -31,7 +31,10 @@ use tokio::{
 };
 
 use super::{
-    disable::{DisableError, DisableLease, DisableLeaseId, DisableOwner, DisableReason},
+    disable::{
+        DisableError, DisableLease, DisableLeaseId, DisableOwner, DisableReason, QuiesceLease,
+        QuiesceLeaseId,
+    },
     guard::ActiveGuard,
     state::{CommunicationStateStore, EnablingResultReceiver, detection_mode},
     transition::{self, LifecycleDecision, LifecycleRequest},
@@ -97,6 +100,11 @@ impl CommunicationHandle {
     pub fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
         let mut state = self.state.lock();
         transition::guard_admission(&state.state)?;
+        // A quiesce pauses admission without a lifecycle state of its own;
+        // callers get the retryable `Quiesced` error.
+        if state.quiesce_owner.is_some() {
+            return Err(CommunicationError::Quiesced);
+        }
         // Must be atomic with the admission check above. Otherwise a
         // `disable()` could claim `Enabled -> Disabling` in the gap.
         Ok(ActiveGuard::register(&mut state, Arc::clone(&self.state)))
@@ -562,6 +570,54 @@ impl CommunicationHandle {
         failure
     }
 
+    /// Acquires the exclusive quiesce lease: no guard is admitted and no
+    /// lifecycle transition or detection starts while it is held, and the
+    /// transport stays as it is.
+    ///
+    /// Granted from `Enabled` and `Disabled`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DisableError::InUse`] when guards are held, and
+    /// [`DisableError::Conflict`] when another exclusive lease is held, a
+    /// transition or detection is in flight, or the state is `Enabling(_)`,
+    /// `Disabling`, `DisabledExclusive`, `RecoveryRequired(_)` or `Error(_)`.
+    /// Fails with [`CommunicationOperationFailure::ShuttingDown`] during shutdown.
+    pub fn quiesce(&self, reason: DisableReason) -> Result<QuiesceLease, DisableError> {
+        let mut state = self.state.lock();
+        if self.worker.is_shutting_down() || state.shutting_down {
+            return Err(DisableError::Failed(
+                CommunicationOperationFailure::ShuttingDown {
+                    operation: CommunicationOperation::Disable,
+                },
+            ));
+        }
+        if !state.active_guards.is_empty() {
+            return Err(DisableError::InUse);
+        }
+        let state_allows = matches!(
+            state.state,
+            CommunicationState::Enabled | CommunicationState::Disabled
+        );
+        if !state_allows
+            || state.disable_owner.is_some()
+            || state.quiesce_owner.is_some()
+            || state.enabling_result.is_some()
+            || state.detection_in_flight.is_some()
+        {
+            tracing::debug!(
+                state = ?state.state,
+                ?reason,
+                "Quiesce rejected: current state does not permit it"
+            );
+            return Err(DisableError::Conflict);
+        }
+        let id = QuiesceLeaseId::new();
+        state.quiesce_owner = Some(id);
+        self.state.gate.close();
+        Ok(QuiesceLease::new(Arc::clone(&self.state), id, reason))
+    }
+
     /// Acquires the sole exclusive disable lease, taking the physical transport
     /// offline if it was up.
     ///
@@ -834,6 +890,7 @@ impl Drop for WorkerBuildGuard {
 pub async fn build_communication_runtime<B>(
     builder: B,
     transport_control: Arc<dyn TransportControl>,
+    transport_gate: TransportGate,
     init_mode: CommunicationInitMode,
     variant_detection: VariantDetectionMode,
 ) -> Result<CommunicationRuntime, BuildCommunicationRuntimeError<B::Error>>
@@ -841,10 +898,10 @@ where
     B: CommunicationPluginBuilder,
 {
     let resources = worker::new_resources(transport_control);
-    let state = Arc::new(CommunicationStateStore::new(
-        CommunicationState::Disabled,
-        variant_detection,
-    ));
+    let state = Arc::new(
+        CommunicationStateStore::new(CommunicationState::Disabled, variant_detection)
+            .with_gate(transport_gate),
+    );
     let (sender, receivers) = worker::channel();
     let worker_task = Arc::new(tokio::sync::Mutex::new(None));
     let handle = CommunicationHandle {
@@ -2071,6 +2128,113 @@ mod tests {
             .expect("the lease must be grantable once detection settles");
         drop(lease);
         assert_eq!(handle.state(), CommunicationState::Disabled);
+    }
+
+    /// [[ test~communication-quiesce-rejects-active-guards, Quiesce is refused while guards are held, test ]]
+    #[tokio::test]
+    async fn quiesce_rejects_active_guards() {
+        let (handle, _control) = handle();
+        handle.enable_and_detect().await.unwrap();
+
+        let guard = handle.acquire().unwrap();
+        assert!(matches!(
+            handle.quiesce(DisableReason::RuntimeUpdate),
+            Err(DisableError::InUse)
+        ));
+        drop(guard);
+        let lease = handle
+            .quiesce(DisableReason::RuntimeUpdate)
+            .expect("quiesce must succeed once no guard is active");
+        drop(lease);
+    }
+
+    /// [[ test~communication-quiesce-closes-gate, The quiesce lease closes the transport gate and refuses new guards with the paused error until dropped, test ]]
+    #[tokio::test]
+    async fn quiesce_closes_the_gate_and_blocks_new_guards_until_dropped() {
+        let (handle, _control) = handle();
+        let gate = handle.state.gate.clone();
+        handle.enable_and_detect().await.unwrap();
+        assert!(gate.is_open());
+
+        let lease = handle.quiesce(DisableReason::RuntimeUpdate).unwrap();
+        assert!(!gate.is_open());
+        // A retryable not-ready error of its own.
+        assert_eq!(handle.acquire().err(), Some(CommunicationError::Quiesced));
+        assert_eq!(handle.state(), CommunicationState::Enabled);
+
+        drop(lease);
+        assert!(gate.is_open());
+        assert!(handle.acquire().is_ok());
+    }
+
+    /// [[ test~communication-quiesce-conflicts-with-disable-and-detection, A quiesce is refused during a detection or another lease and blocks disable and detection and activation, test ]]
+    #[tokio::test]
+    async fn quiesce_conflicts_with_disable_and_detection() {
+        let (handle, _control) = handle();
+        handle.enable_and_detect().await.unwrap();
+        let detector = Arc::new(BlockingDetector {
+            entered: Notify::new(),
+            proceed: Notify::new(),
+        });
+        handle
+            .register_variant_detection(
+                Arc::clone(&detector) as Arc<dyn CommunicationVariantDetection>
+            )
+            .await
+            .unwrap();
+
+        // Detection in flight refuses a quiesce.
+        let sweep = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.redetect().await }
+        });
+        detector.entered.notified().await;
+        assert!(matches!(
+            handle.quiesce(DisableReason::RuntimeUpdate),
+            Err(DisableError::Conflict)
+        ));
+        detector.proceed.notify_one();
+        assert_eq!(sweep.await.unwrap(), Ok(CommunicationState::Enabled));
+
+        // A quiesce refuses disable, detection, a second quiesce and a transition.
+        let lease = handle.quiesce(DisableReason::RuntimeUpdate).unwrap();
+        assert!(matches!(
+            handle.disable(DisableReason::RuntimeUpdate).await,
+            Err(DisableError::Conflict)
+        ));
+        assert!(matches!(
+            handle.redetect().await,
+            Err(CommunicationOperationFailure::TransitionFailure { .. })
+        ));
+        assert!(matches!(
+            handle.quiesce(DisableReason::RuntimeUpdate),
+            Err(DisableError::Conflict)
+        ));
+        drop(lease);
+
+        // A disable lease refuses a quiesce.
+        let disable_lease = handle.disable(DisableReason::RuntimeUpdate).await.unwrap();
+        assert!(matches!(
+            handle.quiesce(DisableReason::RuntimeUpdate),
+            Err(DisableError::Conflict)
+        ));
+        drop(disable_lease);
+        assert_eq!(handle.state(), CommunicationState::Disabled);
+
+        // From `Disabled` a quiesce is granted and still blocks an activation.
+        let lease = handle.quiesce(DisableReason::RuntimeUpdate).unwrap();
+        assert!(matches!(
+            handle.enable_and_detect().await,
+            Err(CommunicationOperationFailure::TransitionFailure { .. })
+        ));
+        assert_eq!(handle.state(), CommunicationState::Disabled);
+        drop(lease);
+        // The activation runs the blocking detector, so pre-release it.
+        detector.proceed.notify_one();
+        assert_eq!(
+            handle.enable_and_detect().await,
+            Ok(CommunicationState::Enabled)
+        );
     }
 
     /// A detector failure during a full activation unwinds all hooks and takes

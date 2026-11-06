@@ -30,8 +30,10 @@
 //! gateways, which is not a plugin concern.
 //!
 //! Only the first two columns vary by mode. `trigger_detection()` never
-//! consults `init_mode`, so under `Disabled` communication has to be enabled out
-//! of band before anything can detect.
+//! consults `init_mode`: an explicit detection request (`DetectionCause::Explicit`
+//! or `DetectionCause::TopologyRediscovery`, a `networkreset` execution) enables
+//! a down transport with a full initialization in every mode, including
+//! `Disabled`.
 //!
 //! Other plugins can be substituted via `Setup::with_communication_plugin`.
 
@@ -47,7 +49,7 @@ use cda_interfaces::communication_control::{
 use super::{CommunicationPlugin, CommunicationPluginBuilder};
 use crate::lifecycle::{
     controller::CommunicationHandle,
-    disable::{DisableError, DisableLease, DisableReason},
+    disable::{DisableError, DisableLease, DisableReason, QuiesceLease},
 };
 
 /// Default communication plugin: applies `init_mode` policy on top of the
@@ -118,7 +120,17 @@ impl CommunicationPlugin for DefaultCommunicationPlugin {
         &self,
         cause: DetectionCause,
     ) -> Result<CommunicationState, CommunicationOperationFailure> {
-        // TODO: topology rediscovery (#490).
+        // Both causes are an explicit authorization to communicate: they bring
+        // a down transport up (with a fresh discovery) in every mode. The match
+        // is exhaustive so a future cause has to be decided consciously.
+        // [[ dimpl~communication-explicit-detection-enables, Explicit detection brings a stopped transport up, dimpl ]]
+        let brings_transport_up = match cause {
+            DetectionCause::Explicit | DetectionCause::TopologyRediscovery => true,
+        };
+        if brings_transport_up && self.handle.state() != CommunicationState::Enabled {
+            tracing::debug!(?cause, mode = ?self.mode, "Enabling communication for detection");
+            return self.handle.enable_and_detect().await;
+        }
 
         tracing::debug!(?cause, mode = ?self.mode, "Triggering whole-vehicle detection");
 
@@ -127,6 +139,10 @@ impl CommunicationPlugin for DefaultCommunicationPlugin {
 
     async fn disable(&self, reason: DisableReason) -> Result<DisableLease, DisableError> {
         self.handle.disable(reason).await
+    }
+
+    fn quiesce(&self, reason: DisableReason) -> Result<QuiesceLease, DisableError> {
+        self.handle.quiesce(reason)
     }
 
     async fn register_lifecycle_hook(
@@ -310,40 +326,80 @@ mod tests {
         assert_eq!(control.enable_count.load(Ordering::Relaxed), 0);
     }
 
-    /// `trigger_detection()` never brings a transport up, so `Disabled` mode is
-    /// inert on every path this plugin exposes: widening a detection request
-    /// into an activation would produce exactly the unauthorized network traffic
-    /// the mode exists to prevent.
+    /// Counts the detections.
+    #[derive(Default)]
+    struct CountingDetector(AtomicUsize);
+
+    impl CountingDetector {
+        fn runs(&self) -> usize {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl CommunicationVariantDetection for CountingDetector {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+
+        async fn detect(
+            &self,
+            _phase: cda_interfaces::communication_control::DetectionPhase,
+        ) -> Result<(), CommControlError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    /// An explicit or rediscovery detection request brings a stopped transport
+    /// up with a full initialization in every `init_mode`.
+    /// [[ test~communication-explicit-detection-enables, Explicit detection brings a stopped transport up, test ]]
     #[tokio::test]
-    async fn disabled_mode_is_inert_on_every_path_including_detection() {
-        let (plugin, control, handle) = plugin_with_mode(CommunicationInitMode::Disabled);
+    async fn explicit_detection_enables_a_stopped_transport() {
+        for mode in [
+            CommunicationInitMode::Always,
+            CommunicationInitMode::WhenNotPersisted,
+            CommunicationInitMode::OnDemand,
+            CommunicationInitMode::Disabled,
+        ] {
+            for cause in [
+                DetectionCause::Explicit,
+                DetectionCause::TopologyRediscovery,
+            ] {
+                let (plugin, control, _handle) = plugin_with_mode(mode);
+                let detector = Arc::new(CountingDetector::default());
+                plugin
+                    .register_variant_detection(Arc::clone(&detector) as _)
+                    .await
+                    .unwrap();
+                assert_eq!(plugin.state(), CommunicationState::Disabled);
+                assert_eq!(
+                    plugin.trigger_detection(cause).await,
+                    Ok(CommunicationState::Enabled),
+                    "{mode:?} {cause:?}"
+                );
+                assert_eq!(
+                    detector.runs(),
+                    1,
+                    "{mode:?} {cause:?}: the registered detector must have run"
+                );
+                assert_eq!(
+                    control.enable_count.load(Ordering::Relaxed),
+                    1,
+                    "{mode:?} {cause:?}: the transport must have been enabled once"
+                );
+                assert_eq!(plugin.state(), CommunicationState::Enabled);
 
-        // Ordinary activation is inert.
-        assert!(plugin.activate(ActivationCause::Explicit).await.is_err());
-        assert_eq!(control.enable_count.load(Ordering::Relaxed), 0);
-        assert_eq!(plugin.state(), CommunicationState::Disabled);
-
-        // So is detection: refused without touching the transport.
-        assert_eq!(
-            plugin.trigger_detection(DetectionCause::Explicit).await,
-            Err(CommunicationOperationFailure::TransitionFailure {
-                operation: CommunicationOperation::Detect
-            })
-        );
-        assert_eq!(
-            control.enable_count.load(Ordering::Relaxed),
-            0,
-            "a detection request must never enable the transport"
-        );
-        assert_eq!(plugin.state(), CommunicationState::Disabled);
-
-        // Once something else enables communication, detection is served.
-        assert_eq!(handle.enable().await, Ok(CommunicationState::Enabled));
-        assert_eq!(
-            plugin.trigger_detection(DetectionCause::Explicit).await,
-            Ok(CommunicationState::Enabled)
-        );
-        assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
+                // Enabled now: a second request re-detects without re-enabling.
+                assert_eq!(
+                    plugin.trigger_detection(cause).await,
+                    Ok(CommunicationState::Enabled),
+                    "{mode:?} {cause:?}"
+                );
+                assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
+                assert_eq!(detector.runs(), 2, "{mode:?} {cause:?}: re-detected");
+            }
+        }
     }
 
     /// From `Enabled`, `trigger_detection` detects without touching the
@@ -378,10 +434,10 @@ mod tests {
         }
     }
 
-    /// `Error(_)` is a downed transport too, so detection is refused there as
-    /// well. Recovery is an activation, which only `activate()` performs.
+    /// `Error(_)` is a stopped transport too: an explicit detection request
+    /// recovers it, in every `init_mode`.
     #[tokio::test]
-    async fn trigger_detection_refused_from_error_in_every_init_mode() {
+    async fn explicit_detection_recovers_from_error_in_every_init_mode() {
         for mode in [
             CommunicationInitMode::Always,
             CommunicationInitMode::OnDemand,
@@ -395,16 +451,10 @@ mod tests {
             control.fail_enable.store(false, Ordering::Relaxed);
             assert_eq!(
                 plugin.trigger_detection(DetectionCause::Explicit).await,
-                Err(CommunicationOperationFailure::TransitionFailure {
-                    operation: CommunicationOperation::Detect
-                }),
-                "{mode:?}: detection must not recover a broken transport"
+                Ok(CommunicationState::Enabled),
+                "{mode:?}"
             );
-            assert_eq!(
-                control.enable_count.load(Ordering::Relaxed),
-                0,
-                "{mode:?}: no successful enable may have happened"
-            );
+            assert_eq!(control.enable_count.load(Ordering::Relaxed), 1, "{mode:?}");
         }
     }
 
@@ -422,7 +472,7 @@ mod tests {
         assert_eq!(
             plugin.trigger_detection(DetectionCause::Explicit).await,
             Err(CommunicationOperationFailure::DisableLeaseHeld {
-                operation: CommunicationOperation::Detect
+                operation: CommunicationOperation::EnableAndDetect
             })
         );
         assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);

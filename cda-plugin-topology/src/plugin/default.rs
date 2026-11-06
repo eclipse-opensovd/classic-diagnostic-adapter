@@ -18,14 +18,16 @@ use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    communication_control::{CommunicationInitMode, CommunicationLifecycle},
-    topology::{DiscoveryStrategy, EcuTopologyStore, TopologyState, physical_gateways},
+    communication_control::{CommunicationInitMode, CommunicationLifecycle, TransportGate},
+    topology::{
+        DiscoveryStrategy, EcuTopologyStore, TopologyResetBackend, TopologyState, physical_gateways,
+    },
 };
 
 use super::{
     TopologyDatabases, TopologyPlugin, TopologyPluginBuilder, TopologyPolicy, TopologySource,
 };
-use crate::{persist::TopologyPersistence, restore};
+use crate::{REDISCOVERY_TIMEOUT, persist::TopologyPersistence, reset::TopologyReset, restore};
 
 /// Logical addresses of the physical gateways in the databases.
 async fn physical_db_gateways(databases: &dyn TopologyDatabases) -> Vec<u16> {
@@ -60,7 +62,12 @@ impl DefaultTopologyPlugin {
     /// pass a [`DisabledTopologyStore`], so nothing touches the storage.
     #[must_use]
     pub fn new(config: TopologyPolicy, store: Arc<dyn EcuTopologyStore>) -> Self {
-        let state = TopologyState::new(DiscoveryStrategy::Vir);
+        // A send or connect refused while communication is quiesced carries the
+        // same retry hint as the other deferred answers.
+        let state = TopologyState::with_transport_gate(
+            DiscoveryStrategy::Vir,
+            TransportGate::with_retry_after(config.deferred_retry_after),
+        );
         state.set_vam_policy(config.vam_policy());
         Self {
             config,
@@ -173,6 +180,17 @@ impl TopologyPlugin for DefaultTopologyPlugin {
         );
         self.persistence.set(Arc::clone(&persistence)).ok()?;
         Some(persistence)
+    }
+
+    fn reset_backend(&self, source: Arc<dyn TopologySource>) -> Arc<dyn TopologyResetBackend> {
+        Arc::new(TopologyReset {
+            store: Arc::clone(&self.store),
+            state: Arc::clone(&self.topology_state),
+            source,
+            persistence: self.persistence.get().cloned(),
+            doip_enabled: self.config.doip_enabled,
+            timeout: REDISCOVERY_TIMEOUT,
+        })
     }
 }
 

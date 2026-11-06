@@ -36,12 +36,15 @@ use cda_interfaces::{
     communication_control::{
         ActivationCause, CommunicationAccess, CommunicationInitMode, CommunicationLifecycle,
         CommunicationVariantDetection, DetectionPhase, DoipConnect, PostUpdateCommunicationMode,
-        VariantDetectionMode, error::CommControlError,
+        TransportGate, VariantDetectionMode, error::CommControlError,
+        quiesce::QuiesceCommunication,
     },
     component_slot::{ComponentSlot, ReplaceComponent},
     health::HealthProvider,
     http_protection::registry::{HttpProtectionRegistry, HttpRouteMatcher},
     lock_priority_api::LockPriorityPolicy,
+    runtime_update_api::LockStateProvider,
+    topology::VehicleTopologyPlugin,
 };
 use cda_plugin_communication_management::{
     lifecycle::{
@@ -49,6 +52,7 @@ use cda_plugin_communication_management::{
         access::CommunicationAccessView,
         build_communication_runtime,
         disable::{CommunicationDisableView, DisableCommunication},
+        rediscovery::CommunicationRediscoveryView,
     },
     plugin::{
         CommunicationPlugin, CommunicationPluginBuilder, default::DefaultCommunicationPluginBuilder,
@@ -58,6 +62,7 @@ use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
 use cda_plugin_topology::{
     DefaultTopologyPluginBuilder, TopologyPlugin, TopologyPluginBuilder, TopologySource,
 };
+use cda_plugin_vehicle_topology::{DefaultVehicleTopologyPlugin, VehicleTopologyDeps};
 use cda_storage::LocalStorage;
 use cda_transport_router::DiagnosticTransportRouter;
 use futures::future::BoxFuture;
@@ -222,7 +227,14 @@ pub struct Setup<
     /// Routes exempt from every global HTTP protection, see
     /// [`Setup::with_always_accessible_routes`].
     pub(crate) always_accessible_routes: Vec<HttpRouteMatcher>,
+    /// Builds the vehicle topology (`networkreset`) plugin. `None` uses
+    /// [`DefaultVehicleTopologyPlugin`].
+    pub(crate) build_vehicle_topology_plugin: Option<VehicleTopologyPluginBuilder>,
 }
+
+/// Builds a custom vehicle topology plugin from the CDA dependencies.
+pub type VehicleTopologyPluginBuilder =
+    Box<dyn FnOnce(VehicleTopologyDeps) -> Arc<dyn VehicleTopologyPlugin> + Send>;
 
 impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Default for Setup<SP, SL> {
     fn default() -> Self {
@@ -244,6 +256,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Setup<SP, SL> {
             shutdown_signal: None,
             lock_priority_policy: Arc::new(cda_plugin_lock_priority::NoPreemptionPolicy),
             always_accessible_routes: Vec::new(),
+            build_vehicle_topology_plugin: None,
         }
     }
 }
@@ -317,7 +330,18 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB, TPB> Setup<SP, SL, 
             shutdown_signal: self.shutdown_signal,
             lock_priority_policy: self.lock_priority_policy,
             always_accessible_routes: self.always_accessible_routes,
+            build_vehicle_topology_plugin: self.build_vehicle_topology_plugin,
         }
+    }
+
+    /// Replaces the default vehicle topology (`networkreset`) plugin.
+    #[must_use]
+    pub fn with_vehicle_topology_plugin(
+        mut self,
+        builder: impl FnOnce(VehicleTopologyDeps) -> Arc<dyn VehicleTopologyPlugin> + Send + 'static,
+    ) -> Self {
+        self.build_vehicle_topology_plugin = Some(Box::new(builder));
+        self
     }
 
     /// Replaces the default communication plugin factory.
@@ -337,6 +361,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB, TPB> Setup<SP, SL, 
             shutdown_signal: self.shutdown_signal,
             lock_priority_policy: self.lock_priority_policy,
             always_accessible_routes: self.always_accessible_routes,
+            build_vehicle_topology_plugin: self.build_vehicle_topology_plugin,
         }
     }
 
@@ -359,6 +384,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB, TPB> Setup<SP, SL, 
             shutdown_signal: self.shutdown_signal,
             lock_priority_policy: self.lock_priority_policy,
             always_accessible_routes: self.always_accessible_routes,
+            build_vehicle_topology_plugin: self.build_vehicle_topology_plugin,
         }
     }
 
@@ -410,6 +436,24 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB, TPB> Setup<SP, SL, 
     }
 }
 
+/// Settings the communication runtime is built with.
+struct CommunicationPolicy {
+    init_mode: CommunicationInitMode,
+    variant_detection: VariantDetectionMode,
+    /// The retry hint of requests deferred while communication starts.
+    retry_after: Duration,
+}
+
+impl From<&Configuration> for CommunicationPolicy {
+    fn from(config: &Configuration) -> Self {
+        Self {
+            init_mode: config.communication.init_mode,
+            variant_detection: config.communication.variant_detection,
+            retry_after: config.deferred_retry_after(),
+        }
+    }
+}
+
 /// Installs the global HTTP protection guard, builds the authoritative communication plugin
 /// runtime, and derives a narrow access view for UDS manager construction.
 ///
@@ -422,9 +466,8 @@ async fn build_communication_runtime_and_access<SP, CPB>(
         DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
     >,
     communication_plugin: CPB,
-    init_mode: CommunicationInitMode,
-    variant_detection: VariantDetectionMode,
-    retry_after: Duration,
+    transport_gate: TransportGate,
+    policy: CommunicationPolicy,
     http_protections: &HttpProtectionRegistry,
 ) -> Result<(CommunicationRuntime, Arc<dyn CommunicationAccess>), AppError>
 where
@@ -441,15 +484,18 @@ where
     let communication_runtime = build_communication_runtime(
         communication_plugin,
         transport_control,
-        init_mode,
-        variant_detection,
+        transport_gate,
+        policy.init_mode,
+        policy.variant_detection,
     )
     .await
     .map_err(|error| AppError::InitializationFailed(error.to_string()))?;
 
-    let communication_access: Arc<dyn CommunicationAccess> = Arc::new(
-        CommunicationAccessView::new(Arc::clone(&communication_runtime.plugin), retry_after),
-    );
+    let communication_access: Arc<dyn CommunicationAccess> =
+        Arc::new(CommunicationAccessView::new(
+            Arc::clone(&communication_runtime.plugin),
+            policy.retry_after,
+        ));
 
     Ok((communication_runtime, communication_access))
 }
@@ -548,23 +594,75 @@ where
     Ok(())
 }
 
+/// Everything `setup_runtime_routes` consumes besides the application state.
+pub(crate) struct RuntimeRoutesInput<SP: SecurityPlugin, UPB, CPB> {
+    pub(crate) config: Configuration,
+    pub(crate) vehicle_data: VehicleData<SP>,
+    pub(crate) build_update_plugin: Option<UPB>,
+    pub(crate) build_communication_plugin: CPB,
+    pub(crate) storage: Arc<LocalStorage>,
+    pub(crate) http_protections: HttpProtectionRegistry,
+    pub(crate) topology: Arc<dyn TopologyPlugin>,
+    pub(crate) build_vehicle_topology_plugin: Option<VehicleTopologyPluginBuilder>,
+}
+
+/// The direct-connect view of `gateway`, if `doip.direct_connect_enabled` is set.
+#[cfg(feature = "doip-direct-connect")]
+fn doip_connect_view<
+    G: cda_interfaces::communication_control::TransportControl + cda_interfaces::Shutdown,
+>(
+    enabled: bool,
+    gateway: &ComponentSlot<G>,
+) -> Option<Arc<dyn DoipConnect>> {
+    enabled.then(|| gateway.doip_connect())
+}
+
+/// Without the `doip-direct-connect` feature there is no direct-connect view.
+#[cfg(not(feature = "doip-direct-connect"))]
+fn doip_connect_view<
+    G: cda_interfaces::communication_control::TransportControl + cda_interfaces::Shutdown,
+>(
+    enabled: bool,
+    _gateway: &ComponentSlot<G>,
+) -> Option<Arc<dyn DoipConnect>> {
+    if enabled {
+        tracing::error!(
+            "doip.direct_connect_enabled is set, but this build lacks the `doip-direct-connect` \
+             feature; direct connect is unavailable"
+        );
+    }
+    None
+}
+
+/// Builds the vehicle topology plugin (a vendor builder takes precedence) and
+/// mounts its routes.
+async fn add_topology_routes<SL: SecurityPluginLoader>(
+    ws: &ApplicationState,
+    deps: VehicleTopologyDeps,
+    build: Option<VehicleTopologyPluginBuilder>,
+    lock_provider: &Arc<cda_sovd::SovdLockStateProvider>,
+    update_retry_after: Duration,
+) {
+    let plugin: Arc<dyn VehicleTopologyPlugin> = match build {
+        Some(build) => build(deps),
+        None => Arc::new(DefaultVehicleTopologyPlugin::new(deps)),
+    };
+    cda_sovd::add_vehicle_topology_routes::<SL>(
+        &ws.dynamic_router,
+        plugin,
+        Arc::clone(lock_provider) as Arc<dyn LockStateProvider>,
+        update_retry_after,
+    )
+    .await;
+}
+
 /// Registers all SOVD routes, the runtime-update plugin, `OpenAPI` routes, and the update guard.
 ///
 /// This is called after vehicle data has been loaded. The `build_update_plugin` optional
 /// builder is consumed here; when `None` the runtime-update endpoints are simply not mounted.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Each argument is an independent startup dependency, a struct would only wrap them"
-)]
 pub(crate) async fn setup_runtime_routes<SP, SL, UPB, CPB>(
-    config: Configuration,
-    vehicle_data: VehicleData<SP>,
     ws: &ApplicationState,
-    build_update_plugin: Option<UPB>,
-    communication_plugin: CPB,
-    storage: Arc<LocalStorage>,
-    http_protections: HttpProtectionRegistry,
-    topology: Arc<dyn TopologyPlugin>,
+    input: RuntimeRoutesInput<SP, UPB, CPB>,
 ) -> Result<CommunicationRuntime, AppError>
 where
     SP: SecurityPlugin,
@@ -572,6 +670,16 @@ where
     UPB: UpdatePluginBuilder<SP>,
     CPB: CommunicationPluginBuilder,
 {
+    let RuntimeRoutesInput {
+        config,
+        vehicle_data,
+        build_update_plugin,
+        build_communication_plugin: communication_plugin,
+        storage,
+        http_protections,
+        topology,
+        build_vehicle_topology_plugin,
+    } = input;
     let flash_files_path = config.flash_files_path.clone();
     let flash_functional_class_default = config.flash_functional_class_default.clone();
     let components_config = config.components.clone();
@@ -579,8 +687,6 @@ where
 
     let runtime_update_config = config.runtime_update_config.clone();
     let update_retry_after = Duration::from_secs(runtime_update_config.retry_after_seconds);
-    let communication_retry_after =
-        Duration::from_secs(config.communication.deferred_retry_after_seconds);
     let post_update_mode = config.communication.post_update_mode.clone();
 
     let lock_provider: Arc<cda_sovd::SovdLockStateProvider> = Arc::new(
@@ -589,29 +695,14 @@ where
 
     let shutdown_signal = cda_interfaces::shutdown_signal(ws.shutdown_signal.clone());
     let gateway = vehicle_data.diagnostic_gateway.clone();
-    #[cfg(feature = "doip-direct-connect")]
-    let doip_connect = config
-        .doip
-        .direct_connect_enabled
-        .then(|| gateway.doip_connect());
-    #[cfg(not(feature = "doip-direct-connect"))]
-    let doip_connect: Option<Arc<dyn DoipConnect>> = {
-        if config.doip.direct_connect_enabled {
-            tracing::error!(
-                "doip.direct_connect_enabled is set, but this build lacks the \
-                 `doip-direct-connect` feature; direct connect is unavailable"
-            );
-        }
-        None
-    };
+    let doip_connect = doip_connect_view(config.doip.direct_connect_enabled, &gateway);
 
     let (communication_runtime, communication_access) = build_communication_runtime_and_access(
         ws,
         vehicle_data.diagnostic_gateway.clone(),
         communication_plugin,
-        config.communication.init_mode,
-        config.communication.variant_detection,
-        communication_retry_after,
+        topology.state().transport_gate(),
+        CommunicationPolicy::from(&config),
         &http_protections,
     )
     .await?;
@@ -635,6 +726,8 @@ where
 
     let communication_disable: Arc<dyn DisableCommunication> =
         Arc::new(CommunicationDisableView::new(Arc::clone(&plugin)));
+    let communication_quiesce: Arc<dyn QuiesceCommunication> =
+        Arc::new(CommunicationDisableView::new(Arc::clone(&plugin)));
 
     // Routes are published only after the plugin, initializers, and narrow views are ready.
     let vehicle_route_handle = cda_sovd::add_vehicle_routes::<_, _, SL>(
@@ -654,6 +747,24 @@ where
         },
     )
     .await?;
+
+    let topology_plugin_deps = VehicleTopologyDeps {
+        backend: topology.reset_backend(topology_source),
+        rediscovery: Arc::new(CommunicationRediscoveryView::new(Arc::clone(&plugin))),
+        communication_disable: Arc::clone(&communication_disable),
+        communication_quiesce,
+        locks: Arc::clone(&lock_provider) as Arc<dyn LockStateProvider>,
+        http_protections: http_protections.clone(),
+        rediscovery_timeout: cda_plugin_topology::REDISCOVERY_TIMEOUT,
+    };
+    add_topology_routes::<SL>(
+        ws,
+        topology_plugin_deps,
+        build_vehicle_topology_plugin,
+        &lock_provider,
+        update_retry_after,
+    )
+    .await;
 
     activate_communication_per_init_mode(&plugin, config.communication.init_mode).await?;
 
@@ -700,7 +811,7 @@ mod tests {
     use async_trait::async_trait;
     use cda_interfaces::{
         communication_control::{
-            CommControlError, CommunicationState, TransportControl, TransportState,
+            CommControlError, CommunicationState, TransportControl, TransportGate, TransportState,
         },
         http_protection::registry::HttpMethod,
         runtime_update_api::{
@@ -817,6 +928,7 @@ mod tests {
             let runtime = build_communication_runtime(
                 DefaultCommunicationPluginBuilder,
                 Arc::new(NoopTransport),
+                TransportGate::new(),
                 mode,
                 VariantDetectionMode::Always,
             )

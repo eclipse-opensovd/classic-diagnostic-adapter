@@ -11,6 +11,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::time::Duration;
+
 // `CanConfig` is always available: the `config` module of cda-comm-can is not
 // gated on the `can` feature, only the SocketCAN transport code is. This keeps
 // the configuration schema (and all public function signatures that mention
@@ -330,6 +332,11 @@ impl Default for Configuration {
 }
 
 impl Configuration {
+    /// The retry hint of requests refused while communication is deferred or paused.
+    pub(crate) fn deferred_retry_after(&self) -> Duration {
+        Duration::from_secs(self.communication.deferred_retry_after_seconds)
+    }
+
     /// A CDA without any transport cannot talk to a single ECU; refuse to
     /// start instead of serving a healthy-looking API that can do nothing.
     fn validate_transport_presence(&self) -> Result<(), ConfigSanityError> {

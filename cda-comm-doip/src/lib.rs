@@ -23,7 +23,8 @@ use cda_interfaces::{
     HashMap, HashMapExtensions, NetworkTopology, PhysicalTransport, RouteStatus, ServicePayload,
     TransmissionParameters, TransportProbe, TransportResponse, VariantDetectionSender,
     communication_control::{
-        DoipEndpoint, GatewayLifecycle, TransportControl, TransportState, error::CommControlError,
+        DoipEndpoint, GatewayLifecycle, TransportControl, TransportGate, TransportState,
+        error::CommControlError,
     },
     dlt_ctx, pending_nrc_from_raw,
     topology::{DiscoveryStrategy, KnownGateway, TopologyState, is_physical_gateway},
@@ -169,6 +170,8 @@ pub(crate) struct DoipGatewayState<T: EcuAddresses + DoipComParams> {
     pub(crate) netmask: u32,
     /// Discovery plan and connected gateways, shared with topology persistence.
     pub(crate) topology: Arc<TopologyState>,
+    /// Closed while communication is quiesced: no new connect starts.
+    pub(crate) gate: TransportGate,
     /// Connect state of the current transport start, `None` while stopped.
     /// Every function that works on a session clones it once and does not read
     /// this again, so work of an earlier start cannot change the current one.
@@ -291,6 +294,7 @@ impl<T: EcuAddresses + DoipComParams> Clone for DoipGatewayState<T> {
             socket: Arc::clone(&self.socket),
             netmask: self.netmask,
             topology: Arc::clone(&self.topology),
+            gate: self.gate.clone(),
             session: Arc::clone(&self.session),
         }
     }
@@ -522,6 +526,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                 socket: Arc::new(Mutex::new(None)),
                 netmask: create_netmask(&doip_config.tester_address, &doip_config.tester_subnet)?,
                 topology: TopologyState::new(DiscoveryStrategy::Vir),
+                gate: TransportGate::new(),
                 session: Arc::new(RwLock::new(None)),
             },
             config: doip_config.clone(),
@@ -548,6 +553,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     /// reported to it.
     #[must_use]
     pub fn with_topology_runtime(mut self, topology: Arc<TopologyState>) -> Self {
+        self.state.gate = topology.transport_gate();
         self.state.topology = topology;
         self
     }
@@ -732,26 +738,32 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     /// Connected is recorded at the address it announced, also if a direct
     /// connect in flight connected it (a direct connect itself is not
     /// recorded). Then the discovery is marked complete, unless the session was
-    /// cancelled meanwhile: a start that was stopped did not search everything.
+    /// cancelled meanwhile: a start that was stopped did not search everything,
+    /// nor did one with a connect refused by the transport gate.
     async fn finish_initial_discovery(
         state: &DoipGatewayState<T>,
         session: &GatewaySession,
         discovery: DiscoveryGuard,
         connects: Vec<(DiscoveredGateway, gateway_session::PendingConnect)>,
     ) {
+        let mut refused = false;
         for (gateway, connect) in connects {
             // A cancelled session must not write the shared topology.
             // A discovery connect recorded the gateway itself already.
-            if connect.wait().await.is_ok()
-                && !session.cancel_token.is_cancelled()
-                && !state.topology.is_connected(gateway.logical_address)
-            {
-                state
-                    .topology
-                    .record_connected(KnownGateway::from(&gateway));
+            match connect.wait().await {
+                Ok(())
+                    if !session.cancel_token.is_cancelled()
+                        && !state.topology.is_connected(gateway.logical_address) =>
+                {
+                    state
+                        .topology
+                        .record_connected(KnownGateway::from(&gateway));
+                }
+                Err(ConnectFailure::Refused) => refused = true,
+                _ => {}
             }
         }
-        discovery.finish(!session.cancel_token.is_cancelled());
+        discovery.finish(!session.cancel_token.is_cancelled() && !refused);
     }
 
     /// Completes a reconnect to persisted gateways: the direct connects were
@@ -764,6 +776,11 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     /// gateways without a usable address (`unusable`) are reported unreachable,
     /// unless they are connected by then. A connect of one in flight (e.g. by
     /// its announcement) is waited for first.
+    ///
+    /// A closed transport gate searches nothing, and gateways it refused are
+    /// not reported: nothing is known about them, and only the clear-only
+    /// `networkreset` closes it. They stay unconnected until their announcement
+    /// or the next transport start.
     /// [[ dimpl~doip-persisted-reconnect, Reconnect to persisted gateways with VIR fallback, dimpl ]]
     /// [[ dimpl~doip-reconnect-discovery-mode, The persisted reconnect follows doip.discovery, dimpl ]]
     async fn finish_reconnect(
@@ -778,16 +795,22 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             .iter()
             .map(|(gateway, _)| gateway.logical_address)
             .collect();
-        let connected = connected_gateways(connects).await;
-        let mut candidates: cda_interfaces::HashSet<u16> =
-            attempted.difference(&connected).copied().collect();
+        let results = connect_results(connects).await;
+        let mut candidates: cda_interfaces::HashSet<u16> = attempted
+            .iter()
+            .filter(|&&address| !results.settles(address))
+            .copied()
+            .collect();
         if session.discovery.sends_vir() {
             candidates.extend(vir_for);
+            if !state.gate.is_open() {
+                candidates.clear();
+            }
             if !candidates.is_empty() {
                 let found = Self::search_gateways(state, session, &candidates).await;
-                let connected =
-                    connected_gateways(state.spawn_connects_for_gateways(session, found)).await;
-                candidates.retain(|address| !connected.contains(address));
+                let results =
+                    connect_results(state.spawn_connects_for_gateways(session, found)).await;
+                candidates.retain(|&address| !results.settles(address));
             }
         } else {
             candidates.extend(unusable);
@@ -1275,6 +1298,8 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                     "ECU '{ecu_name}' is currently being connected"
                 )));
             }
+            // Normally refused by the router already: the same error.
+            Err(DirectRejection::Refused) => return Err(self.state.gate.quiesced_error()),
             Err(DirectRejection::Connected) => {
                 let connected_ip = self
                     .get_gateway_network_address(logical_address)
@@ -1302,6 +1327,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                 tracing::warn!(ecu_name = %ecu_name, %address, %error, "Direct connection failed");
                 Err(error.into())
             }
+            Ok(Err(ConnectFailure::Refused)) => Err(self.state.gate.quiesced_error()),
             Ok(Err(ConnectFailure::Cancelled)) => {
                 tracing::warn!(
                     ecu_name = %ecu_name,
@@ -1631,17 +1657,37 @@ async fn wait_for_ecu_response(
     .unwrap_or_default()
 }
 
-/// Waits for `connects` and returns the gateways that ended connected.
-async fn connected_gateways(
+/// The gateways of a set of connects that need no search and no report.
+#[derive(Default)]
+struct ConnectResults {
+    connected: cda_interfaces::HashSet<u16>,
+    /// Refused by the transport gate, which says nothing about the gateway.
+    refused: cda_interfaces::HashSet<u16>,
+}
+
+impl ConnectResults {
+    fn settles(&self, logical_address: u16) -> bool {
+        self.connected.contains(&logical_address) || self.refused.contains(&logical_address)
+    }
+}
+
+/// Waits for `connects` and sorts out the gateways that ended connected or refused.
+async fn connect_results(
     connects: Vec<(DiscoveredGateway, gateway_session::PendingConnect)>,
-) -> cda_interfaces::HashSet<u16> {
-    let mut connected = cda_interfaces::HashSet::default();
+) -> ConnectResults {
+    let mut results = ConnectResults::default();
     for (gateway, connect) in connects {
-        if connect.wait().await.is_ok() {
-            connected.insert(gateway.logical_address);
+        match connect.wait().await {
+            Ok(()) => {
+                results.connected.insert(gateway.logical_address);
+            }
+            Err(ConnectFailure::Refused) => {
+                results.refused.insert(gateway.logical_address);
+            }
+            Err(_) => {}
         }
     }
-    connected
+    results
 }
 
 fn create_netmask(tester_ip: &str, tester_subnet: &str) -> Result<u32, DoipGatewaySetupError> {
@@ -1948,6 +1994,7 @@ mod tests {
             topology: cda_interfaces::topology::TopologyState::new(
                 cda_interfaces::topology::DiscoveryStrategy::Vir,
             ),
+            gate: cda_interfaces::communication_control::TransportGate::new(),
             session: Arc::new(RwLock::new(None)),
         };
 
@@ -2513,6 +2560,82 @@ mod tests {
                 .flatten()
                 .expect("the discovery must be finished");
         assert!(!outcome.full_vir_discovery);
+    }
+
+    /// A gateway refused by the transport gate is not reported unreachable.
+    /// [[ test~doip-refused-reconnect-not-reported, A reconnect refused by the transport gate is not reported, test ]]
+    #[tokio::test]
+    async fn refused_reconnect_is_not_reported_unreachable() {
+        let fake = FakeGateway::start().await;
+        let gateway = gateway_with_gateways(&[("gw1", 0x1000)]).await;
+        let session = session_with_discovery(&fake, DiscoveryMode::VamOnly);
+        let discovery = crate::DiscoveryGuard::begin(&gateway.state.topology);
+
+        DoipDiagGateway::finish_reconnect(
+            &gateway.state,
+            &session,
+            discovery,
+            vec![(
+                discovered("gw1", 0x1000),
+                finished_connect(Err(ConnectFailure::Refused)),
+            )],
+            cda_interfaces::HashSet::default(),
+            cda_interfaces::HashSet::default(),
+        )
+        .await;
+
+        assert!(gateway.state.topology.unreachable().is_empty());
+    }
+
+    /// A closed transport gate sends no VIR, so the gateways it would have
+    /// searched are not reported unreachable either.
+    /// [[ test~doip-closed-gate-searches-nothing, A closed transport gate searches no gateway, test ]]
+    #[tokio::test]
+    async fn closed_gate_searches_and_reports_nothing() {
+        let fake = FakeGateway::start().await;
+        let gateway = gateway_with_gateways(&[("gw1", 0x1000), ("gw2", 0x2000)]).await;
+        let session = session_with_discovery(&fake, DiscoveryMode::Full);
+        let discovery = crate::DiscoveryGuard::begin(&gateway.state.topology);
+        gateway.state.gate.close();
+
+        DoipDiagGateway::finish_reconnect(
+            &gateway.state,
+            &session,
+            discovery,
+            vec![(
+                discovered("gw1", 0x1000),
+                finished_connect(Err(ConnectFailure::Cancelled)),
+            )],
+            std::iter::once(0x2000).collect(),
+            cda_interfaces::HashSet::default(),
+        )
+        .await;
+
+        assert!(gateway.state.topology.unreachable().is_empty());
+    }
+
+    /// A direct connect refused by the closed transport gate returns the same
+    /// quiesced error as the router, with the gate's retry hint.
+    /// [[ test~doip-gate-refuses-direct-connect, No direct connect starts while the transport gate is closed, test ]]
+    #[tokio::test]
+    async fn closed_gate_direct_connect_returns_the_quiesced_error() {
+        let (_listener, port) = silent_gateway();
+        let mut gateway = make_unconnected_direct_gateway(port).await;
+        let retry_after = Duration::from_secs(7);
+        gateway.state.gate =
+            cda_interfaces::communication_control::TransportGate::with_retry_after(retry_after);
+        gateway.state.gate.close();
+
+        let result = gateway.connect_ecu_direct("ecu_a", direct_endpoint()).await;
+
+        assert_eq!(
+            result,
+            Err(DiagServiceError::CommunicationNotReady {
+                message: cda_interfaces::communication_control::access::QUIESCED_MESSAGE.to_owned(),
+                retry_after,
+            })
+        );
+        assert!(!is_connecting(&gateway).await);
     }
 
     /// Without VIR, a persisted gateway without a usable address that an

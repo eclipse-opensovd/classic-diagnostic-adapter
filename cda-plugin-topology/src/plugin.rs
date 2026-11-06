@@ -15,13 +15,19 @@
 
 pub mod default;
 
-use std::{sync::Arc, time::SystemTime};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagServiceError, HashSet, VariantDetectionActivity,
     communication_control::{CommunicationInitMode, CommunicationLifecycle, TopologySettings},
-    topology::{EcuTopologyEntry, EcuTopologyStore, PersistedVariant, TopologyState, VamPolicy},
+    topology::{
+        EcuTopologyEntry, EcuTopologyStore, PersistedVariant, TopologyResetBackend, TopologyState,
+        VamPolicy,
+    },
 };
 
 /// Input of a topology plugin, derived by the application from its own
@@ -37,6 +43,10 @@ pub struct TopologyPolicy {
     /// Lowercase names of the ECUs pinned to the CAN transport. They are never
     /// restored as `AssumedOnline`.
     pub ecus_pinned_to_can_transport: HashSet<String>,
+    /// Whether gateway discovery is configured; CAN-only setups have no `DoIP` discovery.
+    pub doip_enabled: bool,
+    /// The retry hint of a send or connect refused while communication is quiesced.
+    pub deferred_retry_after: Duration,
 }
 
 impl TopologyPolicy {
@@ -105,6 +115,10 @@ pub trait TopologySource: Send + Sync + 'static {
 
     /// Tracker of the current UDS manager, idle when no detection is pending.
     async fn detection_activity(&self) -> VariantDetectionActivity;
+
+    /// Resets ECU states to `NotTested`, keeping `last_seen`. With
+    /// `only_assumed_online`, only ECUs still assumed online are reset.
+    async fn reset_ecu_states(&self, only_assumed_online: bool);
 }
 
 /// A topology plugin wired into the CDA runtime: it stores, restores and plans
@@ -142,6 +156,11 @@ pub trait TopologyPlugin: cda_interfaces::Shutdown {
         &self,
         source: Arc<dyn TopologySource>,
     ) -> Option<Arc<dyn CommunicationLifecycle>>;
+
+    /// Creates the topology operations of a `networkreset`, reading from
+    /// `source`. Call it after [`create_lifecycle_hook`](Self::create_lifecycle_hook),
+    /// so they run with the persist task.
+    fn reset_backend(&self, source: Arc<dyn TopologySource>) -> Arc<dyn TopologyResetBackend>;
 }
 
 /// Factory for a topology plugin.

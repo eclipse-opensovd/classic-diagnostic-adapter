@@ -17,6 +17,7 @@
 pub mod access;
 pub mod doip_connect;
 pub mod error;
+pub mod gate;
 pub mod operation;
 // Private: `SwappableGateway` is minted only via `ComponentSlot::transport_control`.
 mod swappable_gateway;
@@ -24,16 +25,19 @@ mod swappable_gateway;
 use std::time::Duration;
 
 pub mod disable;
+pub mod quiesce;
 
 pub use access::{CommunicationAccess, CommunicationError, CommunicationGuard, CommunicationState};
 use async_trait::async_trait;
 pub use disable::{DisableCommunication, DisableError, DisableGuard, DisableReason};
 pub use doip_connect::{DoipConnect, DoipEndpoint};
 pub use error::CommControlError;
+pub use gate::TransportGate;
 pub use operation::{
     ActivationCause, CommunicationOperation, CommunicationOperationFailure, DetectionCause,
     DetectionPhase,
 };
+pub use quiesce::{QuiesceCommunication, QuiesceGuard};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 
