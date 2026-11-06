@@ -241,7 +241,7 @@ Vehicle Identification
 
 .. arch:: Vehicle Identification
     :id: arch~doip-vehicle-identification
-    :links: test~doip-vam-connect-does-not-block-listener
+    :links: testset~doip-vehicle-identification
     :status: draft
 
     Vehicle identification is the process by which the CDA discovers DoIP entities
@@ -322,7 +322,7 @@ Spontaneous VAM Handling Mode
 
 .. arch:: Spontaneous VAM Handling Mode
     :id: arch~doip-vam-handling-mode
-    :links: dimpl~doip-vam-handling-mode, test~doip-vam-handling-mode
+    :links: dimpl~doip-vam-handling-mode, testset~doip-vam-handling-mode
     :status: draft
 
     The spontaneous VAM listener's behavior is governed by the configured
@@ -858,7 +858,7 @@ Connection Management
 
 .. arch:: DoIP Connection Management
     :id: arch~doip-connection-management
-    :links: test~doip-cancelled-connect-writes-nothing, test~doip-cancelled-session-reports-nothing
+    :links: testset~doip-connection-management
     :status: draft
 
     The CDA manages DoIP TCP connections with automatic recovery from connection failures.

@@ -386,7 +386,7 @@ Communication Initialization Mode
 
 .. arch:: Communication Initialization Mode
     :id: arch~dt-deferred-initialization
-    :links: dimpl~communication-control-contracts, dimpl~communication-control-access, dimpl~communication-control-operations, dimpl~communication-lifecycle-controller, dimpl~default-communication-policy, dimpl~deferred-communication-startup, dimpl~deferred-sovd-admission, dimpl~deferred-doip-transport, testset~deferred-communication-startup, testset~deferred-communication-activation, test~ecu-topology-reconnect-search, test~doip-aborted-discovery-finishes, dimpl~doip-persisted-reconnect, dimpl~doip-reconnect-discovery-mode, test~doip-vam-only-reconnect-without-search, dimpl~doip-failed-announcement-connect-reported, test~doip-failed-announcement-connect-reported, test~doip-unreachable-reported-after-state-change, dimpl~ecu-topology-restore, dimpl~ecu-state-restore, test~doip-plan-reconnect, test~doip-reconnect-plan-reconnect-rejects-renamed-gateway, test~ecu-state-restore-without-assume-online-only-last-seen-is-restored, test~ecu-state-restore-variant-missing-from-the-database-is-detected-again, test~ecu-state-restore-address-mismatch-restores-nothing, test~ecu-state-restore-can-pinned-ecu-is-not-assumed-online, test~ecu-state-restore-inconsistent-duplicate-group-is-detected-again, test~doip-vam-during-reconnect-does-not-connect-twice, dimpl~doip-vam-during-connect-connects-after-failure, test~doip-vam-during-connect-connects-after-failure, dimpl~doip-discovery-connect-waits-for-direct-connect, test~doip-discovery-connect-waits-for-direct-connect, dimpl~doip-cancelled-connect-reverts-ecu-states, test~doip-cancelled-connect-reverts-ecu-states, test~doip-vam-only-reconnect-reports-unusable, test~ecu-state-restore-independent-of-discovery-mode
+    :links: dimpl~communication-control-contracts, dimpl~communication-control-access, dimpl~communication-control-operations, dimpl~communication-lifecycle-controller, dimpl~default-communication-policy, dimpl~deferred-communication-startup, dimpl~deferred-sovd-admission, dimpl~deferred-doip-transport, testset~deferred-communication-startup, testset~deferred-communication-activation, dimpl~doip-persisted-reconnect, dimpl~doip-reconnect-discovery-mode, dimpl~doip-failed-announcement-connect-reported, dimpl~ecu-topology-restore, dimpl~ecu-state-restore, dimpl~doip-vam-during-connect-connects-after-failure, dimpl~doip-discovery-connect-waits-for-direct-connect, dimpl~doip-cancelled-connect-reverts-ecu-states, testset~persisted-topology-reconnect, testset~ecu-state-restore
     :status: draft
 
     The CDA supports a configurable ``[communication] init_mode`` to enable scenarios where
@@ -886,7 +886,7 @@ ECU States
 
 .. arch:: ECU States
     :id: arch~dt-ecu-states
-    :links: dimpl~ecu-state-restore, dimpl~ecu-state-assumed-online, test~ecu-last-seen, dimpl~uds-ecu-reply-contact, test~uds-ecu-reply-contact, test~uds-gateway-disconnect-applied-before-return, test~uds-suppressed-response-no-contact, test~uds-state-assumed-online-becomes-online-on-response, test~uds-state-restored-duplicate-survives-connect-but-real-reconnect-redetects, test~ecu-state-assumed-online-keeps-state-without-gateway, test~ecu-state-assumed-online-reported-as-online, dimpl~ecu-state-assumed-online-unreachable, test~ecu-state-assumed-online-unreachable-is-offline, test~ecu-state-assumed-online-failed-detection-is-offline
+    :links: dimpl~ecu-state-restore, dimpl~ecu-state-assumed-online, dimpl~uds-ecu-reply-contact, dimpl~ecu-state-assumed-online-unreachable, testset~ecu-states
     :status: draft
 
     ECU state management tracks the lifecycle of each ECU from registration through
@@ -1014,7 +1014,7 @@ ECU List Persistence
 
 .. arch:: ECU List Persistence
     :id: arch~dt-ecu-list-persistence
-    :links: dimpl~ecu-topology-store, dimpl~ecu-topology-store-spawn-locked-write, dimpl~doip-direct-connect-not-recorded, test~doip-direct-connect-not-recorded, test~ecu-topology-store-cancelled-call-keeps-lock, test~detection-activity-running-work-keeps-busy, test~detection-activity-idle-wakes-when-last-work-ends, test~ecu-list-persistence-snapshot-name-case, test~ecu-list-persistence-unreachable-not-reached-is-offline, dimpl~ecu-topology-persist-after-detection, dimpl~ecu-topology-prune, test~ecu-topology-persist-after-detection, test~ecu-topology-prune, dimpl~ecu-topology-persist-serialized, test~ecu-topology-persist-serialized, dimpl~ecu-topology-persist-when-idle, dimpl~ecu-topology-persist-unreachable, itest~ecu-list-persistence-unreachable, itest~ecu-list-persistence-unreachable-gateway, dimpl~ecu-list-persistence-requires-doip, test~ecu-list-persistence-requires-doip, itest~ecu-list-persistence-disabled, itest~ecu-list-persistence-reuse, test~ecu-list-persistence-reuse-plan, test~detection-activity-finished-work-visible-through-generation, test~ecu-list-persistence-runs-during-write-coalesce-into-one-more-write, test~ecu-list-persistence-waits-for-discovery-and-detection, test~ecu-list-persistence-persisted-state-follows-sovd-mapping, test~ecu-topology-store-unreadable-entries-are-skipped, test~ecu-topology-store-persist-gateways-keeps-other-entries, test~ecu-list-persistence-unchanged-restart-writes-nothing, test~ecu-list-persistence-only-changed-gateways-written
+    :links: dimpl~ecu-topology-store, dimpl~ecu-topology-store-spawn-locked-write, dimpl~doip-direct-connect-not-recorded, dimpl~ecu-topology-persist-after-detection, dimpl~ecu-topology-prune, dimpl~ecu-topology-persist-serialized, dimpl~ecu-topology-persist-when-idle, dimpl~ecu-topology-persist-unreachable, dimpl~ecu-list-persistence-requires-doip, testset~ecu-list-persistence
     :status: draft
 
     The detected ECU/gateway topology is persisted on top of the generic Persistence API (see
@@ -1193,7 +1193,7 @@ ECU List Persistence - Shutdown Update
 
 .. arch:: ECU List Persistence - Shutdown Update
     :id: arch~dt-ecu-list-persistence-shutdown
-    :links: dimpl~ecu-topology-persist-after-detection, itest~ecu-list-persistence-shutdown, test~ecu-list-persistence-shutdown-with-running-detection-writes-last-seen-only, test~ecu-list-persistence-shutdown-snapshot
+    :links: dimpl~ecu-topology-persist-after-detection, testset~ecu-list-persistence-shutdown
     :status: draft
 
     The ``last_seen`` timestamp maintained per ECU (see :need:`arch~dt-ecu-states`) changes far more
