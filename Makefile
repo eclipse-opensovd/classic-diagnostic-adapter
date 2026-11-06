@@ -54,7 +54,7 @@ test:
 	cargo +$(STABLE) test --locked --workspace --features opensovd-cda/doip-direct-connect $(ARGS)
 
 integration-test:
-	cargo +$(STABLE) test --locked -p integration-tests --features integration-tests
+	cargo +$(STABLE) test --locked -p integration-tests --features integration-tests $(ARGS)
 
 integration-test-can:
 	CDA_INTEGRATION_TEST_USE_CAN=true cargo +$(STABLE) test --locked -p integration-tests --features can-integration-tests --test integration_tests
@@ -249,7 +249,7 @@ help:
 		'release ARGS="..."           Build the release profile' \
 		'check                        Check the workspace' \
 		'test ARGS="..."              Run workspace unit tests' \
-		'integration-test             Run DoIP integration tests' \
+		'integration-test ARGS="..."  Run DoIP integration tests' \
 		'integration-test-can         Run CAN integration tests' \
 		'integration-test-mixed       Run mixed DoIP/CAN integration tests' \
 		'build-all-features           Build with all features' \

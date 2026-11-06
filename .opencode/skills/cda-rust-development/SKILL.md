@@ -30,6 +30,7 @@ touch, first check that you used `make`. Extra cargo arguments go through `ARGS=
 `make lint ARGS="-p cda-sovd"`.
 
 ```sh
+make check                    # cargo check of the workspace
 make build                    # or `make release`
 make test                     # workspace tests
 make integration-test         # needs Docker (CAN: make integration-test-can)
