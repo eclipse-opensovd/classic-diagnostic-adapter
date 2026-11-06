@@ -128,6 +128,7 @@ pub(crate) mod docs_endpoint {
     pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         Path(FgOperationDocsPathParam { service }): Path<FgOperationDocsPathParam>,
+        crate::sovd::binary_encoding::BinaryEncodingParam(binary_encoding): crate::sovd::binary_encoding::BinaryEncodingParam,
         State(WebserverFgState {
             uds,
             functional_group_name,
@@ -164,7 +165,7 @@ pub(crate) mod docs_endpoint {
             .schema_for_fg_request(&diag_service, &functional_group_name)
             .await
             .ok()
-            .and_then(cda_interfaces::SchemaDescription::into_schema);
+            .and_then(|s| s.with_binary_encoding(binary_encoding).into_schema());
 
         // Note: schema_for_fg_responses is not yet available; response schema
         // is omitted for now and can be added once the trait method exists.
@@ -223,6 +224,7 @@ pub(crate) mod diag_service {
         create_schema, openapi,
         sovd::{
             ExecutionReservation, FgServiceExecution, acquire_and_reserve_execution,
+            binary_encoding::BinaryEncodingParam,
             components::{ecu::DiagServicePathParam, get_content_type_and_accept},
             error::{ApiError, ErrorWrapper, VendorErrorCode},
             functions::functional_groups::{handle_ecu_response, map_to_json},
@@ -410,6 +412,7 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::functions::functional_groups::operations::service::Query>,
             ApiError,
         >,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverFgState {
             uds,
             locks,
@@ -495,7 +498,7 @@ pub(crate) mod diag_service {
         } else {
             match get_payload_data::<
                 sovd_interfaces::functions::functional_groups::operations::service::Request,
-            >(content_type.as_ref(), &headers, &body)
+            >(content_type.as_ref(), &headers, &body, binary_encoding)
             {
                 Ok(value) => value,
                 Err(e) => {
@@ -538,7 +541,7 @@ pub(crate) mod diag_service {
         let EcuResponsesData {
             response_data,
             errors,
-        } = handle_ecu_responses(results);
+        } = handle_ecu_responses(results, binary_encoding);
 
         if is_async {
             build_async_response(
@@ -614,6 +617,7 @@ pub(crate) mod diag_service {
             Query<sovd_interfaces::components::ecu::operations::OperationDeleteQuery>,
             ApiError,
         >,
+        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverFgState {
             uds,
             locks,
@@ -693,7 +697,7 @@ pub(crate) mod diag_service {
         let EcuResponsesData {
             response_data,
             errors,
-        } = handle_ecu_responses(results);
+        } = handle_ecu_responses(results, binary_encoding);
 
         if errors.is_empty() {
             // All ECUs succeeded - remove execution and return 204.
@@ -805,6 +809,7 @@ pub(crate) mod diag_service {
             create_schema, openapi,
             sovd::{
                 FgServiceExecution,
+                binary_encoding::BinaryEncodingParam,
                 error::{ApiError, ErrorWrapper, VendorErrorCode},
                 guard_execution,
                 locks::validate_fg_write,
@@ -840,6 +845,7 @@ pub(crate) mod diag_service {
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(OperationAndIdPathParam { operation, id }): Path<OperationAndIdPathParam>,
             WithRejection(Query(query), _): WithRejection<Query<OperationQuery>, ApiError>,
+            BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
             State(WebserverFgState {
                 uds,
                 locks,
@@ -941,6 +947,7 @@ pub(crate) mod diag_service {
                 exec_id,
                 ctx,
                 query.include_schema,
+                binary_encoding,
             )
             .await
         }
@@ -965,6 +972,10 @@ pub(crate) mod diag_service {
         /// Sends `REQUEST_RESULTS` to the functional group, collects
         /// per-ECU responses, updates the stored execution state, and returns the
         /// aggregated `FgAsyncGetByIdResponse`.
+        #[allow(
+            clippy::too_many_arguments,
+            reason = "Combining parameters into a struct would not improve readability here"
+        )]
         async fn send_request_results<T: UdsEcu + Clone>(
             uds: &T,
             security_plugin: &DynamicPlugin,
@@ -973,6 +984,7 @@ pub(crate) mod diag_service {
             exec_id: Uuid,
             ctx: RequestResultsContext<'_>,
             include_schema: bool,
+            binary_encoding: cda_interfaces::BinaryEncoding,
         ) -> Response {
             let RequestResultsContext { fg_executions } = ctx;
             let results = uds
@@ -994,7 +1006,7 @@ pub(crate) mod diag_service {
             let EcuResponsesData {
                 response_data,
                 errors,
-            } = handle_ecu_responses(results);
+            } = handle_ecu_responses(results, binary_encoding);
 
             // Update stored execution state.
             let status = if errors.is_empty() {
@@ -1044,6 +1056,7 @@ pub(crate) mod diag_service {
 
     fn handle_ecu_responses<R: DiagServiceResponse>(
         results: HashMap<String, Result<R, cda_interfaces::DiagServiceError>>,
+        binary_encoding: cda_interfaces::BinaryEncoding,
     ) -> EcuResponsesData {
         let mut response_data: HashMap<String, serde_json::Map<String, serde_json::Value>> =
             HashMap::default();
@@ -1055,6 +1068,7 @@ pub(crate) mod diag_service {
                 &mut errors,
                 ecu_name,
                 result,
+                binary_encoding,
             );
         }
         EcuResponsesData {
@@ -1103,7 +1117,7 @@ pub(crate) mod diag_service {
             let mut mock = MockDiagServiceResponse::new();
             mock.expect_response_type()
                 .returning(|| cda_interfaces::diagservices::DiagServiceResponseType::Positive);
-            mock.expect_into_json().returning(|| {
+            mock.expect_into_json().returning(|_| {
                 Ok(DiagServiceJsonResponse {
                     data: serde_json::Value::Object(serde_json::Map::new()),
                     errors: vec![],
@@ -1116,7 +1130,7 @@ pub(crate) mod diag_service {
             let mut mock = MockDiagServiceResponse::new();
             mock.expect_response_type()
                 .returning(|| cda_interfaces::diagservices::DiagServiceResponseType::Positive);
-            mock.expect_into_json().return_once(move || {
+            mock.expect_into_json().return_once(move |_| {
                 Ok(DiagServiceJsonResponse {
                     data,
                     errors: vec![],
@@ -1199,6 +1213,9 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
+                ),
                 State(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
@@ -1262,6 +1279,9 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
+                ),
                 State(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
@@ -1324,6 +1344,9 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, true)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
+                ),
                 State(state),
                 Bytes::from_static(b"not valid JSON"),
             )
@@ -1379,6 +1402,9 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
+                ),
                 State(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
@@ -1411,7 +1437,7 @@ pub(crate) mod diag_service {
                     mock.expect_response_type().returning(|| {
                         cda_interfaces::diagservices::DiagServiceResponseType::Positive
                     });
-                    mock.expect_into_json().returning(move || {
+                    mock.expect_into_json().returning(move |_| {
                         Ok(DiagServiceJsonResponse {
                             data: serde_json::Value::Object(params.clone()),
                             errors: vec![],
@@ -1446,6 +1472,9 @@ pub(crate) mod diag_service {
                 WithRejection(
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
+                ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
                 ),
                 State(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
@@ -1524,6 +1553,9 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
+                ),
                 State(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
@@ -1569,7 +1601,7 @@ pub(crate) mod diag_service {
                     response.expect_response_type().returning(|| {
                         cda_interfaces::diagservices::DiagServiceResponseType::Positive
                     });
-                    response.expect_into_json().return_once(|| {
+                    response.expect_into_json().return_once(|_| {
                         Err(DiagServiceError::BadPayload(
                             "simulated parse failure".to_string(),
                         ))
@@ -1602,6 +1634,9 @@ pub(crate) mod diag_service {
                 WithRejection(
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
+                ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
                 ),
                 State(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
@@ -1683,6 +1718,9 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_delete_query(false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
+                ),
                 State(state),
             )
             .await;
@@ -1709,6 +1747,9 @@ pub(crate) mod diag_service {
                 WithRejection(
                     axum::extract::Query(make_delete_query(false)),
                     std::marker::PhantomData,
+                ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
                 ),
                 State(state),
             )
@@ -1753,6 +1794,9 @@ pub(crate) mod diag_service {
                 WithRejection(
                     axum::extract::Query(make_delete_query(false)),
                     std::marker::PhantomData,
+                ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
                 ),
                 State(state),
             )
@@ -1803,6 +1847,9 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_delete_query_with_force(false, true)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
+                ),
                 State(state),
             )
             .await;
@@ -1851,6 +1898,9 @@ pub(crate) mod diag_service {
                 WithRejection(
                     axum::extract::Query(make_delete_query(true)),
                     std::marker::PhantomData,
+                ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
                 ),
                 State(state),
             )
@@ -1915,6 +1965,9 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
+                ),
                 State(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
@@ -1963,6 +2016,9 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
+                ),
                 State(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
             )
@@ -1995,7 +2051,7 @@ pub(crate) mod diag_service {
                     mock.expect_response_type().returning(|| {
                         cda_interfaces::diagservices::DiagServiceResponseType::Positive
                     });
-                    mock.expect_into_json().returning(|| {
+                    mock.expect_into_json().returning(|_| {
                         Ok(DiagServiceJsonResponse {
                             data: serde_json::Value::Object(serde_json::Map::new()),
                             errors: vec![],
@@ -2032,6 +2088,9 @@ pub(crate) mod diag_service {
                 WithRejection(
                     axum::extract::Query(make_query(false, false)),
                     std::marker::PhantomData,
+                ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
                 ),
                 State(state),
                 Bytes::from_static(b"{\"parameters\":{}}"),
@@ -2088,6 +2147,9 @@ pub(crate) mod diag_service {
                 WithRejection(
                     axum::extract::Query(make_delete_query_with_force(false, false)),
                     std::marker::PhantomData,
+                ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
                 ),
                 State(state),
             )
@@ -2157,6 +2219,9 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_delete_query_with_force(false, true)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
+                ),
                 State(state),
             )
             .await;
@@ -2221,7 +2286,7 @@ pub(crate) mod diag_service {
                     mock.expect_response_type().returning(|| {
                         cda_interfaces::diagservices::DiagServiceResponseType::Positive
                     });
-                    mock.expect_into_json().returning(move || {
+                    mock.expect_into_json().returning(move |_| {
                         Ok(DiagServiceJsonResponse {
                             data: serde_json::Value::Object(params.clone()),
                             errors: vec![],
@@ -2249,6 +2314,9 @@ pub(crate) mod diag_service {
                 WithRejection(
                     axum::extract::Query(make_get_query(false, false)),
                     std::marker::PhantomData,
+                ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
                 ),
                 State(state),
             )
@@ -2317,6 +2385,9 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_get_query(false, true)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
+                ),
                 State(state),
             )
             .await;
@@ -2370,6 +2441,9 @@ pub(crate) mod diag_service {
                     axum::extract::Query(make_get_query(false, false)),
                     std::marker::PhantomData,
                 ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
+                ),
                 State(state),
             )
             .await;
@@ -2421,6 +2495,9 @@ pub(crate) mod diag_service {
                 WithRejection(
                     axum::extract::Query(make_get_query(false, false)),
                     std::marker::PhantomData,
+                ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
                 ),
                 State(state),
             )
@@ -2494,6 +2571,9 @@ pub(crate) mod diag_service {
                 WithRejection(
                     axum::extract::Query(make_get_query(false, false)),
                     std::marker::PhantomData,
+                ),
+                crate::sovd::binary_encoding::BinaryEncodingParam(
+                    cda_interfaces::BinaryEncoding::Hex,
                 ),
                 State(state),
             )

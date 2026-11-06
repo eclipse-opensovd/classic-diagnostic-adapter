@@ -12,7 +12,7 @@
  */
 
 use crate::{
-    DataParseError, DiagComm, DiagServiceError, HashMap,
+    BinaryEncoding, DataParseError, DiagComm, DiagServiceError, HashMap,
     datatypes::{DtcField, DtcRecord},
     util,
 };
@@ -73,9 +73,14 @@ pub trait DiagServiceResponse: Sized + Send + Sync + 'static + Clone {
     fn response_type(&self) -> DiagServiceResponseType;
     fn get_raw(&self) -> &[u8];
     /// Convert the response into a JSON representation.
+    /// Binary data (e.g. `ByteField` parameters) is represented as string
+    /// using the given `binary_encoding`.
     /// # Errors
     /// Returns `DiagServiceError` if the conversion fails, depending on what went wrong exactly.
-    fn into_json(self) -> Result<DiagServiceJsonResponse, DiagServiceError>;
+    fn into_json(
+        self,
+        binary_encoding: BinaryEncoding,
+    ) -> Result<DiagServiceJsonResponse, DiagServiceError>;
     /// Map the response as a Negative Response Code (NRC).
     /// # Errors
     /// Returns `String` if on failure to map the response as NRC.
@@ -91,14 +96,16 @@ pub trait DiagServiceResponse: Sized + Send + Sync + 'static + Clone {
 #[derive(Debug)]
 pub enum UdsPayloadData {
     Raw(Vec<u8>),
-    ParameterMap(HashMap<String, serde_json::Value>),
+    /// JSON parameters by name. Binary values (e.g. `ByteField` parameters)
+    /// are given as strings in the attached `BinaryEncoding`.
+    ParameterMap(HashMap<String, serde_json::Value>, BinaryEncoding),
 }
 
 impl std::fmt::Display for UdsPayloadData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             UdsPayloadData::Raw(items) => write!(f, "Raw: {}", util::tracing::print_hex(items, 10)),
-            UdsPayloadData::ParameterMap(hash_map) => {
+            UdsPayloadData::ParameterMap(hash_map, _) => {
                 let dbg = format!("{hash_map:?}");
                 write!(f, "ParameterMap: ")?;
                 if dbg.len() > 40 {
@@ -130,7 +137,10 @@ pub mod mock {
             fn is_empty(&self) -> bool;
             fn service_name(&self) -> String;
             fn get_raw(&self) -> &[u8];
-            fn into_json(self) -> Result<diagservices::DiagServiceJsonResponse, DiagServiceError>;
+            fn into_json(
+                self,
+                binary_encoding: crate::BinaryEncoding,
+            ) -> Result<diagservices::DiagServiceJsonResponse, DiagServiceError>;
             fn as_nrc(&self) -> Result<diagservices::MappedNRC, DiagServiceError>;
             fn get_dtcs(&self) -> Result<
                 Vec<(datatypes::DtcField, datatypes::DtcRecord)>,

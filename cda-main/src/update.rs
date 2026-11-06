@@ -147,6 +147,7 @@ where
         vehicle_route_handle: infra.vehicle_route_handle,
         flash_files_path: infra.flash_files_path,
         flash_functional_class_default: infra.flash_functional_class_default,
+        binary_encoding: infra.binary_encoding,
         components_config: infra.components_config,
         lock_provider: Arc::clone(&infra.lock_provider),
         shutdown_signal: infra.shutdown_signal,

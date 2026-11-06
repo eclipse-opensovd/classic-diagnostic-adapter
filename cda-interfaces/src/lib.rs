@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod authentication;
+mod binary_encoding;
+pub use binary_encoding::*;
 mod can_id;
 pub use can_id::*;
 mod com_param_handling;
