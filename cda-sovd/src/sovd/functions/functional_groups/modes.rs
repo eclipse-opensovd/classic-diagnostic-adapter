@@ -382,7 +382,7 @@ pub(crate) mod commctrl {
             |value| functional_groups::modes::commctrl::get::ResponseElement {
                 name: Some(COMM_CONTROL_NAME.to_owned()),
                 translation_id: None,
-                value: Some(value),
+                value,
                 schema: None,
             },
         )
@@ -482,7 +482,7 @@ pub(crate) mod dtcsetting {
             |value| functional_groups::modes::dtcsetting::get::ResponseElement {
                 name: Some(DTC_SETTING_NAME.to_owned()),
                 translation_id: None,
-                value: Some(value),
+                value,
                 schema: None,
             },
         )
@@ -572,7 +572,7 @@ pub(crate) mod session {
             |value| sovd_modes::session::get::ResponseElement {
                 name: Some(SESSION_NAME.to_owned()),
                 translation_id: None,
-                value: Some(value),
+                value,
                 schema: None,
             },
         )
