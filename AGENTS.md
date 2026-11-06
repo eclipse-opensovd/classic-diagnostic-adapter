@@ -44,10 +44,15 @@ Rust Cargo workspace (see the `cda-rust-development` skill).
 ## Rust development
 
 For any Rust work (build, test, lint, format, coding rules, dependencies, pre-finish checklist)
-load the `cda-rust-development` skill and follow it.
+load the `cda-rust-development` skill before running any command and follow it.
+
+Build, check, test, lint and format only through the `Makefile` targets (`make check`,
+`make build`, `make test`, `make lint`, `make fmt`, ...; `make help` lists all). Never run bare
+`cargo build/check/test/clippy/fmt`: the `Makefile` pins the toolchains, the local default
+toolchain may be newer and report lints CI does not have.
 
 Config: `opensovd-cda.toml`, overridable with `CDA_`-prefixed env vars; file selectable via
-`--config-file`. All pre-commit hooks: `uv run --group tools prek run --all-files`.
+`--config-file`. All pre-commit hooks: `make precommit`.
 
 ## Rules
 

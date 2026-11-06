@@ -82,10 +82,10 @@ can the ODX sources in `testcontainer/` be used as a fallback.
 
 Prefer the smallest reproduction that proves the hypothesis:
 
-1. A unit test in the affected crate (`#[tokio::test]`, `mockall` mocks) - `cargo test -p <crate> <name>`.
+1. A unit test in the affected crate (`#[tokio::test]`, `mockall` mocks) - `make test ARGS="-p <crate> <name>"`.
 2. An integration test in `integration-tests/tests/sovd/` using the ECU simulator
-   (`testcontainer/ecu-sim`): `cargo test --locked -p integration-tests --features integration-tests <name> -- --show-output`.
-3. Manual run: `RUST_LOG=debug cargo run -- --config-file <cfg>` against the docker compose
+   (`testcontainer/ecu-sim`): `make integration-test ARGS="<name> -- --show-output"`.
+3. Manual run: `RUST_LOG=debug make run ARGS="--config-file <cfg>"` against the docker compose
    environment in `testcontainer/` (see `testcontainer/first_steps.md`).
 
 A reproducing test that fails before and passes after the fix is the preferred deliverable.
