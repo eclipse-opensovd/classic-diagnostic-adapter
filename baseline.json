@@ -6006,15 +6006,6 @@
       "crate": "cda-plugin-communication-management"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
-      "function": "CanDiagGateway::send",
-      "line": 478,
-      "cyclomatic": 3.0,
-      "coverage": 70.12987012987013,
-      "crap": 3.239857797793369,
-      "crate": "cda-comm-can"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/diagservices.rs",
       "function": "DiagServiceResponseStruct::serialize_to_json",
       "line": 227,
@@ -6058,6 +6049,15 @@
       "coverage": 77.77777777777779,
       "crap": 3.0987654320987654,
       "crate": "cda-plugin-communication-management"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
+      "function": "CanDiagGateway::send",
+      "line": 478,
+      "cyclomatic": 3.0,
+      "coverage": 79.22077922077922,
+      "crap": 3.080747722508559,
+      "crate": "cda-comm-can"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/ecu_connection.rs",
