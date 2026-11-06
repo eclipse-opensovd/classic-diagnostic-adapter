@@ -1036,6 +1036,8 @@ mod acquisition_policy {
     fn with_fg_coverage(mut uds: MockUdsEcu) -> MockUdsEcu {
         uds.expect_ecus_for_functional_group()
             .returning(|_, _| vec!["ecu1".to_owned(), "ecu2".to_owned()]);
+        uds.expect_ensure_ecu_online()
+            .returning(|_| Ok(cda_interfaces::mock::mock_ecu_state_online_variant_detected()));
         uds
     }
 
@@ -1048,8 +1050,11 @@ mod acquisition_policy {
     #[tokio::test]
     async fn ecu_lock_post_without_vehicle_lock_is_rejected() {
         let locks = vehicle_lock_required();
+        let mut uds = MockUdsEcu::default();
+        // A rejected lock must not cause ECU traffic.
+        uds.expect_ensure_ecu_online().times(0);
 
-        let response = post_ecu_lock(MockUdsEcu::default(), "test_ecu", &locks).await;
+        let response = post_ecu_lock(uds, "test_ecu", &locks).await;
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert!(locks.open_locks().await.is_empty());
@@ -1058,7 +1063,8 @@ mod acquisition_policy {
     #[tokio::test]
     async fn ecu_lock_post_with_vehicle_lock_is_created() {
         let (mut uds, ecu_name, _, _, _) = super::super::cleanup::setup_ecu_lock_test();
-        uds.expect_get_ecu_state()
+        uds.expect_ensure_ecu_online()
+            .times(1)
             .returning(|_| Ok(cda_interfaces::mock::mock_ecu_state_online_variant_detected()));
         let locks = vehicle_lock_required();
         insert_vehicle_lock(&locks).await;
@@ -1112,5 +1118,96 @@ mod acquisition_policy {
         )
         .await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    fn offline_state() -> cda_interfaces::EcuState {
+        cda_interfaces::EcuState {
+            connectivity: cda_interfaces::Connectivity::Offline,
+            ..cda_interfaces::mock::mock_ecu_state_online_variant_detected()
+        }
+    }
+
+    #[tokio::test]
+    async fn ecu_lock_post_rejected_when_probe_finds_ecu_offline() {
+        let mut uds = MockUdsEcu::default();
+        uds.expect_ensure_ecu_online()
+            .times(1)
+            .returning(|_| Ok(offline_state()));
+        let locks = vehicle_lock_required();
+        insert_vehicle_lock(&locks).await;
+        let open_before = locks.open_locks().await.len();
+
+        let response = post_ecu_lock(uds, "test_ecu", &locks).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(locks.open_locks().await.len(), open_before);
+    }
+
+    #[tokio::test]
+    async fn functional_group_lock_post_rejected_when_all_ecus_offline() {
+        let mut uds = MockUdsEcu::default();
+        uds.expect_ecus_for_functional_group()
+            .returning(|_, _| vec!["ecu1".to_owned(), "ecu2".to_owned()]);
+        uds.expect_ensure_ecu_online()
+            .times(2)
+            .returning(|_| Ok(offline_state()));
+        let locks = vehicle_lock_required();
+        insert_vehicle_lock(&locks).await;
+        let open_before = locks.open_locks().await.len();
+
+        let response = post_fg_lock(uds, "test_fg", &locks).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(locks.open_locks().await.len(), open_before);
+    }
+
+    #[tokio::test]
+    async fn functional_group_lock_post_prefers_communication_not_ready() {
+        let mut uds = MockUdsEcu::default();
+        uds.expect_ecus_for_functional_group()
+            .returning(|_, _| vec!["ecu1".to_owned(), "ecu2".to_owned()]);
+        uds.expect_ensure_ecu_online().times(2).returning(|name| {
+            if name == "ecu1" {
+                Err(cda_interfaces::DiagServiceError::NotFound(
+                    "ecu1".to_owned(),
+                ))
+            } else {
+                Err(cda_interfaces::DiagServiceError::CommunicationNotReady {
+                    message: "not ready".to_owned(),
+                    retry_after: std::time::Duration::from_secs(3),
+                })
+            }
+        });
+        let locks = vehicle_lock_required();
+        insert_vehicle_lock(&locks).await;
+
+        let response = post_fg_lock(uds, "test_fg", &locks).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            response
+                .headers()
+                .contains_key(axum::http::header::RETRY_AFTER)
+        );
+    }
+
+    #[tokio::test]
+    async fn functional_group_lock_post_created_when_one_ecu_online() {
+        let (mut uds, fg_name, _) = super::super::cleanup::setup_functional_group_lock_test();
+        uds.expect_ecus_for_functional_group()
+            .returning(|_, _| vec!["ecu1".to_owned(), "ecu2".to_owned()]);
+        uds.expect_ensure_ecu_online().times(2).returning(|name| {
+            if name == "ecu1" {
+                Ok(offline_state())
+            } else {
+                Ok(cda_interfaces::mock::mock_ecu_state_online_variant_detected())
+            }
+        });
+        let locks = vehicle_lock_required();
+        insert_vehicle_lock(&locks).await;
+
+        let response = post_fg_lock(uds, &fg_name, &locks).await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
     }
 }

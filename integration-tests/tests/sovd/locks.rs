@@ -24,7 +24,7 @@ use crate::{
         TestingError, ecusim,
         http::{
             bearer_token_header, extract_field_from_json, poll_while, response_to_json,
-            response_to_json_to_field, send_cda_request,
+            response_to_json_to_field, send_authenticated_cda_request, send_cda_request,
         },
         locks::{
             COMPONENTS_FLXC1000_LOCKS, ENDPOINTS, FUNCTIONS_FUNCTIONALGROUPS_DOIP_LOCKS, LOCKS,
@@ -679,6 +679,83 @@ async fn lock_when_ecu_offline() -> Result<(), TestingError> {
         Method::DELETE,
     )
     .await;
+    Ok(())
+}
+
+/// An ECU that is marked offline but reachable again is probed by the lock
+/// request, which then succeeds instead of being rejected with 503.
+#[tokio::test]
+async fn lock_probes_ecu_marked_offline() -> Result<(), TestingError> {
+    const SILENCE: &str = "silence_all";
+    let test_env = TestEnv::builder().await?;
+
+    let vehicle_lock = create_lock(
+        Duration::from_secs(60),
+        LOCKS,
+        StatusCode::CREATED,
+        &test_env,
+    )
+    .await;
+    let vehicle_lock_id: String = response_to_json_to_field(&vehicle_lock, "id")?;
+
+    // Silence the ECU while keeping its connection, so it does not
+    // re-announce itself once it answers again.
+    ecusim::set_interceptor(&test_env.ecu_sim, "FLXC1000", SILENCE, "[]", "").await?;
+    let outcome = AssertUnwindSafe(async {
+        send_authenticated_cda_request(
+            &test_env,
+            sovd::COMPONENTS_FLXC1000_BASE,
+            StatusCode::GATEWAY_TIMEOUT,
+            Method::PUT,
+            None,
+            None,
+        )
+        .await?;
+        lock_operation(
+            LOCKS,
+            Some(&vehicle_lock_id),
+            &test_env,
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+        )
+        .await;
+        wait_for_ecu_offline(&test_env.config, "FLXC1000").await?;
+
+        ecusim::clear_interceptor(&test_env.ecu_sim, "FLXC1000", SILENCE).await?;
+        // The ECU answers again, but the CDA still has it marked offline:
+        // clearing the interceptor sends nothing to the CDA, and with the
+        // vehicle lock deleted no tester present runs that could probe it.
+        // The lock request below is therefore what brings it back online.
+
+        let ecu_lock = create_lock(
+            Duration::from_secs(30),
+            COMPONENTS_FLXC1000_LOCKS,
+            StatusCode::CREATED,
+            &test_env,
+        )
+        .await;
+        let lock_id = extract_field_from_json::<String>(&response_to_json(&ecu_lock)?, "id")?;
+        lock_operation(
+            COMPONENTS_FLXC1000_LOCKS,
+            Some(&lock_id),
+            &test_env,
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+        )
+        .await;
+        Ok::<(), TestingError>(())
+    })
+    .catch_unwind()
+    .await;
+
+    let cleanup = test_env.reset().await;
+    let recovery = wait_for_ecus_online(&test_env.config).await;
+    match outcome {
+        Ok(result) => result?,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+    cleanup?;
+    recovery?;
     Ok(())
 }
 

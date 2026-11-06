@@ -575,6 +575,12 @@ impl TestEcuDb {
         update(&mut std::sync::Mutex::lock(&self.status).expect("test status lock"));
     }
 
+    /// Replaces the initial ECU state.
+    pub fn with_status(self, status: EcuState) -> Self {
+        self.set_status(|current| *current = status);
+        self
+    }
+
     /// Makes this ECU part of a duplicate group with the given members.
     pub fn with_duplicates(mut self, names: &[&str]) -> Self {
         self.duplicates = Some(names.iter().map(|name| (*name).to_owned()).collect());

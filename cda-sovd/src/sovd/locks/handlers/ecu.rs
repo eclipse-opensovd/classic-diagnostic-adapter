@@ -201,7 +201,9 @@ pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
         .await;
     }
 
-    let state_error = match uds.get_ecu_state(&ecu_name).await {
+    // Only probe once all lock checks passed, so rejected requests don't
+    // cause ECU traffic.
+    let state_error = match uds.ensure_ecu_online(&ecu_name).await {
         Ok(state) if state.connectivity == Connectivity::Online => None,
         Ok(_) => Some(ApiError::ServiceUnavailable {
             message: "ecu is offline".to_owned(),
