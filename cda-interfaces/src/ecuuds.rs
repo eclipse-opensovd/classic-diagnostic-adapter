@@ -673,6 +673,17 @@ pub trait UdsVariant {
     /// Will return Err if the ECU does not exist.
     async fn get_ecu_state(&self, ecu_name: &str) -> Result<EcuState, DiagServiceError>;
 
+    /// Make sure the ECU state reflects its actual reachability and return it.
+    ///
+    /// If the ECU is currently marked offline, variant detection is run as a
+    /// reachability probe (coalesced with any detection already in flight),
+    /// so an ECU that came back is reported online. ECUs that are already
+    /// online or flagged as duplicates are returned unchanged.
+    /// # Errors
+    /// Will return Err if the ECU does not exist or communication is not
+    /// enabled yet (activation is requested in that case).
+    async fn ensure_ecu_online(&self, ecu_name: &str) -> Result<EcuState, DiagServiceError>;
+
     /// Get the logical address of the given ECU.
     /// # Errors
     /// Will return Err if the ECU does not exist.
@@ -1104,6 +1115,10 @@ pub mod mock {
                 ecu_name: &str,
             ) -> Result<(), DiagServiceError>;
             async fn get_ecu_state(
+                &self,
+                ecu_name: &str,
+            ) -> Result<EcuState, DiagServiceError>;
+            async fn ensure_ecu_online(
                 &self,
                 ecu_name: &str,
             ) -> Result<EcuState, DiagServiceError>;
