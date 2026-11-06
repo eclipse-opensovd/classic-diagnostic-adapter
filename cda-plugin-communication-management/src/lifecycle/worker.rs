@@ -36,7 +36,7 @@ use std::sync::{
 use cda_interfaces::{
     communication_control::{
         CommunicationLifecycle, CommunicationOperation, CommunicationOperationFailure,
-        CommunicationState, CommunicationVariantDetection, TransportControl,
+        CommunicationState, CommunicationVariantDetection, DetectionPhase, TransportControl,
     },
     dlt_ctx,
 };
@@ -168,7 +168,7 @@ async fn run_activation(
     }
 
     if let Some(detector) = &detector
-        && let Err(error) = detector.detect().await
+        && let Err(error) = detector.detect(DetectionPhase::Activation).await
     {
         // The detector failed, so tear down everything already initialized.
         deinitialize_all(&resources.initializers).await;
@@ -194,7 +194,7 @@ async fn run_redetection(
     detector: Option<Arc<dyn CommunicationVariantDetection>>,
 ) -> Result<CommunicationState, CommunicationOperationFailure> {
     if let Some(detector) = &detector
-        && let Err(error) = detector.detect().await
+        && let Err(error) = detector.detect(DetectionPhase::Redetection).await
     {
         return Err(CommunicationOperationFailure::DetectionFailure {
             detector: detector.name().to_owned(),

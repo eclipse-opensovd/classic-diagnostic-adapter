@@ -28,6 +28,7 @@ use cda_interfaces::{
         LockSnapshot,
     },
     mock::MockUdsEcu,
+    util::test_utils::wait_until,
 };
 use cda_plugin_security::{
     AuthApi,
@@ -52,25 +53,6 @@ mod policy;
 mod request_context;
 mod transactions;
 mod validation;
-
-const POLL_INTERVAL: Duration = Duration::from_millis(10);
-const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
-
-async fn wait_until<F, Fut>(description: &str, mut condition: F)
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = bool>,
-{
-    let poll = async {
-        while !condition().await {
-            cda_interfaces::util::tokio_ext::sleep_for(POLL_INTERVAL).await;
-        }
-    };
-    assert!(
-        tokio::time::timeout(WAIT_TIMEOUT, poll).await.is_ok(),
-        "Timed out waiting until {description}"
-    );
-}
 
 async fn await_events(policy: &EventRecordingPolicy, count: usize) {
     wait_until("lock lifecycle events are delivered", || async {

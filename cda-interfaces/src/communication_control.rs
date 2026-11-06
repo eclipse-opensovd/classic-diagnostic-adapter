@@ -32,6 +32,7 @@ pub use doip_connect::{DoipConnect, DoipEndpoint};
 pub use error::CommControlError;
 pub use operation::{
     ActivationCause, CommunicationOperation, CommunicationOperationFailure, DetectionCause,
+    DetectionPhase,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
@@ -124,9 +125,21 @@ impl<Operation: Default> GatewayLifecycle<Operation> {
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
 pub enum CommunicationInitMode {
-    /// Whole-vehicle communication is initialized immediately during startup.
+    /// Whole-vehicle communication is initialized immediately during startup,
+    /// always with a full VIR/VAM discovery. A persisted ECU topology
+    /// is never used to skip that discovery, but detection results are still
+    /// persisted when [`EcuListPersistenceSettings::enabled`] is set.
     #[default]
     Always,
+    /// Whole-vehicle communication is initialized immediately during startup.
+    /// A full VIR/VAM discovery only runs when no persisted ECU
+    /// topology exists. Otherwise the persisted gateways are reconnected
+    /// directly and their ECUs restored from the persisted state.
+    ///
+    /// Equivalent to [`Always`](Self::Always) while
+    /// [`EcuListPersistenceSettings::enabled`] is `false`, since no persisted
+    /// topology can exist then.
+    WhenNotPersisted,
     /// Communication stays uninitialized at startup. HTTP/SOVD start first, and
     /// the first qualifying ECU diagnostic request, or an explicit
     /// `CommunicationPlugin::activate()` call, triggers one whole-vehicle
@@ -186,14 +199,65 @@ pub enum PostUpdateCommunicationMode {
     Deferred,
 }
 
+/// Controls how spontaneous vehicle announcements (VAMs received outside of a
+/// VIR/VAM discovery) are handled once communication is enabled.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+pub enum VamHandlingMode {
+    /// Every announcement of a known gateway connects it and triggers variant
+    /// detection (default).
+    #[default]
+    Always,
+    /// Announcements are only handled while a persisted topology exists, then
+    /// like `always`. Behaves like `never` while ECU list persistence is disabled.
+    PersistedOnly,
+    /// The spontaneous VAM listener is not started.
+    Never,
+}
+
 /// Default retry hint for requests deferred while communication starts.
 pub const DEFAULT_DEFERRED_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+/// Persistence of the detected ECU/gateway topology across restarts.
+#[derive(
+    Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema,
+)]
+pub struct EcuListPersistenceSettings {
+    /// When `true`, the detected topology is persisted after every detection
+    /// run and `last_seen` timestamps are written back at shutdown. With
+    /// `init_mode = "WhenNotPersisted"` (or `OnDemand`/`Disabled` once
+    /// triggered), a persisted topology is reused instead of a full
+    /// VIR/VAM discovery. When `false` (default), the persisted
+    /// topology is never read or written. Requires `DoIP` (`doip.enabled =
+    /// true`); without `DoIP` it behaves as `false`.
+    pub enabled: bool,
+}
+
+/// Settings read by the topology plugin. They are part of the `communication`
+/// config section (flattened into [`CommunicationSettings`]).
+#[derive(
+    Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema,
+)]
+pub struct TopologySettings {
+    /// Persistence of the detected ECU/gateway topology.
+    pub ecu_list_persistence: EcuListPersistenceSettings,
+    /// Handling of spontaneous vehicle announcements (VAMs):
+    /// - "Always": connect announced gateways and detect their ECUs (default).
+    /// - "PersistedOnly": only while a persisted topology exists; like "Never"
+    ///   while `ecu_list_persistence` is disabled.
+    /// - "Never": do not listen for spontaneous announcements.
+    pub vam_handling_mode: VamHandlingMode,
+}
 
 /// Transport initialization and runtime settings.
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 pub struct CommunicationSettings {
     /// Controls when diagnostic transport network activation begins:
-    /// - "Always": whole-vehicle communication initializes eagerly at startup (default).
+    /// - "Always": whole-vehicle communication initializes eagerly at startup,
+    ///   always with a full VIR discovery (default).
+    /// - "WhenNotPersisted": like "Always", but a persisted topology (see
+    ///   `ecu_list_persistence`) is reused instead of a VIR discovery.
     /// - "OnDemand": HTTP/SOVD starts first. The first qualifying ECU diagnostic
     ///   request, or an explicit `activate()` call, triggers initialization.
     /// - "Disabled": HTTP/SOVD starts first. The default communication plugin
@@ -218,6 +282,9 @@ pub struct CommunicationSettings {
     /// The value (in seconds) for the HTTP `Retry-After` header returned when a
     /// diagnostic request arrives while initialization is still pending.
     pub deferred_retry_after_seconds: u64,
+    /// Topology plugin settings (`ecu_list_persistence`, `vam_handling_mode`).
+    #[serde(flatten)]
+    pub topology: TopologySettings,
 }
 
 impl Default for CommunicationSettings {
@@ -227,6 +294,7 @@ impl Default for CommunicationSettings {
             variant_detection: VariantDetectionMode::default(),
             post_update_mode: PostUpdateCommunicationMode::default(),
             deferred_retry_after_seconds: DEFAULT_DEFERRED_RETRY_AFTER.as_secs(),
+            topology: TopologySettings::default(),
         }
     }
 }
@@ -354,12 +422,13 @@ pub trait CommunicationVariantDetection: Send + Sync + 'static {
     ///
     /// Called after every registered [`CommunicationLifecycle`] hook has
     /// initialized, so implementations may rely on the transport and on hook
-    /// state being up.
+    /// state being up. `phase` tells an activation's detection apart from an
+    /// explicit re-detection.
     ///
     /// # Errors
     ///
     /// Returns an error when detection cannot be started or completed. The
     /// framework treats this as an activation failure: hooks are deinitialized
     /// and the transport is taken back down.
-    async fn detect(&self) -> Result<(), CommControlError>;
+    async fn detect(&self, phase: DetectionPhase) -> Result<(), CommControlError>;
 }

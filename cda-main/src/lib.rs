@@ -31,6 +31,7 @@ use cda_plugin_communication_management::plugin::CommunicationPluginBuilder;
 use cda_plugin_security::{
     DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,
 };
+use cda_plugin_topology::TopologyPluginBuilder;
 use cda_storage::LocalStorage;
 use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
 use clap::{Parser, Subcommand};
@@ -47,6 +48,7 @@ pub mod config;
 pub mod error;
 pub mod mdd;
 pub mod setup;
+pub mod topology;
 pub mod update;
 pub mod vehicle;
 
@@ -96,11 +98,14 @@ pub enum Command {
 /// Command line representation of [`cda_comm_doip::config::DiscoveryMode`].
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DoipDiscoveryArg {
-    /// No discovery of any kind, ECUs are connected directly.
+    /// No VIR, no VAMs and no reconnect of persisted gateways, ECUs are
+    /// connected directly.
     Disabled,
-    /// Only react to spontaneous VAMs, no VIR is broadcast.
+    /// No VIR, VAMs as `vam_handling_mode` allows, persisted gateways are
+    /// reconnected by unicast without a VIR fallback.
     VamOnly,
-    /// Broadcast a VIR and react to VAMs.
+    /// Broadcast a VIR, VAMs as `vam_handling_mode` allows, VIR fallback
+    /// for persisted gateways.
     Full,
 }
 
@@ -137,8 +142,10 @@ pub struct AppArgs {
     #[arg(long)]
     pub gateway_port: Option<u16>,
 
-    /// How `DoIP` gateways are discovered: `disabled` (no discovery, connect ECUs
-    /// directly), `vam-only` (react to spontaneous VAMs, no VIR) or `full`.
+    /// How `DoIP` gateways are discovered: `disabled` (no VIR, no VAMs, no
+    /// reconnect of persisted gateways; connect ECUs directly), `vam-only` (no
+    /// VIR; VAMs as `vam_handling_mode` allows; persisted gateways reconnected by
+    /// unicast without a VIR fallback) or `full`.
     #[arg(long, value_enum)]
     pub doip_discovery: Option<DoipDiscoveryArg>,
 
@@ -286,15 +293,16 @@ pub async fn run_from_cli() -> Result<(), AppError> {
 ///
 /// # Errors
 /// Returns [`AppError`] if configuration loading, validation, or startup fails.
-pub async fn run_with_ext<SP, SL, UPB, CPB>(
+pub async fn run_with_ext<SP, SL, UPB, CPB, TPB>(
     args: AppArgs,
-    setup: Setup<SP, SL, UPB, CPB>,
+    setup: Setup<SP, SL, UPB, CPB, TPB>,
 ) -> Result<(), AppError>
 where
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
     UPB: UpdatePluginBuilder<SP>,
     CPB: CommunicationPluginBuilder,
+    TPB: TopologyPluginBuilder,
 {
     if let Some(Command::GenerateConfig { output }) = args.command.as_ref() {
         // Exiting after generating config is on purpose.
@@ -358,7 +366,7 @@ async fn await_startup_stage<T>(
 /// let config: Configuration = // ... load or construct ...
 /// # todo!();
 ///
-/// run_with_ext_from_config::<MySecurityPlugin, MySecurityLoader, _, _>(
+/// run_with_ext_from_config::<MySecurityPlugin, MySecurityLoader, _, _, _>(
 ///     config,
 ///     Setup::new().with_update_plugin(update_plugin_fn(|infra| async move {
 ///         Ok(MyPlugin::new(infra))
@@ -368,15 +376,16 @@ async fn await_startup_stage<T>(
 ///
 /// # Errors
 /// Returns [`AppError`] if tracing setup, webserver startup, data loading, or route setup fails.
-pub async fn run_with_ext_from_config<SP, SL, UPB, CPB>(
+pub async fn run_with_ext_from_config<SP, SL, UPB, CPB, TPB>(
     config: Configuration,
-    setup: Setup<SP, SL, UPB, CPB>,
+    setup: Setup<SP, SL, UPB, CPB, TPB>,
 ) -> Result<(), AppError>
 where
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
     UPB: UpdatePluginBuilder<SP>,
     CPB: CommunicationPluginBuilder,
+    TPB: TopologyPluginBuilder,
 {
     let tracing_guards = if setup.initialize_tracing {
         setup_tracing(&config)?
@@ -419,12 +428,17 @@ where
         return Ok(());
     };
 
+    let topology =
+        topology::build_topology_plugin(setup.build_topology_plugin, &config, Arc::clone(&storage))
+            .await?;
+
     let Some(vehicle_data) = await_startup_stage(
         vehicle::load_vehicle_data::<SP>(
             &config,
             webserver_state.health_state.as_ref(),
             &storage,
             setup.lock_priority_policy,
+            topology.as_ref(),
         ),
         webserver_state.shutdown_signal.clone(),
     )
@@ -451,6 +465,7 @@ where
             setup.build_communication_plugin,
             storage,
             http_protections,
+            Arc::clone(&topology),
         ),
         webserver_state.shutdown_signal.clone(),
     )
@@ -473,6 +488,8 @@ where
     // Wait for shutdown signal
     webserver_state.shutdown_signal.clone().await;
     tracing::info!("Shutting down...");
+    // Before communication shuts down, which cancels pending topology writes.
+    cda_interfaces::Shutdown::shutdown(topology.as_ref()).await;
     cda_interfaces::Shutdown::shutdown(&*communication_runtime.plugin).await;
     webserver_state.join().await
 }
@@ -488,6 +505,7 @@ pub async fn run(args: AppArgs) -> Result<(), AppError> {
     Box::pin(run_with_ext::<
         DefaultSecurityPluginData,
         DefaultSecurityPlugin,
+        _,
         _,
         _,
     >(
@@ -511,6 +529,7 @@ pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
     Box::pin(run_with_ext_from_config::<
         DefaultSecurityPluginData,
         DefaultSecurityPlugin,
+        _,
         _,
         _,
     >(

@@ -241,6 +241,7 @@ Vehicle Identification
 
 .. arch:: Vehicle Identification
     :id: arch~doip-vehicle-identification
+    :links: test~doip-vam-connect-does-not-block-listener
     :status: draft
 
     Vehicle identification is the process by which the CDA discovers DoIP entities
@@ -321,34 +322,41 @@ Spontaneous VAM Handling Mode
 
 .. arch:: Spontaneous VAM Handling Mode
     :id: arch~doip-vam-handling-mode
+    :links: dimpl~doip-vam-handling-mode, test~doip-vam-handling-mode
     :status: draft
 
     The spontaneous VAM listener's behavior is governed by the configured
     ``communication.vam_handling_mode``:
 
-    - **always** (default): the listener is active and any spontaneous VAM whose logical address matches a
+    - **Always** (default): the listener is active and any spontaneous VAM whose logical address matches a
       known ECU from the diagnostic databases triggers connection establishment and variant detection, as
       described in the Spontaneous VAM Listener section above.
-    - **persisted-only**: the listener is active only while a persisted ECU topology exists (see
+    - **PersistedOnly**: the listener is active only while a persisted ECU topology exists (see
       :need:`arch~dt-ecu-list-persistence`); this is a one-time check of whether the persistence bucket is
       present, not a per-VAM lookup of the responding entity's logical address. When a topology exists,
-      spontaneous VAMs are handled identically to **always** mode, including VAMs from entities not yet
+      spontaneous VAMs are handled identically to **Always** mode, including VAMs from entities not yet
       present in the persisted topology -- such entities are discovered and added like any other. When no
       persisted topology exists, the listener discards all spontaneous VAMs (logged only) until a topology
-      has been persisted (via startup detection or ``networkreset``, see
-      :need:`arch~plugin-vehicle-topology-reset-persistence`), at which point it starts handling spontaneous
+      has been persisted, at which point it starts handling spontaneous
       VAMs normally without requiring a restart. When ``communication.ecu_list_persistence.enabled`` is
       ``false`` (see :need:`arch~dt-ecu-list-persistence`), a persisted topology can never exist, so this
-      mode is functionally identical to **never** in that configuration.
-    - **never**: the spontaneous VAM listener task is not started. Gateways can only be (re-)discovered via
+      mode is functionally identical to **Never** in that configuration.
+    - **Never**: the spontaneous VAM listener task is not started. Gateways can only be (re-)discovered via
       an explicit ``networkreset`` execution (see :need:`arch~plugin-vehicle-topology-reset-persistence`) or
       via the DoIP connection retry mechanism operating on already-established connections (see
       ``CP_DoIPConnectionRetryDelay`` / ``CP_DoIPConnectionRetryAttempts``).
+
+    The mode is configured as ``communication.vam_handling_mode = "Always" | "PersistedOnly" | "Never"``.
+    Whether a persisted topology exists is tracked in memory: it is set when a non-empty topology is loaded at
+    startup or written after a detection run. In ``PersistedOnly`` mode, the listener checks this flag for
+    every received announcement, so handling starts as soon as a topology has been persisted.
 
     Independent of ``vam_handling_mode``, the spontaneous VAM listener task itself is only started once
     ECU/DoIP communication has actually been initialized (see :need:`arch~dt-deferred-initialization`).
     While ``init_mode`` is ``OnDemand`` or ``Disabled`` and its trigger has not yet fired, no listener task
     exists, regardless of the configured mode.
+    With ``doip.discovery = Disabled`` the listener is not started either, regardless of the configured
+    mode.
 
     .. uml::
         :caption: Spontaneous VAM Handling Mode
@@ -361,11 +369,11 @@ Spontaneous VAM Handling Mode
         participant "Spontaneous VAM\nListener" as Listener
         participant "Persisted Topology" as Persist
 
-        == communication.vam_handling_mode = always ==
+        == communication.vam_handling_mode = Always ==
         GW --> Listener: spontaneous VAM
         Listener -> Listener: connect + trigger variant detection
 
-        == communication.vam_handling_mode = persisted-only ==
+        == communication.vam_handling_mode = PersistedOnly ==
         Listener -> Persist: does a persisted topology exist?
         alt persisted topology exists
             Persist --> Listener: yes
@@ -377,7 +385,7 @@ Spontaneous VAM Handling Mode
             Listener -> Listener: discard (log only)
         end
 
-        == communication.vam_handling_mode = never ==
+        == communication.vam_handling_mode = Never ==
         note over Listener: listener task not started
         @enduml
 
@@ -850,6 +858,7 @@ Connection Management
 
 .. arch:: DoIP Connection Management
     :id: arch~doip-connection-management
+    :links: test~doip-cancelled-connect-writes-nothing, test~doip-cancelled-session-reports-nothing
     :status: draft
 
     The CDA manages DoIP TCP connections with automatic recovery from connection failures.
