@@ -37,6 +37,7 @@ mod authentication;
 mod custom_routes;
 mod data;
 mod deferred_init;
+mod discovery;
 mod ecu;
 mod faults;
 mod flash_download;

@@ -12,6 +12,78 @@
  */
 
 pub mod sovd2uds {
+    /// Capability document of the `sovd2uds` app, `GET /vehicle/v15/apps/sovd2uds`.
+    /// Each link property names a resource of the app.
+    pub mod get {
+        #[derive(serde::Serialize, schemars::JsonSchema)]
+        pub struct Response {
+            pub id: String,
+            pub name: String,
+            #[serde(rename = "bulk-data")]
+            pub bulk_data: String,
+            pub data: String,
+            /// Only present if the app serves at least one operation (Table 53, C1).
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub operations: Option<String>,
+            #[schemars(skip)]
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub schema: Option<schemars::Schema>,
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::Response;
+
+            #[test]
+            fn capability_document_has_id_name_and_links_without_items() {
+                let response = Response {
+                    id: "sovd2uds".to_owned(),
+                    name: "sovd2uds".to_owned(),
+                    bulk_data: "http://host/vehicle/v15/apps/sovd2uds/bulk-data".to_owned(),
+                    data: "http://host/vehicle/v15/apps/sovd2uds/data".to_owned(),
+                    operations: Some("http://host/vehicle/v15/apps/sovd2uds/operations".to_owned()),
+                    schema: None,
+                };
+                let value = serde_json::to_value(&response).unwrap();
+                let object = value.as_object().unwrap();
+
+                assert_eq!(object.get("id").and_then(|v| v.as_str()), Some("sovd2uds"));
+                assert_eq!(
+                    object.get("name").and_then(|v| v.as_str()),
+                    Some("sovd2uds")
+                );
+                assert_eq!(
+                    object.get("bulk-data").and_then(|v| v.as_str()),
+                    Some("http://host/vehicle/v15/apps/sovd2uds/bulk-data")
+                );
+                assert_eq!(
+                    object.get("data").and_then(|v| v.as_str()),
+                    Some("http://host/vehicle/v15/apps/sovd2uds/data")
+                );
+                assert_eq!(
+                    object.get("operations").and_then(|v| v.as_str()),
+                    Some("http://host/vehicle/v15/apps/sovd2uds/operations")
+                );
+                assert!(!object.contains_key("items"));
+                assert!(!object.contains_key("schema"));
+            }
+
+            #[test]
+            fn operations_link_is_omitted_without_operations() {
+                let response = Response {
+                    id: "sovd2uds".to_owned(),
+                    name: "sovd2uds".to_owned(),
+                    bulk_data: String::new(),
+                    data: String::new(),
+                    operations: None,
+                    schema: None,
+                };
+                let value = serde_json::to_value(&response).unwrap();
+                assert!(!value.as_object().unwrap().contains_key("operations"));
+            }
+        }
+    }
+
     pub mod bulk_data {
         pub use cda_interfaces::runtime_update_api::{
             BulkDataCreated, BulkDataCreatedList, BulkDataDeleted, BulkDataList,

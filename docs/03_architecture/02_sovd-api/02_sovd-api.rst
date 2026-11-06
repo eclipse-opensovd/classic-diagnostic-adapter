@@ -160,7 +160,7 @@ Entities
     - A ``last_seen`` timestamp of the last reply of the ECU (see :need:`arch~dt-ecu-states`), if the ECU has
       ever been contacted (either in the current session, or, when loaded from a persisted ECU list, in a
       previous session). It is formatted as RFC 3339 in UTC with second precision and omitted if the ECU was never contacted.
-    - URI references to the standardized resource collection endpoints: data, operations, configurations, faults, modes, locks, and extension endpoints
+    - URI references to the standardized resource collection endpoints: data, operations, configurations, faults, modes, locks, bulk-data, and extension endpoints
 
     The connectivity state of an ECU reflects its current diagnostic reachability and variant detection status:
 
@@ -1581,6 +1581,12 @@ Version Endpoint
 
     Both endpoint types are available immediately after the HTTP server starts and do not require
     any ECU communication.
+
+    The vendor-specific endpoints are registered as static data endpoints with the data category
+    ``identData``. Registering a static data endpoint also lists it in its ``data`` collection
+    (``/data`` or ``/apps/sovd2uds/data``), so endpoints added at runtime, e.g. by an embedding
+    application, are listed as well. Resources served by other routes, like
+    ``/apps/sovd2uds/data/networkstructure`` (``sysInfo``), are registered for listing separately.
 
     .. uml:: images/version_registration.puml
 

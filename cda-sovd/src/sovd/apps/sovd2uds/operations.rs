@@ -48,6 +48,7 @@ pub(crate) mod doip_connect_ecu {
         },
     };
 
+    pub(crate) const PATH: &str = "/vehicle/v15/apps/sovd2uds/operations/doip-connect-ecu";
     pub(crate) const EXECUTIONS_ROUTE: &str =
         "/vehicle/v15/apps/sovd2uds/operations/doip-connect-ecu/executions";
 
@@ -349,6 +350,7 @@ pub(crate) mod runtimefilesupdate {
         DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock,
     };
 
+    pub(crate) const PATH: &str = "/vehicle/v15/apps/sovd2uds/operations/runtimefilesupdate";
     const EXECUTIONS_ROUTE: &str =
         "/vehicle/v15/apps/sovd2uds/operations/runtimefilesupdate/executions";
     const EXECUTIONS_ID_ROUTE: &str =

@@ -46,10 +46,12 @@ MDD Embedded Files API
          - /x-sovd2uds-bulk-data/mdd-embedded-files/{id}
          - Returns an item, which is the data that was embedded
 
+    The same endpoints are available under the standardized ``bulk-data`` collection as
+    ``/bulk-data/mdd-embedded-files`` and ``/bulk-data/mdd-embedded-files/{id}``. Both paths serve
+    identical responses; the ECU resource collection references both.
+
     Other methods are not allowed (e.g. data can't be modified), and will return an HTTP 405 error code.
 
     .. uml:: /03_architecture/02_sovd-api/03_extensions/images/mdd_embedded_files.puml
 
 .. todo:: OpenAPI?
-
-.. todo:: maybe move to a general bulk-data endpoint?

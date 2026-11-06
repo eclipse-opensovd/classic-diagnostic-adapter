@@ -145,7 +145,11 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
     resource_response(
         &host,
         &uri,
-        vec![("RequestDownload", Some("requestdownload"))],
+        vec![
+            ("RequestDownload", Some("requestdownload")),
+            ("FlashTransfer", None),
+            ("TransferExit", None),
+        ],
         query.include_schema,
     )
 }

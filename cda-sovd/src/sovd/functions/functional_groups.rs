@@ -260,7 +260,7 @@ async fn functions_description(
         Json(sovd_interfaces::ResourceResponse {
             items: vec![sovd_interfaces::Resource {
                 href: "http://localhost:20002/vehicle/v15/functions/functionalgroups".to_owned(),
-                id: None,
+                id: Some("functionalgroups".to_owned()),
                 name: "functionalgroups".to_owned(),
             }],
             schema,
