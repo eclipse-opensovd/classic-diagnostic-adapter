@@ -61,8 +61,15 @@ pub mod tokio_ext {
         }};
     }
 
+    /// Discards every message currently queued in `receiver`.
+    ///
+    /// A lagged receiver reports `Lagged` before its retained messages, so
+    /// draining continues past it; stopping there would leave stale messages
+    /// queued for the next reader.
     pub fn clear_pending_messages<M: Clone>(receiver: &mut tokio::sync::broadcast::Receiver<M>) {
-        while receiver.try_recv().is_ok() {}
+        use tokio::sync::broadcast::error::TryRecvError;
+
+        while let Ok(_) | Err(TryRecvError::Lagged(_)) = receiver.try_recv() {}
     }
 
     /// Sleeps for the given `duration`.
@@ -593,6 +600,27 @@ mod tests {
         let panicked = tokio::spawn(async { panic!("task panicked") });
         tokio::task::yield_now().await;
         tokio_ext::abort_and_join(panicked, "panicked").await;
+    }
+
+    /// A receiver that fell behind reports `Lagged` before the retained
+    /// messages; draining must continue past it so nothing stale is left.
+    #[test]
+    fn clear_pending_messages_drains_lagged_receiver() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<u8>(2);
+        for value in 0..5 {
+            tx.send(value).expect("Failed to send message");
+        }
+
+        tokio_ext::clear_pending_messages(&mut rx);
+
+        let next = rx.try_recv();
+        assert!(
+            matches!(
+                next,
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "expected an empty receiver after clearing, got {next:?}"
+        );
     }
 
     #[test]
