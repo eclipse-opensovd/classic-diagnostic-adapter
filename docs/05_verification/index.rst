@@ -24,3 +24,4 @@ links down to the individual tests. Test code comments never link upwards.
    01_general
    02_sovd_api
    03_diagnostic_tester
+   04_communication

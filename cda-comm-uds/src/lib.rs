@@ -14,13 +14,14 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, FunctionalDescriptionConfig,
-    HashMap, HashMapExtensions, SchemaDescription, SchemaProvider, UdsEcu, UdsEcuDb, UdsTransport,
-    VariantDetectionReceiver,
+    Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager,
+    FunctionalDescriptionConfig, HashMap, HashMapExtensions, SchemaDescription, SchemaProvider,
+    UdsEcu, UdsEcuDb, UdsTransport, VariantDetectionActivity, VariantDetectionReceiver,
     communication_control::{ActivationCause, CommunicationAccess, CommunicationGuard},
     datatypes::FaultConfig,
     diagservices::UdsPayloadData,
     request_authorization::RequestLockProvider,
+    topology::EcuTopologyEntry,
 };
 use tokio::{
     sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore},
@@ -86,13 +87,40 @@ async fn request_permits(
     .map_err(|_| DiagServiceError::Timeout)?
 }
 
-/// The running variant-detection listener task, with the token that cancels it.
-///
-/// The task hands the receiver back when canceled, so the next communication
-/// initialization can resume reading from the same channel rather than losing
-/// queued discoveries.
-type VariantDetectionListener =
-    Arc<Mutex<Option<(CancellationToken, JoinHandle<VariantDetectionReceiver>)>>>;
+/// Lifecycle of the variant-detection listener. The receiver is owned by at most
+/// one of these states at any time.
+enum ListenerState {
+    /// Not running. The receiver is parked until the next initialization. It is
+    /// deferred rather than spawned in [`UdsManager::new`] so no VAM-triggered
+    /// detection runs before an authorized activation.
+    Stopped(VariantDetectionReceiver),
+    /// Running. The task hands the receiver back when canceled, so the next
+    /// initialization can resume reading from the same channel rather than
+    /// losing queued discoveries.
+    Running {
+        cancel: CancellationToken,
+        task: JoinHandle<VariantDetectionReceiver>,
+    },
+    /// The receiver was discarded or lost, so the listener cannot be restarted.
+    Closed,
+}
+
+/// Variant-detection listener lifecycle together with the activity it produces.
+#[derive(Clone)]
+struct VariantDetectionState {
+    listener: Arc<Mutex<ListenerState>>,
+    /// Counts running detections, see [`VariantDetectionActivity`].
+    activity: VariantDetectionActivity,
+}
+
+impl VariantDetectionState {
+    fn new(receiver: VariantDetectionReceiver) -> Self {
+        Self {
+            listener: Arc::new(Mutex::new(ListenerState::Stopped(receiver))),
+            activity: VariantDetectionActivity::new(),
+        }
+    }
+}
 
 enum ReceiverRetention {
     /// Keep the receiver when the listener may be restarted later.
@@ -123,11 +151,7 @@ pub struct UdsManager<S: EcuGateway, T: UdsEcuDb> {
     communication_access: Arc<dyn CommunicationAccess>,
     /// Configured retry hint surfaced on [`DiagServiceError::CommunicationNotReady`].
     communication_retry_after: Duration,
-    /// Held until communication initialization starts the listener. Deferred
-    /// rather than spawned in [`UdsManager::new`] so no VAM-triggered detection
-    /// work runs before an authorized activation.
-    variant_detection_receiver: Arc<Mutex<Option<VariantDetectionReceiver>>>,
-    variant_detection_listener: VariantDetectionListener,
+    variant_detection: VariantDetectionState,
 }
 
 impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
@@ -219,30 +243,84 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             request_lock_provider,
             communication_access,
             communication_retry_after,
-            variant_detection_receiver: Arc::new(Mutex::new(Some(variant_detection_receiver))),
-            variant_detection_listener: Arc::new(Mutex::new(None)),
+            variant_detection: VariantDetectionState::new(variant_detection_receiver),
         }
     }
 
-    /// Stops the listener, then either drops its receiver or drains and retains
-    /// it for the next initialization, which preserves the channel held by
-    /// long-lived senders.
-    async fn stop_variant_detection_listener(&self, receiver_retention: ReceiverRetention) {
-        let Some((cancel_token, listener)) = self.variant_detection_listener.lock().await.take()
-        else {
-            return;
-        };
-        cancel_token.cancel();
-        match listener.await {
-            Ok(mut receiver) if matches!(receiver_retention, ReceiverRetention::Keep) => {
-                while receiver.try_recv().is_ok() {}
-                *self.variant_detection_receiver.lock().await = Some(receiver);
+    /// Tracker that is idle once no variant detection is queued or running.
+    #[must_use]
+    pub fn detection_activity(&self) -> &VariantDetectionActivity {
+        &self.variant_detection.activity
+    }
+
+    /// Resets the physical ECUs that are still assumed online from a persisted
+    /// topology to `NotTested` (keeping `last_seen`), e.g. before an explicit
+    /// re-detection.
+    pub async fn reset_ecu_states(&self)
+    where
+        T: EcuManager,
+    {
+        for ecu in self.ecus.values() {
+            let ecu = ecu.read().await;
+            if !ecu.is_physical_ecu() {
+                continue;
             }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::error!(%error, "Variant detection listener failed during shutdown");
+            let runtime_state = ecu.runtime_state();
+            {
+                let mut state = cda_interfaces::util::std_ext::lock_write(&runtime_state.ecu_state);
+                if state.connectivity != Connectivity::AssumedOnline {
+                    continue;
+                }
+                *state = cda_interfaces::EcuState::default();
             }
+            runtime_state.publish_variant_state(cda_interfaces::VariantState::NotTested);
         }
+    }
+
+    /// Snapshot of all physical ECUs for topology persistence.
+    pub async fn ecu_topology_entries(&self) -> Vec<EcuTopologyEntry>
+    where
+        T: EcuManager,
+    {
+        let mut entries = Vec::new();
+        for (name, ecu) in self.ecus.iter() {
+            let ecu = ecu.read().await;
+            if !ecu.is_physical_ecu() {
+                continue;
+            }
+            entries.push(EcuTopologyEntry {
+                name: name.clone(),
+                logical_address: ecu.logical_address(),
+                gateway_address: ecu.logical_gateway_address(),
+                state: ecu.ecu_status(),
+                runtime_state: ecu.runtime_state(),
+            });
+        }
+        entries
+    }
+
+    /// Stops a running listener, then either drops its receiver or drains and
+    /// retains it for the next initialization, which preserves the channel held
+    /// by long-lived senders. A listener that is not running is left unchanged.
+    async fn stop_variant_detection_listener(&self, receiver_retention: ReceiverRetention) {
+        let mut state = self.variant_detection.listener.lock().await;
+        *state = match std::mem::replace(&mut *state, ListenerState::Closed) {
+            ListenerState::Running { cancel, task } => {
+                cancel.cancel();
+                match task.await {
+                    Ok(mut receiver) if matches!(receiver_retention, ReceiverRetention::Keep) => {
+                        while receiver.try_recv().is_ok() {}
+                        ListenerState::Stopped(receiver)
+                    }
+                    Ok(_) => ListenerState::Closed,
+                    Err(error) => {
+                        tracing::error!(%error, "Variant detection listener failed during shutdown");
+                        ListenerState::Closed
+                    }
+                }
+            }
+            other => other,
+        };
     }
 
     /// Returns a clone of the state coordinator for use by the `DoIP` layer.
@@ -385,8 +463,7 @@ impl<S: Clone + EcuGateway, T: UdsEcuDb> Clone for UdsManager<S, T> {
             request_lock_provider: Arc::clone(&self.request_lock_provider),
             communication_access: Arc::clone(&self.communication_access),
             communication_retry_after: self.communication_retry_after,
-            variant_detection_receiver: Arc::clone(&self.variant_detection_receiver),
-            variant_detection_listener: Arc::clone(&self.variant_detection_listener),
+            variant_detection: self.variant_detection.clone(),
         }
     }
 }

@@ -19,11 +19,15 @@
 //!
 //! Required mode semantics:
 //!
-//! | Mode        | `activate()`                   | first ECU request               | `trigger_detection()`   |
-//! |-------------|--------------------------------|---------------------------------|-------------------------|
-//! | `Always`    | joins or repeats current state | requests use current readiness  | detect while enabled    |
-//! | `OnDemand`  | initializes the whole vehicle  | returns pending, triggers once  | detect while enabled    |
-//! | `Disabled`  | rejected, no network activity  | returns pending, never triggers | detect while enabled    |
+//! | Mode               | `activate()`                   | first ECU request               | `trigger_detection()`   |
+//! |--------------------|--------------------------------|---------------------------------|-------------------------|
+//! | `Always`           | joins or repeats current state | requests use current readiness  | detect while enabled    |
+//! | `WhenNotPersisted` | joins or repeats current state | requests use current readiness  | detect while enabled    |
+//! | `OnDemand`         | initializes the whole vehicle  | returns pending, triggers once  | detect while enabled    |
+//! | `Disabled`         | rejected, no network activity  | returns pending, never triggers | detect while enabled    |
+//!
+//! `WhenNotPersisted` differs from `Always` only in how the transport discovers
+//! gateways, which is not a plugin concern.
 //!
 //! Only the first two columns vary by mode. `trigger_detection()` never
 //! consults `init_mode`, so under `Disabled` communication has to be enabled out
@@ -78,7 +82,9 @@ impl CommunicationPlugin for DefaultCommunicationPlugin {
         cause: ActivationCause,
     ) -> Result<CommunicationState, CommunicationOperationFailure> {
         match self.mode {
-            CommunicationInitMode::Always | CommunicationInitMode::OnDemand => {
+            CommunicationInitMode::Always
+            | CommunicationInitMode::WhenNotPersisted
+            | CommunicationInitMode::OnDemand => {
                 tracing::debug!(?cause, mode = ?self.mode, "Activating communication");
                 self.handle.enable_and_detect().await
             }
@@ -94,7 +100,9 @@ impl CommunicationPlugin for DefaultCommunicationPlugin {
 
     fn request_activate(&self, cause: ActivationCause) -> CommunicationState {
         match self.mode {
-            CommunicationInitMode::Always | CommunicationInitMode::OnDemand => {
+            CommunicationInitMode::Always
+            | CommunicationInitMode::WhenNotPersisted
+            | CommunicationInitMode::OnDemand => {
                 tracing::debug!(?cause, mode = ?self.mode, "Requesting activation (non-blocking)");
                 self.handle.request_enable_and_detect()
             }
@@ -233,6 +241,10 @@ mod tests {
     async fn admitting_modes_activate_the_transport() {
         for (mode, cause) in [
             (CommunicationInitMode::Always, ActivationCause::Startup),
+            (
+                CommunicationInitMode::WhenNotPersisted,
+                ActivationCause::Startup,
+            ),
             (CommunicationInitMode::OnDemand, ActivationCause::Explicit),
         ] {
             let (plugin, control, _handle) = plugin_with_mode(mode);
@@ -270,6 +282,7 @@ mod tests {
     async fn request_activate_follows_init_mode() {
         for mode in [
             CommunicationInitMode::Always,
+            CommunicationInitMode::WhenNotPersisted,
             CommunicationInitMode::OnDemand,
         ] {
             let (plugin, control, handle) = plugin_with_mode(mode);

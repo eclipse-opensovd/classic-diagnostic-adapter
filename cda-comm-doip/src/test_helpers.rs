@@ -10,14 +10,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::sync::Arc;
-
-use cda_interfaces::{
-    EcuAddresses, EcuConnectivityHandler, HashMap, HashMapExtensions,
-    util::test_utils::RecordingConnectivityHandler,
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
 
-use crate::EcuActivityReporter;
+use cda_interfaces::{
+    EcuAddresses, EcuConnectivityHandler, HashMap, HashMapExtensions, VariantDetectionRequest,
+    VariantDetectionSender, topology::TopologyState,
+    util::test_utils::RecordingConnectivityHandler,
+};
+use doip_definitions::header::ProtocolVersion;
+use tokio::sync::{RwLock, mpsc};
+use tokio_util::sync::CancellationToken;
+
+use crate::{
+    ConnectionTasks, DiscoveredGateway, DoipConfig, DoipDiagGateway, DoipTransportConfig,
+    EcuActivityReporter, config::DiscoveryMode, connections::ConnectControl,
+    gateway_session::GatewaySession,
+};
 
 /// A reply reporter that knows no ECU.
 pub(crate) fn no_activity() -> EcuActivityReporter {
@@ -47,6 +61,7 @@ pub(crate) fn activity_reporter(
 pub(crate) struct TestEcu {
     logical_address: u16,
     gateway_address: u16,
+    name: &'static str,
 }
 
 impl TestEcu {
@@ -54,7 +69,14 @@ impl TestEcu {
         Self {
             logical_address,
             gateway_address,
+            name: "test",
         }
+    }
+
+    /// The same ECU with the name `name`, to tell several ECUs apart.
+    pub(crate) const fn named(mut self, name: &'static str) -> Self {
+        self.name = name;
+        self
     }
 }
 
@@ -82,7 +104,7 @@ impl EcuAddresses for TestEcu {
     }
 
     fn ecu_name(&self) -> String {
-        "test".to_owned()
+        self.name.to_owned()
     }
 
     fn logical_address_eq<T: EcuAddresses>(&self, other: &T) -> bool {
@@ -91,6 +113,308 @@ impl EcuAddresses for TestEcu {
 }
 
 cda_interfaces::impl_test_doip_com_params!(TestEcu);
+
+/// `DoIP` gateway on the loopback interface that accepts every routing activation
+/// and counts the TCP connections it receives. Routing activation responses can
+/// be held back to keep a connect in flight, and denied to fail a connect.
+/// Connecting to `0.0.0.0` reaches it as well, as a second gateway address,
+/// but not on Windows: tests connecting there are `#[cfg(not(windows))]`.
+///
+/// The tests need a second address that reaches the same gateway, and there
+/// is no portable one. The connect uses one session-wide port and parses the
+/// gateway address as an IPv4 literal, so `127.0.0.1` has a single spelling and
+/// a second listener on its own port is not reachable. `127.0.0.2` is not
+/// available on macOS by default. `0.0.0.0` works on Linux and macOS (it
+/// connects to the local host), but Windows rejects it as a connect target.
+pub(crate) struct FakeGateway {
+    port: u16,
+    connects: Arc<AtomicUsize>,
+    denials: Arc<std::sync::Mutex<usize>>,
+    gate: tokio::sync::watch::Sender<bool>,
+    accept_task: tokio::task::JoinHandle<()>,
+}
+
+impl FakeGateway {
+    pub(crate) async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake gateway");
+        let port = listener.local_addr().expect("local address").port();
+        let connects = Arc::new(AtomicUsize::new(0));
+        let denials = Arc::new(std::sync::Mutex::new(0));
+        let (gate, gate_rx) = tokio::sync::watch::channel(true);
+        let accept_connects = Arc::clone(&connects);
+        let accept_denials = Arc::clone(&denials);
+        let accept_task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                accept_connects.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(Self::serve(
+                    stream,
+                    gate_rx.clone(),
+                    Arc::clone(&accept_denials),
+                ));
+            }
+        });
+        Self {
+            port,
+            connects,
+            denials,
+            gate,
+            accept_task,
+        }
+    }
+
+    pub(crate) fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Number of TCP connections received so far.
+    pub(crate) fn connects(&self) -> usize {
+        self.connects.load(Ordering::SeqCst)
+    }
+
+    /// Holds back routing activation responses until `release_connects`.
+    pub(crate) fn block_connects(&self) {
+        self.gate.send_replace(false);
+    }
+
+    pub(crate) fn release_connects(&self) {
+        self.gate.send_replace(true);
+    }
+
+    async fn serve(
+        mut stream: tokio::net::TcpStream,
+        mut gate: tokio::sync::watch::Receiver<bool>,
+        denials: Arc<std::sync::Mutex<usize>>,
+    ) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let mut header = [0u8; 8];
+        if stream.read_exact(&mut header).await.is_err() {
+            return;
+        }
+        let length = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+        let mut request = vec![0u8; usize::try_from(length).unwrap_or_default()];
+        if stream.read_exact(&mut request).await.is_err() {
+            return;
+        }
+        if gate.wait_for(|open| *open).await.is_err() {
+            return;
+        }
+        let denied = {
+            let mut denials = denials.lock().unwrap();
+            let denied = *denials > 0;
+            *denials = denials.saturating_sub(1);
+            denied
+        };
+        let mut response = vec![header[0], header[1], 0x00, 0x06, 0, 0, 0, 9];
+        // Tester address, entity address, "successfully activated" (or "denied,
+        // unknown source address"), reserved.
+        response.extend_from_slice(request.get(..2).unwrap_or(&[0, 0]));
+        let code = if denied { 0x00 } else { 0x10 };
+        response.extend_from_slice(&[0x00, 0x00, code, 0, 0, 0, 0]);
+        if stream.write_all(&response).await.is_err() {
+            return;
+        }
+        let mut buffer = [0u8; 256];
+        while matches!(stream.read(&mut buffer).await, Ok(read) if read > 0) {}
+    }
+}
+
+impl FakeGateway {
+    /// Denies the next routing activation it answers, so that connect fails.
+    pub(crate) fn deny_next_connect(&self) {
+        let mut denials = self.denials.lock().unwrap();
+        *denials = denials.saturating_add(1);
+    }
+}
+
+impl Drop for FakeGateway {
+    fn drop(&mut self) {
+        self.accept_task.abort();
+    }
+}
+
+pub(crate) fn discovered(name: &str, logical_address: u16) -> DiscoveredGateway {
+    discovered_at(name, logical_address, "127.0.0.1")
+}
+
+/// A gateway announced at `ip`; `127.0.0.1` and `0.0.0.0` both reach a
+/// [`FakeGateway`].
+pub(crate) fn discovered_at(name: &str, logical_address: u16, ip: &str) -> DiscoveredGateway {
+    DiscoveredGateway {
+        ip: ip.to_owned(),
+        ecu_name: name.to_owned(),
+        logical_address,
+        doip_protocol_version: ProtocolVersion::Iso13400_2012,
+    }
+}
+
+/// A transport with the gateway `gw` at 0x1000 and the ECUs `ecu_a` and
+/// `ecu_b` behind it.
+pub(crate) async fn gateway_with_two_ecus() -> DoipDiagGateway<TestEcu> {
+    let ecus = HashMap::from_iter([
+        (
+            "gw".to_owned(),
+            RwLock::new(TestEcu::new(0x1000, 0x1000).named("gw")),
+        ),
+        (
+            "ecu_a".to_owned(),
+            RwLock::new(TestEcu::new(0x1001, 0x1000).named("ecu_a")),
+        ),
+        (
+            "ecu_b".to_owned(),
+            RwLock::new(TestEcu::new(0x1002, 0x1000).named("ecu_b")),
+        ),
+    ]);
+    DoipDiagGateway::<TestEcu>::new(
+        &DoipConfig::default(),
+        Arc::new(ecus),
+        VariantDetectionSender::new(mpsc::channel(16).0),
+        Arc::new(RecordingConnectivityHandler::default()),
+    )
+    .await
+    .unwrap()
+}
+
+pub(crate) async fn gateway_with_gateways(gateways: &[(&str, u16)]) -> DoipDiagGateway<TestEcu> {
+    let mut ecus = HashMap::new();
+    for (name, logical_address) in gateways {
+        ecus.insert(
+            (*name).to_owned(),
+            RwLock::new(TestEcu::new(*logical_address, *logical_address)),
+        );
+    }
+    DoipDiagGateway::<TestEcu>::new(
+        &DoipConfig::default(),
+        Arc::new(ecus),
+        VariantDetectionSender::new(mpsc::channel(16).0),
+        Arc::new(RecordingConnectivityHandler::default()),
+    )
+    .await
+    .unwrap()
+}
+
+/// A session as a transport start creates it, connecting to `fake`.
+pub(crate) fn session_for(fake: &FakeGateway) -> Arc<GatewaySession> {
+    session_with_handler(fake, Arc::new(RecordingConnectivityHandler::default()))
+}
+
+pub(crate) fn session_with_handler(
+    fake: &FakeGateway,
+    handler: Arc<dyn EcuConnectivityHandler>,
+) -> Arc<GatewaySession> {
+    session_with(fake, handler, DiscoveryMode::Full)
+}
+
+pub(crate) fn session_with_discovery(
+    fake: &FakeGateway,
+    discovery: DiscoveryMode,
+) -> Arc<GatewaySession> {
+    session_with(
+        fake,
+        Arc::new(RecordingConnectivityHandler::default()),
+        discovery,
+    )
+}
+
+pub(crate) fn session_with(
+    fake: &FakeGateway,
+    handler: Arc<dyn EcuConnectivityHandler>,
+    discovery: DiscoveryMode,
+) -> Arc<GatewaySession> {
+    session_with_sender(
+        fake,
+        handler,
+        discovery,
+        VariantDetectionSender::new(mpsc::channel(16).0),
+    )
+}
+
+/// Like [`session_with_handler`], and the receiver of the session's variant
+/// detection requests.
+pub(crate) fn session_with_detection(
+    fake: &FakeGateway,
+    handler: Arc<dyn EcuConnectivityHandler>,
+) -> (Arc<GatewaySession>, mpsc::Receiver<VariantDetectionRequest>) {
+    let (sender, receiver) = mpsc::channel(16);
+    let session = session_with_sender(
+        fake,
+        handler,
+        DiscoveryMode::Full,
+        VariantDetectionSender::new(sender),
+    );
+    (session, receiver)
+}
+
+fn session_with_sender(
+    fake: &FakeGateway,
+    handler: Arc<dyn EcuConnectivityHandler>,
+    discovery: DiscoveryMode,
+    variant_detection: VariantDetectionSender,
+) -> Arc<GatewaySession> {
+    Arc::new(GatewaySession::new(
+        DoipTransportConfig {
+            tester_ip: "127.0.0.1".to_owned(),
+            port: fake.port(),
+            tls_port: 0,
+            send_diagnostic_message_ack: false,
+            send_timeout: Duration::from_secs(1),
+            alive_check_interval: Duration::ZERO,
+        },
+        Arc::new(ConnectionTasks::new()),
+        CancellationToken::new(),
+        variant_detection,
+        handler,
+        discovery,
+    ))
+}
+
+/// Notes whether the gateway was already recorded as unreachable when its
+/// ECUs were reported disconnected.
+pub(crate) struct OrderRecorder {
+    topology: Arc<TopologyState>,
+    pub(crate) unreachable_at_disconnect: std::sync::Mutex<Vec<bool>>,
+}
+
+impl OrderRecorder {
+    pub(crate) fn new(topology: &Arc<TopologyState>) -> Arc<Self> {
+        Arc::new(Self {
+            topology: Arc::clone(topology),
+            unreachable_at_disconnect: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+}
+
+/// The control of a direct connect on `session`.
+pub(crate) fn connect_control(session: &GatewaySession) -> ConnectControl {
+    ConnectControl {
+        cancel: session.cancel_token.clone(),
+        headroom: Duration::from_secs(5),
+    }
+}
+
+#[async_trait::async_trait]
+impl EcuConnectivityHandler for OrderRecorder {
+    async fn on_gateway_connected(
+        &self,
+        ecu_names: &[String],
+    ) -> cda_interfaces::GatewayConnectReport {
+        cda_interfaces::GatewayConnectReport {
+            brought_online: ecu_names.to_vec(),
+            needs_detection: ecu_names.to_vec(),
+        }
+    }
+
+    async fn on_gateway_disconnected(&self, _ecu_names: &[String]) {
+        self.unreachable_at_disconnect
+            .lock()
+            .unwrap()
+            .push(!self.topology.unreachable().is_empty());
+    }
+
+    async fn on_ecu_replied(&self, _ecu_name: &str) {}
+}
 
 #[cfg(test)]
 mod tests {
