@@ -19,8 +19,8 @@ mod connect;
 use std::sync::{Arc, Mutex};
 
 use cda_interfaces::{
-    EcuAddresses, EcuConnectivityHandler, HashMap, HashMapExtensions, VariantDetectionSender,
-    util::std_ext::lock_mutex,
+    EcuAddresses, EcuConnectivityHandler, HashMap, HashMapExtensions, HashSet,
+    VariantDetectionSender, util::std_ext::lock_mutex,
 };
 pub(crate) use connect::{ConnectFailure, DirectRejection, GatewayConnectGuard, PendingConnect};
 use tokio::sync::RwLock;
@@ -58,6 +58,18 @@ pub(crate) async fn ecu_names_by_gateway<T: EcuAddresses>(
     gateway_ecu_name_map
 }
 
+/// The gateways a persisted reconnect still decides on. A failed announcement
+/// connect of a covered gateway is not reported at once: that would discard the
+/// restored ECU state before the reconnect (e.g. its VIR search) has finished.
+/// The reconnect reports the deferred gateways together with its own failures.
+/// This holds without VIR (`VamOnly`) too.
+/// A covered gateway stays covered once connected, so its failed announcement
+/// connect after a later drop is reported only when the reconnect ends.
+struct ReconnectScope {
+    covered: HashSet<u16>,
+    deferred: HashSet<u16>,
+}
+
 /// Gateway connect state of one transport start. Replaced on every start, so
 /// work left over from an earlier start cannot change the current one.
 pub(crate) struct GatewaySession {
@@ -67,6 +79,8 @@ pub(crate) struct GatewaySession {
     /// newest announcement: one task per gateway waits, see
     /// [`vir_vam::handle_announcement`](crate::vir_vam::handle_announcement).
     pending_announcements: Mutex<HashMap<u16, DiscoveredGateway>>,
+    /// The gateways of a persisted reconnect in progress, see [`ReconnectScope`].
+    reconnect_scope: Mutex<Option<ReconnectScope>>,
     /// Awaited, not aborted, by the transport stop: the commits of connects,
     /// which report ECUs connected and revert that themselves if the stop
     /// came first.
@@ -99,6 +113,7 @@ impl GatewaySession {
         Self {
             connect_mutexes: Mutex::new(HashMap::new()),
             pending_announcements: Mutex::new(HashMap::new()),
+            reconnect_scope: Mutex::new(None),
             commit_tasks: Arc::new(ConnectionTasks::new()),
             transport_config,
             connection_tasks,
@@ -151,6 +166,34 @@ impl GatewaySession {
             logical_address,
             _held: held,
         })
+    }
+
+    /// Starts a persisted reconnect that decides on the `covered` gateways.
+    pub(crate) fn begin_reconnect(&self, covered: HashSet<u16>) {
+        *lock_mutex(&self.reconnect_scope) = Some(ReconnectScope {
+            covered,
+            deferred: HashSet::default(),
+        });
+    }
+
+    /// Holds back the report of a failed announcement connect of
+    /// `logical_address` if a reconnect covers it; returns whether it did.
+    pub(crate) fn defer_report(&self, logical_address: u16) -> bool {
+        match lock_mutex(&self.reconnect_scope).as_mut() {
+            Some(scope) if scope.covered.contains(&logical_address) => {
+                scope.deferred.insert(logical_address);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Ends the reconnect scope and returns the gateways whose report was held back.
+    pub(crate) fn end_reconnect(&self) -> HashSet<u16> {
+        lock_mutex(&self.reconnect_scope)
+            .take()
+            .map(|scope| scope.deferred)
+            .unwrap_or_default()
     }
 
     /// Newest announcement per gateway (by logical address) that is waiting

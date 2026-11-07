@@ -487,8 +487,9 @@ mod tests {
     }
 
     /// A failed announcement connect is reported unreachable, also with VIR
-    /// allowed, without trying the gateway again.
-    /// [[ test~doip-failed-announcement-connect-reported, A failed announcement connect is reported unreachable without a VIR search, test ]]
+    /// allowed, without trying the gateway again, unless a persisted reconnect
+    /// still covers the gateway.
+    /// [[ test~doip-failed-announcement-connect-reported, A failed announcement connect is reported unreachable without a VIR search unless a persisted reconnect still covers the gateway (then the reconnect reports it), test ]]
     #[tokio::test]
     async fn failed_announcement_connect_is_reported_unreachable() {
         let (fake, gateway, session, _) = blocked_gateway(DiscoveryMode::Full).await;
@@ -504,6 +505,93 @@ mod tests {
         .await;
         assert_eq!(gateway.state.topology.unreachable(), [0x1000]);
         assert_eq!(fake.connects(), 1);
+        session.connection_tasks.shutdown().await;
+    }
+
+    /// Announces gateway 0x1000 with a refused connect while a reconnect
+    /// covering `reconnect_covers` is running, and waits until the attempt has ended.
+    async fn announce_refused_during_reconnect(
+        gateway: &DoipDiagGateway<TestEcu>,
+        session: &Arc<GatewaySession>,
+        fake: &FakeGateway,
+        reconnect_covers: u16,
+    ) {
+        fake.deny_next_connect();
+        fake.release_connects();
+        session.begin_reconnect(std::iter::once(reconnect_covers).collect());
+
+        announce(gateway, session, discovered("gw", 0x1000)).await;
+
+        wait_until("refused announcement connect to end", || async {
+            fake.connects() == 1 && !is_connecting(session, 0x1000)
+        })
+        .await;
+    }
+
+    /// A failed announcement connect of a gateway the reconnect covers is not
+    /// reported at once, so the restored ECU states survive; the reconnect
+    /// reports it when it ends, unless the gateway is connected by then (e.g.
+    /// by the VIR search).
+    /// [[ test~doip-reconnect-decides-deferred-announcement-failures, A failed announcement connect of a gateway a persisted reconnect covers is reported by the reconnect unless connected by then, test ]]
+    #[tokio::test]
+    async fn reconnect_decides_on_a_deferred_announcement_failure() {
+        for connected_meanwhile in [false, true] {
+            let (fake, gateway, session, recorder) = blocked_gateway(DiscoveryMode::Full).await;
+            announce_refused_during_reconnect(&gateway, &session, &fake, 0x1000).await;
+
+            assert!(gateway.state.topology.unreachable().is_empty());
+            assert!(
+                recorder
+                    .unreachable_at_disconnect
+                    .lock()
+                    .unwrap()
+                    .is_empty(),
+                "the failure is held back"
+            );
+
+            if connected_meanwhile {
+                let connect = gateway
+                    .state
+                    .spawn_gateway_connect(&session, discovered("gw", 0x1000));
+                assert!(connect.wait().await.is_ok());
+            }
+            let discovery = crate::DiscoveryGuard::begin(&gateway.state.topology);
+            DoipDiagGateway::finish_reconnect(
+                &gateway.state,
+                &session,
+                discovery,
+                Vec::new(),
+                cda_interfaces::HashSet::default(),
+                cda_interfaces::HashSet::default(),
+            )
+            .await;
+
+            let reported = recorder.unreachable_at_disconnect.lock().unwrap().len();
+            if connected_meanwhile {
+                assert!(gateway.state.topology.unreachable().is_empty());
+                assert_eq!(reported, 0, "a connected gateway is not reported");
+            } else {
+                assert_eq!(gateway.state.topology.unreachable(), [0x1000]);
+                assert_eq!(reported, 1);
+            }
+            session.connection_tasks.shutdown().await;
+        }
+    }
+
+    /// A failed announcement connect of a gateway the reconnect does not cover
+    /// is reported at once.
+    /// [[ test~doip-uncovered-announcement-failure-reported-at-once, A failed announcement connect of a gateway no persisted reconnect covers is reported at once, test ]]
+    #[tokio::test]
+    async fn failed_announcement_of_an_uncovered_gateway_is_reported_at_once() {
+        let (fake, gateway, session, recorder) = blocked_gateway(DiscoveryMode::Full).await;
+        announce_refused_during_reconnect(&gateway, &session, &fake, 0x2000).await;
+
+        wait_until("uncovered failure to be reported", || async {
+            !gateway.state.topology.unreachable().is_empty()
+        })
+        .await;
+        assert_eq!(gateway.state.topology.unreachable(), [0x1000]);
+        assert_eq!(recorder.unreachable_at_disconnect.lock().unwrap().len(), 1);
         session.connection_tasks.shutdown().await;
     }
 

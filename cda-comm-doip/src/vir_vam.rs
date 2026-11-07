@@ -166,9 +166,11 @@ async fn warn_if_other_address<T: EcuAddresses + DoipComParams>(
 /// then connects the newest announced address, unless the gateway is connected
 /// by then. One task per gateway waits; later announcements only replace the
 /// address. Requests variant detection once connected. A failure is reported
-/// unreachable without a VIR search: the gateway has just announced itself.
+/// unreachable without a VIR search: the gateway has just announced itself,
+/// unless a persisted reconnect still covers the gateway; then the reconnect
+/// reports it.
 /// [[ dimpl~doip-vam-during-connect-connects-after-failure, An announcement during a connect in flight connects the gateway if that connect fails, dimpl ]]
-/// [[ dimpl~doip-failed-announcement-connect-reported, A failed announcement connect is reported unreachable without a VIR search, dimpl ]]
+/// [[ dimpl~doip-failed-announcement-connect-reported, A failed announcement connect is reported unreachable without a VIR search unless a persisted reconnect still covers the gateway (then the reconnect reports it), dimpl ]]
 fn connect_announced<T: EcuAddresses + DoipComParams>(
     state: &DoipGatewayState<T>,
     session: &Arc<GatewaySession>,
@@ -207,9 +209,13 @@ fn connect_announced<T: EcuAddresses + DoipComParams>(
                 .await
                 .is_err()
             {
-                state
-                    .report_unreachable(&task_session, [logical_address])
-                    .await;
+                // If a persisted reconnect covers the gateway, it reports it together with
+                // its own failures.
+                if !task_session.defer_report(logical_address) {
+                    state
+                        .report_unreachable(&task_session, [logical_address])
+                        .await;
+                }
             }
         },
     );

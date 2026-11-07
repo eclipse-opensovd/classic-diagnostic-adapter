@@ -662,6 +662,16 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                     discovery = ?config.discovery,
                     "Reconnecting to persisted gateways without a full VIR discovery"
                 );
+                // Before the VAM listener starts, so every announcement of a covered
+                // gateway is deferred.
+                session.begin_reconnect(
+                    plan.unicast
+                        .iter()
+                        .map(|gateway| gateway.logical_address)
+                        .chain(plan.vir_for.iter().copied())
+                        .chain(plan.unusable.iter().copied())
+                        .collect(),
+                );
                 let connects = self
                     .state
                     .spawn_connects_for_gateways(&session, plan.unicast);
@@ -764,7 +774,9 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     /// searched: the gateways that failed their direct connect and the persisted
     /// gateways without a usable address (`unusable`) are reported unreachable,
     /// unless they are connected by then. A connect of one in flight (e.g. by
-    /// its announcement) is waited for first.
+    /// its announcement) is waited for first. The failed announcement connects
+    /// held back meanwhile (see `GatewaySession::defer_report`) are decided
+    /// together with the gateways above: reported, unless connected by then.
     /// [[ dimpl~doip-persisted-reconnect, Reconnect to persisted gateways with VIR fallback, dimpl ]]
     /// [[ dimpl~doip-reconnect-discovery-mode, The persisted reconnect follows doip.discovery, dimpl ]]
     async fn finish_reconnect(
@@ -793,6 +805,8 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         } else {
             candidates.extend(unusable);
         }
+        // Failed announcement connects held back meanwhile are decided here too.
+        candidates.extend(session.end_reconnect());
         // An announcement may have connected a gateway meanwhile; it is not reported.
         let mut unreachable = cda_interfaces::HashSet::default();
         for logical_address in candidates {
