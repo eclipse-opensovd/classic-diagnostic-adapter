@@ -250,15 +250,30 @@ Vehicle Identification
 
     **Discovery Process**
 
-    1. A UDP socket is created and bound to the configured tester address and gateway port
-       (default: 13400). The socket is configured with broadcast capability and address reuse.
-    2. A Vehicle Identification Request (VIR, payload type ``0x0001``) is broadcast to
+    1. A UDP socket (VIR socket) is created and bound to the configured tester address and the
+       port selected by ``doip.vir_source_port``: a fixed port, ``0`` (chosen by the operating
+       system) or a free port of an inclusive range (default: ``49152-65535``, as required by
+       ISO 13400-2 REQ 4.DoIP-135). The socket is configured with broadcast capability. Only if
+       the selected port equals the gateway port (legacy behavior), address reuse is enabled so
+       the port can be shared with the spontaneous VAM listener. A warning is logged if the
+       configured port is outside the dynamic port range. A single configured port is bound up to
+       3 times, 200 ms apart; a range tries each of its ports once. If no port can be bound, an
+       error is logged and no VIR is sent; enabling the communication does not fail, gateways are
+       still connected by VAMs or directly. The VIR socket is only bound if a VIR is sent.
+    2. Before the VIR is sent, the socket of the spontaneous VAM listener is bound to
+       ``0.0.0.0`` and the gateway port, so that responses of DoIP entities which answer to the
+       gateway port instead of the VIR source port are not lost. The VIR socket is reused as
+       listener socket only if it is bound to ``0.0.0.0`` and the gateway port. If the listener
+       socket cannot be bound, an error is logged and spontaneous VAMs are ignored, without
+       failing the communication.
+    3. A Vehicle Identification Request (VIR, payload type ``0x0001``) is broadcast to
        ``255.255.255.255`` on the gateway port.
-    3. Vehicle Announcement Messages (VAM, payload type ``0x0004``) are collected within a
-       timeout window.
-    4. VAM responses are filtered by subnet mask: only responses from IP addresses within the
+    4. Vehicle Announcement Messages (VAM, payload type ``0x0004``) are received on the VIR
+       socket, the DoIP entities answer to the VIR source port (ISO 13400-2 REQ 4.DoIP-137),
+       and collected within a timeout window.
+    5. VAM responses are filtered by subnet mask: only responses from IP addresses within the
        tester's subnet (``tester_address AND tester_subnet``) are accepted.
-    5. Each accepted VAM is matched against known ECU logical addresses from the diagnostic databases.
+    6. Each accepted VAM is matched against known ECU logical addresses from the diagnostic databases.
 
     **Vehicle Announcement Message Content**
 
@@ -281,7 +296,13 @@ Vehicle Identification
     - Gateways reconnecting after a temporary disconnection
 
     When a new or known VAM is received, the system establishes or re-uses the connection
-    and triggers variant detection for the associated ECUs.
+    and triggers variant detection for the associated ECUs. For an already connected gateway,
+    variant detection is not triggered again if it was triggered for this gateway within the
+    last 3 seconds (by discovery, a direct connect or a previous VAM). This suppresses the
+    repeated vehicle announcements of a DoIP entity (``A_DoIP_Announce_Num`` VAMs every
+    ``A_DoIP_Announce_Interval``) and VIR responses received on both the VIR socket and the
+    VAM listener socket. The window does not move with ignored VAMs, so later VAMs still
+    trigger variant detection, e.g. to bring an ECU marked offline back online.
 
     .. uml::
         :caption: Vehicle Identification Sequence
@@ -291,12 +312,14 @@ Vehicle Identification
         skinparam sequenceArrowThickness 2
 
         participant "CDA" as CDA
-        participant "UDP Socket\n(port 13400)" as UDP
+        participant "VIR Socket\n(vir_source_port)" as UDP
+        participant "VAM Listener Socket\n(0.0.0.0:13400)" as VAML
         participant "DoIP Entity A" as GWA
         participant "DoIP Entity B" as GWB
 
         == Initial Discovery ==
-        CDA -> UDP: Create socket\n(broadcast, address reuse)
+        CDA -> UDP: Create socket\n(broadcast)
+        CDA -> VAML: Create socket\n(broadcast, address reuse)
         CDA -> UDP: VIR broadcast to\n255.255.255.255:13400
 
         UDP -> GWA: Vehicle Identification\nRequest (0x0001)
@@ -309,10 +332,10 @@ Vehicle Identification
         CDA -> CDA: Match logical addresses\nto MDD databases
 
         == Spontaneous Listener (background) ==
-        CDA -> UDP: Listen for spontaneous VAMs
+        CDA -> VAML: Listen for spontaneous VAMs
         ...
-        GWA --> UDP: Spontaneous VAM\n(entity came online)
-        UDP --> CDA: New VAM received
+        GWA --> VAML: Spontaneous VAM\n(entity came online)
+        VAML --> CDA: New VAM received
         CDA -> CDA: Establish connection\nand trigger variant detection
         @enduml
 

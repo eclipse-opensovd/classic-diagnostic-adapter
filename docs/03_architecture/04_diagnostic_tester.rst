@@ -505,8 +505,9 @@ Communication Initialization Mode
       reported unreachable, its ECUs keep their persisted state, and only its spontaneous announcement or
       ``doip-connect-ecu`` connects it. Gateways of the databases that are not persisted at all, persisted
       gateways whose address is not usable, and persisted gateways that cannot be reached at their address,
-      are searched by one broadcast VIR sent from a separate, ephemeral socket (the VAM listener owns the
-      socket on the DoIP port); only announcements of these gateways are used.
+      are searched by one broadcast VIR sent from a separate socket bound like the startup VIR socket
+      (``doip.vir_source_port``, see :need:`arch~doip-vehicle-identification`); only announcements of these
+      gateways are used.
     - The ECUs of gateways that are still not found are reported as unreachable. The discovery then counts
       as complete for :need:`arch~dt-ecu-list-persistence`, which writes the result.
     - ``doip.discovery`` restricts the reconnect like the full discovery (see

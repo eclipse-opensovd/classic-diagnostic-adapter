@@ -357,6 +357,7 @@ fn session_with_sender(
         DoipTransportConfig {
             tester_ip: "127.0.0.1".to_owned(),
             port: fake.port(),
+            vir_source_port: crate::config::VirSourcePort::default(),
             tls_port: 0,
             send_diagnostic_message_ack: false,
             send_timeout: Duration::from_secs(1),

@@ -19,7 +19,10 @@ use cda_interfaces::{DiagServiceError, EcuAddresses, HashMap, HashSet, topology:
 use doip_definitions::header::ProtocolVersion;
 use tokio::sync::RwLock;
 
-use crate::{DiscoveredGateway, create_udp_vir_socket, error::DoipGatewaySetupError, vir_vam};
+use crate::{
+    DiscoveredGateway, bind_vir_socket, config::VirSourcePort, error::DoipGatewaySetupError,
+    vir_vam,
+};
 
 /// Gateways to connect to directly, and gateways that need a VIR search.
 #[derive(Debug, Default)]
@@ -93,13 +96,17 @@ pub(crate) fn plan_reconnect(
     plan
 }
 
-/// Broadcasts a VIR from a new, ephemeral socket and returns the announced
-/// gateways whose logical address is in `wanted`.
+/// Broadcasts a VIR from a new socket bound as configured by
+/// `doip.vir_source_port` and returns the announced gateways whose logical
+/// address is in `wanted`.
 ///
 /// A separate socket is used because the VAM listener owns the socket bound to the
 /// `DoIP` port; vehicle announcements answering a VIR are sent to its source port.
+/// Only if `vir_source_port` is the `DoIP` port (legacy behavior) the socket shares
+/// that port with the VAM listener.
 pub(crate) async fn fallback_identification<T, F>(
     tester_ip: &str,
+    vir_source_port: VirSourcePort,
     netmask: u32,
     gateway_port: u16,
     ecus: &Arc<HashMap<String, RwLock<T>>>,
@@ -110,10 +117,14 @@ where
     T: EcuAddresses,
     F: Future<Output = ()> + Send + 'static,
 {
-    let mut socket = create_udp_vir_socket(tester_ip, 0).map_err(|error| match error {
-        DoipGatewaySetupError::InvalidAddress(message) => DiagServiceError::InvalidAddress(message),
-        other => DiagServiceError::ResourceError(other.to_string()),
-    })?;
+    let (mut socket, _) = bind_vir_socket(tester_ip, vir_source_port, gateway_port)
+        .await
+        .map_err(|error| match error {
+            DoipGatewaySetupError::InvalidAddress(message) => {
+                DiagServiceError::InvalidAddress(message)
+            }
+            other => DiagServiceError::ResourceError(other.to_string()),
+        })?;
     let gateways =
         vir_vam::get_vehicle_identification(&mut socket, netmask, gateway_port, ecus, shutdown)
             .await?;
