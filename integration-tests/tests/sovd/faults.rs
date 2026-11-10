@@ -1528,16 +1528,10 @@ async fn test_user_memory_fault_status_uses_status_byte() {
 /// Test that GET /faults returns ECU-reported DTCs with and without ODX references.
 #[tokio::test]
 async fn test_get_faults_with_and_without_odx_reference() {
-    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-    let auth = auth_header(&runtime.config, None).await.unwrap();
-    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
-    let ecu_name = "flxc1000";
+    let test_env = TestEnv::builder().await.unwrap();
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
+    let ecu_name = ECU_FLXC1000;
     let fault_memory = "Standard";
-
-    // Clear any existing DTCs from the simulator.
-    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
-        .await
-        .expect("Failed to clear DTCs in simulator");
 
     // Scenario 1: Add a DTC that has a matching ODX reference.
     // Status mask 0x29 (binary 0010_1001):
@@ -1550,7 +1544,7 @@ async fn test_get_faults_with_and_without_odx_reference() {
         emissions_related: false,
     };
 
-    ecusim::add_dtc(&runtime.ecu_sim, ecu_name, fault_memory, &dtc1)
+    ecusim::add_dtc(&test_env.ecu_sim, ecu_name, fault_memory, &dtc1)
         .await
         .expect("Failed to add ODX-referenced DTC 0x01E241");
 
@@ -1562,12 +1556,12 @@ async fn test_get_faults_with_and_without_odx_reference() {
         emissions_related: false,
     };
 
-    ecusim::add_dtc(&runtime.ecu_sim, ecu_name, fault_memory, &dtc2)
+    ecusim::add_dtc(&test_env.ecu_sim, ecu_name, fault_memory, &dtc2)
         .await
         .expect("Failed to add DTC 0x01E246 without an ODX reference");
 
     // Test GET /faults - both DTCs should be returned, including the one without an ODX reference.
-    let faults = get_faults(&runtime.config, &auth, ecu_endpoint)
+    let faults = get_faults(&test_env, ecu_endpoint)
         .await
         .expect("Failed to get faults via SOVD");
 
@@ -1604,7 +1598,6 @@ async fn test_get_faults_with_and_without_odx_reference() {
         "Expected default severity 0 for DTC without ODX reference"
     );
 
-    // Verify that the ECU-reported DTC status mask
     assert_eq!(
         fault2
             .status
