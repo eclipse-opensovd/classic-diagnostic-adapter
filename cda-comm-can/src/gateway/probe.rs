@@ -337,6 +337,9 @@ mod tests {
                 ),
             ],
             vec![],
+            std::sync::Arc::new(
+                cda_interfaces::util::test_utils::RecordingConnectivityHandler::default(),
+            ),
         );
         gateway.probe_timeout = PROBE_TIMEOUT;
 

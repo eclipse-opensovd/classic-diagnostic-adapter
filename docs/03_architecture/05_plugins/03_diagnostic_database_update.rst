@@ -15,6 +15,7 @@ Diagnostic Database Update Plugin
 .. arch:: Diagnostic Database Update Plugin
     :id: arch~plugin-diagnostic-database-update
     :status: draft
+    :links: dimpl~communication-control-swappable-gateway
 
     **Endpoints and Security**
 
@@ -96,15 +97,24 @@ Diagnostic Database Update Plugin
     The runtime update plugin accepts MDD database files (``.mdd``). CDA configuration files cannot
     be updated through the runtime-files endpoints.
 
-    CDA can be started with MDD files provided in a directory (``database.dir``). Startup only reads it, so the
-    storage stays untouched. The storage is seeded from ``database.dir`` on the first update, by the first upload
-    or delete in ``runtimefiles-nextupdate``, so the update, its backup and the rollback start from the loaded
-    databases. Until then, ``runtimefiles-current`` and ``runtimefiles-nextupdate`` list the databases in
-    ``database.dir``. From then on the storage is used and the directory is ignored, even when an update removed
-    every database.
+    CDA can be started with MDD files provided in a directory (``database.dir``), which is always treated as
+    an immutable source. In ``always`` decompression mode, startup provisions the files into the
+    ``DiagnosticDatabase`` collection as described by :need:`arch~dt-database-loading`.
 
-    Custom update plugins must seed the storage the same way before their first write of an update, by calling
-    ``cda_database::storage::seed_if_nonexistent``.
+    In ``never`` mode, startup only reads ``database.dir`` and storage remains untouched until the first update
+    write. The first upload or delete in ``runtimefiles-nextupdate`` seeds storage from ``database.dir`` without
+    decompressing its files, so the update, its backup and the rollback start from the loaded databases. The
+    source directory remains untouched. In ``always`` mode, compressed MDDs introduced by subsequent runtime
+    updates are decompressed before the updated collection is reloaded; ``never`` keeps them compressed.
+
+    Seeding uses one storage transaction. The active collection becomes visible only when every source MDD has
+    been copied successfully. Until storage has been seeded, ``runtimefiles-current`` and
+    ``runtimefiles-nextupdate`` list the databases in ``database.dir``.
+
+    Once the ``DiagnosticDatabase`` collection exists, whether created during initial provisioning or seeded
+    by an update write, storage is authoritative and ``database.dir`` is ignored even when an update removed
+    every database. Custom update plugins must ensure storage is seeded before their first update write and
+    apply the configured decompression policy when the active collection does not already exist.
 
     **Limitations to bulk-data operations**
 
@@ -195,6 +205,17 @@ Diagnostic Database Update Plugin
     The list endpoint ``GET /apps/sovd2uds/operations/runtimefilesupdate/executions`` returns all
     currently tracked execution identifiers and always contains at most one entry. No vehicle lock is
     required to use the list or status endpoints.
+
+    While an execution is running, requests to other routes are rejected with ``409 Conflict`` and a
+    ``Retry-After`` header. Exempt are the health and both ``/data/version`` endpoints
+    (``/vehicle/v15/data/version`` and ``/vehicle/v15/apps/sovd2uds/data/version``), authorization,
+    reading and acquiring locks, and the execution list and status endpoints. Applications embedding
+    CDA can exempt further routes they register themselves, e.g. vendor-specific version or health
+    endpoints, via ``Setup::with_always_accessible_routes``. These routes are exempt from every
+    protection that denies all non-exempt routes, not only from the update protection. A route is
+    a path prefix matched at segment boundaries, not an exact path: ``/vehicle/v15/apps/sovd2uds/x-vendor/version``
+    also exempts ``/vehicle/v15/apps/sovd2uds/x-vendor/version/history`` but not
+    ``/vehicle/v15/apps/sovd2uds/x-vendor/version-info``.
 
     After applying, or rolling back the diagnostic database, the new database must be active immediately, without
     requiring a restart of the CDA, and the old state must be available as a backup until the next update is applied,

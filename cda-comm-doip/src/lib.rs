@@ -94,8 +94,9 @@ enum DiagnosticResponse {
     /// A response to a `DoIP` alive-check request, indicating that the ECU is reachable.
     AliveCheckResponse,
     /// `TesterPresent` NRC - intercepted at the decoding layer so the receiver
-    /// can log-and-drop without routing it to a per-ECU channel.
-    TesterPresentNRC(u8),
+    /// can log it, report it as a reply of the ECU with its source address, and
+    /// drop it without routing it to a per-ECU channel.
+    TesterPresentNRC { source_address: u16, nrc: u8 },
     /// Generic `DoIP` negative acknowledgment, carrying the `GenericNack` struct with the NACK code.
     GenericNack(GenericNack), // todo #22 -> we need the address of the ECU that sent the nack
 }
@@ -386,14 +387,56 @@ pub(crate) struct GatewayConnectionConfig {
 }
 
 /// One-shot setup bundle consumed by `connection_handler` when bringing up a new gateway.
-/// Carries `GatewayConnectionConfig` plus the ECU list needed during initial channel creation
-/// and the `ConnectivityHandler` for propagating connection events.
+/// Carries `GatewayConnectionConfig` plus the ECU list needed during initial channel creation,
+/// the `ConnectivityHandler` for propagating connection events, and the [`EcuActivityReporter`] for
+/// the frames the receiver task does not route to an ECU.
 #[derive(Clone)]
 pub(crate) struct GatewaySetup {
     pub(crate) connection: GatewayConnectionConfig,
     pub(crate) ecus: Vec<u16>,
     pub(crate) ecu_names: Vec<String>,
     pub(crate) connectivity_handler: Arc<dyn EcuConnectivityHandler>,
+    pub(crate) activity_reporter: EcuActivityReporter,
+}
+
+/// Reports UDS frames that the transport receives but does not pass on as the
+/// answer to a request, so that they still count as replies of the ECU.
+///
+/// The reported replies are used to update `last_seen` of the affected ECUs.
+#[derive(Clone)]
+pub(crate) struct EcuActivityReporter {
+    /// Handler notified about the reported replies.
+    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
+    /// Names of the ECUs behind one gateway, by logical address.
+    ecu_names_by_address: Arc<HashMap<u16, Vec<String>>>,
+}
+
+impl EcuActivityReporter {
+    pub(crate) fn new(
+        connectivity_handler: Arc<dyn EcuConnectivityHandler>,
+        ecu_names_by_address: HashMap<u16, Vec<String>>,
+    ) -> Self {
+        Self {
+            connectivity_handler,
+            ecu_names_by_address: Arc::new(ecu_names_by_address),
+        }
+    }
+
+    /// Reports a frame as a reply of `ecu_name`.
+    pub(crate) async fn report_activity_for_ecu_name(&self, ecu_name: &str) {
+        self.connectivity_handler.on_ecu_replied(ecu_name).await;
+    }
+
+    /// Reports a frame from `source_address` as a reply of the ECUs with that
+    /// logical address.
+    pub(crate) async fn report_activity_for_address(&self, source_address: u16) {
+        let Some(ecu_names) = self.ecu_names_by_address.get(&source_address) else {
+            return;
+        };
+        for ecu_name in ecu_names {
+            self.connectivity_handler.on_ecu_replied(ecu_name).await;
+        }
+    }
 }
 
 struct DoipEcu {
@@ -404,6 +447,7 @@ struct DoipEcu {
 struct DoipConnection {
     ecus: HashMap<u16, Arc<Mutex<DoipEcu>>>,
     ip: String,
+    activity: EcuActivityReporter,
 }
 
 impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
@@ -549,6 +593,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             let state = self.state.clone();
             let gateway_state = GatewayState {
                 doip_connections: Arc::clone(&state.doip_connections),
+                logical_address_to_connection: Arc::clone(&state.logical_address_to_connection),
                 ecus: Arc::clone(&state.ecus),
                 gateway_ecu_map: gateway_ecu_map.clone(),
                 connection_tasks: Arc::clone(&connection_tasks),
@@ -576,8 +621,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                     )
                     .await
                     {
-                        Ok(logical_address) => {
-                            state.register_connection(logical_address).await;
+                        Ok(_) => {
                             if let Err(error) = variant_detection
                                 .send(VariantDetectionRequest::new(gateway_ecu_names))
                                 .await
@@ -707,6 +751,7 @@ impl<T: EcuAddresses + DoipComParams> PhysicalTransport for DoipDiagGateway<T> {
             target_address: message.target_address.to_be_bytes(),
             message: message.data,
         };
+        let activity = doip_conn.activity.clone();
 
         let handle = cda_interfaces::spawn_named!(
             &format!("ecu-data-receive-{}", transmission_params.ecu_name),
@@ -745,6 +790,7 @@ impl<T: EcuAddresses + DoipComParams> PhysicalTransport for DoipDiagGateway<T> {
                         &transmission_params.ecu_name,
                         &doip_message,
                         transmission_params.timeout_ack,
+                        &activity,
                     )
                     .await
                     {
@@ -1090,6 +1136,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         let (gateway_ecu_map, gateway_ecu_name_map) = self.gateway_ecu_maps().await;
         let gateway_state = GatewayState {
             doip_connections: Arc::clone(&self.state.doip_connections),
+            logical_address_to_connection: Arc::clone(&self.state.logical_address_to_connection),
             ecus: Arc::clone(&self.state.ecus),
             gateway_ecu_map,
             connection_tasks: Arc::clone(&connection_tasks),
@@ -1226,11 +1273,13 @@ async fn wait_for_ack_or_response_until_timeout(
     ecu_name: &str,
     sent_message: &DiagnosticMessage,
     timeout: Duration,
+    activity: &EcuActivityReporter,
 ) -> Result<Option<DiagnosticResponse>, DiagServiceError> {
     async fn wait_for_ack_or_response(
         receiver: &mut broadcast::Receiver<Result<DiagnosticResponse, EcuError>>,
         ecu_name: &str,
         sent_message: &DiagnosticMessage,
+        activity: &EcuActivityReporter,
     ) -> Result<Option<DiagnosticResponse>, DiagServiceError> {
         loop {
             let response = match receiver.recv().await {
@@ -1292,6 +1341,11 @@ async fn wait_for_ack_or_response_until_timeout(
                         ?response,
                         "Received response does not match sent message. Ignoring."
                     );
+                    // Not the answer to this request, but still a reply of the ECU:
+                    // the channel of the request's ECU only carries its frames.
+                    if matches!(response, DiagnosticResponse::Msg { .. }) {
+                        activity.report_activity_for_ecu_name(ecu_name).await;
+                    }
                 }
 
                 continue;
@@ -1315,7 +1369,7 @@ async fn wait_for_ack_or_response_until_timeout(
 
     if let Ok(result) = tokio::time::timeout(
         timeout,
-        wait_for_ack_or_response(receiver, ecu_name, sent_message),
+        wait_for_ack_or_response(receiver, ecu_name, sent_message, activity),
     )
     .await
     {
@@ -1703,11 +1757,12 @@ mod tests {
     use std::{net::UdpSocket, sync::Arc, time::Duration};
 
     use cda_interfaces::{
-        DiagServiceError, EcuConnectivityHandler, HashMap, HashMapExtensions, PendingNrc,
-        PhysicalTransport, ServicePayload, TransmissionParameters, TransportResponse,
-        UDS_ID_RESPONSE_BITMASK, VariantDetectionSender,
+        DiagServiceError, HashMap, HashMapExtensions, PendingNrc, PhysicalTransport,
+        ServicePayload, TransmissionParameters, TransportResponse, UDS_ID_RESPONSE_BITMASK,
+        VariantDetectionSender,
         communication_control::{DoipEndpoint, GatewayLifecycle, TransportControl, TransportState},
         nrc, service_ids,
+        util::test_utils::RecordingConnectivityHandler,
     };
     use doip_definitions::{
         header::ProtocolVersion,
@@ -1718,8 +1773,11 @@ mod tests {
 
     use crate::{
         ConnectionTasks, DiagnosticResponse, DoIPUdpSocket, DoipConfig, DoipConnection,
-        DoipDiagGateway, DoipEcu, DoipGatewayState, config::DiscoveryMode, read_ecu_responses,
-        spawn_connection_task, test_helpers::TestEcu, wait_for_ack_or_response_until_timeout,
+        DoipDiagGateway, DoipEcu, DoipGatewayState,
+        config::DiscoveryMode,
+        read_ecu_responses, spawn_connection_task,
+        test_helpers::{TestEcu, activity_reporter, no_activity},
+        wait_for_ack_or_response_until_timeout,
     };
 
     const ECU_ADDR: u16 = 0x0E80;
@@ -1733,15 +1791,6 @@ mod tests {
         PAYLOAD[1],
         0x01,
     ];
-
-    struct TestConnectivityHandler;
-
-    #[async_trait::async_trait]
-    impl EcuConnectivityHandler for TestConnectivityHandler {
-        async fn on_gateway_connected(&self, _ecu_names: &[String]) {}
-
-        async fn on_gateway_disconnected(&self, _ecu_names: &[String]) {}
-    }
 
     /// Builds a minimal `DoipDiagGateway` whose single ECU is backed by the
     /// caller-supplied broadcast receiver and mpsc sender.
@@ -1763,6 +1812,7 @@ mod tests {
         let conn = Arc::new(DoipConnection {
             ecus,
             ip: "127.0.0.1".to_owned(),
+            activity: no_activity(),
         });
 
         // DoIPUdpSocket is never touched during send()
@@ -1789,7 +1839,7 @@ mod tests {
             state,
             config: DoipConfig::default(),
             variant_detection: VariantDetectionSender::new(mpsc::channel(1).0),
-            connectivity_handler: Arc::new(TestConnectivityHandler),
+            connectivity_handler: Arc::new(RecordingConnectivityHandler::default()),
             lifecycle: Arc::new(GatewayLifecycle::new(TransportState::Enabled)),
         }
     }
@@ -1820,7 +1870,7 @@ mod tests {
             &DoipConfig::default(),
             Arc::new(HashMap::new()),
             VariantDetectionSender::new(mpsc::channel(1).0),
-            Arc::new(TestConnectivityHandler),
+            Arc::new(RecordingConnectivityHandler::default()),
         )
         .await
         .unwrap();
@@ -1848,7 +1898,7 @@ mod tests {
             &DoipConfig::default(),
             Arc::new(ecus),
             VariantDetectionSender::new(mpsc::channel(1).0),
-            Arc::new(TestConnectivityHandler),
+            Arc::new(RecordingConnectivityHandler::default()),
         )
         .await
         .unwrap();
@@ -1871,6 +1921,7 @@ mod tests {
             .push(Arc::new(DoipConnection {
                 ecus: conn_ecus,
                 ip: "10.0.0.5".to_owned(),
+                activity: no_activity(),
             }));
         gateway
             .state
@@ -1909,7 +1960,7 @@ mod tests {
             },
             Arc::new(ecus),
             VariantDetectionSender::new(mpsc::channel(1).0),
-            Arc::new(TestConnectivityHandler),
+            Arc::new(RecordingConnectivityHandler::default()),
         )
         .await
         .unwrap();
@@ -2025,7 +2076,7 @@ mod tests {
             &DoipConfig::default(),
             Arc::new(ecus),
             VariantDetectionSender::new(mpsc::channel(1).0),
-            Arc::new(TestConnectivityHandler),
+            Arc::new(RecordingConnectivityHandler::default()),
         )
         .await
         .unwrap();
@@ -2062,7 +2113,7 @@ mod tests {
             },
             Arc::new(HashMap::new()),
             VariantDetectionSender::new(mpsc::channel(1).0),
-            Arc::new(TestConnectivityHandler),
+            Arc::new(RecordingConnectivityHandler::default()),
         )
         .await
         .unwrap();
@@ -2111,6 +2162,7 @@ mod tests {
                     Arc::new(Mutex::new(DoipEcu { sender, receiver })),
                 )]),
                 ip: "10.0.0.6".to_owned(),
+                activity: no_activity(),
             }));
         gateway
             .state
@@ -2365,7 +2417,7 @@ mod tests {
             },
             Arc::new(HashMap::new()),
             VariantDetectionSender::new(mpsc::channel(1).0),
-            Arc::new(TestConnectivityHandler),
+            Arc::new(RecordingConnectivityHandler::default()),
         )
         .await
         .expect("construction must not check the network");
@@ -2644,6 +2696,7 @@ mod tests {
             "test-ecu",
             &msg,
             Duration::from_secs(1),
+            &no_activity(),
         )
         .await;
         assert!(
@@ -2667,6 +2720,7 @@ mod tests {
             "test-ecu",
             &msg,
             Duration::from_secs(1),
+            &no_activity(),
         )
         .await;
 
@@ -2698,6 +2752,7 @@ mod tests {
             "test-ecu",
             &msg,
             Duration::from_secs(1),
+            &no_activity(),
         )
         .await;
 
@@ -2727,6 +2782,7 @@ mod tests {
             "test-ecu",
             &msg,
             Duration::from_secs(1),
+            &no_activity(),
         )
         .await;
 
@@ -2754,6 +2810,7 @@ mod tests {
             "test-ecu",
             &msg,
             Duration::from_secs(1),
+            &no_activity(),
         )
         .await;
 
@@ -2774,6 +2831,7 @@ mod tests {
             "test-ecu",
             &msg,
             Duration::from_millis(200),
+            &no_activity(),
         )
         .await;
 
@@ -2796,6 +2854,7 @@ mod tests {
             "test-ecu",
             &msg,
             Duration::from_secs(1),
+            &no_activity(),
         )
         .await;
 
@@ -2822,6 +2881,7 @@ mod tests {
             "test-ecu",
             &msg,
             Duration::from_secs(1),
+            &no_activity(),
         )
         .await;
 
@@ -2830,6 +2890,42 @@ mod tests {
             matches!(result, Ok(None)),
             "expected Ok(None), got {result:?}"
         );
+    }
+
+    /// A UDS frame with another SID before the ACK does not answer the request
+    /// and is skipped, but it is reported as a reply of the request's ECU.
+    #[tokio::test]
+    async fn wait_for_ack_or_response_reports_skipped_frame_as_reply() {
+        let (tx, mut rx) = make_broadcast_pair();
+        let msg = diag_msg();
+        let handler = Arc::new(RecordingConnectivityHandler::default());
+        // No address map: the request's ECU is reported by its name.
+        let activity = activity_reporter(&handler, &[]);
+
+        tx.send(Ok(DiagnosticResponse::Msg {
+            source_address: ECU_ADDR,
+            target_address: TESTER_ADDR,
+            data: vec![service_ids::SESSION_CONTROL | UDS_ID_RESPONSE_BITMASK, 0x01],
+        }))
+        .expect("Failed to send unrelated response");
+        tx.send(Ok(DiagnosticResponse::Ack((ECU_ADDR, vec![]))))
+            .expect("Failed to send ack");
+
+        let result = wait_for_ack_or_response_until_timeout(
+            &mut rx,
+            "test-ecu",
+            &msg,
+            Duration::from_secs(1),
+            &activity,
+        )
+        .await;
+
+        drop(tx);
+        assert!(
+            matches!(result, Ok(None)),
+            "expected Ok(None), got {result:?}"
+        );
+        assert_eq!(handler.replied(), vec!["test-ecu".to_owned()]);
     }
 
     #[tokio::test]

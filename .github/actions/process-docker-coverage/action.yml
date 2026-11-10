@@ -11,7 +11,7 @@
 
 name: Process Docker coverage
 description: >-
-  Export an lcov tracefile from a coverage-instrumented docker test run (target/coverage/*.profraw) and rewrite the in-container /app/ source paths to the runner workspace so lcov --add unions hit counts across suites. Produces an empty tracefile when the run left no coverage data.
+  Export an lcov tracefile from a coverage-instrumented docker test run (target/coverage/*.profraw) and rewrite the source paths of a binary compiled in the image (/app/) to the runner workspace, so lcov --add unions hit counts across suites; a binary compiled on the runner already has them. Produces an empty tracefile when the run left no coverage data.
 inputs:
   output-file:
     description: Path of the resulting lcov tracefile
@@ -30,7 +30,7 @@ runs:
           $LLVM_COV export -format=lcov \
             target/coverage/opensovd-cda \
             -instr-profile=target/coverage/docker.profdata \
-            --ignore-filename-regex='/usr/local/cargo|/usr/local/rustup' \
+            --ignore-filename-regex='/usr/local/cargo|/usr/local/rustup|/\.cargo/(registry|git)/|/\.rustup/' \
             > "${{ inputs.output-file }}.raw"
           WORKSPACE=$(cargo metadata --no-deps --format-version 1 | jq -r '.workspace_root')
           sed "s|SF:/app/|SF:${WORKSPACE}/|g" "${{ inputs.output-file }}.raw" > "${{ inputs.output-file }}"

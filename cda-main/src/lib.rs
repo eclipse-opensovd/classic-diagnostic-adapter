@@ -23,7 +23,10 @@ use std::{
 };
 
 use backon::Retryable;
-use cda_interfaces::{config::ConfigSanity, dlt_ctx, storage_api::StorageError};
+use cda_interfaces::{
+    config::ConfigSanity, dlt_ctx, http_protection::registry::HttpProtectionRegistry,
+    storage_api::StorageError,
+};
 use cda_plugin_communication_management::plugin::CommunicationPluginBuilder;
 use cda_plugin_security::{
     DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,
@@ -390,6 +393,10 @@ where
         .naming_convention
         .warn_on_non_standard_categories();
 
+    // Validated before anything starts, so invalid routes do not fail after the database load.
+    let http_protections =
+        HttpProtectionRegistry::with_always_accessible_routes(setup.always_accessible_routes)?;
+
     let webserver_state = init_webserver(
         &config,
         setup.pre_load,
@@ -443,6 +450,7 @@ where
             setup.build_update_plugin,
             setup.build_communication_plugin,
             storage,
+            http_protections,
         ),
         webserver_state.shutdown_signal.clone(),
     )

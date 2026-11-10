@@ -24,8 +24,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     ConnectionError, ConnectionTasks, DiagnosticResponse, DiscoveredGateway, DoipConnection,
-    DoipEcu, DoipTransportConfig, EcuTimeouts, GatewayConnectionConfig, GatewayDoipConfig,
-    GatewaySetup,
+    DoipEcu, DoipTransportConfig, EcuActivityReporter, EcuTimeouts, GatewayConnectionConfig,
+    GatewayDoipConfig, GatewaySetup,
     connection_receiver::spawn_gateway_receiver_task,
     connection_sender::spawn_gateway_sender_task,
     connections::EcuError::EcuConnectionError,
@@ -37,6 +37,7 @@ pub(crate) type ConnectionResetReason = String;
 /// Runtime state for managing active gateway connections and ECU mappings.
 pub(crate) struct GatewayState<T> {
     pub doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>>,
+    pub logical_address_to_connection: Arc<RwLock<HashMap<u16, usize>>>,
     pub ecus: Arc<HashMap<String, RwLock<T>>>,
     pub gateway_ecu_map: HashMap<u16, Vec<u16>>,
     pub connection_tasks: Arc<ConnectionTasks>,
@@ -153,12 +154,19 @@ where
 
     // Build list of ECU names behind this gateway for notifications
     let mut ecu_names_for_gateway: Vec<String> = Vec::new();
+    let mut ecu_names_by_address: HashMap<u16, Vec<String>> = HashMap::new();
     for (name, ecu_lock) in state.ecus.iter() {
-        let ecu = ecu_lock.read().await;
-        if ecu_ids.contains(&ecu.logical_address()) {
+        let logical_address = ecu_lock.read().await.logical_address();
+        if ecu_ids.contains(&logical_address) {
             ecu_names_for_gateway.push(name.clone());
+            ecu_names_by_address
+                .entry(logical_address)
+                .or_default()
+                .push(name.clone());
         }
     }
+    let activity =
+        EcuActivityReporter::new(Arc::clone(&connectivity_handler), ecu_names_by_address);
 
     let gateway_ecu = match state.ecus.get(&discovered_gateway.ecu_name) {
         Some(ecu) => ecu.read().await,
@@ -193,6 +201,7 @@ where
         ecus: ecu_ids.clone(),
         ecu_names: ecu_names_for_gateway.clone(),
         connectivity_handler: Arc::clone(&connectivity_handler),
+        activity_reporter: activity.clone(),
     };
     let GatewayConnectionHandles { sender, receivers } =
         connection_handler(gateway, Arc::clone(&state.connection_tasks), control).await?;
@@ -200,14 +209,24 @@ where
     let doip_ecus = create_ecu_receiver_map(ecu_ids, &sender, &receivers);
 
     tracing::info!("Connected to gateway");
-    state
-        .doip_connections
-        .write()
-        .await
-        .push(Arc::new(DoipConnection {
+    // Register the connection and its route in one step, before the ECUs are
+    // announced as online: the announcement triggers variant detection, which
+    // must already find the route to the gateway.
+    {
+        let mut connections = state.doip_connections.write().await;
+        if doip_ecus.contains_key(&discovered_gateway.logical_address) {
+            state
+                .logical_address_to_connection
+                .write()
+                .await
+                .insert(discovered_gateway.logical_address, connections.len());
+        }
+        connections.push(Arc::new(DoipConnection {
             ecus: doip_ecus,
             ip: discovered_gateway.ip,
+            activity,
         }));
+    }
 
     // Notify connectivity handler that ECUs behind this gateway are now online.
     // This sets their state to Online so the pre-send variant detection guard works correctly.
@@ -473,11 +492,15 @@ pub(crate) async fn try_read(
                     // broadcast keep-alive on the shared TCP connection. They
                     // carry a real ECU source address but are unrelated to any
                     // pending physical request. Intercept them as a dedicated
-                    // event so the receiver can log-and-drop without routing
-                    // them to a per-ECU channel.
+                    // event so the receiver can log them, report them as a
+                    // reply of the ECU and drop them without routing them to
+                    // a per-ECU channel.
                     if is_tester_present_nrc(&msg.message) {
-                        let code = msg.message.get(2).copied().unwrap_or(0);
-                        return Ok(DiagnosticResponse::TesterPresentNRC(code));
+                        let nrc = msg.message.get(2).copied().unwrap_or(0);
+                        return Ok(DiagnosticResponse::TesterPresentNRC {
+                            source_address,
+                            nrc,
+                        });
                     }
 
                     Ok(DiagnosticResponse::Msg {

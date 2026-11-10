@@ -12,6 +12,10 @@
 ARG JAVA_VERSION=21
 FROM gradle:8-jdk${JAVA_VERSION} AS builder
 WORKDIR /build
+# The dependencies in a layer of their own, which only the build files
+# invalidate, not every source change.
+COPY settings.gradle.kts build.gradle.kts gradle.properties ./
+RUN gradle dependencies --no-daemon > /dev/null
 COPY . .
 RUN gradle build --no-daemon
 

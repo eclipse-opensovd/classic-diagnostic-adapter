@@ -196,6 +196,368 @@ async fn same_owner_post_renewal_returns_ok_without_location() {
 }
 
 #[tokio::test]
+async fn same_owner_post_renewal_replaces_metadata_only_when_given() {
+    let locks = Arc::new(Locks::new());
+    let mut lock = test_lock("existing-lock").build();
+    lock.metadata
+        .insert("use_case".to_owned(), serde_json::json!("old"));
+    locks.test_insert_active(lock).await;
+    let claims = TestSecurityPlugin.claims();
+    let scope = LockScope::Ecu {
+        name: "ecu-a".to_owned(),
+    };
+    let coverage = LockCoverage::new(["ecu-a".to_owned()]);
+    let renew = async |metadata: serde_json::Map<String, serde_json::Value>, expiration| {
+        let request = sovd_interfaces::locking::Request {
+            lock_expiration: expiration,
+            break_lock: false,
+            x_sovd2uds_isexclusive: None,
+            metadata,
+        };
+        let (acquisition, pending, request) = locks
+            .evaluate_acquisition(scope.clone(), coverage.clone(), &request, &claims)
+            .await
+            .expect("Same-owner renewal should be accepted");
+        let response = post_handler(
+            &MockUdsEcu::default(),
+            LockContext {
+                all_locks: &locks,
+                acquisition,
+                pending,
+                coverage: coverage.clone(),
+            },
+            request,
+            "/vehicle/v15/components/ecu-a/locks",
+            false,
+            Box::new(TestSecurityPlugin),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        locks
+            .core
+            .read_store(|store| {
+                store
+                    .state
+                    .active_by_id("existing-lock")
+                    .map(|lock| lock.metadata.clone())
+            })
+            .await
+            .expect("Lock should remain active")
+    };
+
+    let unchanged = renew(serde_json::Map::new(), 600).await;
+    assert_eq!(unchanged.get("use_case"), Some(&serde_json::json!("old")));
+
+    let new_metadata =
+        serde_json::Map::from_iter([("use_case".to_owned(), serde_json::json!("new"))]);
+    let replaced = renew(new_metadata.clone(), 900).await;
+    assert_eq!(replaced, new_metadata);
+}
+
+/// POSTs a same-owner renewal of the `vehicle` lock carrying `use_case` and returns the
+/// response status and the lock's metadata afterwards.
+async fn renew_vehicle_lock_with_use_case(
+    locks: &Arc<Locks>,
+    use_case: &str,
+) -> (StatusCode, serde_json::Map<String, serde_json::Value>) {
+    let request = sovd_interfaces::locking::Request {
+        lock_expiration: 600,
+        break_lock: false,
+        x_sovd2uds_isexclusive: None,
+        metadata: serde_json::Map::from_iter([(
+            "use_case".to_owned(),
+            serde_json::json!(use_case),
+        )]),
+    };
+    let status = match locks
+        .evaluate_acquisition(
+            LockScope::Vehicle,
+            LockCoverage::vehicle(),
+            &request,
+            &TestSecurityPlugin.claims(),
+        )
+        .await
+    {
+        Ok((acquisition, pending, request)) => post_handler(
+            &MockUdsEcu::default(),
+            LockContext {
+                all_locks: locks,
+                acquisition,
+                pending,
+                coverage: LockCoverage::vehicle(),
+            },
+            request,
+            "/vehicle/v15/locks",
+            false,
+            Box::new(TestSecurityPlugin),
+        )
+        .await
+        .status(),
+        Err(error) => ErrorWrapper {
+            error,
+            include_schema: false,
+        }
+        .into_response()
+        .status(),
+    };
+    let metadata = locks
+        .core
+        .read_store(|store| {
+            store
+                .state
+                .active_by_id("vehicle")
+                .map(|lock| lock.metadata.clone())
+        })
+        .await
+        .expect("Lock should remain active");
+    (status, metadata)
+}
+
+async fn vehicle_lock_with_use_case(policy: Arc<TestPolicy>) -> Arc<Locks> {
+    let locks = Arc::new(Locks::new_with_policy(policy));
+    let mut lock = test_lock("vehicle").vehicle().build();
+    lock.metadata
+        .insert("use_case".to_owned(), serde_json::json!("old"));
+    locks.test_insert_active(lock).await;
+    locks
+}
+
+#[tokio::test]
+async fn vehicle_renewal_stores_metadata_after_policy_allows_it() {
+    let policy = Arc::new(TestPolicy {
+        decision: Some(LockPriorityDecision::Allow),
+        evaluations: StdMutex::new(Vec::new()),
+    });
+    let locks = vehicle_lock_with_use_case(Arc::clone(&policy)).await;
+
+    let (status, metadata) = renew_vehicle_lock_with_use_case(&locks, "new").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(metadata.get("use_case"), Some(&serde_json::json!("new")));
+    let evaluations = policy
+        .evaluations
+        .lock()
+        .expect("policy evaluation mutex poisoned");
+    let evaluation = evaluations
+        .first()
+        .expect("vehicle renewal must be evaluated");
+    assert_eq!(
+        evaluation.operation,
+        LockPriorityOperation::PostRenew {
+            lock_id: "vehicle".into()
+        }
+    );
+    assert_eq!(
+        evaluation
+            .active_locks
+            .first()
+            .and_then(|lock| lock.metadata.get("use_case")),
+        Some(&serde_json::json!("old"))
+    );
+}
+
+#[tokio::test]
+async fn vehicle_renewal_keeps_metadata_when_policy_denies_it() {
+    let policy = Arc::new(TestPolicy {
+        decision: Some(LockPriorityDecision::Deny {
+            reason: "Request has no matching priority entry".to_owned(),
+            parameters: serde_json::Map::new(),
+        }),
+        evaluations: StdMutex::new(Vec::new()),
+    });
+    let locks = vehicle_lock_with_use_case(policy).await;
+
+    let (status, metadata) = renew_vehicle_lock_with_use_case(&locks, "new").await;
+
+    assert_eq!(status, StatusCode::LOCKED);
+    assert_eq!(metadata.get("use_case"), Some(&serde_json::json!("old")));
+}
+
+/// Preempts `existing-lock` (owned by `existing-client`) with a vehicle lock of
+/// `priority-client`, then releases the preemptor's lock. The defunct record is all that
+/// remains of the preempted client's lock.
+async fn preempt_existing_lock_and_release(locks: &Locks) -> String {
+    let lock_id = insert_policy_test_lock(locks, Arc::new(AtomicUsize::new(0))).await;
+    let claims = TestClaims {
+        subject: "priority-client".to_owned(),
+        attributes: serde_json::Map::new(),
+    };
+    let (acquisition, pending, _) = locks
+        .evaluate_acquisition(
+            LockScope::Vehicle,
+            LockCoverage::vehicle(),
+            &preemption_request(),
+            &claims,
+        )
+        .await
+        .expect("policy evaluation must succeed");
+    let pending = pending.expect("preemption must be staged");
+    let replacement = test_lock("replacement")
+        .owner("priority-client")
+        .vehicle()
+        .build();
+    commit_pending_preemption(acquisition, pending, replacement).await;
+    let response = delete_handler(locks, LockScope::Vehicle, "replacement", &claims, false).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    lock_id
+}
+
+#[tokio::test]
+async fn reacquired_vehicle_lock_supersedes_defunct_lock_and_unblocks_ecu_access() {
+    let policy = Arc::new(TestPolicy {
+        decision: Some(LockPriorityDecision::Preempt {
+            lock_ids: vec!["existing-lock".into()],
+            broken_by: "priority-app".to_owned(),
+        }),
+        evaluations: StdMutex::new(Vec::new()),
+    });
+    let (uds, locks) =
+        super::cleanup::setup_vehicle_lock_test_with_policy(Arc::<TestPolicy>::clone(&policy));
+    let defunct_id = preempt_existing_lock_and_release(&locks).await;
+    let claims = TestClaims {
+        subject: "existing-client".to_owned(),
+        attributes: serde_json::Map::new(),
+    };
+    assert!(
+        validate_ecu_read(&claims, "some-ecu", &locks, false)
+            .await
+            .is_err(),
+        "defunct lock must block ECU communication before re-acquisition"
+    );
+
+    let request = sovd_interfaces::locking::Request {
+        lock_expiration: 60,
+        break_lock: false,
+        x_sovd2uds_isexclusive: None,
+        metadata: serde_json::Map::new(),
+    };
+    let (acquisition, pending, request) = locks
+        .evaluate_acquisition(
+            LockScope::Vehicle,
+            LockCoverage::vehicle(),
+            &request,
+            &claims,
+        )
+        .await
+        .expect("Uncontended re-acquisition should be accepted");
+    let response = post_handler(
+        &uds,
+        LockContext {
+            all_locks: &locks,
+            acquisition,
+            pending,
+            coverage: LockCoverage::vehicle(),
+        },
+        request,
+        "/vehicle/v15/locks",
+        false,
+        Box::new(TestSecurityPlugin),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    locks
+        .core
+        .read_store(|store| assert!(store.state.defunct_by_id(&defunct_id).is_none()))
+        .await;
+    assert!(
+        validate_ecu_read(&claims, "some-ecu", &locks, false)
+            .await
+            .is_ok(),
+        "new vehicle lock must allow ECU reads"
+    );
+    assert!(
+        validate_ecu_write(&claims, "some-ecu", &locks, false)
+            .await
+            .is_ok(),
+        "new vehicle lock must allow ECU writes"
+    );
+    let response = get_handler(&locks, LockScope::Vehicle, &claims, false).await;
+    let response: sovd_interfaces::locking::get::Response = axum_response_into(response)
+        .await
+        .expect("failed to extract lock list");
+    assert_eq!(response.items.len(), 1);
+    assert!(response.items.iter().all(|item| item.id != defunct_id));
+    let new_id = response
+        .items
+        .first()
+        .map(|item| item.id.clone())
+        .expect("re-acquired lock must be listed");
+    let response = delete_handler(&locks, LockScope::Vehicle, &new_id, &claims, false).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn ecu_lock_overlapping_defunct_vehicle_lock_is_rejected_until_acknowledged() {
+    let locks = Locks::new_with_policy(Arc::new(TestPolicy {
+        decision: Some(LockPriorityDecision::Preempt {
+            lock_ids: vec!["existing-lock".into()],
+            broken_by: "priority-app".to_owned(),
+        }),
+        evaluations: StdMutex::new(Vec::new()),
+    }));
+    let defunct_id = preempt_existing_lock_and_release(&locks).await;
+    let claims = TestClaims {
+        subject: "existing-client".to_owned(),
+        attributes: serde_json::Map::new(),
+    };
+    let request = sovd_interfaces::locking::Request {
+        lock_expiration: 60,
+        break_lock: false,
+        x_sovd2uds_isexclusive: None,
+        metadata: serde_json::Map::new(),
+    };
+    let acquire_ecu_lock = || {
+        locks.evaluate_acquisition(
+            LockScope::Ecu {
+                name: "some-ecu".to_owned(),
+            },
+            LockCoverage::new(["some-ecu".to_owned()]),
+            &request,
+            &claims,
+        )
+    };
+
+    let Err(error) = acquire_ecu_lock().await else {
+        panic!("ECU lock under a defunct vehicle lock must be rejected");
+    };
+    let response = ErrorWrapper {
+        error,
+        include_schema: false,
+    }
+    .into_response();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let error: sovd_interfaces::error::ApiErrorResponse<crate::sovd::error::VendorErrorCode> =
+        axum_response_into(response)
+            .await
+            .expect("failed to extract broken-lock error");
+    assert_eq!(
+        error.error_code,
+        sovd_interfaces::error::ErrorCode::LockBroken
+    );
+    let parameters = error.parameters.expect("broken-lock parameters must exist");
+    assert_eq!(
+        parameters.get("broken_by"),
+        Some(&serde_json::json!("priority-app"))
+    );
+    assert_eq!(
+        parameters.get("current_holder"),
+        Some(&serde_json::json!("priority-client"))
+    );
+    locks
+        .core
+        .read_store(|store| assert!(store.state.defunct_by_id(&defunct_id).is_some()))
+        .await;
+
+    let response = delete_handler(&locks, LockScope::Vehicle, &defunct_id, &claims, false).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let Ok((acquisition, _, _)) = acquire_ecu_lock().await else {
+        panic!("ECU lock must be accepted once the defunct lock is acknowledged");
+    };
+    acquisition.finish();
+}
+
+#[tokio::test]
 async fn defunct_lock_remains_visible_and_reports_lock_broken() {
     let locks = Locks::new_with_policy(Arc::new(TestPolicy {
         decision: Some(LockPriorityDecision::Preempt {
@@ -580,4 +942,272 @@ fn lock_create_response_includes_exclusivity_and_requested_schema() {
     assert!(!response.x_sovd2uds_isexclusive);
     assert!(response.schema.is_some());
     assert!(sovd_lock_response("lock-id", true, false).schema.is_none());
+}
+
+/// [[ test~sovd-api-lock-acquisition-policy-handlers, ECU and functional group lock POST handlers enforce the acquisition policy, test ]]
+mod acquisition_policy {
+    use aide::UseApi;
+    use axum::{
+        Json,
+        extract::{OriginalUri, Query, State},
+        http::Uri,
+        response::Response,
+    };
+    use axum_extra::extract::WithRejection;
+    use cda_interfaces::{
+        file_manager::mock::MockFileManager,
+        lock_config::{LockAcquisitionPolicy, LockConfig},
+    };
+    use cda_plugin_security::Secured;
+
+    use super::*;
+    use crate::sovd::{
+        WebserverEcuState,
+        functions::functional_groups::{
+            locks::post as fg_post, tests::create_test_fg_state_with_locks,
+        },
+        locks::handlers::ecu::post as ecu_post,
+        tests::create_test_webserver_state,
+    };
+
+    fn vehicle_lock_required() -> Arc<Locks> {
+        Arc::new(Locks::new_with_config(LockConfig {
+            lock_acquisition_policy: LockAcquisitionPolicy::VehicleLockRequired,
+            ..LockConfig::default()
+        }))
+    }
+
+    fn lock_request() -> sovd_interfaces::locking::Request {
+        sovd_interfaces::locking::Request {
+            lock_expiration: 60,
+            break_lock: false,
+            x_sovd2uds_isexclusive: None,
+            metadata: serde_json::Map::new(),
+        }
+    }
+
+    async fn post_ecu_lock(uds: MockUdsEcu, ecu_name: &str, locks: &Arc<Locks>) -> Response {
+        let state = WebserverEcuState {
+            locks: Arc::clone(locks),
+            ..create_test_webserver_state::<MockUdsEcu, MockFileManager>(
+                ecu_name.to_owned(),
+                uds,
+                MockFileManager::new(),
+            )
+        };
+        ecu_post(
+            UseApi(
+                Secured(Box::new(TestSecurityPlugin)),
+                std::marker::PhantomData,
+            ),
+            State(state),
+            Query(sovd_interfaces::IncludeSchemaQuery {
+                include_schema: false,
+            }),
+            OriginalUri(Uri::from_static("/vehicle/v15/components/test_ecu/locks")),
+            WithRejection(Json(lock_request()), std::marker::PhantomData),
+        )
+        .await
+        .into_response()
+    }
+
+    async fn post_fg_lock(uds: MockUdsEcu, fg_name: &str, locks: &Arc<Locks>) -> Response {
+        fg_post(
+            UseApi(
+                Secured(Box::new(TestSecurityPlugin)),
+                std::marker::PhantomData,
+            ),
+            State(create_test_fg_state_with_locks(
+                uds,
+                fg_name.to_owned(),
+                Arc::clone(locks),
+            )),
+            Query(sovd_interfaces::IncludeSchemaQuery {
+                include_schema: false,
+            }),
+            OriginalUri(Uri::from_static(
+                "/vehicle/v15/functions/functionalgroups/test_fg/locks",
+            )),
+            WithRejection(Json(lock_request()), std::marker::PhantomData),
+        )
+        .await
+    }
+
+    fn with_fg_coverage(mut uds: MockUdsEcu) -> MockUdsEcu {
+        uds.expect_ecus_for_functional_group()
+            .returning(|_, _| vec!["ecu1".to_owned(), "ecu2".to_owned()]);
+        uds.expect_ensure_ecu_online()
+            .returning(|_| Ok(cda_interfaces::mock::mock_ecu_state_online_variant_detected()));
+        uds
+    }
+
+    async fn insert_vehicle_lock(locks: &Locks) {
+        locks
+            .test_insert_active(test_lock("vehicle").owner("test_user").vehicle().build())
+            .await;
+    }
+
+    #[tokio::test]
+    async fn ecu_lock_post_without_vehicle_lock_is_rejected() {
+        let locks = vehicle_lock_required();
+        let mut uds = MockUdsEcu::default();
+        // A rejected lock must not cause ECU traffic.
+        uds.expect_ensure_ecu_online().times(0);
+
+        let response = post_ecu_lock(uds, "test_ecu", &locks).await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(locks.open_locks().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ecu_lock_post_with_vehicle_lock_is_created() {
+        let (mut uds, ecu_name, _, _, _) = super::super::cleanup::setup_ecu_lock_test();
+        uds.expect_ensure_ecu_online()
+            .times(1)
+            .returning(|_| Ok(cda_interfaces::mock::mock_ecu_state_online_variant_detected()));
+        let locks = vehicle_lock_required();
+        insert_vehicle_lock(&locks).await;
+
+        let response = post_ecu_lock(uds, &ecu_name, &locks).await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let lock: sovd_interfaces::locking::post_put::Response = axum_response_into(response)
+            .await
+            .expect("failed to extract response");
+        let response = delete_handler(
+            &locks,
+            LockScope::Ecu { name: ecu_name },
+            &lock.id,
+            &TestSecurityPlugin.claims(),
+            false,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn functional_group_lock_post_without_vehicle_lock_is_rejected() {
+        let locks = vehicle_lock_required();
+
+        let response =
+            post_fg_lock(with_fg_coverage(MockUdsEcu::default()), "test_fg", &locks).await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(locks.open_locks().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn functional_group_lock_post_with_vehicle_lock_is_created() {
+        let (uds, fg_name, _) = super::super::cleanup::setup_functional_group_lock_test();
+        let locks = vehicle_lock_required();
+        insert_vehicle_lock(&locks).await;
+
+        let response = post_fg_lock(with_fg_coverage(uds), &fg_name, &locks).await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let lock: sovd_interfaces::locking::post_put::Response = axum_response_into(response)
+            .await
+            .expect("failed to extract response");
+        let response = delete_handler(
+            &locks,
+            LockScope::FunctionalGroup { name: fg_name },
+            &lock.id,
+            &TestSecurityPlugin.claims(),
+            false,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    fn offline_state() -> cda_interfaces::EcuState {
+        cda_interfaces::EcuState {
+            connectivity: cda_interfaces::Connectivity::Offline,
+            ..cda_interfaces::mock::mock_ecu_state_online_variant_detected()
+        }
+    }
+
+    #[tokio::test]
+    async fn ecu_lock_post_rejected_when_probe_finds_ecu_offline() {
+        let mut uds = MockUdsEcu::default();
+        uds.expect_ensure_ecu_online()
+            .times(1)
+            .returning(|_| Ok(offline_state()));
+        let locks = vehicle_lock_required();
+        insert_vehicle_lock(&locks).await;
+        let open_before = locks.open_locks().await.len();
+
+        let response = post_ecu_lock(uds, "test_ecu", &locks).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(locks.open_locks().await.len(), open_before);
+    }
+
+    #[tokio::test]
+    async fn functional_group_lock_post_rejected_when_all_ecus_offline() {
+        let mut uds = MockUdsEcu::default();
+        uds.expect_ecus_for_functional_group()
+            .returning(|_, _| vec!["ecu1".to_owned(), "ecu2".to_owned()]);
+        uds.expect_ensure_ecu_online()
+            .times(2)
+            .returning(|_| Ok(offline_state()));
+        let locks = vehicle_lock_required();
+        insert_vehicle_lock(&locks).await;
+        let open_before = locks.open_locks().await.len();
+
+        let response = post_fg_lock(uds, "test_fg", &locks).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(locks.open_locks().await.len(), open_before);
+    }
+
+    #[tokio::test]
+    async fn functional_group_lock_post_prefers_communication_not_ready() {
+        let mut uds = MockUdsEcu::default();
+        uds.expect_ecus_for_functional_group()
+            .returning(|_, _| vec!["ecu1".to_owned(), "ecu2".to_owned()]);
+        uds.expect_ensure_ecu_online().times(2).returning(|name| {
+            if name == "ecu1" {
+                Err(cda_interfaces::DiagServiceError::NotFound(
+                    "ecu1".to_owned(),
+                ))
+            } else {
+                Err(cda_interfaces::DiagServiceError::CommunicationNotReady {
+                    message: "not ready".to_owned(),
+                    retry_after: std::time::Duration::from_secs(3),
+                })
+            }
+        });
+        let locks = vehicle_lock_required();
+        insert_vehicle_lock(&locks).await;
+
+        let response = post_fg_lock(uds, "test_fg", &locks).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            response
+                .headers()
+                .contains_key(axum::http::header::RETRY_AFTER)
+        );
+    }
+
+    #[tokio::test]
+    async fn functional_group_lock_post_created_when_one_ecu_online() {
+        let (mut uds, fg_name, _) = super::super::cleanup::setup_functional_group_lock_test();
+        uds.expect_ecus_for_functional_group()
+            .returning(|_, _| vec!["ecu1".to_owned(), "ecu2".to_owned()]);
+        uds.expect_ensure_ecu_online().times(2).returning(|name| {
+            if name == "ecu1" {
+                Ok(offline_state())
+            } else {
+                Ok(cda_interfaces::mock::mock_ecu_state_online_variant_detected())
+            }
+        });
+        let locks = vehicle_lock_required();
+        insert_vehicle_lock(&locks).await;
+
+        let response = post_fg_lock(uds, &fg_name, &locks).await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
 }

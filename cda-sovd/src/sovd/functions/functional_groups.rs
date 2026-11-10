@@ -498,9 +498,19 @@ pub(crate) mod tests {
     ) -> WebserverFgState<MockUdsEcu> {
         uds.expect_ecus_for_functional_group()
             .returning(|_, _| vec!["test-ecu".to_owned()]);
+        create_test_fg_state_with_locks(uds, functional_group_name, Arc::new(Locks::new()))
+    }
+
+    /// Creates a functional-group state with the given locks and without adding any
+    /// mock expectations.
+    pub fn create_test_fg_state_with_locks(
+        uds: MockUdsEcu,
+        functional_group_name: String,
+        locks: Arc<Locks>,
+    ) -> WebserverFgState<MockUdsEcu> {
         WebserverFgState {
             uds,
-            locks: Arc::new(Locks::new()),
+            locks,
             functional_group_name,
             fg_executions: Arc::new(std::sync::RwLock::new(HashMap::default())),
             communication_access: enabled_communication_access_for_test(),

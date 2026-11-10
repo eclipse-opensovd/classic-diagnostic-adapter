@@ -49,6 +49,7 @@ schemars = { workspace = true }
 tokio-socketcan-isotp = { workspace = true, optional = true }
 
 [dev-dependencies]
+cda-interfaces = { workspace = true, features = ["test-utils"] }
 toml = { workspace = true }
 cda-transport-router = { workspace = true }
 

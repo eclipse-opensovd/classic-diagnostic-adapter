@@ -83,6 +83,9 @@ pub trait TransactionCommitter: Send + Sync {
     /// 2. Apply each operation, creating `.bak` backups for rollback.
     /// 3. Clean up staging files and the journal on success.
     /// 4. Release the active-transaction flag.
+    ///
+    /// Once started, the commit must run to completion even if the returned future is dropped
+    /// (the result is then discarded), and the active-transaction flag must be released.
     async fn apply(
         &self,
         operations: Vec<Operation>,
@@ -157,6 +160,9 @@ impl Transaction {
     /// subsequent reads.
     ///
     /// Consumes `self` so the transaction cannot be reused after commit.
+    ///
+    /// Cancel-safe: once started, the commit runs to completion even if the future returned
+    /// here is dropped; the result is then discarded.
     ///
     /// # Errors
     ///

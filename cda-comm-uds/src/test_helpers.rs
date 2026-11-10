@@ -23,10 +23,10 @@ use std::{
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    ComponentInfos, Connectivity, DiagComm, DiagCommLookup, DiagCommType, DiagServiceError,
-    DoipComParams, Dtc, DynamicPlugin, EcuAddresses, EcuRuntimeState, EcuSchemas, EcuSecurity,
-    EcuState, EcuStateManager, FunctionalTransport, HashMap, HashMapExtensions, HashSet,
-    MuxCaseInfo, NetworkTopology, PayloadDecoder, PayloadEncoder, PhysicalTransport, Protocol,
+    ComponentInfos, Connectivity, DiagComm, DiagCommLookup, DiagCommType, DiagServiceError, Dtc,
+    DynamicPlugin, EcuAddresses, EcuRuntimeState, EcuSchemas, EcuSecurity, EcuState,
+    EcuStateManager, FunctionalTransport, HashMap, HashMapExtensions, HashSet, MuxCaseInfo,
+    NetworkTopology, PayloadDecoder, PayloadEncoder, PhysicalTransport, Protocol,
     ResponseParameterInfo, SchemaDescription, SecurityAccess, ServiceParameterMetadata,
     ServicePayload, TransmissionParameters, TransportResponse, UDS_ID_RESPONSE_BITMASK,
     UdsComParams, VariantDetection, VariantState,
@@ -204,6 +204,7 @@ pub(crate) struct TestEcuDb {
     /// State applied by `detect_variant` for non-empty responses. `None`
     /// keeps the current state.
     detection_outcome: Option<EcuState>,
+    runtime_state: EcuRuntimeState,
 }
 
 fn default_test_status() -> EcuState {
@@ -241,6 +242,7 @@ impl TestEcuDb {
             duplicates: None,
             status: std::sync::Mutex::new(default_test_status()),
             detection_outcome: None,
+            runtime_state: EcuRuntimeState::new(),
         }
     }
 
@@ -259,6 +261,7 @@ impl TestEcuDb {
             duplicates: None,
             status: std::sync::Mutex::new(default_test_status()),
             detection_outcome: None,
+            runtime_state: EcuRuntimeState::new(),
         }
     }
 
@@ -281,6 +284,7 @@ impl TestEcuDb {
             duplicates: None,
             status: std::sync::Mutex::new(default_test_status()),
             detection_outcome: None,
+            runtime_state: EcuRuntimeState::new(),
         }
     }
 
@@ -302,6 +306,7 @@ impl TestEcuDb {
             duplicates: None,
             status: std::sync::Mutex::new(default_test_status()),
             detection_outcome: None,
+            runtime_state: EcuRuntimeState::new(),
         }
     }
 
@@ -326,6 +331,7 @@ impl TestEcuDb {
             duplicates: None,
             status: std::sync::Mutex::new(default_test_status()),
             detection_outcome: None,
+            runtime_state: EcuRuntimeState::new(),
         }
     }
 
@@ -378,33 +384,7 @@ impl EcuAddresses for TestEcuDb {
     }
 }
 
-impl DoipComParams for TestEcuDb {
-    fn nack_number_of_retries(&self) -> &HashMap<u8, u32> {
-        static EMPTY: std::sync::OnceLock<HashMap<u8, u32>> = std::sync::OnceLock::new();
-        EMPTY.get_or_init(HashMap::new)
-    }
-    fn diagnostic_ack_timeout(&self) -> Duration {
-        Duration::from_secs(2)
-    }
-    fn retry_period(&self) -> Duration {
-        Duration::from_millis(100)
-    }
-    fn routing_activation_timeout(&self) -> Duration {
-        Duration::from_secs(5)
-    }
-    fn repeat_request_count_transmission(&self) -> u32 {
-        3
-    }
-    fn connection_timeout(&self) -> Duration {
-        Duration::from_secs(5)
-    }
-    fn connection_retry_delay(&self) -> Duration {
-        Duration::from_secs(1)
-    }
-    fn connection_retry_attempts(&self) -> u32 {
-        3
-    }
-}
+cda_interfaces::impl_test_doip_com_params!(TestEcuDb);
 
 impl UdsComParams for TestEcuDb {
     fn tester_present_retry_policy(&self) -> bool {
@@ -593,6 +573,12 @@ impl VariantDetection for TestEcuDb {
 impl TestEcuDb {
     fn set_status(&self, update: impl FnOnce(&mut EcuState)) {
         update(&mut std::sync::Mutex::lock(&self.status).expect("test status lock"));
+    }
+
+    /// Replaces the initial ECU state.
+    pub fn with_status(self, status: EcuState) -> Self {
+        self.set_status(|current| *current = status);
+        self
     }
 
     /// Makes this ECU part of a duplicate group with the given members.
@@ -956,7 +942,7 @@ impl cda_interfaces::EcuManager for TestEcuDb {
     }
 
     fn runtime_state(&self) -> EcuRuntimeState {
-        unimplemented!()
+        self.runtime_state.clone()
     }
 }
 

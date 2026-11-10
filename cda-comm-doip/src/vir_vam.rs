@@ -225,6 +225,9 @@ where
                         transport_config,
                         &GatewayState {
                             doip_connections: Arc::clone(&state.doip_connections),
+                            logical_address_to_connection: Arc::clone(
+                                &state.logical_address_to_connection,
+                            ),
                             ecus: Arc::clone(&state.ecus),
                             gateway_ecu_map: gateway_ecu_map.clone(),
                             connection_tasks: Arc::clone(connection_tasks),
@@ -235,7 +238,6 @@ where
                     .await
                     {
                         Ok(logical_address) => {
-                            state.register_connection(logical_address).await;
                             send_variant_detection(
                                 gateway_ecu_name_map,
                                 &vam_notifications.variant_detection,

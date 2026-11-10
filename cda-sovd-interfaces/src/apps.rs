@@ -224,6 +224,10 @@ pub mod sovd2uds {
                 pub logical_address: String,
                 /// ECU link '\<ecu>\_on\_\<protocol>'
                 pub logical_link: String,
+                /// Time of the last reply of the ECU (RFC 3339, UTC).
+                /// Absent if the ECU was never contacted.
+                #[serde(skip_serializing_if = "Option::is_none", default)]
+                pub last_seen: Option<String>,
             }
 
             #[derive(Serialize, Deserialize)]

@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/// [[ dimpl~plugin-vehicle-topology-connect-ecu, Connect ECU directly operation, dimpl, req~plugin-vehicle-topology-connect-ecu; arch~plugin-vehicle-topology-connect-ecu ]]
+/// [[ dimpl~plugin-vehicle-topology-connect-ecu, Connect ECU directly operation, dimpl ]]
 ///
 /// Connects a gateway ECU directly to an IP address, bypassing VIR/VAM discovery.
 ///
@@ -463,6 +463,10 @@ pub(crate) mod runtimefilesupdate {
         vec![
             HttpRouteMatcher::new("/health", vec![HttpMethod::GET]),
             HttpRouteMatcher::new("/vehicle/v15/data/version", vec![HttpMethod::GET]),
+            HttpRouteMatcher::new(
+                "/vehicle/v15/apps/sovd2uds/data/version",
+                vec![HttpMethod::GET],
+            ),
             HttpRouteMatcher::new(
                 "/vehicle/v15/authorize",
                 vec![HttpMethod::GET, HttpMethod::POST],

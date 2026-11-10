@@ -14,6 +14,7 @@ Vehicle Topology Plugin
 
 .. arch:: Vehicle Topology Plugin - Retrieval
     :id: arch~plugin-vehicle-topology-retrieval
+    :links: dimpl~networkstructure-last-seen
     :status: draft
 
     The vehicle topology plugin provides the SOVD API with information about the network structure of the
@@ -38,6 +39,7 @@ Vehicle Topology Plugin
     - **ECUs** -- a qualifier (name), current variant/connectivity state (with the internal AssumedOnline
       state, see :need:`arch~dt-ecu-states`, reported as ``Online``), a ``last_seen`` timestamp, logical
       address, and logical link name, for each ECU listed under a functional group or a gateway.
+      The timestamp as RFC 3339 in UTC with second precision, and omitted for an ECU that was never contacted.
 
     While a ``networkreset`` execution is in progress, this endpoint must respond with ``409 Conflict``, to
     avoid returning stale or partially updated topology data during the reset.
@@ -194,6 +196,7 @@ Vehicle Topology Plugin
 .. arch:: Vehicle Topology Plugin - Connect ECU
     :id: arch~plugin-vehicle-topology-connect-ecu
     :status: draft
+    :links: dimpl~plugin-vehicle-topology-connect-ecu
 
     The plugin provides a ``doip-connect-ecu`` operation to connect an ECU directly to an IP address,
     without waiting for it to be discovered via VIR/VAM. It follows the standard SOVD operations

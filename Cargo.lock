@@ -648,6 +648,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "chrono",
  "foldhash 0.2.0",
  "futures",
  "hex",
@@ -904,21 +905,6 @@ name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
-
-[[package]]
-name = "conquer-once"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d008a441c0f269f36ca13712528069a86a3e60dffee1d98b976eb3b0b2160b4"
-dependencies = [
- "conquer-util",
-]
-
-[[package]]
-name = "conquer-util"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e763eef8846b13b380f37dfecda401770b0ca4e56e95170237bd7c25c7db3582"
 
 [[package]]
 name = "console-api"
@@ -1444,7 +1430,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2221,20 +2207,12 @@ dependencies = [
  "aide",
  "axum",
  "cargo_metadata",
- "cda-comm-doip",
- "cda-comm-uds",
- "cda-core",
- "cda-database",
  "cda-health",
  "cda-interfaces",
- "cda-plugin-communication-management",
- "cda-plugin-lock-priority",
- "cda-plugin-security",
  "cda-sovd",
  "cda-tracing",
  "chrono",
  "const_format",
- "figment",
  "futures",
  "http",
  "libc",
@@ -2244,15 +2222,13 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
- "serde_qs",
  "sovd-interfaces",
+ "strum",
  "tempfile",
  "testcontainers",
  "thiserror 2.0.21",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
  "url",
  "urlencoding",
 ]
@@ -2511,7 +2487,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 [[package]]
 name = "mbedtls-rs"
 version = "0.1.0"
-source = "git+https://github.com/eclipse-opensovd/mbedtls-rs.git?rev=e976dc7b45216022cab175a68c0ee387430ad874#e976dc7b45216022cab175a68c0ee387430ad874"
+source = "git+https://github.com/eclipse-opensovd/mbedtls-rs.git?rev=1dac0d8c6a80feb3864e86aac80b35cf34b10f87#1dac0d8c6a80feb3864e86aac80b35cf34b10f87"
 dependencies = [
  "ed25519-dalek",
  "mbedtls-sys",
@@ -2522,7 +2498,7 @@ dependencies = [
 [[package]]
 name = "mbedtls-sys"
 version = "0.1.0"
-source = "git+https://github.com/eclipse-opensovd/mbedtls-rs.git?rev=e976dc7b45216022cab175a68c0ee387430ad874#e976dc7b45216022cab175a68c0ee387430ad874"
+source = "git+https://github.com/eclipse-opensovd/mbedtls-rs.git?rev=1dac0d8c6a80feb3864e86aac80b35cf34b10f87#1dac0d8c6a80feb3864e86aac80b35cf34b10f87"
 dependencies = [
  "cc",
  "cmake",
@@ -3766,7 +3742,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3806,9 +3782,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -4128,16 +4104,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
-name = "signal-hook"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2a0c28ca5908dbdbcd52e6fdaa00358ab88637f8ab33e1f188dd510eb44b53d"
-dependencies = [
- "libc",
- "signal-hook-registry",
-]
-
-[[package]]
 name = "signal-hook-registry"
 version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4389,7 +4355,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4408,7 +4374,6 @@ dependencies = [
  "async-trait",
  "bollard",
  "bytes",
- "conquer-once",
  "docker_credential",
  "either",
  "etcetera",
@@ -4423,7 +4388,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
- "signal-hook",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
@@ -4528,9 +4492,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "bytes",
  "libc",

@@ -13,15 +13,16 @@
 
 use aide::{UseApi, transform::TransformOperation};
 use axum::extract::OriginalUri;
-use cda_interfaces::{UdsEcu, lock_priority_api::LockScope};
+use cda_interfaces::{Connectivity, DiagServiceError, UdsEcu, lock_priority_api::LockScope};
 use cda_plugin_security::Secured;
+use sovd_interfaces::error::ErrorCode;
 
 use super::{
     ApiError, ErrorWrapper, IntoResponse, Json, Path, Query, Response, State, WebserverFgState,
     WithRejection,
 };
 use crate::{
-    openapi,
+    VendorErrorCode, openapi,
     sovd::{
         lock_state::{self, ActiveLock, LockCoverage},
         locks::{
@@ -137,12 +138,11 @@ pub(crate) async fn post<T: UdsEcu + Clone>(
     WithRejection(Json(body), _): WithRejection<Json<sovd_interfaces::locking::Request>, ApiError>,
 ) -> Response {
     let claims = sec_plugin.as_ref().as_auth_plugin().claims();
-    let coverage = lock_state::LockCoverage::new(
-        state
-            .uds
-            .ecus_for_functional_group(&state.functional_group_name, false)
-            .await,
-    );
+    let fg_ecus = state
+        .uds
+        .ecus_for_functional_group(&state.functional_group_name, false)
+        .await;
+    let coverage = lock_state::LockCoverage::new(fg_ecus.iter().cloned());
     let (acquisition, pending, request) = match state
         .locks
         .evaluate_acquisition(
@@ -184,6 +184,15 @@ pub(crate) async fn post<T: UdsEcu + Clone>(
         }
         .into_response();
     }
+    if let Err(error) = ensure_functional_group_online(&state.uds, &fg_ecus).await {
+        rollback_preemption(pending, &state.locks).await;
+        acquisition.finish();
+        return ErrorWrapper {
+            error,
+            include_schema: query.include_schema,
+        }
+        .into_response();
+    }
     post_handler(
         &state.uds,
         LockContext {
@@ -214,6 +223,9 @@ pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
                 .with(openapi::lock_created_response)
         })
         .with(openapi::lock_not_owned)
+        .response_with::<503, Json<sovd_interfaces::error::ApiErrorResponse<VendorErrorCode>>, _>(
+            |res| res.description("All ECUs of the functional group are offline."),
+        )
 }
 
 pub(crate) async fn get<T: UdsEcu + Clone>(
@@ -239,6 +251,45 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
             res.example(openapi::lock_list_example())
                 .description("List of functional group locks.")
         })
+}
+
+/// Probes the functional group's ECUs and rejects the lock only if none of
+/// them is reachable.
+///
+/// Not every ECU of a functional group has to be fitted in a vehicle, so a
+/// partially offline group is still lockable. Offline ECUs are probed
+/// concurrently to bring back ECUs that reconnected.
+async fn ensure_functional_group_online<T: UdsEcu>(
+    uds: &T,
+    ecu_names: &[String],
+) -> Result<(), ApiError> {
+    if ecu_names.is_empty() {
+        return Ok(());
+    }
+    let results =
+        futures::future::join_all(ecu_names.iter().map(|name| uds.ensure_ecu_online(name))).await;
+    if results
+        .iter()
+        .any(|r| matches!(r, Ok(state) if state.connectivity == Connectivity::Online))
+    {
+        return Ok(());
+    }
+    // Prefer `CommunicationNotReady` so the retry hint is kept regardless of
+    // ECU order.
+    let mut errors: Vec<_> = results.into_iter().filter_map(Result::err).collect();
+    let preferred = errors
+        .iter()
+        .position(|e| matches!(e, DiagServiceError::CommunicationNotReady { .. }))
+        .unwrap_or(0);
+    match (!errors.is_empty()).then(|| errors.swap_remove(preferred)) {
+        Some(error) => Err(ApiError::from(error)),
+        None => Err(ApiError::ServiceUnavailable {
+            message: "all ecus of the functional group are offline".to_owned(),
+            retry_after: None,
+            error_code: ErrorCode::VendorSpecific,
+            vendor_code: Some(VendorErrorCode::CommunicationNotReady),
+        }),
+    }
 }
 
 /// Rejects functional-group coverage that overlaps a lock held by another client.

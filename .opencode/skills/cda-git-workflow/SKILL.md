@@ -46,7 +46,7 @@ manually. Pushing branches always uses `git`, the MCP server cannot push local c
 - Do not add `Co-authored-by:` trailers or any other AI attribution to commit messages.
 - Before committing, inspect `git status` and `git diff`, stage only the intended files and
   never commit secrets. Run the pre-commit hooks
-  (`uv run --group tools prek run --all-files`) and fix findings.
+  (`make precommit`) and fix findings.
 - If a hook rejects the commit, fix the issue and create a new commit; do not amend a failed
   commit or skip hooks.
 

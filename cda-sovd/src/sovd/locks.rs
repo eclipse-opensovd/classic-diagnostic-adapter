@@ -17,6 +17,7 @@ use cda_interfaces::{
     HashMap, HashMapExtensions,
     lock_config::LockConfig,
     lock_priority_api::{LockId, LockPriorityPolicy, LockScope},
+    util::system_time_to_rfc3339,
 };
 use cda_plugin_security::Claims;
 use tokio::sync::{Mutex, mpsc};
@@ -26,7 +27,6 @@ use crate::{
     sovd::{
         error::{ApiError, ErrorWrapper},
         lock_state::{ActiveLock, DefunctLock, LockCoverage, LockState, ScopeKey, StateError},
-        timestamp::system_time_to_rfc3339,
     },
 };
 
@@ -51,6 +51,7 @@ pub(crate) use handlers::{
     ecu, vehicle,
 };
 use lifecycle::{LifecycleDelivery, enqueue_lock_event};
+pub(super) use policy::EvaluatedMetadata;
 pub(crate) use policy::rollback_preemption;
 use policy::{AcquisitionGuard, PendingPreemption, active_snapshot};
 #[cfg(all(test, feature = "doip-direct-connect"))]

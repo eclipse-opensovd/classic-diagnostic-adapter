@@ -442,3 +442,44 @@ async fn defunct_lock_rejects_reads_with_conflict_for_nonexclusive_replacement()
         sovd_interfaces::error::ErrorCode::LockBroken
     );
 }
+
+/// [[ test~sovd-api-lock-acquisition-policy-validation, Acquisition policy requires an active vehicle lock of any owner, test ]]
+#[tokio::test]
+async fn acquisition_policy_controls_child_locks_without_vehicle_lock() {
+    let requester = TestClaims {
+        subject: "requester".to_owned(),
+        attributes: serde_json::Map::new(),
+    };
+
+    let unrestricted = Locks::new();
+    assert!(
+        validate_vehicle_owner(&unrestricted, &requester)
+            .await
+            .is_ok()
+    );
+
+    let required = Locks::new_with_config(cda_interfaces::lock_config::LockConfig {
+        lock_acquisition_policy:
+            cda_interfaces::lock_config::LockAcquisitionPolicy::VehicleLockRequired,
+        ..cda_interfaces::lock_config::LockConfig::default()
+    });
+    assert!(matches!(
+        validate_vehicle_owner(&required, &requester).await,
+        Err(ApiError::Conflict(_))
+    ));
+
+    // Any client's vehicle lock satisfies the precondition; a foreign one still blocks
+    // through vehicle-lock blocking.
+    required
+        .test_insert_active(test_lock("vehicle").owner("requester").vehicle().build())
+        .await;
+    assert!(validate_vehicle_owner(&required, &requester).await.is_ok());
+    let other = TestClaims {
+        subject: "other".to_owned(),
+        attributes: serde_json::Map::new(),
+    };
+    assert!(matches!(
+        validate_vehicle_owner(&required, &other).await,
+        Err(ApiError::Conflict(_))
+    ));
+}

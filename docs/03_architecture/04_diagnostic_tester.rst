@@ -25,7 +25,7 @@ Startup Sequence
 
 .. arch:: Startup Sequence
     :id: arch~dt-startup-sequence
-    :links: dimpl~deferred-communication-startup, dimpl~deferred-doip-transport, test~deferred-startup-policy, test~deferred-doip-passive-construction, itest~deferred-on-demand-pending, itest~deferred-on-demand-uds-silence, itest~deferred-disabled-uds-silence
+    :links: dimpl~deferred-communication-startup, dimpl~deferred-doip-transport, testset~deferred-communication-startup
     :status: draft
 
     The CDA startup is orchestrated by the main application entry point, which coordinates
@@ -202,9 +202,32 @@ Database Loading
        that the SOVD API can expose ECU metadata (names, capabilities) before communication
        is established. Only the DoIP gateway creation and variant detection are deferred.
 
+    **Initial Database Provisioning**
+
+    The active diagnostic database is resolved before loading. If the ``DiagnosticDatabase`` collection
+    exists in CDA storage, it is authoritative even when it is empty. Otherwise, the configured
+    ``database.dir`` provides the initial MDD files.
+
+    ``flat_buf.mdd_decompress`` controls when compressed MDD files are copied into writable storage and
+    decompressed:
+
+    - ``always`` provisions the initial MDD files into a new ``DiagnosticDatabase`` collection when none
+      exists. Already-uncompressed MDD files are copied as-is, while compressed MDD files are copied and
+      decompressed in writable storage.
+    - ``never`` does not create a collection at startup. Startup loads directly from ``database.dir`` and the
+      first runtime update write seeds the active collection without decompressing its files, as described by
+      :need:`arch~plugin-diagnostic-database-update`.
+
+    The configured database directory is an immutable source and is never rewritten. Startup provisioning in
+    ``always`` mode is performed in one storage transaction. The collection becomes visible only after every
+    selected MDD file has been copied and decompressed successfully where necessary. A failed or interrupted
+    transaction therefore leaves no active partial collection and can be retried on the next startup. After
+    the transaction commits, startup loads from the new active collection. Subsequent startups use that
+    collection and do not provision from ``database.dir`` again.
+
     **Parallel Loading Strategy**
 
-    The database loader discovers all ``.mdd`` files in the configured directory and sorts them
+    The database loader discovers all ``.mdd`` files in the resolved active location and sorts them
     by file size in descending order. Files are then distributed into chunks for parallel processing.
     The chunk size is calculated as:
 
@@ -363,7 +386,7 @@ Communication Initialization Mode
 
 .. arch:: Communication Initialization Mode
     :id: arch~dt-deferred-initialization
-    :links: dimpl~communication-control-contracts, dimpl~communication-control-access, dimpl~communication-control-operations, dimpl~communication-lifecycle-controller, dimpl~default-communication-policy, dimpl~deferred-communication-startup, dimpl~deferred-sovd-admission, dimpl~deferred-doip-transport, test~deferred-communication-config, test~deferred-startup-policy, test~deferred-admitting-modes-activate, test~deferred-disabled-rejects-activation, test~deferred-request-activation-policy, test~deferred-activation-retry, test~deferred-sovd-admission, test~deferred-doip-passive-construction, itest~deferred-on-demand-pending, itest~deferred-on-demand-uds-silence, itest~deferred-disabled-uds-silence
+    :links: dimpl~communication-control-contracts, dimpl~communication-control-access, dimpl~communication-control-operations, dimpl~communication-lifecycle-controller, dimpl~default-communication-policy, dimpl~deferred-communication-startup, dimpl~deferred-sovd-admission, dimpl~deferred-doip-transport, testset~deferred-communication-startup, testset~deferred-communication-activation
     :status: draft
 
     The CDA supports a configurable ``[communication] init_mode`` to enable scenarios where
@@ -504,7 +527,7 @@ Post-Update Deferred Communication
 
 .. arch:: Post-Update Deferred Communication
     :id: arch~dt-post-update-deferred-communication
-    :links: dimpl~communication-control-contracts, dimpl~communication-lifecycle-controller, dimpl~post-update-deferred-communication, test~deferred-communication-config, test~deferred-post-update-apply, test~deferred-post-update-rollback, itest~deferred-post-update
+    :links: dimpl~communication-control-contracts, dimpl~communication-lifecycle-controller, dimpl~post-update-deferred-communication, testset~deferred-post-update
     :status: draft
 
     Runtime database updates acquire the communication lifecycle controller's exclusive disable lease
@@ -706,7 +729,7 @@ Variant Detection
 
 .. arch:: Variant Detection
     :id: arch~dt-variant-detection
-    :links: dimpl~default-communication-policy, itest~variant-detection-explicit
+    :links: dimpl~default-communication-policy, testset~variant-detection-explicit
     :status: draft
 
     Variant detection identifies the correct ECU software variant from multiple possible
@@ -788,6 +811,7 @@ ECU States
 
 .. arch:: ECU States
     :id: arch~dt-ecu-states
+    :links: dimpl~uds-ecu-reply-contact, test~uds-ecu-reply-contact, test~uds-suppressed-response-no-contact
     :status: draft
 
     ECU state management tracks the lifecycle of each ECU from registration through
@@ -830,11 +854,29 @@ ECU States
     database and adds runtime state information. The state is queryable through the SOVD API
     component endpoints.
 
-    In addition to the state enum, each ECU manager stores a ``last_seen`` timestamp, updated whenever a
-    diagnostic exchange with the ECU succeeds (e.g. a successful variant detection response, or a successful
-    diagnostic service response during normal operation). For ECUs registered in the AssumedOnline state,
-    the initial value of ``last_seen`` is taken from the persisted topology (see
-    :need:`arch~dt-ecu-list-persistence`) and reflects the last successful contact from a previous session.
+    In addition to the state enum, each ECU manager stores a ``last_seen`` timestamp, the time of the last
+    reply of the ECU. For ECUs registered in the AssumedOnline state, the initial value of ``last_seen`` is
+    taken from the persisted topology (see :need:`arch~dt-ecu-list-persistence`) and reflects the last reply
+    of the ECU in a previous session.
+
+    Any UDS message the ECU sends while a request to it is in progress counts, positive or negative,
+    including the pending NRCs 0x78, 0x21 and 0x94. It counts whether or not the request succeeds as a
+    whole (e.g. 0x78 followed by a timeout), and also if the message is not the answer to the request
+    (e.g. a late answer to an earlier request). For a functional request, each responding ECU counts.
+
+    A physical request with a suppressed positive response (``suppressPosRspMsgIndicationBit`` set) never
+    counts. The CDA does not wait for a UDS reply to such a request: the request ends with the transport
+    acknowledgement, which for DoIP comes from the gateway and does not prove that the ECU is reachable.
+    An NRC that the ECU still sends afterwards (allowed for physical requests) arrives after the request
+    has ended and is not read. For a functional request with a suppressed positive response, every
+    response the CDA still receives (e.g. an NRC) counts for the ECU that sent it. On DoIP, a negative
+    response to a tester present message (``7F 3E``) counts for the ECU that sent it, also when the tester
+    present request was sent with a suppressed positive response.
+
+    ``last_seen`` is wall-clock time, and the newest write always wins, even if it is older than the stored
+    value. Vehicle clocks are often wrong at boot and corrected later by time synchronization. Keeping the
+    maximum would pin a wrong future timestamp that later contacts could never replace; with the newest
+    write, ``last_seen`` can go backwards once after such a correction.
 
     **State Transitions**
 
@@ -1010,6 +1052,7 @@ Error Handling
 .. arch:: Startup Error Handling
     :id: arch~dt-error-handling
     :status: draft
+    :links: dimpl~communication-control-errors
 
     The CDA implements graceful degradation during startup to maximize availability even
     when individual components fail.

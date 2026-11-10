@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::util::{
     TestingError,
     http::{Response, response_to_t},
-    runtime::{find_available_tcp_port, host, wait_for_cda_online},
+    test_env::{bind_address, find_available_tcp_port, wait_for_cda_online},
 };
 
 const MAIN_HEALTH_COMPONENT_KEY: &str = "main";
@@ -127,7 +127,7 @@ async fn assert_demo_endpoint_get_post<GetFut>(
 #[tokio::test]
 async fn test_custom_demo_endpoint() {
     // Use loopback since we don't need actual ECU connections for this test
-    let host = host();
+    let host = bind_address();
     let test_port = find_available_tcp_port(&host).expect("Failed to find available port");
 
     let webserver_config = cda_sovd::WebServerConfig::Tcp {

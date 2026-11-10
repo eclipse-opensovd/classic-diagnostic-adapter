@@ -12,6 +12,18 @@
 ARG RUST_VERSION=1.88
 ARG SOURCE_DATE_EPOCH
 ARG SOURCE_GIT_SHA
+# The tests run an optimized build with debug assertions and overflow checks
+# on, locally and in CI. A dev build would raise the assertions too, but runs
+# unoptimized, so timing-sensitive behavior (tester present, reconnects,
+# timeouts) would differ from the release binary that ships. A plain release
+# build keeps that timing but silently skips debug_assert! and wraps on
+# integer overflow. This is a compromise: it still differs from the shipped
+# binary in those checks, and from a dev build in timing.
+ARG CHECK_RUSTFLAGS="-C debug-assertions -C overflow-checks=on"
+# Where the image takes opensovd-cda from: `builder` compiles it (the default),
+# `prebuilt` copies it from the build context `cda-prebuilt`, e.g. a binary CI
+# compiled with the same flags outside Docker, see .github/workflows/build.yml.
+ARG CDA_BINARY_SOURCE=builder
 
 # --- Stage 1: Install cargo-chef and sccache ---
 FROM rust:${RUST_VERSION}-slim-trixie AS chef
@@ -21,11 +33,39 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     perl \
     make \
+    curl \
+    xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# sccache 0.18 requires Rust 1.91, while this image builds with Rust 1.88.
-RUN cargo install cargo-chef --locked && \
-    cargo install sccache --version 0.17.0 --locked
+# Prebuilt static binaries instead of `cargo install`, which compiles both
+# tools from source on every layer cache miss (~5 min on CI runners).
+# Pinned versions and checksums; update all of them together.
+ARG TARGETARCH
+ARG CARGO_CHEF_VERSION=0.1.78
+ARG SCCACHE_VERSION=0.17.0
+RUN set -eu; \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+    amd64) arch=x86_64; \
+    chef_sha=aca691abfbfbbe00d482e0ed2249eec3091b65e96a0ce92947fb5b254d48b16d; \
+    sccache_sha=67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006 ;; \
+    arm64) arch=aarch64; \
+    chef_sha=cd59b90fce5fa84c4189648fec33404ec5491791eebdb812df5e7fca8336408d; \
+    sccache_sha=821a86343191aa1cbab74bd42f9e93c9a63bf85e4742945f40d3ae84193c1c77 ;; \
+    *) echo "unsupported architecture: ${TARGETARCH:-unknown}" >&2; exit 1 ;; \
+    esac; \
+    chef=cargo-chef-${arch}-unknown-linux-musl; \
+    sccache=sccache-v${SCCACHE_VERSION}-${arch}-unknown-linux-musl; \
+    cd /tmp; \
+    curl -fsSLO "https://github.com/LukeMathWalker/cargo-chef/releases/download/v${CARGO_CHEF_VERSION}/${chef}.tar.xz"; \
+    curl -fsSLO "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/${sccache}.tar.gz"; \
+    echo "${chef_sha}  ${chef}.tar.xz" | sha256sum -c -; \
+    echo "${sccache_sha}  ${sccache}.tar.gz" | sha256sum -c -; \
+    tar -xJf "${chef}.tar.xz"; \
+    tar -xzf "${sccache}.tar.gz"; \
+    install -m 0755 "${chef}/cargo-chef" "${sccache}/sccache" /usr/local/cargo/bin/; \
+    rm -rf /tmp/*; \
+    cargo chef --version; \
+    sccache --version
 
 # --- Stage 2: Prepare the recipe (dependencies only) ---
 FROM chef AS planner
@@ -66,20 +106,27 @@ COPY --from=planner /app/recipe.json recipe.json
 
 ARG BUILD_PROFILE=release
 ARG RUSTFLAGS=
+ARG CHECK_RUSTFLAGS
 
 # Use BuildKit cache mounts for Cargo registry, Git, and sccache
 # This significantly speeds up subsequent builds by reusing downloaded crates and compiled artifacts.
+# BuildKit does not export cache mounts with the image layer cache; CI persists
+# them separately, see .github/workflows/publish-images.yml. SCCACHE_CACHE_SIZE
+# bounds the sccache directory, so that it fits into the CI cache.
+ARG SCCACHE_CACHE_SIZE=10G
 ENV RUSTC_WRAPPER=sccache \
-    SCCACHE_DIR=/sccache
+    SCCACHE_DIR=/sccache \
+    SCCACHE_CACHE_SIZE=${SCCACHE_CACHE_SIZE}
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
-    export RUSTFLAGS="$RUSTFLAGS"; \
+    export RUSTFLAGS="$CHECK_RUSTFLAGS $RUSTFLAGS"; \
     if [ "$BUILD_PROFILE" = "dev" ]; then \
     cargo chef cook --profile dev --recipe-path recipe.json; \
     else \
     cargo chef cook --release --recipe-path recipe.json; \
-    fi
+    fi && \
+    sccache --stop-server
 
 # --- Stage 4: Build the application ---
 FROM chef AS builder
@@ -87,10 +134,12 @@ ARG SOURCE_DATE_EPOCH
 ARG SOURCE_GIT_SHA
 ARG BUILD_PROFILE=release
 ARG RUSTFLAGS=
+ARG CHECK_RUSTFLAGS
 # Optional extra cargo features for the opensovd-cda binary, e.g.
 # "can-socketcand" to compile in the socketcand-backed CAN transport used by
 # the CAN integration tests.
 ARG CDA_FEATURES=""
+ARG SCCACHE_CACHE_SIZE=10G
 
 WORKDIR /app
 # Copy pre-built dependencies from the cacher stage
@@ -122,21 +171,33 @@ COPY opensovd-axum-extra ./opensovd-axum-extra
 COPY override-macros ./override-macros
 
 ENV RUSTC_WRAPPER=sccache \
-    SCCACHE_DIR=/sccache
+    SCCACHE_DIR=/sccache \
+    SCCACHE_CACHE_SIZE=${SCCACHE_CACHE_SIZE}
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
     export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} && \
     export SOURCE_GIT_SHA=${SOURCE_GIT_SHA} && \
-    export RUSTFLAGS="$RUSTFLAGS"; \
+    export RUSTFLAGS="$CHECK_RUSTFLAGS $RUSTFLAGS"; \
     if [ "$BUILD_PROFILE" = "dev" ]; then \
     cargo build --profile dev --bin opensovd-cda ${CDA_FEATURES:+--features "$CDA_FEATURES"} && \
     cp target/debug/opensovd-cda /tmp/opensovd-cda; \
     else \
     cargo build --release --bin opensovd-cda ${CDA_FEATURES:+--features "$CDA_FEATURES"} && \
     cp target/release/opensovd-cda /tmp/opensovd-cda; \
-    fi
+    fi && \
+    sccache --stop-server
+
+# --- Stage 4b: A binary compiled outside Docker ---
+# Empty here; the build context `cda-prebuilt`, which holds the binary,
+# replaces this stage.
+FROM scratch AS cda-prebuilt
+
+FROM scratch AS prebuilt
+COPY --from=cda-prebuilt opensovd-cda /tmp/opensovd-cda
+
+FROM ${CDA_BINARY_SOURCE} AS cda-binary
 
 # --- Stage 5: Runtime base with dependencies ---
 FROM debian:trixie-slim AS runtime-base
@@ -152,7 +213,7 @@ FROM runtime-base
 WORKDIR /app
 
 # Copy the binary from /tmp
-COPY --from=builder /tmp/opensovd-cda /app/opensovd-cda
+COPY --from=cda-binary /tmp/opensovd-cda /app/opensovd-cda
 RUN mkdir -p /app/odx /app/coverage
 
 COPY --chmod=755 testcontainer/cda/entrypoint.sh /app/entrypoint.sh

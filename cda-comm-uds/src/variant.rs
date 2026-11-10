@@ -22,9 +22,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState, HashMap,
-    HashMapExtensions, HashSet, HashSetExtensions, PayloadDecoder, ServicePayload, UdsVariant,
-    VariantState,
+    Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState,
+    HashMap, HashMapExtensions, HashSet, HashSetExtensions, PayloadDecoder, ServicePayload,
+    UdsVariant, VariantState,
     communication_control::{
         ActivationCause, CommunicationLifecycle, CommunicationState, CommunicationVariantDetection,
         VariantDetectionMode, error::CommControlError,
@@ -967,6 +967,49 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
         Ok(status)
     }
 
+    #[tracing::instrument(skip(self), err,
+        fields(
+            dlt_context = dlt_ctx!("UDS")
+        )
+    )]
+    async fn ensure_ecu_online(&self, ecu_name: &str) -> Result<EcuState, DiagServiceError> {
+        let ecu = self.uds_ecu_db(ecu_name)?;
+        let status = ecu.read().await.ecu_status();
+        // Duplicates need manual resolution, re-running detection is pointless.
+        // Under `Never`, settling a never-tested variant is left to explicit
+        // triggers, matching the pre-send guard; previously detected
+        // (disconnected) ECUs are still probed.
+        if status.connectivity == Connectivity::Online
+            || status.variant_state == VariantState::Duplicate
+            || (status.variant_state == VariantState::NotTested
+                && self.communication_access.variant_detection() == VariantDetectionMode::Never)
+        {
+            return Ok(status);
+        }
+
+        // Hold the guard so communication is not torn down mid-probe.
+        let _guard = self.require_communication_ready()?;
+        tracing::info!(
+            ecu_name,
+            variant_state = ?status.variant_state,
+            "ECU marked offline, probing reachability via variant detection"
+        );
+        // Let the transport re-discover the ECU first: CAN drops silent ECUs
+        // from its discovered set and refuses sends until they are probed
+        // again, so detection alone would never reach a returned ECU.
+        if let Err(e) = self.gateway.ecu_online(ecu_name, ecu).await {
+            tracing::warn!(ecu_name, error = %e, "Reachability probe failed");
+            return Ok(ecu.read().await.ecu_status());
+        }
+        if let Err(e) = self
+            .detect_variant_with_trigger(ecu_name, DetectionTrigger::IfNeeded)
+            .await
+        {
+            tracing::warn!(ecu_name, error = %e, "Reachability probe failed");
+        }
+        Ok(ecu.read().await.ecu_status())
+    }
+
     async fn get_logical_address(&self, ecu_name: &str) -> Result<u16, DiagServiceError> {
         let ecu = self.uds_ecu_db(ecu_name)?;
         let logical_address = ecu.read().await.logical_address();
@@ -979,6 +1022,14 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
     ) -> Option<tokio::sync::watch::Receiver<VariantState>> {
         let ecu = self.ecus.get(ecu_name)?;
         Some(ecu.read().await.runtime_state().variant_state_rx())
+    }
+
+    async fn get_last_seen(
+        &self,
+        ecu_name: &str,
+    ) -> Result<Option<std::time::SystemTime>, DiagServiceError> {
+        let ecu = self.uds_ecu_db(ecu_name)?;
+        Ok(ecu.read().await.runtime_state().last_seen())
     }
 }
 
@@ -1071,7 +1122,13 @@ mod tests {
 
     use cda_interfaces::{
         Connectivity, DiagServiceError, EcuState, HashMap, ServicePayload, TransportResponse,
-        UdsVariant, VariantDetection, VariantState, datatypes::FaultConfig, service_ids,
+        UdsVariant, VariantDetection, VariantState,
+        communication_control::{
+            ActivationCause, CommunicationAccess, CommunicationError, CommunicationGuard,
+            CommunicationState, VariantDetectionMode,
+        },
+        datatypes::FaultConfig,
+        service_ids,
     };
     use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
     use tokio::sync::RwLock;
@@ -1220,6 +1277,123 @@ mod tests {
         assert!(!super::is_connectivity_failure(
             &DiagServiceError::BadPayload("Invalid request".to_owned())
         ));
+    }
+
+    /// Enabled communication reporting the given effective detection mode.
+    struct ModeAccess {
+        inner: Arc<dyn CommunicationAccess>,
+        mode: VariantDetectionMode,
+    }
+
+    impl CommunicationAccess for ModeAccess {
+        fn state(&self) -> CommunicationState {
+            self.inner.state()
+        }
+
+        fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+            self.inner.acquire()
+        }
+
+        fn request_activate(&self, cause: ActivationCause) -> CommunicationState {
+            self.inner.request_activate(cause)
+        }
+
+        fn variant_detection(&self) -> VariantDetectionMode {
+            self.mode
+        }
+    }
+
+    async fn ensure_online(status: EcuState, mode: VariantDetectionMode) -> (EcuState, usize) {
+        let send_count = Arc::new(AtomicUsize::new(0));
+        let gateway = probe_reply_gateway(vec![0x62, 0xFF, 0x00, 0x01], Arc::clone(&send_count));
+        let ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_owned(),
+            RwLock::new(TestEcuDb::new().with_status(status)),
+        )]));
+        let manager = UdsManager::new_for_raw_payload_tests(
+            gateway,
+            ecus,
+            FaultConfig::default(),
+            Arc::new(ModeAccess {
+                inner: enabled_communication_access_for_test(),
+                mode,
+            }),
+        );
+        let state = manager
+            .ensure_ecu_online("TestECU")
+            .await
+            .expect("ensure_ecu_online");
+        (state, send_count.load(Ordering::SeqCst))
+    }
+
+    fn offline(variant_state: VariantState) -> EcuState {
+        EcuState {
+            connectivity: Connectivity::Offline,
+            variant_state,
+            variant_index: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_online_probes_untested_ecu_under_always() {
+        let (state, sends) = ensure_online(
+            offline(VariantState::NotTested),
+            VariantDetectionMode::Always,
+        )
+        .await;
+
+        assert_eq!(sends, 1);
+        assert_eq!(state.connectivity, Connectivity::Online);
+    }
+
+    #[tokio::test]
+    async fn ensure_online_leaves_untested_ecu_alone_under_never() {
+        let (state, sends) = ensure_online(
+            offline(VariantState::NotTested),
+            VariantDetectionMode::Never,
+        )
+        .await;
+
+        assert_eq!(sends, 0, "Never must not settle a variant automatically");
+        assert_eq!(state.connectivity, Connectivity::Offline);
+        assert_eq!(state.variant_state, VariantState::NotTested);
+    }
+
+    #[tokio::test]
+    async fn ensure_online_probes_disconnected_ecu_under_never() {
+        let (state, sends) = ensure_online(
+            offline(VariantState::NotDetected),
+            VariantDetectionMode::Never,
+        )
+        .await;
+
+        assert_eq!(sends, 1);
+        assert_eq!(state.connectivity, Connectivity::Online);
+    }
+
+    #[tokio::test]
+    async fn ensure_online_skips_online_and_duplicate_ecus() {
+        let (_, sends) = ensure_online(
+            EcuState {
+                connectivity: Connectivity::Online,
+                variant_state: VariantState::Detected {
+                    name: "MyVariant".to_owned(),
+                    is_base_variant: false,
+                    is_fallback: false,
+                },
+                variant_index: None,
+            },
+            VariantDetectionMode::Always,
+        )
+        .await;
+        assert_eq!(sends, 0);
+
+        let (_, sends) = ensure_online(
+            offline(VariantState::Duplicate),
+            VariantDetectionMode::Always,
+        )
+        .await;
+        assert_eq!(sends, 0);
     }
 
     fn probe_reply_gateway(reply: Vec<u8>, send_count: Arc<AtomicUsize>) -> TestGateway {

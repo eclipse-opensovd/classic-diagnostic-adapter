@@ -324,7 +324,7 @@ pub(super) async fn create_ecu_lock(
     lock_response.id
 }
 
-fn setup_functional_group_lock_test() -> (MockUdsEcu, String, Arc<Locks>) {
+pub(super) fn setup_functional_group_lock_test() -> (MockUdsEcu, String, Arc<Locks>) {
     let mut mock_uds = MockUdsEcu::default();
     let fg_name = "test_fg".to_string();
     let tp_type = TesterPresentType::Functional(fg_name.clone());

@@ -25,6 +25,7 @@ pub use crate::http_protection::{
 };
 use crate::{
     config::{ConfigSanity, ConfigSanityError},
+    http_protection::config::validate_routes,
     util::std_ext,
 };
 
@@ -51,9 +52,16 @@ struct HttpRequestRestriction {
 /// Held by the HTTP middleware guard and components such as the runtime-update
 /// plugin. Each owner calls [`protect`](Self::protect) to install independently
 /// owned protections that block matching requests until dropped.
+///
+/// Routes set via [`with_always_accessible_routes`](Self::with_always_accessible_routes)
+/// are exempt from every protection with a
+/// [`GlobalWithExemptions`](HttpProtectionScope::GlobalWithExemptions) scope, in addition to
+/// the exemptions of the protection itself. Protections with a
+/// [`SelectedRoutes`](HttpProtectionScope::SelectedRoutes) scope deny their routes regardless.
 #[derive(Clone)]
 pub struct HttpProtectionRegistry {
     restrictions: Arc<RwLock<Vec<HttpRequestRestriction>>>,
+    always_accessible_routes: Arc<[HttpRouteMatcher]>,
 }
 
 impl Default for HttpProtectionRegistry {
@@ -63,12 +71,32 @@ impl Default for HttpProtectionRegistry {
 }
 
 impl HttpProtectionRegistry {
-    /// Creates an empty registry.
+    /// Creates an empty registry without always accessible routes.
     #[must_use]
     pub fn new() -> Self {
         Self {
             restrictions: Arc::new(RwLock::new(Vec::new())),
+            always_accessible_routes: Arc::from([]),
         }
+    }
+
+    /// Creates an empty registry whose global protections never deny `routes`.
+    ///
+    /// Lets an embedding application keep routes it registers itself, e.g. version or health
+    /// endpoints, reachable while a protection such as a runtime update is active, without
+    /// each protection owner having to know them.
+    ///
+    /// # Errors
+    /// Returns [`ConfigSanityError`] when a route has an empty or relative prefix, which would
+    /// exempt more paths than intended, or no methods.
+    pub fn with_always_accessible_routes(
+        routes: Vec<HttpRouteMatcher>,
+    ) -> Result<Self, ConfigSanityError> {
+        validate_routes(&routes, "always_accessible_routes")?;
+        Ok(Self {
+            restrictions: Arc::new(RwLock::new(Vec::new())),
+            always_accessible_routes: Arc::from(routes),
+        })
     }
 
     /// Installs an HTTP protection owned by the returned guard.
@@ -110,23 +138,31 @@ impl HttpProtectionRegistry {
         /// A restriction either denies every non-exempt route or only its selected routes.
         fn restriction_matches(
             config: &HttpProtectionConfig,
+            always_accessible: bool,
             path: &str,
             method: &HttpMethod,
         ) -> bool {
             match &config.scope {
-                HttpProtectionScope::GlobalWithExemptions(exempt_routes) => !exempt_routes
-                    .iter()
-                    .any(|route| route.matches(path, method)),
+                HttpProtectionScope::GlobalWithExemptions(exempt_routes) => {
+                    !always_accessible
+                        && !exempt_routes
+                            .iter()
+                            .any(|route| route.matches(path, method))
+                }
                 HttpProtectionScope::SelectedRoutes(routes) => {
                     routes.iter().any(|route| route.matches(path, method))
                 }
             }
         }
 
+        let always_accessible = self
+            .always_accessible_routes
+            .iter()
+            .any(|route| route.matches(path, method));
         let records = std_ext::lock_read(&self.restrictions);
         records
             .iter()
-            .find(|record| restriction_matches(&record.config, path, method))
+            .find(|record| restriction_matches(&record.config, always_accessible, path, method))
             .map(|record| record.config.clone())
     }
 }
@@ -240,5 +276,107 @@ mod tests {
             registry.evaluate("/vehicle/v15", &http::Method::GET),
             Ok(())
         ));
+    }
+
+    fn registry_with_version_route() -> HttpProtectionRegistry {
+        HttpProtectionRegistry::with_always_accessible_routes(vec![HttpRouteMatcher::new(
+            "/vehicle/v15/apps/sovd2uds/data/version",
+            vec![http::Method::GET],
+        )])
+        .expect("Valid always accessible routes should be accepted")
+    }
+
+    #[test]
+    fn always_accessible_routes_bypass_global_protections() {
+        let registry = registry_with_version_route();
+        let _owner =
+            registry
+                .protect(config(StatusCode::CONFLICT).with_exempt_routes(vec![
+                    HttpRouteMatcher::new("/health", vec![http::Method::GET]),
+                ]))
+                .expect("Adding http protection should work");
+
+        assert!(matches!(
+            registry.evaluate(
+                "/vehicle/v15/apps/sovd2uds/data/version",
+                &http::Method::GET
+            ),
+            Ok(())
+        ));
+        // The protection's own exemptions still apply.
+        assert!(matches!(
+            registry.evaluate("/health", &http::Method::GET),
+            Ok(())
+        ));
+        assert!(
+            registry
+                .evaluate(
+                    "/vehicle/v15/apps/sovd2uds/data/version",
+                    &http::Method::PUT
+                )
+                .is_err()
+        );
+        assert!(
+            registry
+                .evaluate("/vehicle/v15/components", &http::Method::GET)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn always_accessible_routes_do_not_bypass_selected_routes() {
+        let registry = registry_with_version_route();
+        let _owner = registry
+            .protect(
+                config(StatusCode::SERVICE_UNAVAILABLE).with_selected_routes(vec![
+                    HttpRouteMatcher::new("/vehicle/v15/apps", vec![http::Method::GET]),
+                ]),
+            )
+            .expect("Adding http protection should work");
+
+        assert!(
+            registry
+                .evaluate(
+                    "/vehicle/v15/apps/sovd2uds/data/version",
+                    &http::Method::GET
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn always_accessible_routes_are_shared_by_clones() {
+        let registry = registry_with_version_route();
+        let clone = registry.clone();
+        let _owner = clone
+            .protect(config(StatusCode::CONFLICT))
+            .expect("Adding http protection should work");
+
+        assert!(matches!(
+            registry.evaluate(
+                "/vehicle/v15/apps/sovd2uds/data/version",
+                &http::Method::GET
+            ),
+            Ok(())
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_always_accessible_routes() {
+        // An empty prefix would exempt the whole API from every global protection.
+        assert!(
+            HttpProtectionRegistry::with_always_accessible_routes(vec![HttpRouteMatcher::new(
+                "",
+                vec![http::Method::GET]
+            )])
+            .is_err()
+        );
+        assert!(
+            HttpProtectionRegistry::with_always_accessible_routes(vec![HttpRouteMatcher::new(
+                "/vehicle/v15/data/version",
+                vec![]
+            )])
+            .is_err()
+        );
     }
 }

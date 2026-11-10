@@ -15,7 +15,8 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Linting & Clippy
 
-- **Clippy**: Run with `cargo lint` alias to use recommended configuration.
+- **Clippy**: Run `make lint` (or `make lint-all-features`). It uses the toolchain pinned in the
+  `Makefile`; a newer local toolchain may report lints that CI does not.
 - **Allow/Forbid**: Use `#[allow(...)]` only when necessary, and always document the reason.
   - Example: `#[allow(clippy::ref_option)] // Not compatible with serde derive`
 - **Warnings**: Treat all warnings as errors.
@@ -35,7 +36,7 @@ As we do not want to require nightly rust for the entire repository, these setti
 Instead, run this command to apply the correct formatting:
 
 ```sh
-cargo +nightly format
+make fmt
 ```
 
 It is recommended to configure your IDE to use nightly rustfmt with these settings as well.
@@ -71,6 +72,20 @@ Additionally the import granularity is set to `crate` to group all imports from 
 - Use tracing macros, like `tracing::info!`, as appropriate to record relevant information.
 - Annotate functions with `tracing::instrument` when they are important for creating new tracing spans.
 - Error messages should start with a capital letter.
+- When several checks branch on the same value (e.g. an `Option`, `Result` or enum combined
+  with extra conditions), prefer a single `match` with guards over separate `if`/early-return
+  blocks that each re-inspect the value. Keep the arm order if behavior depends on it.
+  A single check is still best expressed with `if let` or `let ... else`.
+
+  ```rust
+  match locks.active_for_scope(&LockScope::Vehicle).await {
+      None if vehicle_lock_required => Err(ApiError::Conflict("...".to_owned())),
+      Some(owned) if owned.principal.subject != claims.sub() => {
+          Err(ApiError::Conflict("...".to_owned()))
+      }
+      _ => Ok(()),
+  }
+  ```
 
 ## Licensing & Dependencies
 

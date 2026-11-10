@@ -23,20 +23,19 @@ use cda_interfaces::{
     lock_priority_api::{
         LockLifecycleEvent, LockPriorityPolicy, LockRequest, LockScope, LockSnapshot,
     },
+    util::system_time_to_rfc3339,
 };
 use cda_plugin_security::{Claims, SecurityPlugin};
 use chrono::Utc;
 use tokio::{sync::oneshot, time::Instant};
 
 use super::super::{
-    AcquisitionGuard, ActiveLock, ApiError, DefunctLock, ErrorWrapper, LockCleanupFnHelper,
-    LockCoverage, LockState, Locks, PendingPreemption, ScopeKey, StateError, TransitionReservation,
-    active_snapshot, create_lock, map_state_error, rollback_preemption, validate_claim,
+    AcquisitionGuard, ActiveLock, ApiError, DefunctLock, ErrorWrapper, EvaluatedMetadata,
+    LockCleanupFnHelper, LockCoverage, LockState, Locks, PendingPreemption, ScopeKey, StateError,
+    TransitionReservation, active_snapshot, create_lock, map_state_error, rollback_preemption,
+    validate_claim,
 };
-use crate::sovd::{
-    locks::cleanup::{run_cleanups, take_cleanups},
-    timestamp::system_time_to_rfc3339,
-};
+use crate::sovd::locks::cleanup::{run_cleanups, take_cleanups};
 
 pub(in crate::sovd::locks) struct ValidatedLockRequest {
     pub(in crate::sovd::locks) metadata: serde_json::Map<String, serde_json::Value>,
@@ -464,11 +463,13 @@ async fn renew_existing_lock(
     let existing_id = existing.id.clone();
     let evaluation_id = context.acquisition.evaluation_id.clone();
     let policy = Arc::clone(&context.acquisition.policy);
+    let metadata = context.acquisition.renewal_metadata.take();
     let result = renew_lock(
         &context.acquisition.reservation,
         &existing_id,
         request.expires_at,
         existing,
+        metadata,
     )
     .await;
     context.acquisition.finish();
@@ -574,7 +575,7 @@ pub(crate) async fn put_handler(
         }
         .into_response();
     }
-    let result = renew_lock(&reservation, lock_id, expires_at, active).await;
+    let result = renew_lock(&reservation, lock_id, expires_at, active, None).await;
     reservation.finish();
     match result {
         Ok(lock) => {
@@ -600,17 +601,23 @@ async fn renew_lock(
     lock_id: &str,
     expires_at: SystemTime,
     active: ActiveLock,
+    metadata: Option<EvaluatedMetadata>,
 ) -> Result<LockSnapshot, ApiError> {
     let now = SystemTime::now();
     Locks::expiration_target_at(expires_at, now)?;
+    let renewed_metadata = metadata.as_ref().map_or_else(
+        || active.metadata.clone(),
+        |metadata| metadata.as_map().clone(),
+    );
     reservation
         .write_store()
         .await
         .state
-        .renew(lock_id, expires_at, now)
+        .renew(lock_id, expires_at, now, metadata)
         .map_err(|error| map_state_error(&error))?;
     let renewed = ActiveLock {
         expires_at,
+        metadata: renewed_metadata,
         ..active
     };
     Ok(active_snapshot(&renewed))

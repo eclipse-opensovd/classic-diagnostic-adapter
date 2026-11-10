@@ -14,6 +14,10 @@ NIGHTLY := nightly-2026-07-21
 CARGO_DENY_VERSION := 0.20.2
 CARGO_LLVM_COV_VERSION := 0.9.1
 PROTOC_VERSION := 34.1
+UV_VERSION := 0.13.6
+
+# tools installed by setup-devenv (uv, protoc) are placed in ~/.local/bin
+export PATH := $(HOME)/.local/bin:$(PATH)
 
 # on macOS the xcode tools cause a build failure in bazel due to a fullpath being used
 # this selects the macOS bazel targets if it detects the platform
@@ -34,8 +38,8 @@ endif
 	lint lint-all-features lint-nightly lint-nightly-all-features fmt fmt-check \
 	precommit precommit-all-features \
 	coverage coverage-can integration-coverage deny \
-	generate-config generate-flatbuffers generate-protos docs rustdoc \
-	tool-versions setup-devenv doctor run profile depgraph clean clean-doc help
+	generate-config generate-test-config generate-flatbuffers generate-protos docs rustdoc \
+	tool-versions setup-devenv install-uv install-protoc doctor run profile depgraph clean clean-doc help
 
 build:
 	cargo +$(STABLE) build --locked $(ARGS)
@@ -50,13 +54,13 @@ test:
 	cargo +$(STABLE) test --locked --workspace --features opensovd-cda/doip-direct-connect $(ARGS)
 
 integration-test:
-	cargo +$(STABLE) test --locked -p integration-tests --features integration-tests -- --show-output
+	cargo +$(STABLE) test --locked -p integration-tests --features integration-tests $(ARGS)
 
 integration-test-can:
-	CDA_INTEGRATION_TEST_USE_CAN=true cargo +$(STABLE) test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
+	CDA_INTEGRATION_TEST_USE_CAN=true cargo +$(STABLE) test --locked -p integration-tests --features can-integration-tests --test integration_tests
 
 integration-test-mixed:
-	CDA_INTEGRATION_TEST_USE_MIXED=true cargo +$(STABLE) test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
+	CDA_INTEGRATION_TEST_USE_MIXED=true cargo +$(STABLE) test --locked -p integration-tests --features can-integration-tests --test integration_tests
 
 build-all-features:
 	$(MAKE) build ARGS="--all-features $(ARGS)"
@@ -83,7 +87,7 @@ endif
 bazel-check:
 	python3 bazel/check_mbedtls_revision.py
 	bazel query //...
-	@openssl_targets="$$(bazel cquery 'filter("openssl", deps(//:cda_mbedtls))' --output=label)" || exit $$?; \
+	@openssl_targets="$$(bazel cquery 'filter("(^|[:/])openssl($|[:/])", deps(//:cda_mbedtls))' --output=label)" || exit $$?; \
 	if [ -n "$$openssl_targets" ]; then \
 		printf '%s\n' '::error::mbedTLS target graph contains OpenSSL targets:' "$$openssl_targets"; \
 		exit 1; \
@@ -132,6 +136,9 @@ deny:
 generate-config:
 	cargo +$(STABLE) run --locked --all-features -- generate-config --output $(or $(OUTPUT),opensovd-cda.toml)
 
+generate-test-config:
+	cargo +$(STABLE) test --locked --workspace --all-features --test integration_tests -- --exact --ignored util::config::tests::generate_compose_configs
+
 generate-flatbuffers:
 	$(MAKE) build ARGS="-p cda-database --features gen-flatbuffers $(ARGS)"
 
@@ -154,13 +161,25 @@ tool-versions:
 
 setup-devenv:
 	@command -v rustup >/dev/null 2>&1 || { printf '%s\n' 'rustup is required: https://rustup.rs'; exit 1; }
-	@command -v uv >/dev/null 2>&1 || { printf '%s\n' 'uv is required: https://docs.astral.sh/uv/'; exit 1; }
+	$(MAKE) install-uv install-protoc
 	rustup toolchain install $(STABLE) --profile minimal --component clippy --component rustfmt --component llvm-tools
 	rustup toolchain install $(NIGHTLY) --profile minimal --component clippy --component rustfmt
 	cargo +$(STABLE) install --locked --version $(CARGO_DENY_VERSION) cargo-deny
 	cargo +$(STABLE) install --locked --version $(CARGO_LLVM_COV_VERSION) cargo-llvm-cov
 	uv sync --locked --group tools
 	$(MAKE) doctor
+
+install-uv:
+	@command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/$(UV_VERSION)/install.sh | sh
+
+install-protoc:
+	@command -v protoc >/dev/null 2>&1 || { \
+		case "$$(uname -s)" in Linux) os=linux ;; Darwin) os=osx ;; *) printf '%s\n' 'install protoc manually: https://protobuf.dev'; exit 1 ;; esac; \
+		case "$$(uname -m)" in x86_64) arch=x86_64 ;; aarch64|arm64) arch=aarch_64 ;; *) printf '%s\n' 'install protoc manually: https://protobuf.dev'; exit 1 ;; esac; \
+		zip="$$(mktemp -d)/protoc.zip"; \
+		curl -fsSL -o "$$zip" "https://github.com/protocolbuffers/protobuf/releases/download/v$(PROTOC_VERSION)/protoc-$(PROTOC_VERSION)-$$os-$$arch.zip" && \
+		unzip -qo "$$zip" -d "$$HOME/.local"; \
+	}
 
 doctor:
 	@missing=0; \
@@ -230,9 +249,9 @@ help:
 		'release ARGS="..."           Build the release profile' \
 		'check                        Check the workspace' \
 		'test ARGS="..."              Run workspace unit tests' \
-		'integration-test             Run DoIP integration tests' \
-		'integration-test-can         Run serial CAN integration tests' \
-		'integration-test-mixed       Run serial mixed DoIP/CAN integration tests' \
+		'integration-test ARGS="..."  Run DoIP integration tests' \
+		'integration-test-can         Run CAN integration tests' \
+		'integration-test-mixed       Run mixed DoIP/CAN integration tests' \
 		'build-all-features           Build with all features' \
 		'build-mbedtls                Build CDA with only mbedTLS' \
 		'build-minimal                Build the workspace without default features' \
@@ -253,6 +272,7 @@ help:
 		'integration-coverage         Generate integration-test LCOV coverage' \
 		'deny ARGS="..."              Run all or selected cargo-deny checks' \
 		'generate-config              Regenerate opensovd-cda.toml' \
+		'generate-test-config         Generate testcontainer/cda-test-config*.toml for docker compose' \
 		'generate-flatbuffers         Regenerate FlatBuffers sources' \
 		'generate-protos              Regenerate protobuf sources' \
 		'docs                         Rebuild Sphinx documentation' \

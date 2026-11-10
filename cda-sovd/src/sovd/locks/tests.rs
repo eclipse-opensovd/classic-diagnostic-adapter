@@ -156,6 +156,7 @@ impl Locks {
             reservation,
             evaluation_id: None,
             policy: Arc::clone(&self.priority_policy),
+            renewal_metadata: None,
         }
     }
 }

@@ -137,6 +137,7 @@ Entities
 
 .. arch:: Components Entity Collection
     :id: arch~sovd-api-components-entity-collection
+    :links: dimpl~sovd-ecu-last-seen
     :status: draft
 
     The ``/components`` endpoint serves as the entry point for discovering available ECU entities.
@@ -156,9 +157,9 @@ Entities
 
     - The ECU identifier and name
     - Variant information (name, base variant flag, connectivity state, and logical address)
-    - A ``last_seen`` timestamp of the last successful diagnostic contact with the ECU (see
-      :need:`arch~dt-ecu-states`), if the ECU has ever been contacted (either in the current session, or,
-      when loaded from a persisted ECU list, in a previous session)
+    - A ``last_seen`` timestamp of the last reply of the ECU (see :need:`arch~dt-ecu-states`), if the ECU has
+      ever been contacted (either in the current session, or, when loaded from a persisted ECU list, in a
+      previous session). It is formatted as RFC 3339 in UTC with second precision and omitted if the ECU was never contacted.
     - URI references to the standardized resource collection endpoints: data, operations, configurations, faults, modes, locks, and extension endpoints
 
     The connectivity state of an ECU reflects its current diagnostic reachability and variant detection status:
@@ -211,7 +212,7 @@ SDG/SD Metadata
 
 .. arch:: Component SDG/SDs
     :id: arch~sovd-api-component-sdgsd
-    :links: dimpl~sovd-api-component-sdgsd, dimpl~sovd-api-component-data-sdgsd, dimpl~sovd-api-component-operations-sdgsd, itest~sovd-api-component-sdgsd, itest~sovd-api-component-alias-sdgsd, itest~sovd-api-component-data-sdgsd, itest~sovd-api-component-operations-sdgsd
+    :links: dimpl~sovd-api-component-sdgsd, dimpl~sovd-api-component-data-sdgsd, dimpl~sovd-api-component-operations-sdgsd, testset~sovd-api-component-sdgsd
     :status: draft
 
     Special Data Groups (SDGs) and Special Data (SDs) from the diagnostic description can be retrieved through an
@@ -857,7 +858,7 @@ Authentication -- SID 29\ :sub:`16`
 
 .. arch:: Authentication Endpoints
     :id: arch~sovd-api-authentication-modes
-    :links: req~sovd-api-authentication-modes, itest~sovd-api-authentication-modes-pki, itest~sovd-api-authentication-modes-pki-bidirectional, itest~sovd-api-authentication-modes-challenge-response, itest~sovd-api-authentication-modes-rejected, itest~sovd-api-authentication-modes-expiration, itest~sovd-api-authentication-modes-nrc, itest~sovd-api-authentication-modes-invalid
+    :links: testset~sovd-api-authentication-modes
     :status: draft
 
     .. note::
@@ -1189,7 +1190,10 @@ Locks
     A POST that creates a lock returns HTTP 201 and a relative ``Location`` header for the new
     lock resource. For compatibility with existing CDA clients, POST by the owner of the active
     lock renews that lock and returns HTTP 200 with its representation and no ``Location`` header.
-    This does not create an independent lock resource. Clients should use PUT on
+    This does not create an independent lock resource. If the renewal request contains
+    vendor-specific properties, they replace the lock's metadata after the priority mechanism has
+    evaluated the request (see :need:`arch~sovd-api-lock-priority`); an empty set keeps the
+    existing metadata. Clients should use PUT on
     ``/locks/{lock-id}`` to modify an existing lock's expiration; successful PUT returns HTTP 204.
 
     **Response fields (GET /locks/{id})**
@@ -1376,6 +1380,7 @@ Locks
 .. arch:: Lock Acquisition Policy
     :id: arch~sovd-api-lock-acquisition-policy
     :status: draft
+    :links: dimpl~sovd-api-lock-acquisition-policy, dimpl~sovd-api-lock-acquisition-policy-config, testset~sovd-api-lock-acquisition-policy
 
     The ECU lock POST handler and the functional group lock POST handler each evaluate the
     configured ``lock_acquisition_policy`` before creating the child lock, in addition to
@@ -1418,7 +1423,10 @@ Locks
 
     When a vehicle lock POST request arrives and a lock is already held by a different client,
     the priority mechanism is additionally invoked to evaluate preemption before returning HTTP
-    423.
+    423. A same-owner POST renewal of a vehicle lock is also evaluated, as a ``PostRenew``
+    operation that names the renewed lock; the prior lock, including its metadata, is part of the
+    active-lock snapshot so the mechanism can detect a metadata change and re-evaluate the
+    client's priority. A renewal may be allowed or denied but never preempt other locks.
 
     **Mechanism input**
 
@@ -1454,6 +1462,17 @@ Locks
        function.
     4. A new lock is created for the preempting client and placed in the active slot with
        its own expiration task and cleanup function.
+    5. When the preempted client later acquires a new lock on the same scope, or one whose
+       coverage contains the defunct lock's coverage (always true for a vehicle lock), the
+       defunct entry is removed from the defunct store in the same state transition that
+       inserts the new lock, exactly as a ``DELETE`` on the defunct lock would remove it.
+       Defunct entries of other clients are unaffected, and the ``x-sovd2uds-current-holder``
+       chain of remaining entries is re-linked past the removed one.
+    6. An ECU or functional-group lock request of the preempted client whose coverage
+       overlaps an unexpired defunct lock of that client without containing it is rejected
+       with that defunct lock's HTTP 409 ``lock-broken`` error. The check runs in the
+       acquisition evaluation while the transition reservation is held, before the vehicle
+       lock ownership check, so the defunct store cannot change before the lock is committed.
 
     ``GET /locks`` returns both the active lock and any defunct locks for the entity.
     Defunct lock entries carry ``x-sovd2uds-broken-by``, ``x-sovd2uds-broken-at``, and
@@ -1502,7 +1521,7 @@ Version Endpoint
 
 .. arch:: API Version Endpoint Registration Function
     :id: arch~sovd-api-version-registration-function
-    :links: dimpl~sovd-api-version-endpoint
+    :links: dimpl~sovd-api-version-endpoint, testset~sovd-api-version-endpoint
     :status: draft
 
     The CDA provides a version registration function that sets up version-related endpoints during

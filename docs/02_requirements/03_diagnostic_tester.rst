@@ -135,6 +135,45 @@ Database Loading
     database files may be inconsistent or corrupted.
 
 
+.. req:: Initial Diagnostic Database Provisioning
+    :id: req~dt-initial-database-provisioning
+    :links: arch~dt-database-loading, arch~plugin-diagnostic-database-update
+    :status: draft
+
+    The CDA shall support deployments in which the executable and initial MDD files are delivered on a
+    read-only file system while the CDA storage is located on a separate writable file system.
+
+    The MDD decompression configuration shall support the following policies:
+
+    - ``always``: When no active diagnostic database collection exists, the CDA shall provision it from the
+      configured database directory before loading the diagnostic databases. Compressed MDD files shall be
+      decompressed in the new collection. Compressed MDD files introduced by runtime updates shall also be
+      decompressed.
+    - ``never``: Startup shall not create an active collection, and the CDA shall not decompress MDD files while
+      seeding storage or applying updates.
+
+    The following requirements apply whenever storage is provisioned or seeded:
+
+    - The configured database directory shall be treated as a read-only source and shall not be modified.
+    - MDD files containing compressed chunks shall be copied to CDA storage before being decompressed.
+    - MDD files that are already uncompressed shall be copied without modification.
+    - A newly provisioned or seeded collection shall become the source from which the CDA loads its diagnostic
+      databases.
+    - If an active diagnostic database collection already exists, the CDA shall use that collection and
+      shall not provision or seed it again from the configured database directory.
+    - The existence of the active collection, rather than whether it contains any files, shall determine
+      whether provisioning or seeding has already occurred.
+    - Provisioning and seeding shall be atomic. If copying or decompressing any MDD file fails, no partially
+      populated active collection shall become visible, and the source files shall remain unchanged.
+
+    **Rationale**
+
+    Production deployments may deliver the CDA and compressed initial MDD files as part of an immutable
+    system image. Keeping the MDD files compressed reduces image size, while provisioning decompressed copies
+    into writable runtime storage enables memory-efficient read-only memory mapping without modifying the
+    system image.
+
+
 DoIP Gateway Initialization
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -356,7 +395,7 @@ ECU States
     - Offline --> NotTested (reconnection attempt or explicit re-detection requested)
     - Online --> Disconnected (connection lost)
     - Online --> NotTested (explicit re-detection requested)
-    - AssumedOnline --> Online (successfully contacted, e.g. first diagnostic request or re-detection)
+    - AssumedOnline --> Online (the ECU replied, e.g. to its first diagnostic request or to a re-detection)
     - AssumedOnline --> Disconnected (contact attempted but ECU unreachable)
     - AssumedOnline --> NotTested (explicit re-detection requested)
     - NoVariantDetected --> Online (successful re-detection)
@@ -370,7 +409,7 @@ ECU States
     :need:`arch~sovd-api-components-entity-collection`).
 
     In addition to the state, the SOVD API must expose a ``last_seen`` timestamp for each ECU, indicating
-    the time of the last successful diagnostic contact with that ECU. This timestamp must be preserved
+    the time of the last UDS message the CDA received from that ECU. This timestamp must be preserved
     across CDA restarts by persisting it together with the ECU list (see :need:`req~dt-ecu-list-persistence`
     and :need:`req~dt-ecu-list-persistence-shutdown`).
 
@@ -415,7 +454,7 @@ ECU States
         Online --> Disconnected : Connection lost
         Online --> NotTested : Re-detection\nrequested
 
-        AssumedOnline --> Online : Successfully\ncontacted
+        AssumedOnline --> Online : ECU\nreplied
         AssumedOnline --> Disconnected : Contact attempted\nbut unreachable
         AssumedOnline --> NotTested : Re-detection\nrequested
 
@@ -525,10 +564,10 @@ ECU List Persistence - Shutdown Update
 
     **Rationale**
 
-    The ``last_seen`` timestamp is updated frequently during normal operation (on every successful
-    diagnostic response), which is not practical to persist and flush on every single occurrence without
+    The ``last_seen`` timestamp is updated frequently during normal operation (on every UDS message
+    received from the ECU), which is not practical to persist and flush on every single occurrence without
     impacting performance and flash wear. Persisting the latest value at shutdown ensures the timestamp
-    surviving a restart is reasonably up to date, without requiring a flush on every diagnostic response.
+    surviving a restart is reasonably up to date, without requiring a flush on every message.
 
 
 Error Handling
