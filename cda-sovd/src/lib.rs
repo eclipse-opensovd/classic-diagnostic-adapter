@@ -48,6 +48,9 @@ pub mod dynamic_router;
 mod openapi;
 pub(crate) mod sovd;
 
+/// Builders for self-contained `OpenAPI` capability descriptions, shared with offline tools.
+pub use sovd::docs;
+
 // Consts for HTTP
 pub const SWAGGER_UI_ROUTE: &str = "/swagger-ui";
 pub const OPENAPI_JSON_ROUTE: &str = "/openapi.json";

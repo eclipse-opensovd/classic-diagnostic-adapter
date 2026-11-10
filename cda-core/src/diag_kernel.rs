@@ -29,6 +29,7 @@ pub(crate) mod diagservices;
 pub(crate) mod dtc;
 pub(crate) mod ecumanager;
 pub(crate) mod iso_14229_nrc;
+pub(crate) mod offline;
 mod operations;
 pub(crate) mod param_metadata;
 pub(crate) mod payload;
