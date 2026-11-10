@@ -27,18 +27,7 @@ use crate::diag_kernel::security::is_service_visible;
 
 impl<S: SecurityPlugin> ComponentInfos for EcuManager<S> {
     fn get_components_data_info(&self, security_plugin: &DynamicPlugin) -> Vec<ComponentDataInfo> {
-        self.get_services_from_variant_and_parent_refs(|service| {
-            service
-                .request_id()
-                .is_some_and(|id| id == service_ids::READ_DATA_BY_IDENTIFIER)
-        })
-        .into_iter()
-        .filter(|service| is_service_visible::<S>(security_plugin, service))
-        .filter_map(|service| {
-            let diag_comm = service.diag_comm()?;
-            Some(self.diag_comm_to_component_data_info(&(diag_comm.into())))
-        })
-        .collect()
+        self.components_data_info_with(|service| is_service_visible::<S>(security_plugin, service))
     }
 
     fn get_functional_group_data_info(
@@ -68,122 +57,9 @@ impl<S: SecurityPlugin> ComponentInfos for EcuManager<S> {
         &self,
         security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError> {
-        let diag_layers = self.get_diag_layers_from_variant_and_parent_refs();
-        let configuration_func_class_short_names: HashSet<&str> = diag_layers
-            .iter()
-            .filter_map(|dl| dl.funct_classes())
-            .flat_map(|fc_vec| fc_vec.iter())
-            .filter_map(|fc| {
-                fc.short_name().filter(|name| {
-                    self.database_naming_convention
-                        .is_configuration_functional_class(name)
-                })
-            })
-            .collect();
-
-        let configuration_sids = [
-            service_ids::READ_DATA_BY_IDENTIFIER,
-            service_ids::WRITE_DATA_BY_IDENTIFIER,
-        ];
-
-        // Maps a common abbreviated service short name (using the configured affixes) to
-        // a vector of bytes of: service_id, ID_parameter_coded_const
-        let mut result_map: HashMap<String, HashSet<Vec<u8>>> = HashMap::default();
-
-        // Maps common short name to long name
-        let mut long_name_map: HashMap<String, String> = HashMap::default();
-
-        // Iterate over all services of the variant and the base
-        diag_layers
-            .iter()
-            .filter_map(|dl| dl.diag_services())
-            .flat_map(|services| services.iter())
-            .map(datatypes::DiagService)
-            .filter(|service| is_service_visible::<S>(security_plugin, service))
-            .filter(|service| {
-                service
-                    .request_id()
-                    .is_some_and(|id| configuration_sids.contains(&id))
-            })
-            .filter_map(|service| {
-                service
-                    .diag_comm()
-                    .map(|dc| (service, datatypes::DiagComm(dc)))
-            })
-            .filter(|(_, dc)| {
-                dc.funct_class().is_some_and(|fc| {
-                    fc.iter().any(|fc| {
-                        fc.short_name()
-                            .is_some_and(|n| configuration_func_class_short_names.contains(n))
-                    })
-                })
-            })
-            .for_each(|(service, diag_comm)| {
-                // trim short names so write and read services are grouped together
-                let common_short_name = diag_comm
-                    .short_name()
-                    .map(|short_name| {
-                        self.database_naming_convention
-                            .trim_short_name_affixes(short_name)
-                    })
-                    .unwrap_or_default();
-
-                // trim the long name so we can return a descriptive name
-                if !long_name_map.contains_key(&common_short_name)
-                    && let Some(long_name) = diag_comm.long_name().and_then(|ln| {
-                        ln.value().map(|long_name| {
-                            self.database_naming_convention
-                                .trim_long_name_affixes(long_name)
-                        })
-                    })
-                {
-                    long_name_map.insert(common_short_name.clone(), long_name);
-                }
-
-                let Some(service_id) = service.request_id() else {
-                    return;
-                };
-                let Some((sub_function_id, sub_func_id_bit_len)) =
-                    service.request_sub_function_id()
-                else {
-                    return;
-                };
-
-                // collect the coded const bytes of the parameter expressing the ID
-                let bytes = sub_function_id.to_be_bytes();
-                let Some(id_param_bytes) =
-                    bytes.get(4usize.saturating_sub(sub_func_id_bit_len as usize / 8)..)
-                else {
-                    return;
-                };
-                // compile the first bytes of the raw uds payload
-                let mut service_abstract_entry =
-                    Vec::with_capacity(1usize.saturating_add(id_param_bytes.len()));
-                service_abstract_entry.push(service_id);
-                service_abstract_entry.extend_from_slice(id_param_bytes);
-
-                result_map
-                    .entry(common_short_name)
-                    .or_default()
-                    .insert(service_abstract_entry);
-            });
-
-        let mut result: Vec<_> = result_map
-            .into_iter()
-            .map(
-                |(common_short_name, abstracts)| ComponentConfigurationsInfo {
-                    name: long_name_map
-                        .get(&common_short_name)
-                        .cloned()
-                        .unwrap_or_default(),
-                    id: common_short_name,
-                    configurations_type: "parameter".to_owned(),
-                    service_abstract: abstracts.into_iter().collect(),
-                },
-            )
-            .collect();
-        result.sort_by(|a, b| a.id.cmp(&b.id));
-        Ok(result)
+        Ok(self.components_configurations_info_with(|service| {
+            is_service_visible::<S>(security_plugin, service)
+        }))
     }
 
     /// Returns all `RoutineControl` (SID 0x31) services for the given ECU,
@@ -193,14 +69,9 @@ impl<S: SecurityPlugin> ComponentInfos for EcuManager<S> {
         &self,
         security_plugin: &DynamicPlugin,
     ) -> Vec<ComponentOperationsInfo> {
-        let routine_control_services = self.get_services_from_variant_and_parent_refs(|service| {
-            service
-                .request_id()
-                .is_some_and(|id| id == service_ids::ROUTINE_CONTROL)
-                && is_service_visible::<S>(security_plugin, service)
-        });
-
-        self.filter_and_transform_operations(routine_control_services)
+        self.components_operations_info_with(|service| {
+            is_service_visible::<S>(security_plugin, service)
+        })
     }
 
     /// Check which additional `RoutineControl` subfunctions are defined for a specific routine.
@@ -596,6 +467,173 @@ impl<S: SecurityPlugin> ComponentInfos for EcuManager<S> {
 }
 
 impl<S: SecurityPlugin> EcuManager<S> {
+    pub(in crate::diag_kernel) fn components_data_info_with<V>(
+        &self,
+        visible: V,
+    ) -> Vec<ComponentDataInfo>
+    where
+        V: Fn(&datatypes::DiagService<'_>) -> bool,
+    {
+        self.get_services_from_variant_and_parent_refs(|service| {
+            service
+                .request_id()
+                .is_some_and(|id| id == service_ids::READ_DATA_BY_IDENTIFIER)
+        })
+        .into_iter()
+        .filter(|service| visible(service))
+        .filter_map(|service| {
+            let diag_comm = service.diag_comm()?;
+            Some(self.diag_comm_to_component_data_info(&(diag_comm.into())))
+        })
+        .collect()
+    }
+
+    /// Returns all services in /configuration,
+    /// i.e. 0x22 (`ReadDataByIdentifier`) and 0x2E (`WriteDataByIdentifier`)
+    /// that belong to one of the configured `configuration_functional_classes`.
+    pub(in crate::diag_kernel) fn components_configurations_info_with<V>(
+        &self,
+        visible: V,
+    ) -> Vec<ComponentConfigurationsInfo>
+    where
+        V: Fn(&datatypes::DiagService<'_>) -> bool,
+    {
+        let diag_layers = self.get_diag_layers_from_variant_and_parent_refs();
+        let configuration_func_class_short_names: HashSet<&str> = diag_layers
+            .iter()
+            .filter_map(|dl| dl.funct_classes())
+            .flat_map(|fc_vec| fc_vec.iter())
+            .filter_map(|fc| {
+                fc.short_name().filter(|name| {
+                    self.database_naming_convention
+                        .is_configuration_functional_class(name)
+                })
+            })
+            .collect();
+
+        let configuration_sids = [
+            service_ids::READ_DATA_BY_IDENTIFIER,
+            service_ids::WRITE_DATA_BY_IDENTIFIER,
+        ];
+
+        // Maps a common abbreviated service short name (using the configured affixes) to
+        // a vector of bytes of: service_id, ID_parameter_coded_const
+        let mut result_map: HashMap<String, HashSet<Vec<u8>>> = HashMap::default();
+
+        // Maps common short name to long name
+        let mut long_name_map: HashMap<String, String> = HashMap::default();
+
+        // Iterate over all services of the variant and the base
+        diag_layers
+            .iter()
+            .filter_map(|dl| dl.diag_services())
+            .flat_map(|services| services.iter())
+            .map(datatypes::DiagService)
+            .filter(|service| visible(service))
+            .filter(|service| {
+                service
+                    .request_id()
+                    .is_some_and(|id| configuration_sids.contains(&id))
+            })
+            .filter_map(|service| {
+                service
+                    .diag_comm()
+                    .map(|dc| (service, datatypes::DiagComm(dc)))
+            })
+            .filter(|(_, dc)| {
+                dc.funct_class().is_some_and(|fc| {
+                    fc.iter().any(|fc| {
+                        fc.short_name()
+                            .is_some_and(|n| configuration_func_class_short_names.contains(n))
+                    })
+                })
+            })
+            .for_each(|(service, diag_comm)| {
+                // trim short names so write and read services are grouped together
+                let common_short_name = diag_comm
+                    .short_name()
+                    .map(|short_name| {
+                        self.database_naming_convention
+                            .trim_short_name_affixes(short_name)
+                    })
+                    .unwrap_or_default();
+
+                // trim the long name so we can return a descriptive name
+                if !long_name_map.contains_key(&common_short_name)
+                    && let Some(long_name) = diag_comm.long_name().and_then(|ln| {
+                        ln.value().map(|long_name| {
+                            self.database_naming_convention
+                                .trim_long_name_affixes(long_name)
+                        })
+                    })
+                {
+                    long_name_map.insert(common_short_name.clone(), long_name);
+                }
+
+                let Some(service_id) = service.request_id() else {
+                    return;
+                };
+                let Some((sub_function_id, sub_func_id_bit_len)) =
+                    service.request_sub_function_id()
+                else {
+                    return;
+                };
+
+                // collect the coded const bytes of the parameter expressing the ID
+                let bytes = sub_function_id.to_be_bytes();
+                let Some(id_param_bytes) =
+                    bytes.get(4usize.saturating_sub(sub_func_id_bit_len as usize / 8)..)
+                else {
+                    return;
+                };
+                // compile the first bytes of the raw uds payload
+                let mut service_abstract_entry =
+                    Vec::with_capacity(1usize.saturating_add(id_param_bytes.len()));
+                service_abstract_entry.push(service_id);
+                service_abstract_entry.extend_from_slice(id_param_bytes);
+
+                result_map
+                    .entry(common_short_name)
+                    .or_default()
+                    .insert(service_abstract_entry);
+            });
+
+        let mut result: Vec<_> = result_map
+            .into_iter()
+            .map(
+                |(common_short_name, abstracts)| ComponentConfigurationsInfo {
+                    name: long_name_map
+                        .get(&common_short_name)
+                        .cloned()
+                        .unwrap_or_default(),
+                    id: common_short_name,
+                    configurations_type: "parameter".to_owned(),
+                    service_abstract: abstracts.into_iter().collect(),
+                },
+            )
+            .collect();
+        result.sort_by(|a, b| a.id.cmp(&b.id));
+        result
+    }
+
+    /// Returns all `RoutineControl` (SID 0x31) services visible according to `visible`.
+    pub(in crate::diag_kernel) fn components_operations_info_with<V>(
+        &self,
+        visible: V,
+    ) -> Vec<ComponentOperationsInfo>
+    where
+        V: Fn(&datatypes::DiagService<'_>) -> bool,
+    {
+        let routine_control_services = self.get_services_from_variant_and_parent_refs(|service| {
+            service
+                .request_id()
+                .is_some_and(|id| id == service_ids::ROUTINE_CONTROL)
+                && visible(service)
+        });
+
+        self.filter_and_transform_operations(routine_control_services)
+    }
+
     /// Resolves the `/data` category for a 0x22/0x2E `DiagComm` by looking at its functional
     /// classes and matching them against the configured `category_mapping`. Falls back to
     /// `default_category` if none of the service's functional classes have a mapping entry.

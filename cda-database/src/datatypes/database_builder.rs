@@ -734,6 +734,38 @@ impl<'a> EcuDataBuilder<'a> {
         dataformat::AdditionalAudience::create(&mut self.fbb, &additional_audience_args)
     }
 
+    /// Create a [`dataformat::Audience`].
+    ///
+    /// `flags` are, in order: supplier, development, manufacturing, after sales, after market.
+    pub fn create_audience(
+        &mut self,
+        flags: [bool; 5],
+        enabled_audiences: Option<Vec<WIPOffset<dataformat::AdditionalAudience<'a>>>>,
+        disabled_audiences: Option<Vec<WIPOffset<dataformat::AdditionalAudience<'a>>>>,
+    ) -> WIPOffset<dataformat::Audience<'a>> {
+        let [
+            is_supplier,
+            is_development,
+            is_manufacturing,
+            is_after_sales,
+            is_after_market,
+        ] = flags;
+        let enabled_audiences = enabled_audiences.map(|v| self.fbb.create_vector(&v));
+        let disabled_audiences = disabled_audiences.map(|v| self.fbb.create_vector(&v));
+        dataformat::Audience::create(
+            &mut self.fbb,
+            &dataformat::AudienceArgs {
+                enabled_audiences,
+                disabled_audiences,
+                is_supplier,
+                is_development,
+                is_manufacturing,
+                is_after_sales,
+                is_after_market,
+            },
+        )
+    }
+
     pub fn create_param(
         &mut self,
         params: &ParameterParams<'a>,

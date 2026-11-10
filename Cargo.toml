@@ -40,6 +40,7 @@ members = [
   "integration-tests",
   "cda-build",
   "override-macros",
+  "cda-openapi-gen",
 ]
 
 [workspace.dependencies]
@@ -61,6 +62,7 @@ cda-plugin-runtime-update = { path = "cda-plugin-runtime-update" }
 cda-plugin-communication-management = { path = "cda-plugin-communication-management" }
 cda-plugin-topology = { path = "cda-plugin-topology" }
 cda-sovd = { path = "cda-sovd" }
+cda-openapi-gen = { path = "cda-openapi-gen" }
 cda-tracing = { path = "cda-tracing" }
 cda-health = { path = "cda-health" }
 cda-storage = { path = "cda-storage" }

@@ -134,7 +134,7 @@ deny:
 	cargo +$(STABLE) deny check $(ARGS)
 
 generate-config:
-	cargo +$(STABLE) run --locked --all-features -- generate-config --output $(or $(OUTPUT),opensovd-cda.toml)
+	cargo +$(STABLE) run --locked --all-features --bin opensovd-cda -- generate-config --output $(or $(OUTPUT),opensovd-cda.toml)
 
 generate-test-config:
 	cargo +$(STABLE) test --locked --workspace --all-features --test integration_tests -- --exact --ignored util::config::tests::generate_compose_configs

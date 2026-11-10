@@ -3015,3 +3015,101 @@ pub(crate) fn create_ecu_manager_with_write_did_services_and_plugin<S: SecurityP
         &[0xF191],
     )
 }
+
+/// Creates an ECU manager for offline tests (no variant selected).
+///
+/// - `BaseVariant` (base): `ReadUnrestricted` (no audience), `ReadSupplierOnly`
+///   (supplier, enabled additional audience `Workshop`) and the routine
+///   `RoutineControl_DevOnly` (development).
+/// - `SpecificVariant`: `ReadUnrestricted` and `ReadSpecific` (no audience).
+pub(crate) fn create_ecu_manager_for_offline() -> EcuManager<DefaultSecurityPluginData> {
+    let mut db_builder = EcuDataBuilder::new();
+    let protocol_name = Protocol::default().to_string();
+    let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
+    let cp_ref = db_builder.create_com_param_ref(None, None, None, Some(protocol), None);
+
+    macro_rules! service {
+        ($name:expr, $audience:expr, $params:expr) => {{
+            let diag_comm = db_builder.create_diag_comm(DiagCommParams {
+                short_name: $name,
+                protocols: Some(vec![protocol]),
+                audience: $audience,
+                ..Default::default()
+            });
+            let request = db_builder.create_request(Some($params), None);
+            new_diag_service!(db_builder, diag_comm, request, vec![], vec![])
+        }};
+    }
+    macro_rules! read_service {
+        ($name:expr, $did:expr, $audience:expr) => {{
+            let params = vec![
+                create_sid_param!(db_builder, service_ids::READ_DATA_BY_IDENTIFIER),
+                db_builder.create_coded_const_param(
+                    "DID",
+                    &$did.to_string(),
+                    1,
+                    0,
+                    16,
+                    DataType::UInt32,
+                ),
+            ];
+            service!($name, $audience, params)
+        }};
+    }
+
+    let workshop = db_builder.create_additional_audience("Workshop", None);
+    let supplier_audience = db_builder.create_audience(
+        [true, false, false, false, false],
+        Some(vec![workshop]),
+        None,
+    );
+    let dev_audience = db_builder.create_audience([false, true, false, false, false], None, None);
+
+    let unrestricted = read_service!("ReadUnrestricted", 0x0100u32, None);
+    let supplier_only = read_service!("ReadSupplierOnly", 0x0101u32, Some(supplier_audience));
+    let specific = read_service!("ReadSpecific", 0x0102u32, None);
+    let routine_params = vec![
+        create_sid_param!(db_builder, service_ids::ROUTINE_CONTROL),
+        db_builder.create_coded_const_param(
+            "RoutineControlType",
+            &subfunction_ids::routine::START.to_string(),
+            1,
+            0,
+            8,
+            DataType::UInt32,
+        ),
+        db_builder.create_coded_const_param(
+            "RoutineIdentifier",
+            "4096",
+            2,
+            0,
+            16,
+            DataType::UInt32,
+        ),
+    ];
+    let dev_routine = service!("RoutineControl_DevOnly", Some(dev_audience), routine_params);
+
+    let base_layer = db_builder.create_diag_layer(DiagLayerParams {
+        short_name: "BaseVariant",
+        com_param_refs: Some(vec![cp_ref]),
+        diag_services: Some(vec![unrestricted, supplier_only, dev_routine]),
+        ..Default::default()
+    });
+    let base_variant = db_builder.create_variant(base_layer, true, None, None);
+    let specific_layer = db_builder.create_diag_layer(DiagLayerParams {
+        short_name: "SpecificVariant",
+        com_param_refs: Some(vec![cp_ref]),
+        diag_services: Some(vec![unrestricted, specific]),
+        ..Default::default()
+    });
+    let specific_variant = db_builder.create_variant(specific_layer, false, None, None);
+
+    let db = db_builder.finish(EcuDataParams {
+        ecu_name: "OfflineEcu",
+        revision: "revision_1",
+        version: "1.0.0",
+        variants: Some(vec![base_variant, specific_variant]),
+        ..Default::default()
+    });
+    new_ecu_manager_no_base_fallback(db)
+}
