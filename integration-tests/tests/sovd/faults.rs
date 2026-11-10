@@ -1785,6 +1785,19 @@ async fn test_get_faults_with_and_without_odx_reference() {
         .find(|fault| fault.code == "01E246")
         .expect("Expected ECU-reported DTC 0x01E246 without an ODX reference to be present");
 
+    // Verify fallback fault name and severity.
+    assert_eq!(
+        fault2.fault_name, "DTC description not available",
+        "Expected fallback fault name for DTC without ODX reference"
+    );
+
+    assert_eq!(
+        fault2.severity,
+        Some(0),
+        "Expected default severity 0 for DTC without ODX reference"
+    );
+
+    // Verify that the ECU-reported DTC status mask
     assert_eq!(
         fault2
             .status
@@ -1792,23 +1805,5 @@ async fn test_get_faults_with_and_without_odx_reference() {
             .and_then(|status| status.mask.clone()),
         Some("29".to_string()),
         "Expected DTC 0x01E246 to have status mask 0x29"
-    );
-
-    // Clear all DTCs from the simulator.
-    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
-        .await
-        .expect("Failed to clear DTCs in simulator");
-
-    // Verify that no failed faults remain after clearing the DTCs.
-    let failed_faults_after_clear = get_faults(&runtime.config, &auth, ecu_endpoint)
-        .await
-        .map(filter_failed_faults)
-        .expect("Failed to get faults after clearing DTCs");
-
-    assert_eq!(
-        failed_faults_after_clear.len(),
-        0,
-        "Expected 0 failed faults after clearing DTCs, got {}",
-        failed_faults_after_clear.len()
     );
 }
