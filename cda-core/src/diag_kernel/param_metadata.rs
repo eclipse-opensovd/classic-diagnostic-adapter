@@ -24,6 +24,144 @@ use cda_interfaces::{
     CompuScaleInfo, DiagServiceError, ParameterTypeMetadata, ResponseParameterInfo,
 };
 
+/// Byte layout of the raw data returned for a positive response.
+///
+/// `data_offset` is the first DATA parameter position. `fixed_data_size` is
+/// `None` when the response has a variable or unresolved layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RawResponseLayout {
+    pub(crate) data_offset: u32,
+    pub(crate) fixed_data_size: Option<usize>,
+}
+
+/// Returns a parameter's fixed encoded size when its coded length is known.
+fn static_byte_length(param: &datatypes::Parameter<'_>) -> Option<u32> {
+    if let Some(matching) = param.specific_data_as_matching_request_param() {
+        return Some(matching.byte_length());
+    }
+
+    let coded_type: datatypes::DiagCodedType =
+        if let Some(coded_const) = param.specific_data_as_coded_const() {
+            coded_const.diag_coded_type()?.try_into().ok()?
+        } else {
+            param
+                .specific_data_as_value()
+                .and_then(|value| value.dop())
+                .and_then(|dop| dop.specific_data_as_normal_dop())
+                .map(datatypes::NormalDop)?
+                .diag_coded_type()
+                .ok()?
+        };
+    let bit_length = match coded_type.type_() {
+        datatypes::DiagCodedTypeVariant::StandardLength(slt) => slt.bit_length,
+        _ => return None,
+    };
+    param
+        .bit_position()
+        .checked_add(bit_length)
+        .map(|bits| bits.div_ceil(8))
+}
+
+/// Resolves parameter positions in database order, preserving each parameter.
+/// An omitted position follows the preceding parameter when its length is fixed.
+pub(crate) fn effective_byte_positions<'a>(
+    params: &[datatypes::Parameter<'a>],
+) -> Vec<(datatypes::Parameter<'a>, Option<u32>)> {
+    let mut next_position = Some(0u32);
+    params
+        .iter()
+        .map(|param| {
+            let position = if param.has_byte_position() {
+                Some(param.byte_position())
+            } else {
+                next_position
+            };
+            next_position = position.and_then(|position| {
+                static_byte_length(param).and_then(|length| position.checked_add(length))
+            });
+            (param.clone(), position)
+        })
+        .collect()
+}
+
+/// Calculates the raw payload offset and fixed size for a positive response.
+/// Returns `None` if there is no DATA parameter or its offset is unresolved.
+pub(crate) fn raw_response_layout(
+    params: &[datatypes::Parameter<'_>],
+    data_semantic: &str,
+) -> Result<Option<RawResponseLayout>, DiagServiceError> {
+    let layout: Vec<_> = effective_byte_positions(params)
+        .iter()
+        .map(|(param, position)| {
+            (
+                param
+                    .semantic()
+                    .is_some_and(|semantic| semantic == data_semantic),
+                *position,
+                static_byte_length(param),
+            )
+        })
+        .collect();
+    raw_response_layout_from_parameters(&layout)
+}
+
+/// Calculates the raw layout from DATA flags, resolved positions, and fixed sizes.
+fn raw_response_layout_from_parameters(
+    layout: &[(bool, Option<u32>, Option<u32>)],
+) -> Result<Option<RawResponseLayout>, DiagServiceError> {
+    let Some(data_index) = layout.iter().position(|(is_data, _, _)| *is_data) else {
+        return Ok(None);
+    };
+    let Some(data_offset) = layout
+        .iter()
+        .filter_map(|(is_data, position, _)| is_data.then_some(*position).flatten())
+        .min()
+    else {
+        return Ok(None);
+    };
+
+    let mut data_end = data_offset;
+    for (index, (_, byte_position, byte_size)) in layout.iter().enumerate() {
+        let Some(byte_position) = byte_position else {
+            if index >= data_index {
+                return Ok(Some(RawResponseLayout {
+                    data_offset,
+                    fixed_data_size: None,
+                }));
+            }
+            continue;
+        };
+        if *byte_position < data_offset {
+            continue;
+        }
+        let Some(byte_size) = byte_size else {
+            return Ok(Some(RawResponseLayout {
+                data_offset,
+                fixed_data_size: None,
+            }));
+        };
+        let Some(parameter_end) = byte_position.checked_add(*byte_size) else {
+            return Err(DiagServiceError::InvalidDatabase(
+                "Diagnostic data size overflows its byte position".to_owned(),
+            ));
+        };
+        data_end = data_end.max(parameter_end);
+    }
+
+    let data_size = data_end.checked_sub(data_offset).ok_or_else(|| {
+        DiagServiceError::InvalidDatabase(
+            "Diagnostic data ends before its DATA parameter".to_owned(),
+        )
+    })?;
+    let fixed_data_size = usize::try_from(data_size).map_err(|_| {
+        DiagServiceError::InvalidDatabase("Diagnostic data size does not fit in usize".to_owned())
+    })?;
+    Ok(Some(RawResponseLayout {
+        data_offset,
+        fixed_data_size: Some(fixed_data_size),
+    }))
+}
+
 /// Parse a limit value string as a `u64`.
 ///
 /// Tries integer parsing first; falls back to `f64` parsing with
@@ -424,10 +562,70 @@ mod tests {
     use cda_interfaces::{ParameterTypeMetadata, Protocol};
 
     use super::{
-        byte_size_from_coded_const, byte_size_from_value_param, expand_mux_cases,
-        extract_request_param_type, extract_response_param_type, extract_value_dop_info,
+        RawResponseLayout, byte_size_from_coded_const, byte_size_from_value_param,
+        effective_byte_positions, expand_mux_cases, extract_request_param_type,
+        extract_response_param_type, extract_value_dop_info, raw_response_layout_from_parameters,
         resolve_phys_const_coded_value,
     };
+
+    #[test]
+    fn missing_byte_positions_follow_fixed_length_parameters() {
+        let tdb = build_missing_byte_position_db();
+        let variant = tdb.db.base_variant().expect("no base variant");
+        let services = variant.diag_layer().unwrap().diag_services().unwrap();
+        let service = datatypes::DiagService(services.get(0));
+        let params = service
+            .pos_responses()
+            .unwrap()
+            .iter()
+            .next()
+            .unwrap()
+            .params()
+            .unwrap();
+        let params: Vec<_> = params.iter().map(datatypes::Parameter).collect();
+        assert_eq!(
+            effective_byte_positions(&params)
+                .into_iter()
+                .map(|(_, position)| position)
+                .collect::<Vec<_>>(),
+            [Some(0), Some(1)]
+        );
+    }
+
+    #[test]
+    fn raw_response_layout_resolves_implicit_data_and_fixed_end() {
+        assert_eq!(
+            raw_response_layout_from_parameters(&[
+                (false, Some(0), Some(1)),
+                (false, Some(1), Some(1)),
+                (true, Some(2), Some(1)),
+                (false, Some(3), Some(2)),
+            ]),
+            Ok(Some(RawResponseLayout {
+                data_offset: 2,
+                fixed_data_size: Some(3),
+            }))
+        );
+    }
+
+    #[test]
+    fn raw_response_layout_reports_variable_and_unresolved_sizes() {
+        assert_eq!(
+            raw_response_layout_from_parameters(&[
+                (false, Some(0), Some(1)),
+                (true, Some(1), Some(1)),
+                (false, Some(2), None),
+            ]),
+            Ok(Some(RawResponseLayout {
+                data_offset: 1,
+                fixed_data_size: None,
+            }))
+        );
+        assert_eq!(
+            raw_response_layout_from_parameters(&[(false, Some(0), None), (true, None, Some(1))]),
+            Ok(None)
+        );
+    }
 
     /// Wraps a finished database and provides access to individual parameters
     /// from the first service's request or response.
@@ -477,6 +675,24 @@ mod tests {
                 db: $db.finish_with_single_variant($protocol, vec![svc], "L", "E", "1", "1.0"),
             }
         }};
+    }
+
+    fn build_missing_byte_position_db() -> TestDb {
+        let mut db = EcuDataBuilder::new();
+        let protocol_name = Protocol::default().to_string();
+        let protocol = db.create_protocol(&protocol_name, None, None, None);
+        let diag_type = db.create_diag_coded_type_standard_length(8, DataType::UInt32);
+        let compu = db.create_compu_method(CompuCategory::Identical, None, None);
+        let dop = db.create_regular_normal_dop("missing_position_dop", diag_type, compu);
+        let positioned = db.create_coded_const_param("positioned", "1", 0, 0, 8, DataType::UInt32);
+        let unpositioned = db.create_value_param_no_byte_pos("unpositioned", dop);
+        let request = db.create_request(None, None);
+        let response = db.create_response(
+            ResponseType::Positive,
+            Some(vec![positioned, unpositioned]),
+            None,
+        );
+        finish_test_db!(db, protocol, request, vec![response])
     }
 
     /// Build a database with a single request-parameter for PHYS-CONST tests.

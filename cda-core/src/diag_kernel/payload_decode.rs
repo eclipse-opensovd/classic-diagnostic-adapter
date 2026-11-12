@@ -453,15 +453,37 @@ impl<S: SecurityPlugin> EcuManager<S> {
         &self,
         params: &[datatypes::Parameter],
     ) -> u32 {
-        params
-            .iter()
-            .filter(|p| {
-                p.semantic()
-                    .is_some_and(|s| s == self.database_naming_convention.semantics.data)
+        super::param_metadata::effective_byte_positions(params)
+            .into_iter()
+            .filter(|(param, _)| {
+                param.semantic().is_some_and(|semantic| {
+                    semantic == self.database_naming_convention.semantics.data
+                })
             })
-            .map(datatypes::Parameter::byte_position)
+            .filter_map(|(_, position)| position)
             .min()
             .unwrap_or(0)
+    }
+
+    /// Looks up the first positive response and resolves its raw payload layout.
+    /// Returns `None` when the response has no DATA parameter or its offset is unknown.
+    pub(in crate::diag_kernel) async fn get_positive_response_raw_layout(
+        &self,
+        diag_service: &DiagComm,
+    ) -> Result<Option<super::param_metadata::RawResponseLayout>, DiagServiceError> {
+        let mapped_service = self.lookup_diag_service(diag_service, None, None).await?;
+        let Some(params) = mapped_service
+            .pos_responses()
+            .and_then(|responses| responses.iter().next())
+            .and_then(|response| response.params())
+        else {
+            return Ok(None);
+        };
+        let params: Vec<_> = params.iter().map(datatypes::Parameter).collect();
+        super::param_metadata::raw_response_layout(
+            &params,
+            &self.database_naming_convention.semantics.data,
+        )
     }
 
     #[tracing::instrument(skip_all,
