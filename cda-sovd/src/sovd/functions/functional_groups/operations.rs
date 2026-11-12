@@ -118,7 +118,6 @@ pub(crate) mod docs_endpoint {
     use crate::{
         openapi,
         sovd::{
-            binary_encoding::BinaryEncodingParam,
             docs::{self, operations::OperationDocsMeta},
             error::ApiError,
         },
@@ -129,7 +128,6 @@ pub(crate) mod docs_endpoint {
     pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         Path(FgOperationDocsPathParam { service }): Path<FgOperationDocsPathParam>,
-        BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
         State(WebserverFgState {
             uds,
             functional_group_name,
@@ -166,7 +164,7 @@ pub(crate) mod docs_endpoint {
             .schema_for_fg_request(&diag_service, &functional_group_name)
             .await
             .ok()
-            .and_then(|s| s.with_binary_encoding(binary_encoding).into_schema());
+            .and_then(|s| s.with_all_binary_encodings().into_schema());
 
         // Note: schema_for_fg_responses is not yet available; response schema
         // is omitted for now and can be added once the trait method exists.

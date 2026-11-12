@@ -108,6 +108,76 @@ impl SchemaDescription {
         self
     }
 
+    /// Describe binary (byte field) string values as `anyOf` all supported
+    /// encodings, so the schema does not depend on the encoding selected per
+    /// request. Each alternative carries its own `format` and `default`.
+    ///
+    /// `anyOf` instead of `oneOf`: `format` is only an annotation in JSON
+    /// schema and a value can be valid in several encodings (e.g. `"0102"`),
+    /// so `oneOf` would reject valid values.
+    #[must_use]
+    pub fn with_all_binary_encodings(mut self) -> Self {
+        fn replace(value: &mut serde_json::Value) {
+            let from = crate::BinaryEncoding::Base64;
+            match value {
+                serde_json::Value::Object(map) => {
+                    let is_binary_string = map.get("type").and_then(|t| t.as_str())
+                        == Some("string")
+                        && map.get("format").and_then(|f| f.as_str())
+                            == Some(from.json_schema_format());
+                    if is_binary_string {
+                        let bytes = map
+                            .get("default")
+                            .and_then(|d| d.as_str())
+                            .and_then(|d| from.decode(d).ok());
+                        let variants = crate::BinaryEncoding::ALL
+                            .iter()
+                            .map(|encoding| {
+                                let mut variant = map.clone();
+                                variant.insert(
+                                    "format".to_owned(),
+                                    encoding.json_schema_format().into(),
+                                );
+                                match &bytes {
+                                    Some(bytes) => {
+                                        variant.insert(
+                                            "default".to_owned(),
+                                            encoding.encode(bytes).into(),
+                                        );
+                                    }
+                                    None => {
+                                        variant.remove("default");
+                                    }
+                                }
+                                serde_json::Value::Object(variant)
+                            })
+                            .collect::<Vec<_>>();
+                        *value = serde_json::json!({ "anyOf": variants });
+                        return;
+                    }
+                    for v in map.values_mut() {
+                        replace(v);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for v in values.iter_mut() {
+                        replace(v);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(schema) = self.schema.as_mut() {
+            let mut value = schema.clone().to_value();
+            replace(&mut value);
+            if let Ok(updated) = schemars::Schema::try_from(value) {
+                *schema = updated;
+            }
+        }
+        self
+    }
+
     #[must_use]
     pub fn get_param_properties(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
         let properties = self.schema()?;
@@ -214,6 +284,46 @@ mod tests {
             desc.with_binary_encoding(crate::BinaryEncoding::Base64)
                 .into_schema(),
             Some(schema)
+        );
+    }
+
+    #[test]
+    fn test_with_all_binary_encodings() {
+        let schema = schemars::json_schema!({
+            "type": "object",
+            "properties": {
+                "raw": { "type": "string", "format": "byte", "default": "AQI=" },
+                "nodefault": { "type": "string", "format": "byte" },
+                "date": { "type": "string", "format": "date", "default": "AQI=" }
+            }
+        });
+        let all = SchemaDescription::new("n".to_owned(), "t".to_owned(), Some(schema))
+            .with_all_binary_encodings()
+            .into_schema()
+            .unwrap()
+            .to_value();
+
+        assert_eq!(
+            all.pointer("/properties/raw"),
+            Some(&serde_json::json!({
+                "anyOf": [
+                    { "type": "string", "format": "byte", "default": "AQI=" },
+                    { "type": "string", "format": "hex", "default": "0x01 0x02" }
+                ]
+            }))
+        );
+        assert_eq!(
+            all.pointer("/properties/nodefault"),
+            Some(&serde_json::json!({
+                "anyOf": [
+                    { "type": "string", "format": "byte" },
+                    { "type": "string", "format": "hex" }
+                ]
+            }))
+        );
+        assert_eq!(
+            all.pointer("/properties/date"),
+            Some(&serde_json::json!({ "type": "string", "format": "date", "default": "AQI=" }))
         );
     }
 }

@@ -85,8 +85,14 @@ Binary Encoding
     * Response parameters, including nested and repeating structures
     * Security access seeds and keys, authentication parameters
     * DTC extended and snapshot data
-    * JSON schemas: ``A_BYTEFIELD`` values are described as ``string`` with the format of the selected encoding,
-      their ``default`` values are converted into that encoding
+    * JSON schemas returned with ``include-schema``: ``A_BYTEFIELD`` values are described as ``string`` with the
+      format of the selected encoding, their ``default`` values are converted into that encoding
+
+    The online capability description (``/docs``) does not accept query parameters (ISO 17978-3 §7.5.2) and
+    is therefore independent of the selected encoding: ``A_BYTEFIELD`` values are described as ``anyOf`` all
+    supported encodings, each alternative with its own ``format`` and converted ``default``. ``anyOf`` is used
+    instead of ``oneOf`` because ``format`` is only an annotation in JSON schema and a value can be valid in
+    several encodings.
 
     Values originating from the diagnostic database (physical default values, coded constants, variant
     detection patterns) are always interpreted as hex, independent of the selected encoding. Internal callers

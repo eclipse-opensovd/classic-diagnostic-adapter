@@ -63,6 +63,9 @@ impl std::str::FromStr for BinaryEncoding {
 }
 
 impl BinaryEncoding {
+    /// All supported encodings.
+    pub const ALL: [BinaryEncoding; 2] = [BinaryEncoding::Base64, BinaryEncoding::Hex];
+
     /// JSON schema `format` of string values in this encoding.
     #[must_use]
     pub fn json_schema_format(self) -> &'static str {

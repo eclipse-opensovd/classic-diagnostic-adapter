@@ -737,7 +737,6 @@ pub(crate) mod service {
             openapi,
             sovd::{
                 WebserverEcuState,
-                binary_encoding::BinaryEncodingParam,
                 docs::{self, operations::OperationDocsMeta},
                 error::ApiError,
                 locks::require_ecu_access,
@@ -749,7 +748,6 @@ pub(crate) mod service {
         pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(OperationNamePathParam { service }): Path<OperationNamePathParam>,
-            BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
             State(WebserverEcuState {
                 ecu_name,
                 uds,
@@ -789,13 +787,13 @@ pub(crate) mod service {
                 .schema_for_request(&ecu_name, &diag_service)
                 .await
                 .ok()
-                .and_then(|s| s.with_binary_encoding(binary_encoding).into_schema());
+                .and_then(|s| s.with_all_binary_encodings().into_schema());
 
             let response_params_schema = uds
                 .schema_for_responses(&ecu_name, &diag_service)
                 .await
                 .ok()
-                .and_then(|s| s.with_binary_encoding(binary_encoding).into_schema());
+                .and_then(|s| s.with_all_binary_encodings().into_schema());
 
             let meta = OperationDocsMeta {
                 name: service.clone(),

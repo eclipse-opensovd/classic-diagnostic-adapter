@@ -523,10 +523,7 @@ pub(crate) mod diag_service {
 
         use crate::{
             openapi,
-            sovd::{
-                WebserverEcuState, binary_encoding::BinaryEncodingParam, docs, error::ApiError,
-                locks::require_ecu_access,
-            },
+            sovd::{WebserverEcuState, docs, error::ApiError, locks::require_ecu_access},
         };
 
         openapi::aide_helper::gen_path_param!(DataDocsPathParam service String);
@@ -534,7 +531,6 @@ pub(crate) mod diag_service {
         pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(DataDocsPathParam { service }): Path<DataDocsPathParam>,
-            BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
             State(WebserverEcuState {
                 ecu_name,
                 uds,
@@ -562,8 +558,7 @@ pub(crate) mod diag_service {
                     .into_response();
             }
 
-            docs::data::build_docs_response(&uds, &ecu_name, &service, "data", binary_encoding)
-                .await
+            docs::data::build_docs_response(&uds, &ecu_name, &service, "data").await
         }
 
         pub(crate) fn docs_transform(op: TransformOperation) -> TransformOperation {
@@ -625,7 +620,6 @@ pub(crate) mod diag_service {
                     Path(DataDocsPathParam {
                         service: "EngineTemp".to_owned(),
                     }),
-                    crate::sovd::binary_encoding::hex_encoding(),
                     State(state),
                 )
                 .await;
@@ -672,7 +666,6 @@ pub(crate) mod diag_service {
                     Path(DataDocsPathParam {
                         service: "NonExistent".to_owned(),
                     }),
-                    crate::sovd::binary_encoding::hex_encoding(),
                     State(state),
                 )
                 .await;
@@ -704,7 +697,6 @@ pub(crate) mod diag_service {
                     Path(DataDocsPathParam {
                         service: "Anything".to_owned(),
                     }),
-                    crate::sovd::binary_encoding::hex_encoding(),
                     State(state),
                 )
                 .await;
