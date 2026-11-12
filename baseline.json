@@ -14,7 +14,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/schema.rs",
       "function": "dop_variant_to_schema",
-      "line": 410,
+      "line": 437,
       "cyclomatic": 17.0,
       "coverage": 0.0,
       "crap": 306.0,
@@ -104,10 +104,10 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::ecu_reset_handler",
-      "line": 1533,
+      "line": 1581,
       "cyclomatic": 16.0,
-      "coverage": 34.710743801652896,
-      "crap": 87.24676147194481,
+      "coverage": 35.77235772357724,
+      "crap": 83.82751480895735,
       "crate": "cda-sovd"
     },
     {
@@ -140,7 +140,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/dtc.rs",
       "function": "UdsManager::delete_dtcs_scoped",
-      "line": 765,
+      "line": 781,
       "cyclomatic": 9.0,
       "coverage": 13.333333333333334,
       "crap": 61.72800000000001,
@@ -156,6 +156,15 @@
       "crate": "cda-tracing"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/schema.rs",
+      "function": "normal_dop_to_schema",
+      "line": 343,
+      "cyclomatic": 7.0,
+      "coverage": 0.0,
+      "crap": 56.0,
+      "crate": "cda-core"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/functional_group.rs",
       "function": "UdsManager::set_functional_state",
       "line": 514,
@@ -167,7 +176,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/modes.rs",
       "function": "build_mode_response",
-      "line": 186,
+      "line": 189,
       "cyclomatic": 7.0,
       "coverage": 0.0,
       "crap": 56.0,
@@ -176,7 +185,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "get_components",
-      "line": 796,
+      "line": 850,
       "cyclomatic": 7.0,
       "coverage": 0.0,
       "crap": 56.0,
@@ -194,7 +203,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "process_physical_type_value",
-      "line": 904,
+      "line": 889,
       "cyclomatic": 13.0,
       "coverage": 37.5,
       "crap": 54.259765625,
@@ -230,7 +239,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "compu_lookup",
-      "line": 147,
+      "line": 146,
       "cyclomatic": 17.0,
       "coverage": 54.23728813559322,
       "crap": 44.697023551580244,
@@ -257,7 +266,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/schema.rs",
       "function": "SchemaDescription::get_param_properties",
-      "line": 58,
+      "line": 182,
       "cyclomatic": 6.0,
       "coverage": 0.0,
       "crap": 42.0,
@@ -336,15 +345,6 @@
       "crate": "cda-sovd"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
-      "function": "EcuManager::map_param_to_uds",
-      "line": 174,
-      "cyclomatic": 14.0,
-      "coverage": 50.0,
-      "crap": 38.5,
-      "crate": "cda-core"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_decode.rs",
       "function": "EcuManager::map_dop_from_uds",
       "line": 967,
@@ -365,7 +365,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "parse_json_to_f64",
-      "line": 378,
+      "line": 377,
       "cyclomatic": 15.0,
       "coverage": 54.54545454545454,
       "crap": 36.130728775356886,
@@ -428,10 +428,10 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
       "function": "EcuManager::map_table_struct_to_uds",
-      "line": 694,
+      "line": 719,
       "cyclomatic": 20.0,
-      "coverage": 69.0,
-      "crap": 31.916400000000007,
+      "coverage": 69.6078431372549,
+      "crap": 31.229089867396404,
       "crate": "cda-core"
     },
     {
@@ -464,7 +464,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/schema.rs",
       "function": "schema_find_recursive",
-      "line": 67,
+      "line": 191,
       "cyclomatic": 5.0,
       "coverage": 0.0,
       "crap": 30.0,
@@ -474,15 +474,6 @@
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_decode.rs",
       "function": "map_param_reserved_from_uds",
       "line": 1818,
-      "cyclomatic": 5.0,
-      "coverage": 0.0,
-      "crap": 30.0,
-      "crate": "cda-core"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/schema.rs",
-      "function": "ecu_datatype_to_jsontype",
-      "line": 638,
       "cyclomatic": 5.0,
       "coverage": 0.0,
       "crap": 30.0,
@@ -500,7 +491,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/lib.rs",
       "function": "UdsManager::send_by_sid",
-      "line": 362,
+      "line": 363,
       "cyclomatic": 5.0,
       "coverage": 0.0,
       "crap": 30.0,
@@ -518,7 +509,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/modes.rs",
       "function": "handle_mode_get_work",
-      "line": 286,
+      "line": 289,
       "cyclomatic": 5.0,
       "coverage": 0.0,
       "crap": 30.0,
@@ -561,15 +552,6 @@
       "crate": "cda-core"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
-      "function": "EcuManager::map_param_value_to_uds",
-      "line": 220,
-      "cyclomatic": 21.0,
-      "coverage": 74.72527472527473,
-      "crap": 28.120293907276157,
-      "crate": "cda-core"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/data_transfer.rs",
       "function": "UdsManager::ecu_flash_transfer_exit",
       "line": 313,
@@ -577,6 +559,15 @@
       "coverage": 15.384615384615385,
       "crap": 27.809740555302685,
       "crate": "cda-comm-uds"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
+      "function": "EcuManager::map_param_to_uds",
+      "line": 179,
+      "cyclomatic": 14.0,
+      "coverage": 58.97435897435898,
+      "crap": 27.533876161095094,
+      "crate": "cda-core"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-database/src/datatypes/diag_coded_type.rs",
@@ -588,9 +579,18 @@
       "crate": "cda-database"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
+      "function": "EcuManager::map_param_value_to_uds",
+      "line": 231,
+      "cyclomatic": 21.0,
+      "coverage": 75.78947368421053,
+      "crap": 27.258226563639003,
+      "crate": "cda-core"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/diagservices.rs",
       "function": "DiagServiceResponseStruct::map_data",
-      "line": 277,
+      "line": 288,
       "cyclomatic": 23.0,
       "coverage": 80.0,
       "crap": 27.232,
@@ -644,19 +644,10 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "compu_convert",
-      "line": 489,
+      "line": 488,
       "cyclomatic": 9.0,
       "coverage": 44.44444444444444,
       "crap": 22.888888888888893,
-      "crate": "cda-core"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_decode.rs",
-      "function": "map_param_coded_const_from_uds",
-      "line": 1857,
-      "cyclomatic": 15.0,
-      "coverage": 67.56756756756756,
-      "crap": 22.675754644344856,
       "crate": "cda-core"
     },
     {
@@ -705,6 +696,15 @@
       "crate": "cda-sovd"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_decode.rs",
+      "function": "map_param_coded_const_from_uds",
+      "line": 1857,
+      "cyclomatic": 15.0,
+      "coverage": 69.62025316455697,
+      "crap": 21.308628729167467,
+      "crate": "cda-core"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/recovery.rs",
       "function": "rollback_partial_commit",
       "line": 149,
@@ -712,15 +712,6 @@
       "coverage": 56.00000000000001,
       "crap": 21.307263999999996,
       "crate": "cda-storage"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
-      "function": "EcuManager::map_table_key_to_uds",
-      "line": 617,
-      "cyclomatic": 14.0,
-      "coverage": 66.66666666666666,
-      "crap": 21.25925925925927,
-      "crate": "cda-core"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/genericservice.rs",
@@ -742,17 +733,17 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
-      "function": "EcuManager::map_reserved_param_to_uds",
-      "line": 398,
-      "cyclomatic": 4.0,
-      "coverage": 0.0,
-      "crap": 20.0,
+      "function": "EcuManager::map_table_key_to_uds",
+      "line": 640,
+      "cyclomatic": 14.0,
+      "coverage": 67.6923076923077,
+      "crap": 20.609580336822937,
       "crate": "cda-core"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/schema.rs",
-      "function": "normal_dop_to_schema",
-      "line": 343,
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
+      "function": "EcuManager::map_reserved_param_to_uds",
+      "line": 415,
       "cyclomatic": 4.0,
       "coverage": 0.0,
       "crap": 20.0,
@@ -761,7 +752,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/schema.rs",
       "function": "map_dynamic_length_field_to_schema",
-      "line": 526,
+      "line": 553,
       "cyclomatic": 4.0,
       "coverage": 0.0,
       "crap": 20.0,
@@ -770,7 +761,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/schema.rs",
       "function": "map_dop_field_to_schema",
-      "line": 567,
+      "line": 594,
       "cyclomatic": 4.0,
       "coverage": 0.0,
       "crap": 20.0,
@@ -779,7 +770,16 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/schema.rs",
       "function": "map_mux_to_schema",
-      "line": 607,
+      "line": 634,
+      "cyclomatic": 4.0,
+      "coverage": 0.0,
+      "crap": 20.0,
+      "crate": "cda-core"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/schema.rs",
+      "function": "ecu_datatype_to_jsontype",
+      "line": 665,
       "cyclomatic": 4.0,
       "coverage": 0.0,
       "crap": 20.0,
@@ -806,7 +806,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/lib.rs",
       "function": "UdsManager::reset_ecu_states",
-      "line": 259,
+      "line": 260,
       "cyclomatic": 4.0,
       "coverage": 0.0,
       "crap": 20.0,
@@ -815,7 +815,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/lib.rs",
       "function": "UdsManager::send_by_sid_and_name",
-      "line": 422,
+      "line": 423,
       "cyclomatic": 4.0,
       "coverage": 0.0,
       "crap": 20.0,
@@ -860,7 +860,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
       "function": "flash_transfer::get",
-      "line": 455,
+      "line": 464,
       "cyclomatic": 4.0,
       "coverage": 0.0,
       "crap": 20.0,
@@ -930,15 +930,6 @@
       "crate": "cda-storage"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/data.rs",
-      "function": "diag_service::functional_data_request",
-      "line": 264,
-      "cyclomatic": 15.0,
-      "coverage": 75.24752475247524,
-      "crap": 18.412230988808126,
-      "crate": "cda-sovd"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/functional_group.rs",
       "function": "UdsManager::send_functional_to_gateway",
       "line": 45,
@@ -948,21 +939,21 @@
       "crate": "cda-comm-uds"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
-      "function": "diag_service::post",
-      "line": 403,
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
+      "function": "security::put",
+      "line": 453,
       "cyclomatic": 17.0,
-      "coverage": 83.62068965517241,
-      "crap": 18.269944314035016,
+      "coverage": 83.9622641509434,
+      "crap": 18.192139316348396,
       "crate": "cda-sovd"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
-      "function": "security::put",
-      "line": 450,
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
+      "function": "diag_service::post",
+      "line": 415,
       "cyclomatic": 17.0,
-      "coverage": 84.11214953271028,
-      "crap": 18.159026254588614,
+      "coverage": 84.42622950819673,
+      "crap": 18.091639278177468,
       "crate": "cda-sovd"
     },
     {
@@ -982,6 +973,15 @@
       "coverage": 86.3013698630137,
       "crap": 17.74289812527473,
       "crate": "cda-plugin-topology"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/data.rs",
+      "function": "diag_service::functional_data_request",
+      "line": 273,
+      "cyclomatic": 15.0,
+      "coverage": 77.06422018348624,
+      "crap": 17.714707547089677,
+      "crate": "cda-sovd"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/service_lookup.rs",
@@ -1004,7 +1004,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/dtc.rs",
       "function": "UdsManager::ecu_dtc_by_mask_with_services",
-      "line": 508,
+      "line": 521,
       "cyclomatic": 16.0,
       "coverage": 82.35294117647058,
       "crap": 17.406879706900064,
@@ -1085,7 +1085,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/dtc.rs",
       "function": "sae_to_dtc_code",
-      "line": 121,
+      "line": 122,
       "cyclomatic": 16.0,
       "coverage": 91.11111111111111,
       "crap": 16.179796982167353,
@@ -1103,16 +1103,16 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::id::delete",
-      "line": 1871,
+      "line": 1928,
       "cyclomatic": 16.0,
-      "coverage": 95.40229885057471,
-      "crap": 16.0248806763219,
+      "coverage": 95.6043956043956,
+      "crap": 16.02174181331288,
       "crate": "cda-sovd"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/lib.rs",
       "function": "setup_tracing",
-      "line": 740,
+      "line": 743,
       "cyclomatic": 9.0,
       "coverage": 56.00000000000001,
       "crap": 15.899903999999998,
@@ -1146,21 +1146,21 @@
       "crate": "cda-comm-doip"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
-      "function": "EcuManager::map_phys_const_param_to_uds",
-      "line": 428,
-      "cyclomatic": 14.0,
-      "coverage": 81.13207547169812,
-      "crap": 15.31652303579465,
-      "crate": "cda-core"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel.rs",
       "function": "DiagDataValue::new",
       "line": 61,
       "cyclomatic": 13.0,
       "coverage": 76.47058823529412,
       "crap": 15.201506208019541,
+      "crate": "cda-core"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
+      "function": "EcuManager::map_phys_const_param_to_uds",
+      "line": 445,
+      "cyclomatic": 14.0,
+      "coverage": 82.45614035087719,
+      "crap": 15.05835533740476,
       "crate": "cda-core"
     },
     {
@@ -1229,10 +1229,10 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/dtc.rs",
       "function": "UdsManager::map_snapshots",
-      "line": 369,
+      "line": 380,
       "cyclomatic": 13.0,
-      "coverage": 79.22077922077922,
-      "crap": 14.516262789327387,
+      "coverage": 79.74683544303798,
+      "crap": 14.403994410178505,
       "crate": "cda-comm-uds"
     },
     {
@@ -1281,6 +1281,15 @@
       "crate": "cda-sovd"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/schema.rs",
+      "function": "SchemaDescription::with_binary_encoding",
+      "line": 61,
+      "cyclomatic": 14.0,
+      "coverage": 93.02325581395348,
+      "crap": 14.066560177091326,
+      "crate": "cda-interfaces"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-database/src/storage.rs",
       "function": "seed_if_nonexistent",
       "line": 183,
@@ -1310,7 +1319,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "process_numeric_json_value",
-      "line": 845,
+      "line": 830,
       "cyclomatic": 12.0,
       "coverage": 76.08695652173914,
       "crap": 13.969096737075695,
@@ -1319,7 +1328,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/config/configfile.rs",
       "function": "Configuration::validate_topology",
-      "line": 447,
+      "line": 474,
       "cyclomatic": 8.0,
       "coverage": 55.00000000000001,
       "crap": 13.831999999999997,
@@ -1346,7 +1355,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "decode_numeric_val_from_str",
-      "line": 289,
+      "line": 288,
       "cyclomatic": 12.0,
       "coverage": 78.08219178082192,
       "crap": 13.516190809142017,
@@ -1373,20 +1382,11 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
       "function": "EcuManager::map_mux_to_uds",
-      "line": 510,
+      "line": 531,
       "cyclomatic": 13.0,
-      "coverage": 86.74698795180723,
-      "crap": 13.39339649205036,
+      "coverage": 87.05882352941177,
+      "crap": 13.366275595359252,
       "crate": "cda-core"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
-      "function": "service::executions::handle_sync_post",
-      "line": 1460,
-      "cyclomatic": 9.0,
-      "coverage": 62.264150943396224,
-      "crap": 13.352586363239453,
-      "crate": "cda-sovd"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/override-macros/src/vendor_overridable.rs",
@@ -1409,7 +1409,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "apply_linear_conversion",
-      "line": 89,
+      "line": 88,
       "cyclomatic": 10.0,
       "coverage": 68.08510638297872,
       "crap": 13.250724791231232,
@@ -1418,7 +1418,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "compu_convert_text_table",
-      "line": 636,
+      "line": 635,
       "cyclomatic": 12.0,
       "coverage": 79.54545454545455,
       "crap": 13.232344102178814,
@@ -1431,6 +1431,15 @@
       "cyclomatic": 12.0,
       "coverage": 80.0,
       "crap": 13.152,
+      "crate": "cda-sovd"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
+      "function": "service::executions::handle_sync_post",
+      "line": 1506,
+      "cyclomatic": 9.0,
+      "coverage": 62.96296296296296,
+      "crap": 13.115226337448558,
       "crate": "cda-sovd"
     },
     {
@@ -1452,15 +1461,6 @@
       "crate": "cda-storage"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups.rs",
-      "function": "handle_ecu_response",
-      "line": 380,
-      "cyclomatic": 10.0,
-      "coverage": 68.91891891891892,
-      "crap": 13.002536868497426,
-      "crate": "cda-sovd"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
       "function": "CanDiagGateway::new",
       "line": 155,
@@ -1468,6 +1468,15 @@
       "coverage": 100.0,
       "crap": 13.0,
       "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups.rs",
+      "function": "handle_ecu_response",
+      "line": 380,
+      "cyclomatic": 10.0,
+      "coverage": 69.33333333333334,
+      "crap": 12.884029629629627,
+      "crate": "cda-sovd"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/config.rs",
@@ -1524,24 +1533,6 @@
       "crate": "cda-plugin-topology"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
-      "function": "authentication::response_parameters",
-      "line": 703,
-      "cyclomatic": 8.0,
-      "coverage": 60.0,
-      "crap": 12.096,
-      "crate": "cda-sovd"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
-      "function": "diag_service::delete",
-      "line": 610,
-      "cyclomatic": 12.0,
-      "coverage": 91.35802469135803,
-      "crap": 12.092939761892666,
-      "crate": "cda-sovd"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-plugin-runtime-update/src/operations/apply.rs",
       "function": "execute_apply",
       "line": 46,
@@ -1551,12 +1542,21 @@
       "crate": "cda-plugin-runtime-update"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
+      "function": "diag_service::delete",
+      "line": 627,
+      "cyclomatic": 12.0,
+      "coverage": 91.46341463414635,
+      "crap": 12.089580824422164,
+      "crate": "cda-sovd"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::ecu_operation_write_handler_with_activity",
-      "line": 1070,
+      "line": 1077,
       "cyclomatic": 12.0,
-      "coverage": 97.91666666666666,
-      "crap": 12.001302083333334,
+      "coverage": 98.0,
+      "crap": 12.001152,
       "crate": "cda-sovd"
     },
     {
@@ -1715,7 +1715,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
       "function": "diag_service::executions::get",
-      "line": 332,
+      "line": 344,
       "cyclomatic": 3.0,
       "coverage": 0.0,
       "crap": 12.0,
@@ -1733,7 +1733,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "get",
-      "line": 47,
+      "line": 49,
       "cyclomatic": 3.0,
       "coverage": 0.0,
       "crap": 12.0,
@@ -1742,7 +1742,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::get_subschema",
-      "line": 1695,
+      "line": 1746,
       "cyclomatic": 3.0,
       "coverage": 0.0,
       "crap": 12.0,
@@ -1857,6 +1857,15 @@
       "crate": "cda-plugin-topology"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
+      "function": "authentication::response_parameters",
+      "line": 705,
+      "cyclomatic": 8.0,
+      "coverage": 61.904761904761905,
+      "crap": 11.538278803584925,
+      "crate": "cda-sovd"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/connections.rs",
       "function": "handle_gateway_connection",
       "line": 135,
@@ -1877,7 +1886,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/config/configfile.rs",
       "function": "ServerTransport::validate_sanity",
-      "line": 200,
+      "line": 225,
       "cyclomatic": 10.0,
       "coverage": 77.08333333333334,
       "crap": 11.203522858796294,
@@ -1886,7 +1895,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups.rs",
       "function": "map_to_json",
-      "line": 464,
+      "line": 465,
       "cyclomatic": 4.0,
       "coverage": 23.52941176470588,
       "crap": 11.154895176063507,
@@ -1895,10 +1904,10 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "authentication::execute_put",
-      "line": 789,
+      "line": 794,
       "cyclomatic": 11.0,
-      "coverage": 95.91836734693877,
-      "crap": 11.00822786424024,
+      "coverage": 96.0,
+      "crap": 11.007744,
       "crate": "cda-sovd"
     },
     {
@@ -1940,7 +1949,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/dtc.rs",
       "function": "UdsManager::delete_dtcs",
-      "line": 704,
+      "line": 720,
       "cyclomatic": 11.0,
       "coverage": 100.0,
       "crap": 11.0,
@@ -1954,15 +1963,6 @@
       "coverage": 100.0,
       "crap": 11.0,
       "crate": "opensovd-cda"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
-      "function": "request_download::put",
-      "line": 180,
-      "cyclomatic": 7.0,
-      "coverage": 56.9620253164557,
-      "crap": 10.906173750960876,
-      "crate": "cda-sovd"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-transport-router/src/lib.rs",
@@ -1983,6 +1983,15 @@
       "crate": "cda-sovd"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/variant.rs",
+      "function": "UdsManager::gather_or_mark_unreachable",
+      "line": 384,
+      "cyclomatic": 8.0,
+      "coverage": 65.21739130434783,
+      "crap": 10.693186488041423,
+      "crate": "cda-comm-uds"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel.rs",
       "function": "DiagDataValue::from_number",
       "line": 89,
@@ -1994,7 +2003,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "extract_diag_data_container",
-      "line": 698,
+      "line": 697,
       "cyclomatic": 10.0,
       "coverage": 81.3953488372093,
       "crap": 10.643968455607682,
@@ -2010,13 +2019,13 @@
       "crate": "cda-database"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
-      "function": "EcuManager::map_param_length_key_to_uds",
-      "line": 350,
-      "cyclomatic": 10.0,
-      "coverage": 83.33333333333334,
-      "crap": 10.462962962962962,
-      "crate": "cda-core"
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
+      "function": "request_download::put",
+      "line": 187,
+      "cyclomatic": 7.0,
+      "coverage": 58.0246913580247,
+      "crap": 10.623913096656072,
+      "crate": "cda-sovd"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-database/src/storage.rs",
@@ -2026,6 +2035,15 @@
       "coverage": 84.0,
       "crap": 10.409600000000001,
       "crate": "cda-database"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
+      "function": "EcuManager::map_param_length_key_to_uds",
+      "line": 365,
+      "cyclomatic": 10.0,
+      "coverage": 84.0909090909091,
+      "crap": 10.402657776108189,
+      "crate": "cda-core"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/mdd.rs",
@@ -2057,10 +2075,10 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
       "function": "diag_service::id::get",
-      "line": 839,
+      "line": 857,
       "cyclomatic": 10.0,
-      "coverage": 85.55555555555556,
-      "crap": 10.301371742112483,
+      "coverage": 85.86956521739131,
+      "crap": 10.282141242705679,
       "crate": "cda-sovd"
     },
     {
@@ -2075,11 +2093,20 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/dtc.rs",
       "function": "status_value_to_bool",
-      "line": 83,
+      "line": 84,
       "cyclomatic": 10.0,
       "coverage": 89.28571428571429,
       "crap": 10.122995626822158,
       "crate": "cda-comm-uds"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/schema.rs",
+      "function": "SchemaDescription::with_all_binary_encodings",
+      "line": 119,
+      "cyclomatic": 10.0,
+      "coverage": 90.9090909090909,
+      "crap": 10.075131480090159,
+      "crate": "cda-interfaces"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups.rs",
@@ -2138,7 +2165,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/dtc.rs",
       "function": "UdsManager::request_extended_data",
-      "line": 218,
+      "line": 219,
       "cyclomatic": 10.0,
       "coverage": 95.91836734693877,
       "crap": 10.00679988780185,
@@ -2183,7 +2210,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/dtc.rs",
       "function": "decode_dtc_from_str",
-      "line": 190,
+      "line": 191,
       "cyclomatic": 9.0,
       "coverage": 77.77777777777779,
       "crap": 9.888888888888888,
@@ -2237,10 +2264,10 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/dtc.rs",
       "function": "UdsManager::map_extended_data",
-      "line": 278,
+      "line": 283,
       "cyclomatic": 9.0,
-      "coverage": 81.15942028985508,
-      "crap": 9.541711185994904,
+      "coverage": 81.69014084507043,
+      "crap": 9.497210200301192,
       "crate": "cda-comm-uds"
     },
     {
@@ -2264,7 +2291,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "DiagCommType::try_from",
-      "line": 298,
+      "line": 300,
       "cyclomatic": 7.0,
       "coverage": 63.63636363636363,
       "crap": 9.356123215627349,
@@ -2329,18 +2356,9 @@
       "function": "init_webserver",
       "line": 549,
       "cyclomatic": 9.0,
-      "coverage": 86.66666666666667,
-      "crap": 9.192,
+      "coverage": 87.3015873015873,
+      "crap": 9.165856818918044,
       "crate": "opensovd-cda"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/variant.rs",
-      "function": "UdsManager::gather_or_mark_unreachable",
-      "line": 384,
-      "cyclomatic": 8.0,
-      "coverage": 73.91304347826086,
-      "crap": 9.136188049642476,
-      "crate": "cda-comm-uds"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-transport-router/src/lib.rs",
@@ -2354,29 +2372,29 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "remove_descriptions_recursive",
-      "line": 1230,
+      "line": 1288,
       "cyclomatic": 9.0,
       "coverage": 92.85714285714286,
       "crap": 9.029518950437318,
       "crate": "cda-sovd"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel.rs",
-      "function": "DiagDataValue::serialize",
-      "line": 352,
-      "cyclomatic": 9.0,
-      "coverage": 94.73684210526315,
-      "crap": 9.011809301647471,
-      "crate": "cda-core"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu.rs",
       "function": "format_data_response",
-      "line": 351,
+      "line": 358,
       "cyclomatic": 9.0,
-      "coverage": 96.07843137254902,
-      "crap": 9.004884998982291,
+      "coverage": 96.15384615384616,
+      "crap": 9.00460855712335,
       "crate": "cda-sovd"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel.rs",
+      "function": "EncodedDiagDataValue::serialize",
+      "line": 368,
+      "cyclomatic": 9.0,
+      "coverage": 96.29629629629629,
+      "crap": 9.004115226337449,
+      "crate": "cda-core"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-database/src/datatypes/comparam.rs",
@@ -2404,6 +2422,15 @@
       "coverage": 100.0,
       "crap": 9.0,
       "crate": "cda-core"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/variant.rs",
+      "function": "UdsManager::evaluate_duplicate_group",
+      "line": 882,
+      "cyclomatic": 8.0,
+      "coverage": 75.0,
+      "crap": 9.0,
+      "crate": "cda-comm-uds"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/variant.rs",
@@ -2444,20 +2471,11 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/config/configfile.rs",
       "function": "Configuration::validate_sanity",
-      "line": 473,
+      "line": 500,
       "cyclomatic": 9.0,
       "coverage": 100.0,
       "crap": 9.0,
       "crate": "opensovd-cda"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/variant.rs",
-      "function": "UdsManager::evaluate_duplicate_group",
-      "line": 882,
-      "cyclomatic": 8.0,
-      "coverage": 77.77777777777779,
-      "crap": 8.70233196159122,
-      "crate": "cda-comm-uds"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
@@ -2516,7 +2534,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/diagservices.rs",
       "function": "DiagServiceResponseStruct::get_dtcs",
-      "line": 164,
+      "line": 167,
       "cyclomatic": 8.0,
       "coverage": 87.2340425531915,
       "crap": 8.133149687448832,
@@ -2534,7 +2552,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_decode.rs",
       "function": "map_dtc_dop_from_uds",
-      "line": 1944,
+      "line": 1950,
       "cyclomatic": 8.0,
       "coverage": 91.42857142857143,
       "crap": 8.040303206997084,
@@ -2543,7 +2561,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::resolve_operation",
-      "line": 1250,
+      "line": 1270,
       "cyclomatic": 8.0,
       "coverage": 93.54838709677419,
       "crap": 8.01718639857675,
@@ -2552,10 +2570,10 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::id::get",
-      "line": 1772,
+      "line": 1827,
       "cyclomatic": 8.0,
-      "coverage": 96.875,
-      "crap": 8.001953125,
+      "coverage": 96.96969696969697,
+      "crap": 8.001780894342877,
       "crate": "cda-sovd"
     },
     {
@@ -2606,7 +2624,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "json_value_to_uds_data",
-      "line": 763,
+      "line": 762,
       "cyclomatic": 8.0,
       "coverage": 100.0,
       "crap": 8.0,
@@ -2660,7 +2678,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/dtc.rs",
       "function": "UdsManager::ecu_dtc_extended",
-      "line": 643,
+      "line": 656,
       "cyclomatic": 8.0,
       "coverage": 100.0,
       "crap": 8.0,
@@ -2696,7 +2714,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "session::put",
-      "line": 239,
+      "line": 242,
       "cyclomatic": 8.0,
       "coverage": 100.0,
       "crap": 8.0,
@@ -2741,7 +2759,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/lib.rs",
       "function": "UdsManager::stop_variant_detection_listener",
-      "line": 305,
+      "line": 306,
       "cyclomatic": 7.0,
       "coverage": 73.33333333333333,
       "crap": 7.929185185185186,
@@ -2750,7 +2768,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "DiagCommAction::fmt",
-      "line": 527,
+      "line": 529,
       "cyclomatic": 6.0,
       "coverage": 62.5,
       "crap": 7.8984375,
@@ -2784,18 +2802,9 @@
       "crate": "cda-comm-doip"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
-      "function": "encode_coded_const",
-      "line": 1023,
-      "cyclomatic": 7.0,
-      "coverage": 76.19047619047619,
-      "crap": 7.661375661375661,
-      "crate": "cda-core"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "linear_scaled_value_to_bytes",
-      "line": 472,
+      "line": 471,
       "cyclomatic": 6.0,
       "coverage": 64.28571428571429,
       "crap": 7.6399416909620985,
@@ -2826,6 +2835,15 @@
       "cyclomatic": 7.0,
       "coverage": 77.77777777777779,
       "crap": 7.5377229080932775,
+      "crate": "cda-core"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
+      "function": "encode_coded_const",
+      "line": 1060,
+      "cyclomatic": 7.0,
+      "coverage": 78.72340425531915,
+      "crap": 7.471957080800978,
       "crate": "cda-core"
     },
     {
@@ -2912,10 +2930,10 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
       "function": "EcuManager::process_parameter_map",
-      "line": 867,
+      "line": 896,
       "cyclomatic": 7.0,
-      "coverage": 84.84848484848484,
-      "crap": 7.170437153908229,
+      "coverage": 85.71428571428571,
+      "crap": 7.142857142857143,
       "crate": "cda-core"
     },
     {
@@ -2948,7 +2966,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
       "function": "try_parse_str_as_json_number",
-      "line": 954,
+      "line": 991,
       "cyclomatic": 5.0,
       "coverage": 56.25,
       "crap": 7.093505859375,
@@ -3128,7 +3146,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "EcuState::into_sovd",
-      "line": 94,
+      "line": 95,
       "cyclomatic": 7.0,
       "coverage": 100.0,
       "crap": 7.0,
@@ -3164,7 +3182,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "compu_convert_linear",
-      "line": 524,
+      "line": 523,
       "cyclomatic": 6.0,
       "coverage": 70.0,
       "crap": 6.972,
@@ -3173,7 +3191,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
       "function": "flash_transfer::DataTransferStatus::into_sovd",
-      "line": 613,
+      "line": 622,
       "cyclomatic": 5.0,
       "coverage": 57.14285714285714,
       "crap": 6.96793002915452,
@@ -3198,18 +3216,9 @@
       "crate": "cda-plugin-communication-management"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
-      "function": "launch_webserver",
-      "line": 95,
-      "cyclomatic": 6.0,
-      "coverage": 72.22222222222221,
-      "crap": 6.771604938271606,
-      "crate": "cda-sovd"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/config/configfile.rs",
       "function": "Configuration::validate_transport_overrides",
-      "line": 407,
+      "line": 434,
       "cyclomatic": 5.0,
       "coverage": 58.82352941176471,
       "crap": 6.745369428048035,
@@ -3218,11 +3227,20 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "to_numeric_base_type",
-      "line": 1025,
+      "line": 1010,
       "cyclomatic": 6.0,
       "coverage": 72.72727272727273,
       "crap": 6.730277986476334,
       "crate": "cda-core"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
+      "function": "launch_webserver",
+      "line": 95,
+      "cyclomatic": 6.0,
+      "coverage": 72.97297297297297,
+      "crap": 6.7107180226245235,
+      "crate": "cda-sovd"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/mdd.rs",
@@ -3279,15 +3297,6 @@
       "crate": "cda-plugin-communication-management"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
-      "function": "sovd_to_func_class_service_exec",
-      "line": 73,
-      "cyclomatic": 6.0,
-      "coverage": 75.0,
-      "crap": 6.5625,
-      "crate": "cda-sovd"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-tracing/src/subscriber.rs",
       "function": "CdaFormatter::style_for",
       "line": 188,
@@ -3295,6 +3304,15 @@
       "coverage": 75.0,
       "crap": 6.5625,
       "crate": "cda-tracing"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
+      "function": "sovd_to_func_class_service_exec",
+      "line": 77,
+      "cyclomatic": 6.0,
+      "coverage": 75.55555555555556,
+      "crap": 6.525827160493828,
+      "crate": "cda-sovd"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/connection_receiver.rs",
@@ -3316,17 +3334,8 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
-      "function": "get_payload_data",
-      "line": 1151,
-      "cyclomatic": 6.0,
-      "coverage": 78.94736842105263,
-      "crap": 6.33590902463916,
-      "crate": "cda-sovd"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "static_data::get",
-      "line": 1347,
+      "line": 1405,
       "cyclomatic": 4.0,
       "coverage": 47.368421052631575,
       "crap": 6.332701559994169,
@@ -3353,7 +3362,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/data.rs",
       "function": "diag_service::get_sdgs_handler",
-      "line": 330,
+      "line": 331,
       "cyclomatic": 6.0,
       "coverage": 81.13207547169812,
       "crap": 6.241810353513303,
@@ -3387,6 +3396,15 @@
       "crate": "cda-comm-uds"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
+      "function": "get_payload_data",
+      "line": 1205,
+      "cyclomatic": 6.0,
+      "coverage": 82.6086956521739,
+      "crap": 6.189364674940413,
+      "crate": "cda-sovd"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/authentication.rs",
       "function": "EcuManager::decode_authentication_return_value",
       "line": 47,
@@ -3407,7 +3425,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/faults.rs",
       "function": "id::delete",
-      "line": 387,
+      "line": 389,
       "cyclomatic": 6.0,
       "coverage": 82.85714285714286,
       "crap": 6.18136443148688,
@@ -3423,15 +3441,6 @@
       "crate": "cda-core"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu.rs",
-      "function": "data_request",
-      "line": 417,
-      "cyclomatic": 6.0,
-      "coverage": 84.0909090909091,
-      "crap": 6.1449567993989485,
-      "crate": "cda-sovd"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "comparams::executions::handler_write",
       "line": 248,
@@ -3441,13 +3450,13 @@
       "crate": "cda-sovd"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
-      "function": "resolve_required_param",
-      "line": 922,
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu.rs",
+      "function": "data_request",
+      "line": 429,
       "cyclomatic": 6.0,
-      "coverage": 85.0,
-      "crap": 6.1215,
-      "crate": "cda-core"
+      "coverage": 85.1063829787234,
+      "crap": 6.118933184361847,
+      "crate": "cda-sovd"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/transport.rs",
@@ -3461,7 +3470,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
       "function": "flash_transfer::post",
-      "line": 340,
+      "line": 349,
       "cyclomatic": 6.0,
       "coverage": 85.18518518518519,
       "crap": 6.11705532693187,
@@ -3479,7 +3488,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "authentication::get",
-      "line": 649,
+      "line": 651,
       "cyclomatic": 6.0,
       "coverage": 86.95652173913044,
       "crap": 6.079888222240487,
@@ -3502,6 +3511,15 @@
       "coverage": 87.5,
       "crap": 6.0703125,
       "crate": "cda-storage"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
+      "function": "resolve_required_param",
+      "line": 953,
+      "cyclomatic": 6.0,
+      "coverage": 87.5,
+      "crap": 6.0703125,
+      "crate": "cda-core"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/util.rs",
@@ -3569,10 +3587,10 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "handle_mode_change",
-      "line": 139,
+      "line": 141,
       "cyclomatic": 6.0,
-      "coverage": 95.0,
-      "crap": 6.0045,
+      "coverage": 95.1219512195122,
+      "crap": 6.004178697349139,
       "crate": "cda-sovd"
     },
     {
@@ -3668,7 +3686,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "DiagCommType::service_prefixes",
-      "line": 374,
+      "line": 376,
       "cyclomatic": 6.0,
       "coverage": 100.0,
       "crap": 6.0,
@@ -3677,7 +3695,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/diagservices.rs",
       "function": "DiagServiceJsonResponse::is_empty",
-      "line": 116,
+      "line": 123,
       "cyclomatic": 2.0,
       "coverage": 0.0,
       "crap": 6.0,
@@ -3731,7 +3749,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
       "function": "encode_raw_payload",
-      "line": 990,
+      "line": 1027,
       "cyclomatic": 6.0,
       "coverage": 100.0,
       "crap": 6.0,
@@ -3830,7 +3848,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/lib.rs",
       "function": "UdsManager::schema_for_request",
-      "line": 507,
+      "line": 509,
       "cyclomatic": 2.0,
       "coverage": 0.0,
       "crap": 6.0,
@@ -3839,7 +3857,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/lib.rs",
       "function": "UdsManager::schema_for_responses",
-      "line": 516,
+      "line": 518,
       "cyclomatic": 2.0,
       "coverage": 0.0,
       "crap": 6.0,
@@ -3848,7 +3866,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/lib.rs",
       "function": "UdsManager::schema_for_fg_request",
-      "line": 525,
+      "line": 527,
       "cyclomatic": 2.0,
       "coverage": 0.0,
       "crap": 6.0,
@@ -4028,7 +4046,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/modes.rs",
       "function": "handle_mode_get",
-      "line": 256,
+      "line": 259,
       "cyclomatic": 2.0,
       "coverage": 0.0,
       "crap": 6.0,
@@ -4082,7 +4100,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/data.rs",
       "function": "diag_service::put",
-      "line": 453,
+      "line": 456,
       "cyclomatic": 2.0,
       "coverage": 0.0,
       "crap": 6.0,
@@ -4100,7 +4118,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/configurations.rs",
       "function": "diag_service::put",
-      "line": 148,
+      "line": 149,
       "cyclomatic": 2.0,
       "coverage": 0.0,
       "crap": 6.0,
@@ -4118,7 +4136,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "value_to_schema",
-      "line": 1212,
+      "line": 1270,
       "cyclomatic": 2.0,
       "coverage": 0.0,
       "crap": 6.0,
@@ -4172,7 +4190,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/config/configfile.rs",
       "function": "ServerTransport::address",
-      "line": 263,
+      "line": 290,
       "cyclomatic": 2.0,
       "coverage": 0.0,
       "crap": 6.0,
@@ -4181,7 +4199,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/config/configfile.rs",
       "function": "ServerTransport::port",
-      "line": 273,
+      "line": 300,
       "cyclomatic": 2.0,
       "coverage": 0.0,
       "crap": 6.0,
@@ -4287,6 +4305,15 @@
       "crate": "cda-interfaces"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/lib.rs",
+      "function": "read_ecu_responses",
+      "line": 1521,
+      "cyclomatic": 4.0,
+      "coverage": 51.92307692307693,
+      "crap": 5.77799271734183,
+      "crate": "cda-comm-doip"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/apps/sovd2uds/bulk_data/flash_files.rs",
       "function": "get",
       "line": 129,
@@ -4323,15 +4350,6 @@
       "crate": "cda-interfaces"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
-      "function": "service::executions::validate_and_parse_write_request",
-      "line": 1025,
-      "cyclomatic": 5.0,
-      "coverage": 72.22222222222221,
-      "crap": 5.535836762688615,
-      "crate": "cda-sovd"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_decode.rs",
       "function": "EcuManager::convert_service_14_response",
       "line": 355,
@@ -4366,6 +4384,15 @@
       "coverage": 75.0,
       "crap": 5.390625,
       "crate": "cda-database"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
+      "function": "service::executions::validate_and_parse_write_request",
+      "line": 1030,
+      "cyclomatic": 5.0,
+      "coverage": 75.0,
+      "crap": 5.390625,
+      "crate": "cda-sovd"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
@@ -4415,7 +4442,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "validate_data_length",
-      "line": 979,
+      "line": 964,
       "cyclomatic": 4.0,
       "coverage": 57.89473684210527,
       "crap": 5.194343198717014,
@@ -4424,7 +4451,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "compu_convert_scale_linear",
-      "line": 559,
+      "line": 558,
       "cyclomatic": 5.0,
       "coverage": 80.7017543859649,
       "crap": 5.179677417612977,
@@ -4442,7 +4469,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
       "function": "diag_service::check_if_async",
-      "line": 740,
+      "line": 758,
       "cyclomatic": 5.0,
       "coverage": 82.14285714285714,
       "crap": 5.142356049562682,
@@ -4514,7 +4541,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/dtc.rs",
       "function": "UdsManager::ecu_dtc_by_mask",
-      "line": 600,
+      "line": 613,
       "cyclomatic": 5.0,
       "coverage": 87.5,
       "crap": 5.048828125,
@@ -4550,7 +4577,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "compu_lookup_linear",
-      "line": 223,
+      "line": 222,
       "cyclomatic": 5.0,
       "coverage": 89.65517241379311,
       "crap": 5.027676411496986,
@@ -4732,17 +4759,17 @@
       "function": "id::get",
       "line": 329,
       "cyclomatic": 5.0,
-      "coverage": 97.05882352941177,
-      "crap": 5.00063606757582,
+      "coverage": 97.22222222222221,
+      "crap": 5.000535836762689,
       "crate": "cda-sovd"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
       "function": "diag_service::id::send_request_results",
-      "line": 968,
+      "line": 992,
       "cyclomatic": 5.0,
-      "coverage": 97.5609756097561,
-      "crap": 5.000362734144891,
+      "coverage": 97.5,
+      "crap": 5.000390625,
       "crate": "cda-sovd"
     },
     {
@@ -4820,7 +4847,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/diagservices.rs",
       "function": "UdsPayloadData::fmt",
-      "line": 98,
+      "line": 105,
       "cyclomatic": 5.0,
       "coverage": 100.0,
       "crap": 5.0,
@@ -4847,7 +4874,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "uds_data_to_physical",
-      "line": 45,
+      "line": 44,
       "cyclomatic": 5.0,
       "coverage": 100.0,
       "crap": 5.0,
@@ -4856,7 +4883,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "numeric_json_value_to_byte_vector",
-      "line": 1002,
+      "line": 987,
       "cyclomatic": 5.0,
       "coverage": 100.0,
       "crap": 5.0,
@@ -4910,7 +4937,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/dtc.rs",
       "function": "UdsManager::ecu_dtc_by_mask_for_code",
-      "line": 469,
+      "line": 482,
       "cyclomatic": 5.0,
       "coverage": 100.0,
       "crap": 5.0,
@@ -4964,7 +4991,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "authentication::put",
-      "line": 737,
+      "line": 740,
       "cyclomatic": 5.0,
       "coverage": 100.0,
       "crap": 5.0,
@@ -4973,7 +5000,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::parse_json_response_params",
-      "line": 1346,
+      "line": 1366,
       "cyclomatic": 5.0,
       "coverage": 100.0,
       "crap": 5.0,
@@ -4982,7 +5009,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
       "function": "transferexit::put",
-      "line": 696,
+      "line": 705,
       "cyclomatic": 5.0,
       "coverage": 100.0,
       "crap": 5.0,
@@ -5000,7 +5027,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/config/configfile.rs",
       "function": "Configuration::validate_can_mappings",
-      "line": 366,
+      "line": 393,
       "cyclomatic": 5.0,
       "coverage": 100.0,
       "crap": 5.0,
@@ -5072,7 +5099,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/config/configfile.rs",
       "function": "Configuration::validate_transport_presence",
-      "line": 335,
+      "line": 362,
       "cyclomatic": 4.0,
       "coverage": 68.42105263157895,
       "crap": 4.5038635369587405,
@@ -5088,15 +5115,6 @@
       "crate": "cda-sovd"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/lib.rs",
-      "function": "read_ecu_responses",
-      "line": 1521,
-      "cyclomatic": 4.0,
-      "coverage": 71.15384615384616,
-      "crap": 4.384046426945835,
-      "crate": "cda-comm-doip"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/locks/handlers/common.rs",
       "function": "post_handler",
       "line": 349,
@@ -5108,7 +5126,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
       "function": "flash_transfer::id::get",
-      "line": 523,
+      "line": 532,
       "cyclomatic": 4.0,
       "coverage": 74.19354838709677,
       "crap": 4.274982377228023,
@@ -5126,16 +5144,16 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu.rs",
       "function": "execute_uds_data_request",
-      "line": 309,
+      "line": 315,
       "cyclomatic": 4.0,
-      "coverage": 75.0,
-      "crap": 4.25,
+      "coverage": 75.75757575757575,
+      "crap": 4.22795447588836,
       "crate": "cda-sovd"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "handle_mode_get",
-      "line": 191,
+      "line": 194,
       "cyclomatic": 4.0,
       "coverage": 76.0,
       "crap": 4.221184,
@@ -5216,7 +5234,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "get_octet_stream_payload",
-      "line": 1177,
+      "line": 1235,
       "cyclomatic": 4.0,
       "coverage": 82.14285714285714,
       "crap": 4.091107871720117,
@@ -5243,7 +5261,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "DiagCommAction::from",
-      "line": 266,
+      "line": 268,
       "cyclomatic": 4.0,
       "coverage": 83.33333333333334,
       "crap": 4.0740740740740735,
@@ -5261,7 +5279,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::detect_variant",
-      "line": 528,
+      "line": 531,
       "cyclomatic": 4.0,
       "coverage": 83.33333333333334,
       "crap": 4.0740740740740735,
@@ -5313,15 +5331,6 @@
       "crate": "cda-core"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
-      "function": "service::executions::id::get_operations_response",
-      "line": 1729,
-      "cyclomatic": 4.0,
-      "coverage": 87.09677419354838,
-      "crap": 4.034372797153503,
-      "crate": "cda-sovd"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/locks/handlers/vehicle.rs",
       "function": "post",
       "line": 126,
@@ -5367,6 +5376,15 @@
       "crate": "cda-sovd"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
+      "function": "service::executions::id::get_operations_response",
+      "line": 1781,
+      "cyclomatic": 4.0,
+      "coverage": 87.87878787878788,
+      "crap": 4.028494309486045,
+      "crate": "cda-sovd"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-database/src/datatypes/diag_coded_type.rs",
       "function": "MinMaxLengthType::new",
       "line": 1243,
@@ -5396,7 +5414,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "components_route",
-      "line": 861,
+      "line": 915,
       "cyclomatic": 4.0,
       "coverage": 88.23529411764706,
       "crap": 4.026053327905557,
@@ -5432,7 +5450,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::send_start_request",
-      "line": 1293,
+      "line": 1313,
       "cyclomatic": 4.0,
       "coverage": 89.28571428571429,
       "crap": 4.019679300291545,
@@ -5466,15 +5484,6 @@
       "crate": "cda-core"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
-      "function": "service::executions::handle_async_post",
-      "line": 1422,
-      "cyclomatic": 4.0,
-      "coverage": 90.32258064516128,
-      "crap": 4.014501023799134,
-      "crate": "cda-sovd"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/ecumanager.rs",
       "function": "EcuManager::restore_persisted_variant",
       "line": 917,
@@ -5491,6 +5500,15 @@
       "coverage": 90.47619047619048,
       "crap": 4.013821401576504,
       "crate": "cda-comm-doip"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
+      "function": "service::executions::handle_async_post",
+      "line": 1466,
+      "cyclomatic": 4.0,
+      "coverage": 90.625,
+      "crap": 4.01318359375,
+      "crate": "cda-sovd"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/dtc.rs",
@@ -5540,7 +5558,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "compu_lookup_scale_linear",
-      "line": 256,
+      "line": 255,
       "cyclomatic": 4.0,
       "coverage": 95.0,
       "crap": 4.002,
@@ -5711,7 +5729,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "validate_bit_len_signed",
-      "line": 1063,
+      "line": 1048,
       "cyclomatic": 4.0,
       "coverage": 100.0,
       "crap": 4.0,
@@ -5828,7 +5846,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/lib.rs",
       "function": "request_permits",
-      "line": 57,
+      "line": 58,
       "cyclomatic": 4.0,
       "coverage": 100.0,
       "crap": 4.0,
@@ -5873,7 +5891,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "remove_stale_unix_socket",
-      "line": 167,
+      "line": 174,
       "cyclomatic": 4.0,
       "coverage": 100.0,
       "crap": 4.0,
@@ -6008,7 +6026,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/data.rs",
       "function": "diag_service::docs_endpoint::get",
-      "line": 526,
+      "line": 531,
       "cyclomatic": 4.0,
       "coverage": 100.0,
       "crap": 4.0,
@@ -6026,7 +6044,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/configurations.rs",
       "function": "diag_service::docs_endpoint::get",
-      "line": 222,
+      "line": 225,
       "cyclomatic": 4.0,
       "coverage": 100.0,
       "crap": 4.0,
@@ -6035,7 +6053,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "guard_execution",
-      "line": 491,
+      "line": 545,
       "cyclomatic": 4.0,
       "coverage": 100.0,
       "crap": 4.0,
@@ -6161,7 +6179,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/diagservices.rs",
       "function": "DiagServiceResponseStruct::get_mapped_payload",
-      "line": 269,
+      "line": 280,
       "cyclomatic": 3.0,
       "coverage": 57.14285714285714,
       "crap": 3.7084548104956268,
@@ -6179,7 +6197,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "compu_lookup_text_table",
-      "line": 278,
+      "line": 277,
       "cyclomatic": 3.0,
       "coverage": 60.0,
       "crap": 3.576,
@@ -6276,22 +6294,22 @@
       "crate": "cda-comm-can"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/diagservices.rs",
-      "function": "DiagServiceResponseStruct::serialize_to_json",
-      "line": 227,
-      "cyclomatic": 3.0,
-      "coverage": 70.27027027027027,
-      "crap": 3.23649142202831,
-      "crate": "cda-core"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
       "function": "flash_transfer::id::delete",
-      "line": 578,
+      "line": 587,
       "cyclomatic": 3.0,
       "coverage": 73.68421052631578,
       "crap": 3.16401807843709,
       "crate": "cda-sovd"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/diagservices.rs",
+      "function": "DiagServiceResponseStruct::serialize_to_json",
+      "line": 231,
+      "cyclomatic": 3.0,
+      "coverage": 75.0,
+      "crap": 3.140625,
+      "crate": "cda-core"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/background.rs",
@@ -6431,7 +6449,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "rewrite_request_uri",
-      "line": 318,
+      "line": 325,
       "cyclomatic": 3.0,
       "coverage": 82.35294117647058,
       "crap": 3.0494606146957053,
@@ -6440,7 +6458,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "acquire_and_reserve_execution",
-      "line": 576,
+      "line": 630,
       "cyclomatic": 3.0,
       "coverage": 82.75862068965517,
       "crap": 3.0461273524949775,
@@ -6557,7 +6575,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/lib.rs",
       "function": "ApplicationState::join",
-      "line": 698,
+      "line": 701,
       "cyclomatic": 3.0,
       "coverage": 85.71428571428571,
       "crap": 3.0262390670553936,
@@ -6615,15 +6633,6 @@
       "cyclomatic": 3.0,
       "coverage": 88.23529411764706,
       "crap": 3.0146549969468754,
-      "crate": "cda-sovd"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/data.rs",
-      "function": "diag_service::get",
-      "line": 392,
-      "cyclomatic": 3.0,
-      "coverage": 88.63636363636364,
-      "crap": 3.013206705484598,
       "crate": "cda-sovd"
     },
     {
@@ -6690,6 +6699,15 @@
       "crate": "cda-database"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/data.rs",
+      "function": "diag_service::get",
+      "line": 393,
+      "cyclomatic": 3.0,
+      "coverage": 89.13043478260869,
+      "crap": 3.0115579025232186,
+      "crate": "cda-sovd"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/vir_vam.rs",
       "function": "get_vehicle_identification",
       "line": 52,
@@ -6746,7 +6764,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "remove_reserved_execution",
-      "line": 626,
+      "line": 680,
       "cyclomatic": 3.0,
       "coverage": 92.3076923076923,
       "crap": 3.0040964952207556,
@@ -6807,15 +6825,6 @@
       "crate": "cda-comm-uds"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
-      "function": "EcuManager::map_struct_to_uds",
-      "line": 825,
-      "cyclomatic": 3.0,
-      "coverage": 94.28571428571428,
-      "crap": 3.001679300291545,
-      "crate": "cda-core"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_decode.rs",
       "function": "EcuManager::map_param_length_key_from_uds",
       "line": 560,
@@ -6843,6 +6852,15 @@
       "crate": "cda-sovd"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
+      "function": "EcuManager::map_struct_to_uds",
+      "line": 852,
+      "cyclomatic": 3.0,
+      "coverage": 94.5945945945946,
+      "crap": 3.001421436045249,
+      "crate": "cda-core"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/config.rs",
       "function": "CanProbeConfig::payload_bytes",
       "line": 120,
@@ -6863,7 +6881,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::get_by_id_response",
-      "line": 1388,
+      "line": 1432,
       "cyclomatic": 3.0,
       "coverage": 96.0,
       "crap": 3.000576,
@@ -6927,6 +6945,33 @@
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/authentication.rs",
       "function": "AuthenticationStatus::name",
       "line": 115,
+      "cyclomatic": 3.0,
+      "coverage": 100.0,
+      "crap": 3.0,
+      "crate": "cda-interfaces"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/binary_encoding.rs",
+      "function": "BinaryEncoding::json_schema_format",
+      "line": 59,
+      "cyclomatic": 3.0,
+      "coverage": 100.0,
+      "crap": 3.0,
+      "crate": "cda-interfaces"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/binary_encoding.rs",
+      "function": "BinaryEncoding::encode",
+      "line": 68,
+      "cyclomatic": 3.0,
+      "coverage": 100.0,
+      "crap": 3.0,
+      "crate": "cda-interfaces"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/binary_encoding.rs",
+      "function": "BinaryEncoding::decode",
+      "line": 89,
       "cyclomatic": 3.0,
       "coverage": 100.0,
       "crap": 3.0,
@@ -7169,7 +7214,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
       "function": "EcuManager::reject_unexpected_keys",
-      "line": 493,
+      "line": 514,
       "cyclomatic": 3.0,
       "coverage": 100.0,
       "crap": 3.0,
@@ -7196,7 +7241,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_decode.rs",
       "function": "create_diag_service_response",
-      "line": 2029,
+      "line": 2035,
       "cyclomatic": 3.0,
       "coverage": 100.0,
       "crap": 3.0,
@@ -7214,7 +7259,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/diagservices.rs",
       "function": "extract_nrc_from_raw_data",
-      "line": 395,
+      "line": 406,
       "cyclomatic": 3.0,
       "coverage": 100.0,
       "crap": 3.0,
@@ -7223,7 +7268,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "validate_bit_len_unsigned",
-      "line": 1108,
+      "line": 1093,
       "cyclomatic": 3.0,
       "coverage": 100.0,
       "crap": 3.0,
@@ -7529,7 +7574,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/lib.rs",
       "function": "UdsManager::ecu_topology_entries",
-      "line": 281,
+      "line": 282,
       "cyclomatic": 3.0,
       "coverage": 100.0,
       "crap": 3.0,
@@ -7707,6 +7752,15 @@
       "crate": "cda-sovd"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/binary_encoding.rs",
+      "function": "BinaryEncodingParam::resolve",
+      "line": 52,
+      "cyclomatic": 3.0,
+      "coverage": 100.0,
+      "crap": 3.0,
+      "crate": "cda-sovd"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/locks/policy.rs",
       "function": "Locks::verify_policy_metadata",
       "line": 412,
@@ -7790,7 +7844,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "security::level_from_value",
-      "line": 436,
+      "line": 439,
       "cyclomatic": 3.0,
       "coverage": 100.0,
       "crap": 3.0,
@@ -7817,7 +7871,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "acquire_communication_activity",
-      "line": 154,
+      "line": 155,
       "cyclomatic": 3.0,
       "coverage": 100.0,
       "crap": 3.0,
@@ -8031,6 +8085,15 @@
       "crate": "cda-interfaces"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/binary_encoding.rs",
+      "function": "BinaryEncodingParam::from_request_parts",
+      "line": 77,
+      "cyclomatic": 2.0,
+      "coverage": 56.25,
+      "crap": 2.3349609375,
+      "crate": "cda-sovd"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/datatypes/database_naming_convention.rs",
       "function": "warn_on_non_standard_category",
       "line": 146,
@@ -8051,7 +8114,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "decode_u32_octal_with_optional_prefix",
-      "line": 817,
+      "line": 802,
       "cyclomatic": 2.0,
       "coverage": 61.53846153846154,
       "crap": 2.2275830678197543,
@@ -8060,7 +8123,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "decode_u32_binary_with_optional_prefix",
-      "line": 831,
+      "line": 816,
       "cyclomatic": 2.0,
       "coverage": 61.53846153846154,
       "crap": 2.2275830678197543,
@@ -8177,7 +8240,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/diagservices.rs",
       "function": "DiagServiceResponseStruct::as_nrc",
-      "line": 108,
+      "line": 111,
       "cyclomatic": 2.0,
       "coverage": 78.94736842105263,
       "crap": 2.0373232249599065,
@@ -8186,7 +8249,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
       "function": "diag_service::build_operation_response",
-      "line": 246,
+      "line": 248,
       "cyclomatic": 2.0,
       "coverage": 79.16666666666666,
       "crap": 2.0361689814814814,
@@ -8213,7 +8276,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
       "function": "phys_value_str_to_json",
-      "line": 946,
+      "line": 983,
       "cyclomatic": 2.0,
       "coverage": 80.0,
       "crap": 2.032,
@@ -8301,15 +8364,6 @@
       "crate": "cda-sovd"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
-      "function": "diag_service::build_async_response",
-      "line": 275,
-      "cyclomatic": 2.0,
-      "coverage": 82.35294117647058,
-      "crap": 2.0219824954203136,
-      "crate": "cda-sovd"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/lib.rs",
       "function": "EcuActivityReporter::report_activity_for_address",
       "line": 487,
@@ -8317,6 +8371,15 @@
       "coverage": 83.33333333333334,
       "crap": 2.0185185185185186,
       "crate": "cda-comm-doip"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
+      "function": "diag_service::build_async_response",
+      "line": 284,
+      "cyclomatic": 2.0,
+      "coverage": 83.33333333333334,
+      "crap": 2.0185185185185186,
+      "crate": "cda-sovd"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-plugin-runtime-update/src/operations/executions.rs",
@@ -8391,30 +8454,30 @@
       "crate": "cda-plugin-communication-management"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/data.rs",
-      "function": "diag_service::put",
-      "line": 205,
-      "cyclomatic": 2.0,
-      "coverage": 87.5,
-      "crap": 2.0078125,
-      "crate": "cda-sovd"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/data.rs",
-      "function": "diag_service::get",
-      "line": 131,
-      "cyclomatic": 2.0,
-      "coverage": 87.8048780487805,
-      "crap": 2.0072546828978104,
-      "crate": "cda-sovd"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/apps/sovd2uds/data/networkstructure.rs",
       "function": "get",
       "line": 28,
       "cyclomatic": 2.0,
       "coverage": 88.0,
       "crap": 2.006912,
+      "crate": "cda-sovd"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/data.rs",
+      "function": "diag_service::put",
+      "line": 208,
+      "cyclomatic": 2.0,
+      "coverage": 88.09523809523809,
+      "crap": 2.006748731238527,
+      "crate": "cda-sovd"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/data.rs",
+      "function": "diag_service::get",
+      "line": 132,
+      "cyclomatic": 2.0,
+      "coverage": 88.37209302325581,
+      "crap": 2.0062887544492938,
       "crate": "cda-sovd"
     },
     {
@@ -8546,7 +8609,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "vehicle_route",
-      "line": 727,
+      "line": 781,
       "cyclomatic": 2.0,
       "coverage": 93.02325581395348,
       "crap": 2.0013583709610474,
@@ -8564,7 +8627,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::create_uds_payload",
-      "line": 612,
+      "line": 615,
       "cyclomatic": 2.0,
       "coverage": 94.5945945945946,
       "crap": 2.000631749353444,
@@ -8573,7 +8636,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
       "function": "diag_service::id::fg_get_by_id_response",
-      "line": 815,
+      "line": 833,
       "cyclomatic": 2.0,
       "coverage": 95.23809523809523,
       "crap": 2.000431918799266,
@@ -8591,7 +8654,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "resource_response",
-      "line": 655,
+      "line": 709,
       "cyclomatic": 2.0,
       "coverage": 95.23809523809523,
       "crap": 2.000431918799266,
@@ -8609,7 +8672,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/lib.rs",
       "function": "initialize_storage",
-      "line": 794,
+      "line": 797,
       "cyclomatic": 2.0,
       "coverage": 95.83333333333334,
       "crap": 2.0002893518518516,
@@ -8663,7 +8726,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::get",
-      "line": 884,
+      "line": 887,
       "cyclomatic": 2.0,
       "coverage": 97.14285714285714,
       "crap": 2.0000932944606413,
@@ -8672,7 +8735,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "ecu_route",
-      "line": 887,
+      "line": 941,
       "cyclomatic": 2.0,
       "coverage": 97.43589743589743,
       "crap": 2.000067432020095,
@@ -8942,7 +9005,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionActivity::wait_until_idle",
-      "line": 153,
+      "line": 155,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -8951,7 +9014,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "DiagComm::fmt",
-      "line": 516,
+      "line": 518,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -9256,15 +9319,6 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/schema.rs",
-      "function": "SchemaDescription::new",
-      "line": 33,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "cda-interfaces"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/schema.rs",
       "function": "SchemaDescription::title",
       "line": 41,
       "cyclomatic": 1.0,
@@ -9291,15 +9345,6 @@
       "crate": "cda-interfaces"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/schema.rs",
-      "function": "SchemaDescription::into_schema",
-      "line": 53,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "cda-interfaces"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/uds.rs",
       "function": "is_tester_present_nrc",
       "line": 184,
@@ -9311,7 +9356,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/ecuuds.rs",
       "function": "mock::MockUdsEcu::schema_for_fg_request",
-      "line": 1164,
+      "line": 1166,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -9536,7 +9581,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_encode.rs",
       "function": "effective_byte_pos",
-      "line": 976,
+      "line": 1013,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -9671,7 +9716,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/schema.rs",
       "function": "map_struct_to_schema",
-      "line": 490,
+      "line": 517,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -9680,7 +9725,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/schema.rs",
       "function": "env_data_desc_to_variants",
-      "line": 503,
+      "line": 530,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10544,7 +10589,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestResponse::as_nrc",
-      "line": 158,
+      "line": 161,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10553,7 +10598,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestResponse::get_dtcs",
-      "line": 162,
+      "line": 165,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10562,7 +10607,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "detection_session",
-      "line": 345,
+      "line": 348,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -10571,7 +10616,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::default",
-      "line": 361,
+      "line": 364,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10580,7 +10625,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::logical_functional_address",
-      "line": 376,
+      "line": 379,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10589,7 +10634,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::logical_address_eq",
-      "line": 382,
+      "line": 385,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10598,15 +10643,6 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::tester_present_retry_policy",
-      "line": 390,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "cda-comm-uds"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
-      "function": "TestEcuDb::tester_present_addr_mode",
       "line": 393,
       "cyclomatic": 1.0,
       "coverage": 0.0,
@@ -10615,8 +10651,17 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
+      "function": "TestEcuDb::tester_present_addr_mode",
+      "line": 396,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "cda-comm-uds"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::tester_present_send_type",
-      "line": 399,
+      "line": 402,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10625,15 +10670,6 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::tester_present_exp_pos_resp",
-      "line": 405,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "cda-comm-uds"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
-      "function": "TestEcuDb::tester_present_exp_neg_resp",
       "line": 408,
       "cyclomatic": 1.0,
       "coverage": 0.0,
@@ -10642,8 +10678,17 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
+      "function": "TestEcuDb::tester_present_exp_neg_resp",
+      "line": 411,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "cda-comm-uds"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::set_authentication_state",
-      "line": 513,
+      "line": 516,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -10652,7 +10697,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::check_genericservice",
-      "line": 604,
+      "line": 607,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10661,7 +10706,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::convert_request_from_uds",
-      "line": 672,
+      "line": 675,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10670,7 +10715,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::convert_service_14_response",
-      "line": 681,
+      "line": 684,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10679,7 +10724,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::lookup_security_access_change",
-      "line": 690,
+      "line": 693,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10688,7 +10733,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::get_send_key_param_name",
-      "line": 698,
+      "line": 701,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10697,7 +10742,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::is_service_allowed",
-      "line": 709,
+      "line": 712,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10706,7 +10751,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::get_components_data_info",
-      "line": 753,
+      "line": 756,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10715,7 +10760,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::get_functional_group_data_info",
-      "line": 757,
+      "line": 760,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10724,7 +10769,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::get_components_configurations_info",
-      "line": 765,
+      "line": 768,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10733,7 +10778,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::get_components_operations_info",
-      "line": 772,
+      "line": 775,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10742,7 +10787,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::get_routine_subfunctions",
-      "line": 779,
+      "line": 782,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10751,7 +10796,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::get_io_control_service",
-      "line": 787,
+      "line": 790,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10760,7 +10805,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::get_functional_group_operations_info",
-      "line": 795,
+      "line": 798,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10769,7 +10814,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::get_functional_group_routine_subfunctions",
-      "line": 803,
+      "line": 806,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10778,7 +10823,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::get_components_single_ecu_jobs_info",
-      "line": 812,
+      "line": 815,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10787,7 +10832,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::get_request_parameter_metadata",
-      "line": 816,
+      "line": 819,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10796,7 +10841,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::get_response_parameter_metadata",
-      "line": 823,
+      "line": 826,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10805,7 +10850,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::get_mux_cases_for_service",
-      "line": 830,
+      "line": 833,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10814,7 +10859,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::functional_groups",
-      "line": 837,
+      "line": 840,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10823,7 +10868,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::lookup_dtc_services",
-      "line": 843,
+      "line": 846,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10832,7 +10877,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::lookup_single_ecu_job",
-      "line": 852,
+      "line": 855,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10841,7 +10886,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::lookup_service_through_func_class",
-      "line": 856,
+      "line": 859,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10850,7 +10895,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::lookup_diagcomms_by_request_prefix",
-      "line": 864,
+      "line": 867,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10859,7 +10904,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::lookup_service_by_sid_and_name",
-      "line": 871,
+      "line": 874,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10868,7 +10913,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::schema_for_request",
-      "line": 882,
+      "line": 885,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10877,7 +10922,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::schema_for_responses",
-      "line": 889,
+      "line": 892,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10886,7 +10931,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::schema_for_fg_request",
-      "line": 896,
+      "line": 899,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10895,7 +10940,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::is_physical_ecu",
-      "line": 908,
+      "line": 911,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10904,7 +10949,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::protocol",
-      "line": 912,
+      "line": 915,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10913,7 +10958,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::load",
-      "line": 920,
+      "line": 923,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10922,7 +10967,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::comparams",
-      "line": 924,
+      "line": 927,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10931,7 +10976,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::sdgs",
-      "line": 928,
+      "line": 931,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10940,7 +10985,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::set_duplicating_ecu_names",
-      "line": 932,
+      "line": 935,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10949,7 +10994,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::revision",
-      "line": 940,
+      "line": 943,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10958,7 +11003,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::runtime_state",
-      "line": 944,
+      "line": 947,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10967,7 +11012,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/lib.rs",
       "function": "UdsManager::require_communication_ready",
-      "line": 187,
+      "line": 188,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -10976,7 +11021,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/lib.rs",
       "function": "UdsManager::state_coordinator",
-      "line": 328,
+      "line": 329,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -11219,7 +11264,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/dtc.rs",
       "function": "get_dtc_status_for_record",
-      "line": 68,
+      "line": 69,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -12803,7 +12848,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/modes.rs",
       "function": "commctrl::get",
-      "line": 372,
+      "line": 378,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -12812,7 +12857,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/modes.rs",
       "function": "commctrl::put",
-      "line": 408,
+      "line": 414,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -12821,7 +12866,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/modes.rs",
       "function": "dtcsetting::get",
-      "line": 472,
+      "line": 483,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -12830,7 +12875,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/modes.rs",
       "function": "dtcsetting::put",
-      "line": 502,
+      "line": 513,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -12839,7 +12884,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/modes.rs",
       "function": "session::get",
-      "line": 562,
+      "line": 578,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -12848,7 +12893,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/modes.rs",
       "function": "session::put",
-      "line": 590,
+      "line": 606,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -12857,7 +12902,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
       "function": "diag_service::handle_ecu_responses",
-      "line": 1045,
+      "line": 1069,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -12983,7 +13028,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "security::is_request_seed_value",
-      "line": 428,
+      "line": 431,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -12992,7 +13037,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "authentication::get_response",
-      "line": 630,
+      "line": 632,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -13019,7 +13064,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::finish_write_request",
-      "line": 1208,
+      "line": 1220,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -13073,7 +13118,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
       "function": "get",
-      "line": 126,
+      "line": 131,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -13082,7 +13127,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
       "function": "flash_transfer::DataTransferError::into_sovd",
-      "line": 626,
+      "line": 635,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -13091,7 +13136,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
       "function": "flash_transfer::Vec::into_sovd",
-      "line": 655,
+      "line": 664,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -13100,7 +13145,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
       "function": "transferexit::parse_body",
-      "line": 688,
+      "line": 697,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -13199,7 +13244,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "with_retry_after",
-      "line": 141,
+      "line": 142,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -13208,7 +13253,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "ExecutionReservation::drop",
-      "line": 232,
+      "line": 233,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -13217,7 +13262,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "ExecutionLease::fmt",
-      "line": 245,
+      "line": 246,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -13226,7 +13271,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "ComparamExecution::snapshot",
-      "line": 268,
+      "line": 269,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -13235,7 +13280,16 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "ComparamExecution::deref_mut",
-      "line": 282,
+      "line": 283,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "cda-sovd"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
+      "function": "StoredParameters::fmt",
+      "line": 334,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -13244,7 +13298,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "ExecutionRequestGuard::drop",
-      "line": 478,
+      "line": 532,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -13253,7 +13307,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "reserve_execution",
-      "line": 544,
+      "line": 598,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -13262,7 +13316,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "finalize_execution",
-      "line": 609,
+      "line": 663,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -13271,7 +13325,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "FieldParseError::into_sovd",
-      "line": 1428,
+      "line": 1486,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -13298,7 +13352,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/lib.rs",
       "function": "ApplicationState::drop",
-      "line": 689,
+      "line": 692,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -13413,15 +13467,6 @@
       "crate": "opensovd-cda"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/config/generate.rs",
-      "function": "walk_schema",
-      "line": 454,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
-      "crap": 2.0,
-      "crate": "opensovd-cda"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/config/com_params.rs",
       "function": "EcuComParams::default",
       "line": 159,
@@ -13451,7 +13496,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/config/configfile.rs",
       "function": "Configuration::validate_flash_functional_class_default",
-      "line": 435,
+      "line": 462,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -13703,7 +13748,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::parse_exec_uuid",
-      "line": 1378,
+      "line": 1422,
       "cyclomatic": 1.0,
       "coverage": 50.0,
       "crap": 1.125,
@@ -13766,7 +13811,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/lib.rs",
       "function": "UdsManager::shutdown",
-      "line": 473,
+      "line": 475,
       "cyclomatic": 1.0,
       "coverage": 57.14285714285714,
       "crap": 1.0787172011661808,
@@ -13820,7 +13865,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
       "function": "flash_transfer::DataTransferMetaData::into_sovd",
-      "line": 634,
+      "line": 643,
       "cyclomatic": 1.0,
       "coverage": 71.42857142857143,
       "crap": 1.0233236151603498,
@@ -13937,7 +13982,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/lib.rs",
       "function": "shutdown_signal",
-      "line": 709,
+      "line": 712,
       "cyclomatic": 1.0,
       "coverage": 87.5,
       "crap": 1.001953125,
@@ -13962,9 +14007,18 @@
       "crate": "cda-core"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
+      "function": "service::executions::parse_json_response_params_stored",
+      "line": 1404,
+      "cyclomatic": 1.0,
+      "coverage": 88.23529411764706,
+      "crap": 1.0016283329940974,
+      "crate": "cda-sovd"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "create_trace_layer",
-      "line": 340,
+      "line": 347,
       "cyclomatic": 1.0,
       "coverage": 88.57142857142857,
       "crap": 1.0014927113702623,
@@ -14081,7 +14135,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/lib.rs",
       "function": "register_version_endpoints",
-      "line": 643,
+      "line": 646,
       "cyclomatic": 1.0,
       "coverage": 90.9090909090909,
       "crap": 1.0007513148009015,
@@ -15152,7 +15206,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionRequest::new",
-      "line": 96,
+      "line": 98,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15161,7 +15215,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionRequest::into_ecus",
-      "line": 101,
+      "line": 103,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15170,7 +15224,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionActivity::new",
-      "line": 121,
+      "line": 123,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15179,7 +15233,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionActivity::begin",
-      "line": 127,
+      "line": 129,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15188,7 +15242,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionActivity::is_idle",
-      "line": 136,
+      "line": 138,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15197,7 +15251,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionActivity::generation",
-      "line": 142,
+      "line": 144,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15206,7 +15260,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionActivity::subscribe",
-      "line": 148,
+      "line": 150,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15215,7 +15269,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionGuard::drop",
-      "line": 171,
+      "line": 173,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15224,7 +15278,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionSender::new",
-      "line": 189,
+      "line": 191,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15233,7 +15287,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionSender::send",
-      "line": 196,
+      "line": 198,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15242,7 +15296,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionReceiver::new",
-      "line": 212,
+      "line": 214,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15251,7 +15305,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionReceiver::recv",
-      "line": 216,
+      "line": 218,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15260,7 +15314,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionReceiver::try_recv",
-      "line": 223,
+      "line": 225,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15269,7 +15323,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "DiagComm::new",
-      "line": 249,
+      "line": 251,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15278,7 +15332,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "DiagComm::action",
-      "line": 260,
+      "line": 262,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15287,7 +15341,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "TesterPresentType::is_functional",
-      "line": 354,
+      "line": 356,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15296,7 +15350,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "FunctionalDescriptionConfig::default",
-      "line": 401,
+      "line": 403,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15305,7 +15359,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "DiagServiceError::demotes_connectivity",
-      "line": 504,
+      "line": 506,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15314,7 +15368,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "shutdown_signal",
-      "line": 542,
+      "line": 544,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15414,6 +15468,24 @@
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/authentication.rs",
       "function": "AuthenticationState::is_authenticated",
       "line": 148,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-interfaces"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/binary_encoding.rs",
+      "function": "decode_base64_lenient",
+      "line": 105,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-interfaces"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/binary_encoding.rs",
+      "function": "decode_hex_with_optional_prefix",
+      "line": 126,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15735,6 +15807,15 @@
       "crate": "cda-interfaces"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/diagservices.rs",
+      "function": "mock::MockDiagServiceResponse::cloneable",
+      "line": 160,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-interfaces"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/datatypes/com_params.rs",
       "function": "duration_param_schema",
       "line": 38,
@@ -15924,6 +16005,24 @@
       "crate": "cda-interfaces"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/schema.rs",
+      "function": "SchemaDescription::new",
+      "line": 33,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-interfaces"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/schema.rs",
+      "function": "SchemaDescription::into_schema",
+      "line": 53,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-interfaces"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/uds.rs",
       "function": "is_negative_response",
       "line": 173,
@@ -15944,7 +16043,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/ecuuds.rs",
       "function": "mock::mock_ecu_state_online_variant_detected",
-      "line": 788,
+      "line": 789,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15953,7 +16052,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/ecuuds.rs",
       "function": "mock::MockUdsEcu::schema_for_request",
-      "line": 1146,
+      "line": 1148,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15962,7 +16061,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/ecuuds.rs",
       "function": "mock::MockUdsEcu::schema_for_responses",
-      "line": 1155,
+      "line": 1157,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15971,7 +16070,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/ecuuds.rs",
       "function": "tests::test_get_ecus",
-      "line": 1181,
+      "line": 1183,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15980,7 +16079,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/ecuuds.rs",
       "function": "tests::test_get_ecu_service_state",
-      "line": 1193,
+      "line": 1195,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -17024,7 +17123,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_decode.rs",
       "function": "mux_case_struct_from_selector_value",
-      "line": 1995,
+      "line": 2001,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -17033,7 +17132,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_decode.rs",
       "function": "extract_struct_dop_from_field",
-      "line": 2016,
+      "line": 2022,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -17042,7 +17141,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_decode.rs",
       "function": "physical_base_type",
-      "line": 2061,
+      "line": 2067,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -17393,7 +17492,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/diagservices.rs",
       "function": "DiagServiceResponseStruct::is_empty",
-      "line": 160,
+      "line": 163,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -17438,16 +17537,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
       "function": "uds_data_to_serializable",
-      "line": 32,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "cda-core"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
-      "function": "decode_hex_with_optional_prefix",
-      "line": 802,
+      "line": 31,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -17880,6 +17970,15 @@
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel.rs",
       "function": "pad_msb_to_len",
       "line": 188,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-core"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel.rs",
+      "function": "DiagDataValue::encoded",
+      "line": 359,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19391,7 +19490,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "default_test_status",
-      "line": 210,
+      "line": 213,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19400,7 +19499,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::with_request_send_policy",
-      "line": 226,
+      "line": 229,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19409,7 +19508,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::new",
-      "line": 231,
+      "line": 234,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19418,7 +19517,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::with_timeout_default",
-      "line": 250,
+      "line": 253,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19427,7 +19526,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::with_timeout_default_and_repeat_req_count_app",
-      "line": 270,
+      "line": 273,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19436,7 +19535,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::with_tester_present_config",
-      "line": 292,
+      "line": 295,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19445,7 +19544,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::with_variant_detection_request",
-      "line": 314,
+      "line": 317,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19454,7 +19553,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::with_variant_detection_session",
-      "line": 319,
+      "line": 322,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19463,7 +19562,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::with_additional_detection_session",
-      "line": 338,
+      "line": 341,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19472,15 +19571,6 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::tester_address",
-      "line": 367,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "cda-comm-uds"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
-      "function": "TestEcuDb::logical_address",
       "line": 370,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -19489,7 +19579,7 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
-      "function": "TestEcuDb::logical_gateway_address",
+      "function": "TestEcuDb::logical_address",
       "line": 373,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -19498,8 +19588,17 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
+      "function": "TestEcuDb::logical_gateway_address",
+      "line": 376,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-uds"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::ecu_name",
-      "line": 379,
+      "line": 382,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19508,7 +19607,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::tester_present_response_expected",
-      "line": 396,
+      "line": 399,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19517,7 +19616,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::tester_present_message",
-      "line": 402,
+      "line": 405,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19526,15 +19625,6 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::tester_present_time",
-      "line": 411,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "cda-comm-uds"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
-      "function": "TestEcuDb::repeat_req_count_app",
       "line": 414,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -19543,7 +19633,7 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
-      "function": "TestEcuDb::rc_21_retry_policy",
+      "function": "TestEcuDb::repeat_req_count_app",
       "line": 417,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -19552,7 +19642,7 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
-      "function": "TestEcuDb::rc_21_completion_timeout",
+      "function": "TestEcuDb::rc_21_retry_policy",
       "line": 420,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -19561,7 +19651,7 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
-      "function": "TestEcuDb::rc_21_repeat_request_time",
+      "function": "TestEcuDb::rc_21_completion_timeout",
       "line": 423,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -19570,7 +19660,7 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
-      "function": "TestEcuDb::rc_78_retry_policy",
+      "function": "TestEcuDb::rc_21_repeat_request_time",
       "line": 426,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -19579,7 +19669,7 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
-      "function": "TestEcuDb::rc_78_completion_timeout",
+      "function": "TestEcuDb::rc_78_retry_policy",
       "line": 429,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -19588,7 +19678,7 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
-      "function": "TestEcuDb::rc_78_timeout",
+      "function": "TestEcuDb::rc_78_completion_timeout",
       "line": 432,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -19597,7 +19687,7 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
-      "function": "TestEcuDb::rc_94_retry_policy",
+      "function": "TestEcuDb::rc_78_timeout",
       "line": 435,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -19606,7 +19696,7 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
-      "function": "TestEcuDb::rc_94_completion_timeout",
+      "function": "TestEcuDb::rc_94_retry_policy",
       "line": 438,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -19615,7 +19705,7 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
-      "function": "TestEcuDb::rc_94_repeat_request_time",
+      "function": "TestEcuDb::rc_94_completion_timeout",
       "line": 441,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -19624,7 +19714,7 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
-      "function": "TestEcuDb::timeout_default",
+      "function": "TestEcuDb::rc_94_repeat_request_time",
       "line": 444,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -19633,8 +19723,17 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
+      "function": "TestEcuDb::timeout_default",
+      "line": 447,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-uds"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::set_service_state",
-      "line": 450,
+      "line": 453,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19643,7 +19742,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::get_service_state",
-      "line": 457,
+      "line": 460,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19652,7 +19751,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::session",
-      "line": 462,
+      "line": 465,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19661,7 +19760,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::default_session",
-      "line": 474,
+      "line": 477,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19670,7 +19769,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::security_access",
-      "line": 478,
+      "line": 481,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19679,7 +19778,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::lookup_session_change",
-      "line": 490,
+      "line": 493,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19688,7 +19787,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::set_default_states",
-      "line": 502,
+      "line": 505,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19697,7 +19796,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::authentication_state",
-      "line": 506,
+      "line": 509,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19706,7 +19805,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::ecu_status",
-      "line": 522,
+      "line": 525,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19715,7 +19814,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::get_variant_detection_requests",
-      "line": 547,
+      "line": 550,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19724,7 +19823,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::mark_as_duplicate",
-      "line": 551,
+      "line": 554,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19733,7 +19832,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::mark_as_no_variant_detected",
-      "line": 555,
+      "line": 558,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19742,7 +19841,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::set_base_variant_online",
-      "line": 559,
+      "line": 562,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19751,7 +19850,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::set_status",
-      "line": 574,
+      "line": 577,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19760,7 +19859,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::with_status",
-      "line": 579,
+      "line": 582,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19769,7 +19868,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::with_duplicates",
-      "line": 585,
+      "line": 588,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19778,7 +19877,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::with_detection_outcome",
-      "line": 591,
+      "line": 594,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19787,7 +19886,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::convert_from_uds",
-      "line": 659,
+      "line": 662,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19796,7 +19895,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::default_security_access",
-      "line": 705,
+      "line": 708,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19805,7 +19904,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::validate_request_send",
-      "line": 717,
+      "line": 720,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19814,7 +19913,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::lookup_authentication_service",
-      "line": 729,
+      "line": 732,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19823,7 +19922,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::authentication_return_value",
-      "line": 743,
+      "line": 746,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19832,7 +19931,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::is_loaded",
-      "line": 916,
+      "line": 919,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19841,7 +19940,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "TestEcuDb::duplicating_ecu_names",
-      "line": 936,
+      "line": 939,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19850,7 +19949,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "positive_session_response",
-      "line": 950,
+      "line": 953,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19859,7 +19958,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/test_helpers.rs",
       "function": "negative_session_response",
-      "line": 959,
+      "line": 962,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19868,7 +19967,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/lib.rs",
       "function": "VariantDetectionState::new",
-      "line": 117,
+      "line": 118,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19877,7 +19976,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/lib.rs",
       "function": "UdsManager::request_ecu_permits",
-      "line": 158,
+      "line": 159,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19886,7 +19985,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/lib.rs",
       "function": "UdsManager::uds_ecu_db",
-      "line": 165,
+      "line": 166,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19895,7 +19994,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/lib.rs",
       "function": "UdsManager::build_communication_not_ready_err",
-      "line": 200,
+      "line": 201,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19904,7 +20003,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/lib.rs",
       "function": "UdsManager::new",
-      "line": 218,
+      "line": 219,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19913,7 +20012,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/lib.rs",
       "function": "UdsManager::detection_activity",
-      "line": 252,
+      "line": 253,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19922,7 +20021,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/lib.rs",
       "function": "UdsManager::clone",
-      "line": 450,
+      "line": 452,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20183,7 +20282,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/dtc.rs",
       "function": "get_dtc_status_for_mask",
-      "line": 42,
+      "line": 43,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20714,7 +20813,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "add_vehicle_routes",
-      "line": 196,
+      "line": 203,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20723,7 +20822,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "build_vehicle_routes",
-      "line": 218,
+      "line": 225,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20732,7 +20831,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "add_runtime_update_routes",
-      "line": 246,
+      "line": 253,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20741,7 +20840,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "routes_accessible_during_update",
-      "line": 277,
+      "line": 284,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20750,7 +20849,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "add_openapi_routes",
-      "line": 287,
+      "line": 294,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20759,7 +20858,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "webserver_bind_tests::get_over_unix_socket",
-      "line": 503,
+      "line": 510,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20768,7 +20867,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "webserver_bind_tests::shutdown_channel",
-      "line": 518,
+      "line": 525,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20777,7 +20876,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "webserver_bind_tests::temp_socket_config",
-      "line": 533,
+      "line": 540,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20786,7 +20885,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "webserver_bind_tests::assert_reachable_then_shutdown",
-      "line": 545,
+      "line": 552,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20795,7 +20894,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "webserver_bind_tests::launch_webserver_binds_unix_socket",
-      "line": 565,
+      "line": 572,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20804,7 +20903,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "webserver_bind_tests::launch_webserver_binds_tcp",
-      "line": 578,
+      "line": 589,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20813,7 +20912,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "webserver_bind_tests::launch_webserver_removes_stale_unix_socket_file",
-      "line": 612,
+      "line": 627,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -20822,7 +20921,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/lib.rs",
       "function": "webserver_bind_tests::launch_webserver_fails_if_stale_socket_cannot_be_removed",
-      "line": 629,
+      "line": 648,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -21210,6 +21309,24 @@
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/docs.rs",
       "function": "error_schema",
       "line": 119,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-sovd"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/binary_encoding.rs",
+      "function": "BinaryEncodingParam::operation_input",
+      "line": 103,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-sovd"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/binary_encoding.rs",
+      "function": "hex_encoding",
+      "line": 113,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -21776,7 +21893,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/modes.rs",
       "function": "commctrl::docs_get",
-      "line": 392,
+      "line": 398,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -21785,7 +21902,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/modes.rs",
       "function": "commctrl::docs_put",
-      "line": 430,
+      "line": 438,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -21794,7 +21911,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/modes.rs",
       "function": "dtcsetting::docs_get",
-      "line": 492,
+      "line": 503,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -21803,7 +21920,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/modes.rs",
       "function": "dtcsetting::docs_put",
-      "line": 524,
+      "line": 537,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -21812,7 +21929,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/modes.rs",
       "function": "session::docs_get",
-      "line": 582,
+      "line": 598,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -21821,7 +21938,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/modes.rs",
       "function": "session::docs_put",
-      "line": 612,
+      "line": 630,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -21848,7 +21965,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
       "function": "diag_service::executions::docs_get",
-      "line": 385,
+      "line": 397,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -21857,7 +21974,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
       "function": "diag_service::docs_post",
-      "line": 558,
+      "line": 575,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -21866,7 +21983,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
       "function": "diag_service::docs_delete",
-      "line": 716,
+      "line": 734,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -21875,7 +21992,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
       "function": "diag_service::id::parse_execution_id",
-      "line": 948,
+      "line": 968,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -21884,7 +22001,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
       "function": "diag_service::id::RequestResultsContext::new",
-      "line": 958,
+      "line": 978,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -21893,7 +22010,16 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
       "function": "diag_service::id::docs_get",
-      "line": 1023,
+      "line": 1044,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-sovd"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/operations.rs",
+      "function": "diag_service::handle_ecu_responses_stored",
+      "line": 1095,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -21911,7 +22037,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/data.rs",
       "function": "diag_service::docs_get",
-      "line": 174,
+      "line": 177,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -21920,7 +22046,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/data.rs",
       "function": "diag_service::docs_put",
-      "line": 247,
+      "line": 252,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22154,7 +22280,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "docs_get",
-      "line": 108,
+      "line": 110,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22163,7 +22289,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "session::docs_put",
-      "line": 309,
+      "line": 312,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22172,7 +22298,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "session::get",
-      "line": 330,
+      "line": 333,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22181,7 +22307,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "session::docs_get",
-      "line": 357,
+      "line": 360,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22190,7 +22316,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "security::get",
-      "line": 387,
+      "line": 390,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22199,7 +22325,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "security::docs_get",
-      "line": 414,
+      "line": 417,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22208,7 +22334,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "security::docs_put",
-      "line": 584,
+      "line": 586,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22217,7 +22343,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "authentication::error_response",
-      "line": 621,
+      "line": 623,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22226,7 +22352,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "authentication::docs_get",
-      "line": 678,
+      "line": 680,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22235,7 +22361,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "authentication::docs_put",
-      "line": 852,
+      "line": 858,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22244,7 +22370,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "commctrl::get",
-      "line": 902,
+      "line": 909,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22253,7 +22379,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "commctrl::docs_get",
-      "line": 929,
+      "line": 936,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22262,7 +22388,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "commctrl::put",
-      "line": 943,
+      "line": 950,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22271,7 +22397,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "commctrl::docs_put",
-      "line": 971,
+      "line": 980,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22280,7 +22406,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "dtcsetting::get",
-      "line": 1015,
+      "line": 1025,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22289,7 +22415,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "dtcsetting::docs_get",
-      "line": 1042,
+      "line": 1052,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22298,7 +22424,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "dtcsetting::put",
-      "line": 1056,
+      "line": 1066,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22307,7 +22433,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/modes.rs",
       "function": "dtcsetting::docs_put",
-      "line": 1084,
+      "line": 1096,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22388,7 +22514,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::docs_get",
-      "line": 924,
+      "line": 927,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22397,7 +22523,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::post",
-      "line": 935,
+      "line": 938,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22406,7 +22532,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::docs_post",
-      "line": 979,
+      "line": 984,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22415,7 +22541,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::OperationWriteContext::new",
-      "line": 1055,
+      "line": 1062,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22424,7 +22550,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::err_invalid_content",
-      "line": 1325,
+      "line": 1345,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22433,7 +22559,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::id::docs_get",
-      "line": 1853,
+      "line": 1910,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22442,7 +22568,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/operations.rs",
       "function": "service::executions::id::docs_delete",
-      "line": 1988,
+      "line": 2049,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22523,7 +22649,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/faults.rs",
       "function": "id::docs_get",
-      "line": 370,
+      "line": 372,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22532,7 +22658,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/faults.rs",
       "function": "id::docs_delete",
-      "line": 428,
+      "line": 430,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22550,7 +22676,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/data.rs",
       "function": "diag_service::docs_get",
-      "line": 439,
+      "line": 442,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22559,7 +22685,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/data.rs",
       "function": "diag_service::docs_put",
-      "line": 494,
+      "line": 499,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22568,7 +22694,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/data.rs",
       "function": "diag_service::docs_endpoint::docs_transform",
-      "line": 559,
+      "line": 564,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22577,7 +22703,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
       "function": "request_download::docs_put",
-      "line": 284,
+      "line": 293,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22586,7 +22712,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
       "function": "flash_transfer::docs_post",
-      "line": 439,
+      "line": 448,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22595,7 +22721,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
       "function": "flash_transfer::docs_get",
-      "line": 494,
+      "line": 503,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22604,7 +22730,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
       "function": "flash_transfer::id::docs_get",
-      "line": 557,
+      "line": 566,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22613,7 +22739,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
       "function": "flash_transfer::id::docs_delete",
-      "line": 599,
+      "line": 608,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22622,7 +22748,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
       "function": "transferexit::docs_put",
-      "line": 729,
+      "line": 740,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22667,7 +22793,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/configurations.rs",
       "function": "diag_service::docs_put",
-      "line": 189,
+      "line": 192,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22676,7 +22802,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/configurations.rs",
       "function": "diag_service::docs_endpoint::docs_transform",
-      "line": 257,
+      "line": 260,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -22991,7 +23117,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "ExecutionReservation::new",
-      "line": 207,
+      "line": 208,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23000,7 +23126,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "ExecutionReservation::commit_async",
-      "line": 221,
+      "line": 222,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23009,7 +23135,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "ComparamExecution::new",
-      "line": 256,
+      "line": 257,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23018,7 +23144,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "ComparamExecution::deref",
-      "line": 276,
+      "line": 277,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23026,8 +23152,8 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
-      "function": "ServiceExecution::clone",
-      "line": 298,
+      "function": "StoredParameters::from_fn",
+      "line": 301,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23035,8 +23161,8 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
-      "function": "ServiceExecution::complete",
-      "line": 310,
+      "function": "StoredParameters::in_encoding",
+      "line": 312,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23044,16 +23170,7 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
-      "function": "ServiceExecution::execution_status",
-      "line": 317,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "cda-sovd"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
-      "function": "ServiceExecution::is_in_flight",
+      "function": "StoredParameters::default",
       "line": 320,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -23062,16 +23179,7 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
-      "function": "ServiceExecution::set_in_flight",
-      "line": 323,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "cda-sovd"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
-      "function": "ServiceExecution::is_created",
+      "function": "StoredParameters::clone",
       "line": 326,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -23080,8 +23188,8 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
-      "function": "ServiceExecution::set_created",
-      "line": 329,
+      "function": "ServiceExecution::clone",
+      "line": 352,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23089,8 +23197,8 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
-      "function": "ServiceExecution::placeholder",
-      "line": 332,
+      "function": "ServiceExecution::complete",
+      "line": 364,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23098,8 +23206,8 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
-      "function": "FgServiceExecution::clone",
-      "line": 358,
+      "function": "ServiceExecution::execution_status",
+      "line": 371,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23107,8 +23215,8 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
-      "function": "FgServiceExecution::complete",
-      "line": 370,
+      "function": "ServiceExecution::is_in_flight",
+      "line": 374,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23116,7 +23224,7 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
-      "function": "FgServiceExecution::execution_status",
+      "function": "ServiceExecution::set_in_flight",
       "line": 377,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -23125,7 +23233,7 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
-      "function": "FgServiceExecution::is_in_flight",
+      "function": "ServiceExecution::is_created",
       "line": 380,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -23134,7 +23242,7 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
-      "function": "FgServiceExecution::set_in_flight",
+      "function": "ServiceExecution::set_created",
       "line": 383,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -23143,7 +23251,7 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
-      "function": "FgServiceExecution::is_created",
+      "function": "ServiceExecution::placeholder",
       "line": 386,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -23152,8 +23260,62 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
+      "function": "FgServiceExecution::clone",
+      "line": 412,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-sovd"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
+      "function": "FgServiceExecution::complete",
+      "line": 424,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-sovd"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
+      "function": "FgServiceExecution::execution_status",
+      "line": 431,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-sovd"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
+      "function": "FgServiceExecution::is_in_flight",
+      "line": 434,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-sovd"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
+      "function": "FgServiceExecution::set_in_flight",
+      "line": 437,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-sovd"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
+      "function": "FgServiceExecution::is_created",
+      "line": 440,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-sovd"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "FgServiceExecution::set_created",
-      "line": 389,
+      "line": 443,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23162,7 +23324,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "FgServiceExecution::placeholder",
-      "line": 392,
+      "line": 446,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23171,7 +23333,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "SovdLockStateProvider::new",
-      "line": 413,
+      "line": 467,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23180,7 +23342,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "SovdLockStateProvider::prepare_runtime_update",
-      "line": 423,
+      "line": 477,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23189,7 +23351,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "SovdLockStateProvider::current_locks",
-      "line": 432,
+      "line": 486,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23198,7 +23360,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "SovdLockStateProvider::vehicle_lock_owner_sub",
-      "line": 439,
+      "line": 493,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23207,7 +23369,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "SovdLockStateProvider::has_non_vehicle_locks",
-      "line": 444,
+      "line": 498,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23216,7 +23378,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "SovdLockStateProvider::current_lock",
-      "line": 452,
+      "line": 506,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23225,7 +23387,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "ExecutionRequestGuard::snapshot",
-      "line": 472,
+      "line": 526,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23234,7 +23396,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "route",
-      "line": 694,
+      "line": 748,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23243,7 +23405,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "docs_components",
-      "line": 847,
+      "line": 901,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23252,7 +23414,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "static_data::add_static_data_endpoint",
-      "line": 1330,
+      "line": 1388,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23261,7 +23423,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "static_data::docs_get",
-      "line": 1370,
+      "line": 1428,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23270,7 +23432,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "DataError::from",
-      "line": 1387,
+      "line": 1445,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23279,7 +23441,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd.rs",
       "function": "field_parse_errors_to_json",
-      "line": 1411,
+      "line": 1469,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23342,7 +23504,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/lib.rs",
       "function": "cda_version",
-      "line": 829,
+      "line": 832,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23620,6 +23782,15 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/config/generate.rs",
+      "function": "walk_schema",
+      "line": 454,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "opensovd-cda"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/config/generate.rs",
       "function": "process_toml",
       "line": 519,
       "cyclomatic": 1.0,
@@ -23656,8 +23827,17 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/config/configfile.rs",
+      "function": "ServerConfig::validate_sanity",
+      "line": 157,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "opensovd-cda"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/config/configfile.rs",
       "function": "default_server_address",
-      "line": 181,
+      "line": 206,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23666,7 +23846,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/config/configfile.rs",
       "function": "default_server_port",
-      "line": 185,
+      "line": 210,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23675,7 +23855,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/config/configfile.rs",
       "function": "ServerTransport::default",
-      "line": 190,
+      "line": 215,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -23684,7 +23864,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/config/configfile.rs",
       "function": "Configuration::default",
-      "line": 281,
+      "line": 308,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
