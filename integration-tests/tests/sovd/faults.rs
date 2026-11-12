@@ -1572,6 +1572,20 @@ async fn test_get_faults_with_and_without_odx_reference() {
         .expect("Expected ODX-referenced DTC 0x01E241 to be present");
 
     assert_eq!(
+        fault1.fault_name, "DTC Code 3",
+        "Expected the ODX fault name for DTC 0x01E241"
+    );
+    assert_eq!(
+        fault1.severity,
+        Some(3),
+        "Expected the ODX severity for DTC 0x01E241"
+    );
+    assert_eq!(
+        fault1.display_code.as_deref(),
+        Some("P123457"),
+        "Expected the ODX display code for DTC 0x01E241"
+    );
+    assert_eq!(
         fault1
             .status
             .as_ref()
