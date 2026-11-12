@@ -12,6 +12,9 @@
 exports_files([
     "Cargo.lock",
     "Cargo.toml",
+    "can-Cargo.lock",
+    "can-cargo-bazel-lock.json",
+    "cargo-bazel-lock.json",
 ])
 
 package_group(

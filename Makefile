@@ -94,6 +94,7 @@ bazel-check:
 	fi
 
 bazel-update-lockfile:
+	CARGO_BAZEL_REPIN=1 bazel fetch --lockfile_mode=update @cda_crates//... @can_crates//...
 	bazel mod deps --lockfile_mode=update
 	cd bazel/vendor-consumer-test && bazel mod deps --lockfile_mode=update
 
@@ -258,7 +259,7 @@ help:
 		'build-minimal-cda            Build CDA without default features' \
 		'bazel-build                  Build platform-supported primary and vendor targets' \
 		'bazel-check                  Validate the Bazel configuration and target graph' \
-		'bazel-update-lockfile        Update root and vendor Bazel lockfiles' \
+		'bazel-update-lockfile        Update crate and module Bazel lockfiles' \
 		'lint ARGS="..."              Run stable Clippy' \
 		'lint-all-features            Run stable Clippy with all features' \
 		'lint-nightly ARGS="..."      Run pinned-nightly Clippy' \
