@@ -24,36 +24,6 @@ use cda_plugin_security::SecurityPlugin;
 
 use super::ecumanager::EcuManager;
 
-fn fixed_data_range_size(
-    data_start: u32,
-    parameter_layout: impl IntoIterator<Item = (u32, Option<u32>)>,
-) -> Result<Option<usize>, DiagServiceError> {
-    let mut data_end = data_start;
-    for (byte_position, byte_size) in parameter_layout {
-        if byte_position < data_start {
-            continue;
-        }
-        let Some(byte_size) = byte_size else {
-            return Ok(None);
-        };
-        let Some(parameter_end) = byte_position.checked_add(byte_size) else {
-            return Err(DiagServiceError::InvalidDatabase(
-                "Diagnostic data size overflows its byte position".to_owned(),
-            ));
-        };
-        data_end = data_end.max(parameter_end);
-    }
-
-    let data_size = data_end.checked_sub(data_start).ok_or_else(|| {
-        DiagServiceError::InvalidDatabase(
-            "Diagnostic data ends before its DATA parameter".to_owned(),
-        )
-    })?;
-    usize::try_from(data_size).map(Some).map_err(|_| {
-        DiagServiceError::InvalidDatabase("Diagnostic data size does not fit in usize".to_owned())
-    })
-}
-
 impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
     async fn lookup_security_access_change(
         &self,
@@ -108,10 +78,25 @@ impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
         let byte_size = if is_mux {
             None
         } else {
-            fixed_data_range_size(
-                data_parameter.byte_position(),
-                [(data_parameter.byte_position(), byte_size)],
-            )?
+            byte_size
+                .map(|size| {
+                    data_parameter
+                        .byte_position()
+                        .checked_add(size)
+                        .ok_or_else(|| {
+                            DiagServiceError::InvalidDatabase(
+                                "Diagnostic data size overflows its byte position".to_owned(),
+                            )
+                        })
+                        .and_then(|_| {
+                            usize::try_from(size).map_err(|_| {
+                                DiagServiceError::InvalidDatabase(
+                                    "Diagnostic data size does not fit in usize".to_owned(),
+                                )
+                            })
+                        })
+                })
+                .transpose()?
         };
 
         Ok(cda_interfaces::SendKeyParameterInfo { name, byte_size })
@@ -121,58 +106,10 @@ impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
         &self,
         diag_service: &cda_interfaces::DiagComm,
     ) -> Result<Option<usize>, DiagServiceError> {
-        use super::param_metadata::{byte_size_from_coded_const, byte_size_from_value_param};
-
-        let mapped_service = self.lookup_diag_service(diag_service, None, None).await?;
-        let Some(positive_responses) = mapped_service.pos_responses() else {
-            return Ok(None);
-        };
-        let Some(params) = positive_responses
-            .iter()
-            .next()
-            .and_then(|response| response.params())
-        else {
-            return Ok(None);
-        };
-
-        let data_semantic = &self.database_naming_convention.semantics.data;
-        let response_parameters: Vec<_> = params
-            .iter()
-            .map(datatypes::Parameter)
-            .map(|parameter| {
-                let byte_size = match parameter.param_type()? {
-                    datatypes::ParamType::CodedConst => byte_size_from_coded_const(&parameter),
-                    datatypes::ParamType::MatchingRequestParam => parameter
-                        .specific_data_as_matching_request_param()
-                        .map(|matching| matching.byte_length()),
-                    datatypes::ParamType::Value => {
-                        let (size, is_mux) = byte_size_from_value_param(&parameter);
-                        if is_mux { None } else { size }
-                    }
-                    _ => None,
-                };
-                Ok((
-                    parameter.semantic().map(ToOwned::to_owned),
-                    parameter.byte_position(),
-                    byte_size,
-                ))
-            })
-            .collect::<Result<_, DiagServiceError>>()?;
-        let Some(data_start) = response_parameters
-            .iter()
-            .filter(|(semantic, _, _)| semantic.as_ref() == Some(data_semantic))
-            .map(|(_, byte_position, _)| *byte_position)
-            .min()
-        else {
-            return Ok(None);
-        };
-
-        fixed_data_range_size(
-            data_start,
-            response_parameters
-                .iter()
-                .map(|(_, byte_position, byte_size)| (*byte_position, *byte_size)),
-        )
+        Ok(self
+            .get_positive_response_raw_layout(diag_service)
+            .await?
+            .and_then(|layout| layout.fixed_data_size))
     }
 
     fn default_security_access(&self) -> Result<String, DiagServiceError> {
