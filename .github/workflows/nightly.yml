@@ -33,7 +33,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.1.0
         with:
           submodules: false
       - name: Install Rust toolchain
@@ -50,25 +50,25 @@ jobs:
     name: "Nightly Lint and Format"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.1.0
         with:
           submodules: false
       - name: Setup DLT tracing lib
         uses: eclipse-opensovd/dlt-tracing-lib/.github/actions/setup-dlt@main
       - name: Install Protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@v3.0.0
         with:
           version: ${{ needs.versions.outputs.protoc }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Format and Clippy - Nightly toolchain pinned
-        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@febc566231f4ff6fafec78c91078e381666120f9
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@main
         with:
           toolchain: ${{ needs.versions.outputs.nightly }}
           extra-args: "--all-features --all-targets -- --deny=warnings"
       - name: Format and Clippy - Nightly toolchain latest
         if: ${{ !cancelled() }}
         continue-on-error: true
-        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@febc566231f4ff6fafec78c91078e381666120f9
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@main
         with:
           toolchain: nightly
           extra-args: "--all-features --all-targets"
