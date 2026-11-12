@@ -16,6 +16,7 @@
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use strum_macros::{Display, EnumString};
 
 use crate::{
     DiagServiceError,
@@ -26,40 +27,27 @@ use crate::{
 ///
 /// [[ dimpl~sovd-api-binary-encoding-type, Base64 and hex encoding of binary data ]]
 #[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+    Display,
+    EnumString,
 )]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
 pub enum BinaryEncoding {
     /// Standard base64 (RFC 4648, with padding), as required by the SOVD standard.
     #[default]
     Base64,
     /// Space separated, `0x` prefixed upper case hex bytes, e.g. `"0x01 0xAB"`.
     Hex,
-}
-
-impl std::fmt::Display for BinaryEncoding {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BinaryEncoding::Base64 => write!(f, "base64"),
-            BinaryEncoding::Hex => write!(f, "hex"),
-        }
-    }
-}
-
-impl std::str::FromStr for BinaryEncoding {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.eq_ignore_ascii_case("base64") {
-            Ok(BinaryEncoding::Base64)
-        } else if s.eq_ignore_ascii_case("hex") {
-            Ok(BinaryEncoding::Hex)
-        } else {
-            Err(format!(
-                "Invalid binary encoding '{s}', expected 'base64' or 'hex'"
-            ))
-        }
-    }
 }
 
 impl BinaryEncoding {

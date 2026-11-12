@@ -388,7 +388,6 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             ecu_name,
             diag_comm,
             security_plugin,
-            // Programmatic callers provide binary values hex coded.
             Some(UdsPayloadData::ParameterMap(params, BinaryEncoding::Hex)),
             map_to_json,
         )
