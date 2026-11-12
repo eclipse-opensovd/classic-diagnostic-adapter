@@ -29,12 +29,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout PR head
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.4.0
         with:
           submodules: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v4.4.0
         with:
           node-version: "20"
 
@@ -48,7 +48,7 @@ jobs:
             --silent
 
       - name: Get changed files
-        uses: actions/github-script@v7
+        uses: actions/github-script@v7.1.0
         with:
           script: |
             const files = await github.paginate(
@@ -79,7 +79,7 @@ jobs:
           cp /tmp/body.md pr-comment-duplicate-code/body.md
 
       - name: Upload duplicate-code comment artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: pr-comment-duplicate-code
           path: pr-comment-duplicate-code/
@@ -88,7 +88,7 @@ jobs:
       # permissions and are handled by the workflow_run workflow in pr-comment.yml.
       - name: Post PR comment
         if: github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/github-script@v7
+        uses: actions/github-script@v7.1.0
         with:
           script: |
             const fs = require('fs');
@@ -119,7 +119,7 @@ jobs:
 
       - name: Create check run
         if: github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/github-script@v7
+        uses: actions/github-script@v7.1.0
         with:
           script: |
             const fs = require('fs');
