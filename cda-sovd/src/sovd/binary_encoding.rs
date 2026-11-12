@@ -56,9 +56,14 @@ impl BinaryEncodingParam {
             .map_err(|e| ApiError::BadRequest(format!("Invalid query: {}", e.body_text())))?;
         let requested = query
             .binary_encoding
-            .map(|v| v.parse::<BinaryEncoding>())
-            .transpose()
-            .map_err(ApiError::BadRequest)?;
+            .map(|v| {
+                v.parse::<BinaryEncoding>().map_err(|_| {
+                    ApiError::BadRequest(format!(
+                        "Invalid binary encoding '{v}', expected 'base64' or 'hex'"
+                    ))
+                })
+            })
+            .transpose()?;
         Ok(Self(requested.unwrap_or(default)))
     }
 }
