@@ -520,7 +520,7 @@ mod tests {
             let names = ["testecu".to_owned()];
 
             let report = coordinator.on_gateway_connected(&names).await;
-            assert!(report.brought_online.is_empty());
+            assert_eq!(report.brought_online, [] as [std::string::String; 0]);
             // What the commit of a connect does with the report.
             coordinator
                 .on_gateway_disconnected(&report.brought_online)
