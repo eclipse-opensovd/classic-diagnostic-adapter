@@ -16,7 +16,7 @@ mod diag_kernel;
 pub use diag_kernel::{
     diagservices::*,
     ecumanager::{EcuManager, EcuManagerConfig},
-    offline::{OfflineServiceInfo, ServiceAudience, VariantInfo},
+    offline::{OfflineEndpointKind, OfflineServiceInfo, ServiceAudience, VariantInfo},
     security::{LOOKUP_REQUEST_SEED_SERVICE_HOOK, lookup_request_seed_service},
 };
 

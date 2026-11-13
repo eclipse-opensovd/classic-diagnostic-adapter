@@ -34,7 +34,7 @@ Rust Cargo workspace (see the `cda-rust-development` skill).
 | `cda-tracing` | Logging, DLT, OpenTelemetry setup |
 | `cda-plugin-*` | Plugins (security, lock priority, runtime update, communication management) |
 | `cda-health`, `cda-storage`, `cda-extra`, `cda-build` | Health checks, storage, extras, build helpers |
-| `cda-openapi-gen` | Standalone OpenAPI generator (`opensovd-cda-openapi`) for one ECU from its MDD, OEM extensible |
+| `cda-openapi-gen` | Standalone OpenAPI generator (`cda-openapi-gen`) for one ECU from its MDD, OEM extensible |
 | `opensovd-axum-extra` | Shared axum extensions (extractors, OpenAPI helpers) |
 | `override-macros` | Proc macros for vendor-overridable implementations |
 | `comm-mbedtls/` | mbedtls FFI bindings (`mbedtls-sys`) and async wrapper (`mbedtls-rs`) |

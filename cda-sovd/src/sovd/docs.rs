@@ -19,6 +19,7 @@
 //! self-contained `OpenAPI` specification returned by `GET .../docs`.
 
 pub mod data;
+pub mod faults;
 pub mod operations;
 
 use aide::openapi::{

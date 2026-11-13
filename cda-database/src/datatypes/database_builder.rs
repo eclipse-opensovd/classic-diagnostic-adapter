@@ -1256,6 +1256,32 @@ impl<'a> EcuDataBuilder<'a> {
         dataformat::SpecificDOPData::tag_as_normal_dop(normal_dop)
     }
 
+    /// Creates a `PHYSICAL-TYPE` with the given base data type.
+    pub fn create_physical_type(
+        &mut self,
+        base_data_type: DataType,
+    ) -> WIPOffset<dataformat::PhysicalType<'a>> {
+        use dataformat::PhysicalTypeDataType as T;
+        let base_data_type = match base_data_type {
+            DataType::Int32 => T::A_INT_32,
+            DataType::UInt32 => T::A_UINT_32,
+            DataType::Float32 => T::A_FLOAT_32,
+            DataType::Float64 => T::A_FLOAT_64,
+            DataType::AsciiString => T::A_ASCIISTRING,
+            DataType::Utf8String => T::A_UTF_8_STRING,
+            DataType::Unicode2String => T::A_UNICODE_2_STRING,
+            DataType::ByteField => T::A_BYTEFIELD,
+        };
+        dataformat::PhysicalType::create(
+            &mut self.fbb,
+            &dataformat::PhysicalTypeArgs {
+                precision: None,
+                base_data_type,
+                display_radix: dataformat::Radix::DEC,
+            },
+        )
+    }
+
     /// Shorthand for creating a regular `NormalDOP` with only a compu method and diag coded type.
     ///
     /// Equivalent to calling [`create_normal_specific_dop_data`] (with all optional fields `None`)

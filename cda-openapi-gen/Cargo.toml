@@ -22,7 +22,7 @@ license.workspace = true
 workspace = true
 
 [[bin]]
-name = "opensovd-cda-openapi"
+name = "cda-openapi-gen"
 path = "src/main.rs"
 
 [lib]
@@ -32,16 +32,19 @@ path = "src/lib.rs"
 [dependencies]
 opensovd_cda_lib = { workspace = true }
 cda-core = { workspace = true }
+cda-comm-uds = { workspace = true }
+cda-database = { workspace = true }
 cda-interfaces = { workspace = true }
 cda-plugin-security = { workspace = true }
 cda-sovd = { workspace = true }
 aide = { workspace = true }
+async-trait = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 indexmap = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
