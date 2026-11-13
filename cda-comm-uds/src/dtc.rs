@@ -296,7 +296,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 .get_param_properties()?
                 .values()
                 .filter_map(|p| p.as_object())
-                .find(|obj| obj.contains_key("any-of"));
+                .find(|obj| obj.contains_key("anyOf"));
 
             schema.map(|schema| serde_json::Value::Object(schema.clone()))
         }
@@ -393,7 +393,10 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             let mut schema = serde_json::Map::new();
 
             for (key, value) in param_properties {
-                if value.is_array() || value.get("type").is_some_and(|t| t == "integer") {
+                if value
+                    .get("type")
+                    .is_some_and(|t| t == "array" || t == "integer")
+                {
                     schema.insert(key.clone(), value.clone());
                 }
             }

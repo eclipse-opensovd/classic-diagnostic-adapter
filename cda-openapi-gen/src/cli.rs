@@ -19,15 +19,15 @@ use clap::Parser;
 use opensovd_cda_lib::config::{configfile::Configuration, default_config, load_config};
 
 use crate::{
-    AudienceFilter, GeneratedDocument, GenerationOptions, Generator, GeneratorError,
-    StandardAudience, VariantSelection,
+    AudienceFilter, FaultSchemaDetail, GeneratedDocument, GenerationOptions, Generator,
+    GeneratorError, StandardAudience, VariantSelection,
 };
 
 /// Generates the SOVD `OpenAPI` document(s) of a single ECU from its MDD file.
 ///
 /// One document is written per selected variant, named `<ecu>_<variant>.openapi.json`.
 #[derive(Debug, Clone, Parser)]
-#[command(name = "opensovd-cda-openapi", version, about, long_about = None)]
+#[command(name = "cda-openapi-gen", version, about, long_about = None)]
 pub struct CliArgs {
     /// MDD file of the ECU.
     #[arg(long, short = 'm', value_name = "FILE")]
@@ -67,6 +67,16 @@ pub struct CliArgs {
     #[arg(long, value_name = "URL")]
     pub server_url: Option<String>,
 
+    /// Detail of the fault environment data (snapshots, extended data records) in
+    /// `GET /faults/{id}`. `generic` omits the data types of the MDD, e.g. if the
+    /// documents get too large.
+    #[arg(long, value_enum, value_name = "DETAIL", default_value_t)]
+    pub fault_schemas: FaultSchemaDetail,
+
+    /// Write indented JSON instead of compact JSON.
+    #[arg(long)]
+    pub pretty: bool,
+
     /// Only print the variants contained in the MDD and exit.
     #[arg(long)]
     pub list_variants: bool,
@@ -91,6 +101,7 @@ impl CliArgs {
             ),
             server_url: self.server_url.clone(),
             config: self.load_config()?,
+            fault_schemas: self.fault_schemas,
         })
     }
 
@@ -107,7 +118,10 @@ impl Generator {
     #[must_use]
     pub fn run_from_cli(&self) -> ExitCode {
         let args = CliArgs::parse();
-        let runtime = match tokio::runtime::Builder::new_current_thread().build() {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(rt) => rt,
             Err(e) => {
                 eprintln!("Failed to create runtime: {e}");
@@ -141,7 +155,7 @@ impl Generator {
 
         let documents = self.generate(&options).await?;
         match (&args.output, documents.as_slice()) {
-            (Some(file), [doc]) => write_document(doc, file),
+            (Some(file), [doc]) => write_document(doc, file, args.pretty),
             (Some(_), docs) => Err(GeneratorError::Output(format!(
                 "--output requires exactly one document, but {} were generated; use --output-dir",
                 docs.len()
@@ -153,16 +167,25 @@ impl Generator {
                         args.output_dir.display()
                     ))
                 })?;
-                docs.iter()
-                    .try_for_each(|doc| write_document(doc, &args.output_dir.join(doc.file_name())))
+                docs.iter().try_for_each(|doc| {
+                    write_document(doc, &args.output_dir.join(doc.file_name()), args.pretty)
+                })
             }
         }
     }
 }
 
-fn write_document(doc: &GeneratedDocument, path: &std::path::Path) -> Result<(), GeneratorError> {
-    let json = serde_json::to_string_pretty(&doc.document)
-        .map_err(|e| GeneratorError::Output(format!("Cannot serialize document: {e}")))?;
+fn write_document(
+    doc: &GeneratedDocument,
+    path: &std::path::Path,
+    pretty: bool,
+) -> Result<(), GeneratorError> {
+    let json = if pretty {
+        serde_json::to_string_pretty(&doc.document)
+    } else {
+        serde_json::to_string(&doc.document)
+    }
+    .map_err(|e| GeneratorError::Output(format!("Cannot serialize document: {e}")))?;
     std::fs::write(path, json)
         .map_err(|e| GeneratorError::Output(format!("Cannot write {}: {e}", path.display())))?;
     eprintln!("Written {}", path.display());

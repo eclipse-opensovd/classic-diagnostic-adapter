@@ -1738,6 +1738,94 @@ pub(crate) fn create_ecu_manager_with_value_default_text_table_service() -> (
     (ecu_manager, dc, sid)
 }
 
+/// Creates an `EcuManager` with a read service whose response parameters cover
+/// the JSON types and defaults of the schema generation:
+///
+/// * `scaled`: `A_UINT32` coded, LINEAR compu method, `A_FLOAT64` physical type
+/// * `identical`: `A_UINT32` coded, IDENTICAL compu method, default `"5"`
+/// * `identical_float_phys`: like `identical` without default, `A_FLOAT64` physical type
+/// * `state`: TEXTTABLE compu method without default
+pub(crate) fn create_ecu_manager_with_physical_type_service() -> (
+    crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
+    cda_interfaces::DiagComm,
+) {
+    let mut db_builder = EcuDataBuilder::new();
+    let u16_diag_type = db_builder.create_diag_coded_type_standard_length(16, DataType::UInt32);
+    let compu_identical =
+        db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
+    let compu_linear = db_builder.create_compu_method(datatypes::CompuCategory::Linear, None, None);
+    let compu_text_table = db_builder.create_text_table_compu_method(&[(
+        "ON",
+        1,
+        datatypes::IntervalType::Closed,
+        datatypes::IntervalType::Closed,
+    )]);
+
+    let mut float_dop = |name, compu_method| {
+        let physical_type = db_builder.create_physical_type(DataType::Float64);
+        let specific_data = db_builder
+            .create_normal_specific_dop_data(
+                Some(compu_method),
+                Some(u16_diag_type),
+                Some(physical_type),
+                None,
+                None,
+                None,
+            )
+            .value_offset();
+        db_builder.create_dop(
+            *DopType::REGULAR,
+            Some(name),
+            None,
+            *SpecificDOPData::NormalDOP,
+            Some(specific_data),
+        )
+    };
+    let scaled_dop = float_dop("scaled_dop", compu_linear);
+    let identical_float_dop = float_dop("identical_float_dop", compu_identical);
+    let identical_dop =
+        db_builder.create_regular_normal_dop("identical_dop", u16_diag_type, compu_identical);
+    let state_dop =
+        db_builder.create_regular_normal_dop("state_dop", u16_diag_type, compu_text_table);
+
+    let sid = service_ids::READ_DATA_BY_IDENTIFIER;
+    let dc_name = "TestPhysicalTypeService";
+    let protocol_name = Protocol::default().to_string();
+    let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
+    let diag_comm = new_diag_comm!(db_builder, dc_name, protocol);
+
+    let request = {
+        let sid_param = create_sid_param!(db_builder, "sid", sid);
+        db_builder.create_request(Some(vec![sid_param]), None)
+    };
+    let pos_response = {
+        let sid_param = create_sid_param!(db_builder, "pos_sid", (sid + UDS_ID_RESPONSE_BITMASK));
+        let scaled = db_builder.create_value_param("scaled", scaled_dop, 1, 0);
+        let identical =
+            db_builder.create_value_param_with_default("identical", identical_dop, 3, 0, Some("5"));
+        let identical_float =
+            db_builder.create_value_param("identical_float_phys", identical_float_dop, 5, 0);
+        let state = db_builder.create_value_param("state", state_dop, 7, 0);
+        db_builder.create_response(
+            ResponseType::Positive,
+            Some(vec![sid_param, scaled, identical, identical_float, state]),
+            None,
+        )
+    };
+
+    let diag_service =
+        new_diag_service!(db_builder, diag_comm, request, vec![pos_response], vec![]);
+    let db = finish_db!(db_builder, protocol, vec![diag_service]);
+
+    let dc = cda_interfaces::DiagComm {
+        name: dc_name.to_owned(),
+        type_: DiagCommType::Data,
+        lookup_name: Some(dc_name.to_owned()),
+        subfunction_id: None,
+    };
+    (new_ecu_manager(db), dc)
+}
+
 /// Helper function to create an ECU manager with services that have state transition refs.
 ///
 /// `security_transition` controls which security transition the service

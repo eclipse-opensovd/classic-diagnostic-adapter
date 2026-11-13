@@ -674,7 +674,10 @@ name = "cda-openapi-gen"
 version = "0.1.0"
 dependencies = [
  "aide",
+ "async-trait",
+ "cda-comm-uds",
  "cda-core",
+ "cda-database",
  "cda-interfaces",
  "cda-plugin-security",
  "cda-sovd",

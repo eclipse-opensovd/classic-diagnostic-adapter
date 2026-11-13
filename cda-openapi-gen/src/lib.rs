@@ -18,8 +18,9 @@
 //! selected ECU variant; services can be restricted to a set of audiences.
 //!
 //! OEMs can extend the generator by wrapping it in their own binary and
-//! registering [`ServiceFilter`]s, [`PathContributor`]s and
-//! [`DocumentPostProcessor`]s on the [`Generator`]:
+//! registering [`ServiceFilter`]s, [`EndpointDecorator`]s, [`PathContributor`]s
+//! and [`DocumentPostProcessor`]s on the [`Generator`]. Endpoint decorators get
+//! the MDD objects ([`datatypes`]) each generated resource is built from:
 //!
 //! ```no_run
 //! use cda_openapi_gen::{DocumentPostProcessor, GenContext, Generator, GeneratorError};
@@ -47,14 +48,22 @@
 mod audience;
 mod cli;
 mod extension;
+mod faults;
 mod generator;
+mod schemas;
+mod skeleton;
+mod template;
 
 pub use audience::{AudienceFilter, StandardAudience};
 pub use cda_core::{OfflineServiceInfo, ServiceAudience, VariantInfo};
+/// Read access to the MDD objects passed to the extensions.
+pub use cda_database::datatypes;
 pub use cli::CliArgs;
 pub use extension::{
-    DocumentPostProcessor, FilterContext, GenContext, PathContributor, ServiceFilter,
+    DocumentPostProcessor, Endpoint, EndpointContext, EndpointDecorator, FilterContext, GenContext,
+    PathContributor, ServiceFilter,
 };
+pub use faults::FaultSchemaDetail;
 pub use generator::{
     GeneratedDocument, GenerationOptions, Generator, GeneratorBuilder, VariantSelection,
 };

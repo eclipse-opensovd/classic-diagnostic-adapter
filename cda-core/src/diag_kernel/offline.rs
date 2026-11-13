@@ -19,8 +19,9 @@
 
 use cda_database::datatypes;
 use cda_interfaces::{
-    DiagServiceError, VariantState,
+    DiagServiceError, HashMap, VariantState,
     datatypes::{ComponentConfigurationsInfo, ComponentDataInfo, ComponentOperationsInfo},
+    service_ids,
     util::std_ext,
 };
 use cda_plugin_security::SecurityPlugin;
@@ -72,7 +73,17 @@ pub struct OfflineServiceInfo {
 
 impl OfflineServiceInfo {
     fn from_service(service: &datatypes::DiagService<'_>) -> Self {
-        let diag_comm = service.diag_comm();
+        Self::from_diag_comm(
+            service.diag_comm().map(datatypes::DiagComm).as_ref(),
+            service.request_id(),
+        )
+    }
+
+    fn from_single_ecu_job(job: &datatypes::SingleEcuJob<'_>) -> Self {
+        Self::from_diag_comm(job.diag_comm().map(datatypes::DiagComm).as_ref(), None)
+    }
+
+    fn from_diag_comm(diag_comm: Option<&datatypes::DiagComm<'_>>, service_id: Option<u8>) -> Self {
         let audience = diag_comm.and_then(|dc| dc.audience()).map(|a| {
             // The flatbuffer vector type is not exported by cda-database, hence a macro.
             macro_rules! names {
@@ -98,7 +109,7 @@ impl OfflineServiceInfo {
                 .and_then(|dc| dc.short_name())
                 .unwrap_or_default()
                 .to_owned(),
-            service_id: service.request_id(),
+            service_id,
             semantic: diag_comm
                 .and_then(|dc| dc.semantic())
                 .map(ToOwned::to_owned),
@@ -199,6 +210,120 @@ impl<S: SecurityPlugin> EcuManager<S> {
     ) -> Vec<ComponentOperationsInfo> {
         self.components_operations_info_with(|s| visible(&OfflineServiceInfo::from_service(s)))
     }
+
+    /// Returns the diagnostic services of the selected variant (and its parent refs)
+    /// behind the endpoints of the given kind, grouped by endpoint id.
+    ///
+    /// The ids are the same as the ones returned by [`Self::offline_data_info`],
+    /// [`Self::offline_configurations_info`] and [`Self::offline_operations_info`]:
+    /// * [`OfflineEndpointKind::Data`]: the `ReadDataByIdentifier` and
+    ///   `WriteDataByIdentifier` services, keyed by their trimmed short name.
+    /// * [`OfflineEndpointKind::Configuration`]: as data, restricted to services of a
+    ///   configuration functional class.
+    /// * [`OfflineEndpointKind::Operation`]: the `RoutineControl` services, keyed by
+    ///   their trimmed routine name.
+    ///
+    /// Only services for which `visible` returns true are included.
+    #[must_use]
+    pub fn offline_endpoint_services(
+        &self,
+        kind: OfflineEndpointKind,
+        visible: &dyn Fn(&OfflineServiceInfo) -> bool,
+    ) -> HashMap<String, Vec<datatypes::DiagService<'_>>> {
+        let naming = &self.database_naming_convention;
+        let data_sids = [
+            service_ids::READ_DATA_BY_IDENTIFIER,
+            service_ids::WRITE_DATA_BY_IDENTIFIER,
+        ];
+        let services = self.get_services_from_variant_and_parent_refs(|service| {
+            let Some(sid) = service.request_id() else {
+                return false;
+            };
+            match kind {
+                OfflineEndpointKind::Data => data_sids.contains(&sid),
+                OfflineEndpointKind::Configuration => {
+                    data_sids.contains(&sid)
+                        && service
+                            .diag_comm()
+                            .and_then(|dc| dc.funct_class())
+                            .is_some_and(|fcs| {
+                                fcs.iter().any(|fc| {
+                                    fc.short_name().is_some_and(|n| {
+                                        naming.is_configuration_functional_class(n)
+                                    })
+                                })
+                            })
+                }
+                OfflineEndpointKind::Operation => sid == service_ids::ROUTINE_CONTROL,
+            }
+        });
+
+        let mut result: HashMap<String, Vec<datatypes::DiagService<'_>>> = HashMap::default();
+        for service in services {
+            if !visible(&OfflineServiceInfo::from_service(&service)) {
+                continue;
+            }
+            let Some(short_name) = service.diag_comm().and_then(|dc| dc.short_name()) else {
+                continue;
+            };
+            let id = match kind {
+                OfflineEndpointKind::Data | OfflineEndpointKind::Configuration => {
+                    naming.trim_short_name_affixes(short_name)
+                }
+                OfflineEndpointKind::Operation => naming.trim_routine_name(short_name),
+            };
+            result.entry(id).or_default().push(service);
+        }
+        result
+    }
+
+    /// Returns the single ECU jobs of the selected variant (and its parent refs) for
+    /// which `visible` returns true, keyed by the id used in
+    /// `/x-single-ecu-jobs/{id}`.
+    ///
+    /// Uses the same ids and the same selection as the job listing of the CDA, i.e.
+    /// jobs without a semantic are not included.
+    #[must_use]
+    pub fn offline_single_ecu_jobs(
+        &self,
+        visible: &dyn Fn(&OfflineServiceInfo) -> bool,
+    ) -> Vec<(String, datatypes::SingleEcuJob<'_>)> {
+        let mut jobs: Vec<_> = self
+            .get_single_ecu_jobs_from_variant_and_parent_refs(|_| true)
+            .into_iter()
+            .filter(|job| visible(&OfflineServiceInfo::from_single_ecu_job(job)))
+            .filter_map(|job| {
+                let diag_comm = job.diag_comm()?;
+                diag_comm.semantic()?;
+                let id = self
+                    .database_naming_convention
+                    .trim_short_name_affixes(diag_comm.short_name()?)
+                    .to_lowercase();
+                Some((id, job))
+            })
+            .collect();
+        jobs.sort_by(|(a, _), (b, _)| a.cmp(b));
+        jobs
+    }
+
+    /// Returns the diag layers of the selected variant followed by the ones of its
+    /// parent refs, i.e. the complete ECU description the variant is built from.
+    #[must_use]
+    pub fn offline_diag_layers(&self) -> Vec<datatypes::DiagLayer<'_>> {
+        self.get_diag_layers_from_variant_and_parent_refs()
+    }
+}
+
+/// Kind of the endpoints the services of [`EcuManager::offline_endpoint_services`] are
+/// grouped for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OfflineEndpointKind {
+    /// `/data/{id}`
+    Data,
+    /// `/configurations/{id}`
+    Configuration,
+    /// `/operations/{id}`
+    Operation,
 }
 
 #[cfg(test)]
@@ -295,5 +420,43 @@ mod tests {
             ecu.offline_operations_info(&|s| s.audience.is_none())
                 .is_empty()
         );
+    }
+
+    /// [[ test~openapi-gen-offline-endpoint-services, Services are grouped by endpoint id, test ]]
+    #[tokio::test]
+    async fn endpoint_services_match_data_ids() {
+        let ecu = create_ecu_manager_for_offline();
+        ecu.select_variant_offline("BaseVariant")
+            .await
+            .expect("Variant must exist");
+
+        let not_supplier =
+            |s: &OfflineServiceInfo| s.audience.as_ref().is_none_or(|a| !a.is_supplier);
+        let services = ecu.offline_endpoint_services(OfflineEndpointKind::Data, &not_supplier);
+        let mut keys: Vec<_> = services.keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, ids(&ecu.offline_data_info(&not_supplier)));
+        let unrestricted = services
+            .get("ReadUnrestricted")
+            .expect("Service must exist");
+        assert_eq!(unrestricted.len(), 1);
+        assert_eq!(
+            unrestricted
+                .first()
+                .and_then(datatypes::DiagService::request_id),
+            Some(service_ids::READ_DATA_BY_IDENTIFIER)
+        );
+        let mut operation_keys: Vec<_> = ecu
+            .offline_endpoint_services(OfflineEndpointKind::Operation, &|_| true)
+            .into_keys()
+            .collect();
+        operation_keys.sort();
+        let mut operation_ids: Vec<_> = ecu
+            .offline_operations_info(&|_| true)
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
+        operation_ids.sort();
+        assert_eq!(operation_keys, operation_ids);
     }
 }
