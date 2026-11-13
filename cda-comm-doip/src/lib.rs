@@ -37,6 +37,10 @@ use doip_definitions::{
     },
 };
 use futures::FutureExt;
+// Ensure mbedtls-rs is considered "used" when the feature is enabled,
+// even if `openssl` is also enabled and takes precedence.
+#[cfg(feature = "mbedtls")]
+use mbedtls_rs as _;
 use tokio::{
     sync::{Mutex, OwnedMutexGuard, RwLock, broadcast, mpsc},
     task::JoinHandle,
