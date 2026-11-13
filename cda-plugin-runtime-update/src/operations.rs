@@ -100,6 +100,8 @@ pub(crate) async fn reload_database_if_present<S: Storage, R: RuntimeReloaderPlu
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use cda_interfaces::storage_api::{CollectionName, Storage as _, StorageError};
 
     use super::{delete_collection_ignore_missing, reload_database_if_present, try_get_collection};
@@ -216,7 +218,7 @@ mod tests {
 
         let calls = handler.reload_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        assert!(calls.first().unwrap().is_empty());
+        assert_eq!(calls.first().unwrap().as_slice(), [] as [PathBuf; 0]);
     }
 
     #[tokio::test]
@@ -229,6 +231,6 @@ mod tests {
         assert!(result.is_ok());
         let calls = handler.reload_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        assert!(calls.first().unwrap().is_empty());
+        assert_eq!(calls.first().unwrap().as_slice(), [] as [PathBuf; 0]);
     }
 }

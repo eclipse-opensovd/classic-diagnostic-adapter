@@ -2609,7 +2609,10 @@ mod tests {
             .await
             .expect("request with forward-referenced length key must decode");
         let mapped = response.mapped_data.expect("mapped data");
-        assert!(mapped.errors.is_empty());
+        assert_eq!(
+            mapped.errors,
+            [] as [cda_interfaces::diagservices::FieldParseError; 0]
+        );
         assert!(mapped.data.contains_key("var_data"));
         assert!(mapped.data.contains_key("len_key"));
     }

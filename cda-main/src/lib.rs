@@ -55,15 +55,15 @@ pub mod vehicle;
 pub use error::AppError;
 pub use setup::Setup;
 
-// Valgrind and other profing tools intercept the system allocator, whereas mimalloc
+// Valgrind and other profiling tools intercept the system allocator, whereas mimalloc
 // manages allocations internally. Keep mimalloc in normal builds but omit it
 // from profiling builds so allocation call stacks remain visible.
-#[cfg(not(feature = "heap-profiling"))]
+#[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// Environment variable to override the purge delay of mimalloc in milliseconds.
-#[cfg(not(feature = "heap-profiling"))]
+#[cfg(feature = "mimalloc")]
 const MIMALLOC_PURGE_DELAY_ENV: &str = "MIMALLOC_PURGE_DELAY";
 
 /// Configures mimalloc to return unused memory to the OS immediately.
@@ -74,7 +74,7 @@ const MIMALLOC_PURGE_DELAY_ENV: &str = "MIMALLOC_PURGE_DELAY";
 /// cuts the resident memory after startup roughly in half.
 /// Can be overridden with the `MIMALLOC_PURGE_DELAY` environment variable.
 fn configure_allocator() {
-    #[cfg(not(feature = "heap-profiling"))]
+    #[cfg(feature = "mimalloc")]
     if std::env::var_os(MIMALLOC_PURGE_DELAY_ENV).is_none() {
         mimalloc::options::option_set(mimalloc::options::MiOption::PurgeDelay, 0);
     }

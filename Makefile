@@ -10,7 +10,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 STABLE := 1.88.0
-NIGHTLY := nightly-2026-07-21
+NIGHTLY := nightly-2026-11-12
 CARGO_DENY_VERSION := 0.20.2
 CARGO_LLVM_COV_VERSION := 0.9.1
 PROTOC_VERSION := 34.1
@@ -137,6 +137,10 @@ integration-coverage:
 deny:
 	cargo +$(STABLE) deny check $(ARGS)
 
+# Update dependencies via Nightly, because dependency cooldown is only available with Rust 1.100.
+update:
+	cargo +$(NIGHTLY) update
+
 generate-config:
 	cargo +$(STABLE) run --locked --all-features -- generate-config --output $(or $(OUTPUT),opensovd-cda.toml)
 
@@ -236,7 +240,7 @@ run:
 	cargo +$(STABLE) run --locked --release -- $(ARGS)
 
 profile:
-	RUSTFLAGS="-C force-frame-pointers=yes" cargo +$(STABLE) build --profile release-with-debug --bin opensovd-cda --features heap-profiling
+	RUSTFLAGS="-C force-frame-pointers=yes" cargo +$(STABLE) build --profile release-with-debug --bin opensovd-cda --no-default-features --features=default-without-mimalloc
 
 depgraph:
 	cargo +$(STABLE) depgraph --target-deps --dedup-transitive-deps --workspace-only | dot -Tpng > depgraph.png
