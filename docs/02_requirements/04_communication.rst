@@ -162,7 +162,11 @@ Vehicle Identification
     The CDA shall:
 
     1. Broadcast VIR messages to ``255.255.255.255`` on the configured gateway port
-       (default: 13400).
+       (default: 13400), sent from a configurable local UDP source port
+       (``UDP_TEST_EQUIPMENT_REQUEST``). The source port shall be configurable as a fixed
+       port, as ``0`` (chosen by the operating system) or as a port range from which a free
+       port is selected. It shall default to the dynamic port range ``49152-65535``
+       (ISO 13400-2 REQ 4.DoIP-135).
     2. Collect VAM responses within a configurable timeout window.
     3. Filter VAM responses by subnet mask, accepting only responses from IP addresses
        within the tester's configured subnet.

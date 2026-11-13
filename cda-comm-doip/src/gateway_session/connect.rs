@@ -330,9 +330,11 @@ impl<T: EcuAddresses + DoipComParams> DoipGatewayState<T> {
         }
         // A direct connect is ad hoc (e.g. ECU development): it is not
         // persisted, so the next start does not reconnect to its address.
+        let logical_address = known_gateway.logical_address;
         if is_discovered {
             topology.record_connected(known_gateway);
         }
+        session.mark_variant_detection(logical_address);
         if let Err(error) = session
             .variant_detection
             .send(VariantDetectionRequest::new(gateway_ecu_names))

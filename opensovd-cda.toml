@@ -764,6 +764,18 @@
 # tester_subnet = "255.255.0.0"
 # TLS port for secure `DoIP` communication.
 # tls_port = 3496
+# Local UDP port the vehicle identification request (VIR) is sent from and
+# the responses are received on. Either a port (`0` lets the operating
+# system choose) or an inclusive range `"start-end"` from which a free port
+# is picked. ISO 13400-2 requires a port within `"49152-65535"` (default).
+# Setting it to `gateway_port` restores the legacy behavior of sending the
+# VIR from the discovery port. Spontaneous VAMs are always received on
+# `gateway_port`. A single port is retried 3 times, 200 ms apart, a range
+# tries each of its ports once. If no port can be bound, an error is logged
+# and no VIR is sent; `DoIP` communication is still enabled and gateways are
+# connected by VAMs or directly. The VIR search of the persisted reconnect
+# uses this setting as well.
+# vir_source_port = "49152-65535"
 
 # [ecu.FLXC1000.com_params.can.functional_id]
 # name = "CP_CanFuncReqId"
