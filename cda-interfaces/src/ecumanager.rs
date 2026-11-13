@@ -58,6 +58,15 @@ pub struct ResponseParameterInfo {
     pub byte_size: Option<u32>,
 }
 
+/// Metadata for the `SendKey` request's DATA parameter.
+#[derive(Debug, Clone)]
+pub struct SendKeyParameterInfo {
+    /// Parameter short name used when building the request parameter map.
+    pub name: String,
+    /// Fixed byte size, or `None` when the request definition is variable-sized.
+    pub byte_size: Option<usize>,
+}
+
 /// Information about a single scale in a DOP `CompuMethod`.
 ///
 /// For TEXTTABLE DOPs the lower/upper limits define the coded (internal)
@@ -820,13 +829,23 @@ pub trait EcuSecurity: Send + Sync + 'static {
         has_key: bool,
     ) -> impl Future<Output = Result<SecurityAccess, DiagServiceError>> + Send;
 
-    /// Retrieves the name of the parameter used to send the key for security access.
+    /// Retrieves the name and fixed byte size of the `SendKey` DATA parameter.
     /// # Errors
-    /// Will return `DiagServiceError` if the parameter cannot be found in the database.
-    fn get_send_key_param_name(
+    /// Will return `DiagServiceError` if the service or DATA parameter cannot be found.
+    fn get_send_key_parameter_info(
         &self,
         diag_service: &DiagComm,
-    ) -> impl Future<Output = Result<String, DiagServiceError>> + Send;
+    ) -> impl Future<Output = Result<SendKeyParameterInfo, DiagServiceError>> + Send;
+
+    /// Returns the fixed byte length of the raw positive response data for a `RequestSeed` service.
+    ///
+    /// Returns `Ok(None)` when the response definition does not provide a fixed length.
+    /// # Errors
+    /// Returns `DiagServiceError` if the response definition cannot be read.
+    fn get_request_seed_response_data_size(
+        &self,
+        diag_service: &DiagComm,
+    ) -> impl Future<Output = Result<Option<usize>, DiagServiceError>> + Send;
 
     /// Retrieves the name of the default ECU security level.
     /// # Errors

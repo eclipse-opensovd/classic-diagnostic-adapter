@@ -17,7 +17,7 @@ use cda_database::datatypes;
 use cda_interfaces::{DiagServiceError, authentication::AuthenticationSubFunction, service_ids};
 use cda_plugin_security::SecurityPlugin;
 
-use super::ecumanager::EcuManager;
+use super::{ecumanager::EcuManager, param_metadata::effective_byte_positions};
 
 /// Byte position of the first parameter following the response SID and sub-function.
 const FIRST_DATA_BYTE: u32 = 2;
@@ -106,54 +106,6 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(Some(
             bytes.iter().fold(0u64, |acc, b| (acc << 8) | u64::from(*b)),
         ))
-    }
-}
-
-/// Resolves the byte position of each param in database order. A param
-/// without BYTE-POSITION follows its predecessor (ISO 22901-1 §7.4.8); its
-/// position is only known if all preceding params up to the last positioned
-/// one have a static length, otherwise it is `None`.
-fn effective_byte_positions<'a>(
-    params: &[datatypes::Parameter<'a>],
-) -> Vec<(datatypes::Parameter<'a>, Option<u32>)> {
-    let mut next = Some(0u32);
-    params
-        .iter()
-        .map(|p| {
-            let pos = if p.has_byte_position() {
-                Some(p.byte_position())
-            } else {
-                next
-            };
-            next = pos.and_then(|pos| static_byte_length(p).and_then(|len| pos.checked_add(len)));
-            (p.clone(), pos)
-        })
-        .collect()
-}
-
-/// Number of bytes a CODED-CONST or VALUE param with a standard length
-/// occupies, `None` for variable or unsupported lengths.
-fn static_byte_length(param: &datatypes::Parameter) -> Option<u32> {
-    let coded_type: datatypes::DiagCodedType =
-        if let Some(cc) = param.specific_data_as_coded_const() {
-            cc.diag_coded_type()?.try_into().ok()?
-        } else {
-            param
-                .specific_data_as_value()
-                .and_then(|v| v.dop())
-                .and_then(|dop| dop.specific_data_as_normal_dop())
-                .map(datatypes::NormalDop)?
-                .diag_coded_type()
-                .ok()?
-        };
-    match coded_type.type_() {
-        datatypes::DiagCodedTypeVariant::StandardLength(slt) => Some(
-            param
-                .bit_position()
-                .checked_add(slt.bit_length)?
-                .div_ceil(8),
-        ),
-        _ => None,
     }
 }
 
