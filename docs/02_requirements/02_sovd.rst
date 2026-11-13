@@ -476,7 +476,7 @@ Version Info Endpoint
     ``implementation.version``/``commit``/``build_date``).
 
     These endpoints are registered by the same registration function that provides the standard
-    ``/version-info`` endpoint.
+    ``/version-info`` endpoint. Each is listed in its ``data`` collection with the category ``identData``.
 
     **Rationale**
 
@@ -601,10 +601,37 @@ mdd-files, or to prepare for operations which affect the whole vehicle (e.g. dis
 
        * - Resource
          - Description
+       * - id
+         - Identifier of the entity, empty for the SOVD server
+       * - name
+         - Name of the entity, empty for the SOVD server
+       * - components
+         - The ECUs of the vehicle, see :need:`req~sovd-api-components-entity-collection`
+       * - apps
+         - The apps of the CDA
        * - locks
          - Locks affecting the whole vehicle
        * - functions
          - Functions affecting the whole vehicle (i.e. communication disable/enable)
+       * - data
+         - Data resources of the vehicle, e.g. ``version``
+
+    The ``sovd2uds`` app (``/apps/sovd2uds``) must provide a resource collection with ``id``, ``name``,
+    ``bulk-data`` and ``data``. It must contain ``operations`` only if the app serves at least one operation
+    (ISO 17978-3, Table 53, C1).
+
+    The ``bulk-data`` and ``operations`` collections of the app must list every category and operation that is
+    served beneath them. Resources that depend on a plugin or on the configuration, such as the runtime update
+    categories and operations, are listed only while they are served. Each operation item must contain ``id``,
+    ``name``, ``proximity_proof_required`` and ``asynchronous_execution`` (Table 169).
+
+    The ``data`` collections (``/data`` and ``/apps/sovd2uds/data``) must list every data resource served
+    beneath them, including resources registered at runtime. Each item must contain ``id``, ``name`` and
+    ``category``.
+
+    **Rationale**
+
+    A client must be able to find every resource by following the references, starting from the root.
 
 
 .. _requirements_sovd_api_locks:
@@ -1220,6 +1247,10 @@ MDD Embedded files
     The CDA must support reading embedded files from the MDD file, and provide them via the
     ``/components/{ecuName}/x-sovd2uds-bulk-data/mdd-embedded-files`` endpoint (listing) and
     ``/components/{ecuName}/x-sovd2uds-bulk-data/mdd-embedded-files/{id}`` endpoint (retrieval).
+
+    The same endpoints must also be available under the standardized ``bulk-data`` collection,
+    ``/components/{ecuName}/bulk-data/mdd-embedded-files`` and
+    ``/components/{ecuName}/bulk-data/mdd-embedded-files/{id}``.
 
     **Rationale**
 

@@ -87,6 +87,26 @@ pub struct IncludeSchemaQuery {
     pub include_schema: bool,
 }
 
+/// Capability document of the vehicle root, `/vehicle/v15`.
+/// ISO 17978-3 7.6.3: each property is a link to a supported resource.
+pub mod vehicle {
+    pub mod get {
+        #[derive(serde::Serialize, schemars::JsonSchema)]
+        pub struct Response {
+            pub id: String,
+            pub name: String,
+            pub components: String,
+            pub apps: String,
+            pub functions: String,
+            pub locks: String,
+            pub data: String,
+            #[schemars(skip)]
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub schema: Option<schemars::Schema>,
+        }
+    }
+}
+
 pub mod sovd2uds {
     use std::path::PathBuf;
 

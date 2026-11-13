@@ -121,7 +121,11 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
             data: format!("{base_path}/data"),
             sdgs,
             single_ecu_jobs: format!("{base_path}/x-single-ecu-jobs"),
+            bulk_data: format!("{base_path}/bulk-data"),
+            x_sovd2uds_bulk_data: format!("{base_path}/x-sovd2uds-bulk-data"),
+            x_sovd2uds_download: format!("{base_path}/x-sovd2uds-download"),
             faults: format!("{base_path}/faults"),
+            genericservice: format!("{base_path}/genericservice"),
             modes: format!("{base_path}/modes"),
             schema,
         }),
@@ -153,7 +157,18 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
                 single_ecu_jobs:
                     "http://localhost:20002/vehicle/v15/components/my_ecu/x-single-ecu-jobs"
                         .to_string(),
+                bulk_data: "http://localhost:20002/vehicle/v15/components/my_ecu/bulk-data"
+                    .to_string(),
+                x_sovd2uds_bulk_data:
+                    "http://localhost:20002/vehicle/v15/components/my_ecu/x-sovd2uds-bulk-data"
+                        .to_string(),
+                x_sovd2uds_download:
+                    "http://localhost:20002/vehicle/v15/components/my_ecu/x-sovd2uds-download"
+                        .to_string(),
                 faults: "http://localhost:20002/vehicle/v15/components/my_ecu/faults".to_string(),
+                genericservice:
+                    "http://localhost:20002/vehicle/v15/components/my_ecu/genericservice"
+                        .to_string(),
                 modes: "http://localhost:20002/vehicle/v15/components/my_ecu/modes".to_string(),
                 schema: None,
             })
