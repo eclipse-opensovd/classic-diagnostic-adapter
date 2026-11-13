@@ -476,7 +476,7 @@ mod tests {
         let response = DiagServiceResponseStruct::empty_positive(service);
         assert_eq!(response.response_type(), DiagServiceResponseType::Positive);
         assert!(response.is_empty());
-        assert!(response.get_raw().is_empty());
+        assert_eq!(response.get_raw(), [] as [u8; 0]);
         assert_eq!(response.service_name(), "TesterPresent");
     }
 }

@@ -33,7 +33,7 @@ thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 # tokio
 tokio = { workspace = true, features = ["rt", "time", "sync", "io-util"] }
-tokio-util = { workspace = true }
+tokio-util = { workspace = true, optional = true }
 # logging & tracing
 tracing = { workspace = true }
 # futures
@@ -55,7 +55,7 @@ cda-transport-router = { workspace = true }
 
 [features]
 default = []
-can = ["dep:tokio-socketcan-isotp"]
+can = ["dep:tokio-socketcan-isotp", "dep:tokio-util"]
 # Userspace ISO-TP over raw CAN: enables the `rawcan:<ifname>` interface
 # scheme (vcan without the can_isotp kernel module).
 can-isotp-userspace = ["can", "tokio-socketcan-isotp/isotp-userspace"]

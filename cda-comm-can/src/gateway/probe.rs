@@ -344,10 +344,7 @@ mod tests {
         gateway.probe_timeout = PROBE_TIMEOUT;
 
         let start = std::time::Instant::now();
-        assert_eq!(
-            gateway.discover_ecus().await,
-            [] as [std::string::String; 0]
-        );
+        assert_eq!(gateway.discover_ecus().await, [] as [String; 0]);
         assert!(
             start.elapsed() < PROBE_TIMEOUT * 2,
             "three probes should complete near one timeout, not three: {:?}",

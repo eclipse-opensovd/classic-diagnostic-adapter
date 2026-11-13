@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{fmt::Debug, time::Duration};
+use std::{fmt::Debug, str::FromStr, time::Duration};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 
@@ -115,10 +115,10 @@ impl TryFrom<String> for ComParamBool {
     }
 }
 
-impl TryFrom<&str> for ComParamBool {
-    type Error = String;
+impl core::str::FromStr for ComParamBool {
+    type Err = String;
 
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         value.to_string().try_into()
     }
 }
@@ -642,7 +642,7 @@ impl DeserializableCompParam for Option<u32> {
 
 impl DeserializableCompParam for ComParamBool {
     fn parse_from_db(input: &str, _unit: Option<&Unit>) -> Result<Self, String> {
-        ComParamBool::try_from(input)
+        ComParamBool::from_str(input)
     }
 }
 
@@ -744,6 +744,8 @@ impl DeserializableCompParam for Duration {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::*;
     use crate::datatypes::ComParamSimpleValue;
 
@@ -754,7 +756,7 @@ mod tests {
         assert_eq!(result, ComParamBool::True);
 
         let value = "Disabled";
-        let result: ComParamBool = value.try_into().unwrap();
+        let result = ComParamBool::from_str(value).unwrap();
         assert_eq!(result, ComParamBool::False);
     }
 

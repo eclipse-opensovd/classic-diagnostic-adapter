@@ -265,7 +265,7 @@ mod tests {
         )
         .await;
 
-        assert!(items.is_empty());
+        assert_eq!(items, [] as [serde_json::Value; 0]);
     }
 
     /// Request URIs (including their query string) are lowercased by CDA's request
