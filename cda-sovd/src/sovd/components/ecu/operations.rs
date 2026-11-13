@@ -114,7 +114,9 @@ pub(crate) mod comparams {
         use cda_plugin_security::Secured;
         use indexmap::IndexMap;
         use opensovd_axum_extra::ExtractHost;
-        use sovd_interfaces::components::ecu::operations::comparams as sovd_comparams;
+        use sovd_interfaces::components::ecu::operations::{
+            ExecutionStatus, comparams as sovd_comparams,
+        };
         use tokio::sync::RwLock;
         use uuid::Uuid;
 
@@ -215,7 +217,7 @@ pub(crate) mod comparams {
                         res.description("Comparam execution created successfully.")
                             .example(sovd_comparams::executions::update::Response {
                                 id: "b7e2c1a2-3f4d-4e6a-9c8b-2a1d5e7f8c9b".to_string(),
-                                status: sovd_comparams::executions::Status::Running,
+                                status: ExecutionStatus::Running,
                                 schema: None,
                             })
                     },
@@ -287,7 +289,7 @@ pub(crate) mod comparams {
 
             let create_execution_response = sovd_comparams::executions::update::Response {
                 id: id.to_string(),
-                status: sovd_comparams::executions::Status::Running,
+                status: ExecutionStatus::Running,
                 schema,
             };
             // Publish the lease before the execution becomes observable to DELETE.
@@ -405,7 +407,7 @@ pub(crate) mod comparams {
                                 .example(sovd_comparams::executions::id::get::Response {
                                     capability: sovd_comparams::executions::Capability::Execute,
                                     parameters: HashMap::new(),
-                                    status: sovd_comparams::executions::Status::Running,
+                                    status: ExecutionStatus::Running,
                                     schema: None,
                                 })
                         },
@@ -533,7 +535,7 @@ pub(crate) mod comparams {
                             res.description("Comparam execution updated successfully.")
                                 .example(sovd_comparams::executions::update::Response {
                                     id: "example_id".to_string(),
-                                    status: sovd_comparams::executions::Status::Running,
+                                    status: ExecutionStatus::Running,
                                     schema: None,
                                 })
                         },
@@ -988,10 +990,9 @@ pub(crate) mod service {
                     let mut res = res
                         .description("Execution started, synchronous result.")
                         .example(sovd_executions::Response {
-                            parameters: Some(serde_json::Map::from_iter([(
-                                "example_param".to_string(),
-                                serde_json::Value::String("example_value".to_string()),
-                            )])),
+                            parameters: Some(serde_json::json!({
+                                "example_param": "example_value",
+                            })),
                             error: None,
                             schema: None,
                         });
@@ -1342,6 +1343,16 @@ pub(crate) mod service {
             Ok(Some(response))
         }
 
+        /// `null` and an empty object both mean "no output parameters"; the
+        /// response then omits `parameters` instead of sending an empty value.
+        fn is_present_value(value: &serde_json::Value) -> bool {
+            match value {
+                serde_json::Value::Null => false,
+                serde_json::Value::Object(map) => !map.is_empty(),
+                _ => true,
+            }
+        }
+
         fn err_invalid_content(
             detail: String,
         ) -> sovd_interfaces::error::DataError<VendorErrorCode> {
@@ -1444,7 +1455,7 @@ pub(crate) mod service {
             let parameters = if parameters.is_empty() {
                 None
             } else {
-                Some(parameters)
+                Some(serde_json::Value::Object(parameters))
             };
             (
                 StatusCode::OK,
@@ -1524,24 +1535,12 @@ pub(crate) mod service {
             };
 
             if map_to_json {
+                // Spec Table 189: `parameters` is `AnyValue`, so non-object results are valid.
                 let (mapped_data, parse_errors) = match response
                     .and_then(|r| (!r.is_empty()).then(|| r.into_json(binary_encoding)))
                 {
-                    None => (serde_json::Map::new(), vec![]),
-                    Some(Ok(DiagServiceJsonResponse {
-                        data: serde_json::Value::Object(mapped_data),
-                        errors,
-                    })) => (mapped_data, errors),
-                    Some(Ok(v)) => {
-                        return ErrorWrapper {
-                            error: ApiError::InternalServerError(Some(format!(
-                                "Expected JSON object but got: {}",
-                                v.data
-                            ))),
-                            include_schema,
-                        }
-                        .into_response();
-                    }
+                    None => (serde_json::Value::Null, vec![]),
+                    Some(Ok(DiagServiceJsonResponse { data, errors })) => (data, errors),
                     Some(Err(e)) => {
                         return ErrorWrapper {
                             error: ApiError::InternalServerError(Some(format!("{e:?}"))),
@@ -1554,11 +1553,7 @@ pub(crate) mod service {
                 let error = field_parse_errors_to_json(parse_errors, "parameters")
                     .into_iter()
                     .next();
-                let parameters = if mapped_data.is_empty() {
-                    None
-                } else {
-                    Some(mapped_data)
-                };
+                let parameters = is_present_value(&mapped_data).then_some(mapped_data);
                 (
                     StatusCode::OK,
                     Json(sovd_executions::Response {
@@ -1691,28 +1686,12 @@ pub(crate) mod service {
                             .into_json(binary_encoding)
                         {
                             Ok(DiagServiceJsonResponse {
-                                data: serde_json::Value::Object(mapped_data),
-                                errors,
-                            }) => (mapped_data, errors),
-                            Ok(DiagServiceJsonResponse {
                                 data: serde_json::Value::Null,
                                 errors,
-                            }) => {
-                                if errors.is_empty() {
-                                    return StatusCode::NO_CONTENT.into_response();
-                                }
-                                (serde_json::Map::new(), errors)
+                            }) if errors.is_empty() => {
+                                return StatusCode::NO_CONTENT.into_response();
                             }
-                            Ok(v) => {
-                                return ErrorWrapper {
-                                    error: ApiError::InternalServerError(Some(format!(
-                                        "Expected JSON object but got: {}",
-                                        v.data
-                                    ))),
-                                    include_schema,
-                                }
-                                .into_response();
-                            }
+                            Ok(DiagServiceJsonResponse { data, errors }) => (data, errors),
                             Err(e) => {
                                 return ErrorWrapper {
                                     error: ApiError::InternalServerError(Some(format!("{e:?}"))),
@@ -1724,11 +1703,7 @@ pub(crate) mod service {
                         let error = field_parse_errors_to_json(parse_errors, "parameters")
                             .into_iter()
                             .next();
-                        let parameters = if response_data.is_empty() {
-                            None
-                        } else {
-                            Some(response_data)
-                        };
+                        let parameters = is_present_value(&response_data).then_some(response_data);
                         (
                             StatusCode::OK,
                             Json(sovd_executions::Response {
@@ -2139,7 +2114,7 @@ mod tests {
             crate::sovd::ComparamExecution::new(
                 comparams::Execution {
                     capability: executions::Capability::Execute,
-                    status: executions::Status::Running,
+                    status: sovd_interfaces::components::ecu::operations::ExecutionStatus::Running,
                     comparam_override: HashMap::new(),
                 },
                 communication_access
