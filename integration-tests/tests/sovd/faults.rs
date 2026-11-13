@@ -1524,3 +1524,100 @@ async fn test_user_memory_fault_status_uses_status_byte() {
         );
     }
 }
+
+/// Test that GET /faults returns ECU-reported DTCs with and without ODX references.
+#[tokio::test]
+async fn test_get_faults_with_and_without_odx_reference() {
+    let test_env = TestEnv::builder().await.unwrap();
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
+    let ecu_name = ECU_FLXC1000;
+    let fault_memory = "Standard";
+
+    // Scenario 1: Add a DTC that has a matching ODX reference.
+    // Status mask 0x29 (binary 0010_1001):
+    // - Bit 0: testFailed = true
+    // - Bit 3: confirmedDTC = true
+    // - Bit 5: testFailedSinceLastClear = true
+    let dtc1 = DtcMinimal {
+        id: "01E241".into(),
+        status_mask: "29".into(),
+        emissions_related: false,
+    };
+
+    ecusim::add_dtc(&test_env.ecu_sim, ecu_name, fault_memory, &dtc1)
+        .await
+        .expect("Failed to add ODX-referenced DTC 0x01E241");
+
+    // Scenario 2: Add an ECU-reported DTC without a matching ODX reference.
+    // Use the same status mask (0x29) to verify that its status is preserved.
+    let dtc2 = DtcMinimal {
+        id: "01E246".into(),
+        status_mask: "29".into(),
+        emissions_related: false,
+    };
+
+    ecusim::add_dtc(&test_env.ecu_sim, ecu_name, fault_memory, &dtc2)
+        .await
+        .expect("Failed to add DTC 0x01E246 without an ODX reference");
+
+    // Test GET /faults - both DTCs should be returned, including the one without an ODX reference.
+    let faults = get_faults(&test_env, ecu_endpoint)
+        .await
+        .expect("Failed to get faults via SOVD");
+
+    // Verify that the DTC with an ODX reference is returned with status mask 0x29.
+    let fault1 = faults
+        .iter()
+        .find(|fault| fault.code == "01E241")
+        .expect("Expected ODX-referenced DTC 0x01E241 to be present");
+
+    assert_eq!(
+        fault1.fault_name, "DTC Code 3",
+        "Expected the ODX fault name for DTC 0x01E241"
+    );
+    assert_eq!(
+        fault1.severity,
+        Some(3),
+        "Expected the ODX severity for DTC 0x01E241"
+    );
+    assert_eq!(
+        fault1.display_code.as_deref(),
+        Some("P123457"),
+        "Expected the ODX display code for DTC 0x01E241"
+    );
+    assert_eq!(
+        fault1
+            .status
+            .as_ref()
+            .and_then(|status| status.mask.clone()),
+        Some("29".to_string()),
+        "Expected DTC 0x01E241 to have status mask 0x29"
+    );
+
+    // Verify that the ECU-reported DTC without an ODX reference is also returned.
+    let fault2 = faults
+        .iter()
+        .find(|fault| fault.code == "01E246")
+        .expect("Expected ECU-reported DTC 0x01E246 without an ODX reference to be present");
+
+    // Verify fallback fault name and severity.
+    assert_eq!(
+        fault2.fault_name, "DTC description not available",
+        "Expected fallback fault name for DTC without ODX reference"
+    );
+
+    assert_eq!(
+        fault2.severity,
+        Some(0),
+        "Expected default severity 0 for DTC without ODX reference"
+    );
+
+    assert_eq!(
+        fault2
+            .status
+            .as_ref()
+            .and_then(|status| status.mask.clone()),
+        Some("29".to_string()),
+        "Expected DTC 0x01E246 to have status mask 0x29"
+    );
+}
