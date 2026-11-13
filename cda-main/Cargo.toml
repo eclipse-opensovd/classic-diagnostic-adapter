@@ -55,7 +55,7 @@ toml = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 # allocator
-mimalloc = { git = "https://github.com/theswiftfox/mimalloc.git", rev = "f1b43de8bcd208a4b0c9469a87fe0920b540da40" }
+mimalloc = { git = "https://github.com/theswiftfox/mimalloc.git", rev = "f1b43de8bcd208a4b0c9469a87fe0920b540da40", optional = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -90,10 +90,12 @@ cda-plugin-security = { workspace = true, features = ["test-utils"] }
 chrono = { workspace = true }
 
 [features]
-default = ["health", "openssl", "config-optional"]
-# Uses Rust's system allocator so allocator-interposition profilers such as
+default = ["default-without-mimalloc", "mimalloc"]
+default-without-mimalloc = ["health", "openssl", "config-optional"]
+# Use mimalloc as the global allocator. Disable this feature to use Rust's
+# system allocator, so allocator-interposition profilers such as
 # Heaptrack and Valgrind can attribute CDA allocations.
-heap-profiling = []
+mimalloc = ["dep:mimalloc"]
 tokio-tracing = ["cda-interfaces/tokio-tracing", "cda-tracing/tokio-tracing"]
 openssl = ["cda-comm-doip/openssl"]
 openssl-vendored = [

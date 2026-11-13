@@ -26,18 +26,16 @@ sudo apt install heaptrack heaptrack-gui
 
 ## Build the profiling binary
 
-Build the `release-with-debug` profile with the `heap-profiling` feature:
+Build the `release-with-debug` profile without mimalloc:
 
 ```shell
-RUSTFLAGS='-C force-frame-pointers=yes' \
-  cargo build --locked --profile release-with-debug --bin opensovd-cda \
-  --features heap-profiling
+make profile
 ```
 
 The resulting binary is `target/release-with-debug/opensovd-cda`.
 
-The `heap-profiling` feature uses Rust's system allocator instead of mimalloc,
-allowing Heaptrack to intercept and attribute allocations. The
+This way, it uses Rust's system allocator, allowing
+Heaptrack to intercept and attribute allocations. The
 `release-with-debug` profile retains debug information and reduces optimization
 to improve call-stack readability.
 
