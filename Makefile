@@ -10,7 +10,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 STABLE := 1.88.0
-NIGHTLY := nightly-2026-07-21
+NIGHTLY := nightly-2026-11-12
 CARGO_DENY_VERSION := 0.20.2
 CARGO_LLVM_COV_VERSION := 0.9.1
 PROTOC_VERSION := 34.1

@@ -49,9 +49,9 @@ serde_json = { workspace = true }
 schemars = { workspace = true }
 
 [build-dependencies]
-prost-build = { workspace = true }
-cargo_toml = { workspace = true }
-toml = { workspace = true }
+prost-build = { workspace = true, optional = true }
+cargo_toml = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
 
 [dev-dependencies]
 cda-database = { workspace = true, features = ["database-builder"] }
@@ -61,8 +61,8 @@ tokio = { workspace = true, features = ["macros"] }
 
 [features]
 default = []
-gen-protos = []
-gen-flatbuffers = []
+gen-protos = ["dep:prost-build"]
+gen-flatbuffers = ["dep:cargo_toml", "dep:toml"]
 dlt-tracing = ["cda-interfaces/dlt-tracing"]
 
 # Guard the database builder, as it should not be used

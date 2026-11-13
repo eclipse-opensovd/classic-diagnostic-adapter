@@ -966,6 +966,7 @@ mod acquisition_policy {
         functions::functional_groups::{
             locks::post as fg_post, tests::create_test_fg_state_with_locks,
         },
+        lock_state,
         locks::handlers::ecu::post as ecu_post,
         tests::create_test_webserver_state,
     };
@@ -1057,7 +1058,7 @@ mod acquisition_policy {
         let response = post_ecu_lock(uds, "test_ecu", &locks).await;
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
-        assert!(locks.open_locks().await.is_empty());
+        assert_eq!(locks.open_locks().await, [] as [lock_state::ActiveLock; 0]);
     }
 
     #[tokio::test]
@@ -1094,7 +1095,7 @@ mod acquisition_policy {
             post_fg_lock(with_fg_coverage(MockUdsEcu::default()), "test_fg", &locks).await;
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
-        assert!(locks.open_locks().await.is_empty());
+        assert_eq!(locks.open_locks().await, [] as [lock_state::ActiveLock; 0]);
     }
 
     #[tokio::test]

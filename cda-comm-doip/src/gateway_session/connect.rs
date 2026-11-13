@@ -539,7 +539,7 @@ mod tests {
             let (fake, gateway, session, recorder) = blocked_gateway(DiscoveryMode::Full).await;
             announce_refused_during_reconnect(&gateway, &session, &fake, 0x1000).await;
 
-            assert!(gateway.state.topology.unreachable().is_empty());
+            assert_eq!(gateway.state.topology.unreachable(), [] as [u16; 0]);
             assert!(
                 recorder
                     .unreachable_at_disconnect
@@ -568,7 +568,7 @@ mod tests {
 
             let reported = recorder.unreachable_at_disconnect.lock().unwrap().len();
             if connected_meanwhile {
-                assert!(gateway.state.topology.unreachable().is_empty());
+                assert_eq!(gateway.state.topology.unreachable(), [] as [u16; 0]);
                 assert_eq!(reported, 0, "a connected gateway is not reported");
             } else {
                 assert_eq!(gateway.state.topology.unreachable(), [0x1000]);
@@ -616,7 +616,10 @@ mod tests {
         assert!(connect.wait().await.is_err());
         assert!(gateway.state.doip_connections.read().await.is_empty());
         assert!(!gateway.state.has_connection(0x1000).await);
-        assert!(gateway.state.topology.connected().is_empty());
+        assert_eq!(
+            gateway.state.topology.connected(),
+            [] as [cda_interfaces::topology::KnownGateway; 0]
+        );
         gateway.state.report_unreachable(&session, [0x1000]).await;
         assert!(
             recorder
@@ -625,7 +628,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert!(gateway.state.topology.unreachable().is_empty());
+        assert_eq!(gateway.state.topology.unreachable(), [] as [u16; 0]);
         session.connection_tasks.shutdown().await;
     }
 
@@ -999,7 +1002,10 @@ mod tests {
             ]
         );
         assert!(detection.try_recv().is_err());
-        assert!(gateway.state.topology.connected().is_empty());
+        assert_eq!(
+            gateway.state.topology.connected(),
+            [] as [cda_interfaces::topology::KnownGateway; 0]
+        );
         assert!(connect.wait().await.is_err());
     }
 
@@ -1025,7 +1031,10 @@ mod tests {
         gateway.stop(&mut operation).await;
 
         assert!(handler.calls.lock().unwrap().is_empty());
-        assert!(gateway.state.topology.connected().is_empty());
+        assert_eq!(
+            gateway.state.topology.connected(),
+            [] as [cda_interfaces::topology::KnownGateway; 0]
+        );
         assert!(connect.wait().await.is_err());
     }
 
@@ -1054,7 +1063,10 @@ mod tests {
             detection.try_recv().is_err(),
             "a cancelled commit requests no detection"
         );
-        assert!(gateway.state.topology.connected().is_empty());
+        assert_eq!(
+            gateway.state.topology.connected(),
+            [] as [cda_interfaces::topology::KnownGateway; 0]
+        );
         session.connection_tasks.shutdown().await;
     }
 
@@ -1081,7 +1093,10 @@ mod tests {
         assert!(connect.wait().await.is_err());
         assert!(handler.disconnected.lock().unwrap().is_empty());
         assert!(detection.try_recv().is_err());
-        assert!(gateway.state.topology.connected().is_empty());
+        assert_eq!(
+            gateway.state.topology.connected(),
+            [] as [cda_interfaces::topology::KnownGateway; 0]
+        );
         session.connection_tasks.shutdown().await;
     }
 

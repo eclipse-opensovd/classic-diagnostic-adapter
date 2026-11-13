@@ -191,9 +191,12 @@ mod tests {
     fn only_fields_with_a_matching_sd_are_reported() {
         let sdgs = [sd_group("LIN", "yes")];
         assert_eq!(matching_field_names(&filters(), &sdgs), ["x-lin"]);
-        assert!(matching_field_names(&filters(), &[]).is_empty());
+        assert_eq!(matching_field_names(&filters(), &[]), [] as [String; 0]);
         // `x-obd` is case sensitive, so a differently cased value does not match.
-        assert!(matching_field_names(&filters(), &[sd_group("OBD", "obd")]).is_empty());
+        assert_eq!(
+            matching_field_names(&filters(), &[sd_group("OBD", "obd")]),
+            [] as [String; 0]
+        );
     }
 
     #[tokio::test]

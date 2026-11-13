@@ -1092,7 +1092,10 @@ mod tests {
         // "engine" is covered but owned by a different client; "body" is the
         // same owner as "powertrain" but outside its coverage. Neither
         // qualifies.
-        assert!(state.covered_narrow_locks(&powertrain).is_empty());
+        assert_eq!(
+            state.covered_narrow_locks(&powertrain),
+            [] as [cda_interfaces::lock_priority_api::LockId; 0]
+        );
     }
 
     #[test]
@@ -1108,10 +1111,16 @@ mod tests {
             .expect("ECU lock insertion should succeed");
 
         let ecu_lock = state.active_by_id("engine").expect("ECU lock should exist");
-        assert!(state.covered_narrow_locks(ecu_lock).is_empty());
+        assert_eq!(
+            state.covered_narrow_locks(ecu_lock),
+            [] as [cda_interfaces::lock_priority_api::LockId; 0]
+        );
 
         let vehicle = active_lock("vehicle-only", ScopeKey::Vehicle, &["engine"], None);
-        assert!(state.covered_narrow_locks(&vehicle).is_empty());
+        assert_eq!(
+            state.covered_narrow_locks(&vehicle),
+            [] as [cda_interfaces::lock_priority_api::LockId; 0]
+        );
     }
 
     #[test]

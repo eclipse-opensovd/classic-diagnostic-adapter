@@ -255,7 +255,7 @@ mod tests {
         );
         assert!(config.ecu_mappings.is_empty());
         assert!(config.transport_overrides.is_empty());
-        assert!(config.probe_fallbacks.is_empty());
+        assert_eq!(config.probe_fallbacks, [] as [CanProbeConfig; 0]);
     }
 
     #[test]
