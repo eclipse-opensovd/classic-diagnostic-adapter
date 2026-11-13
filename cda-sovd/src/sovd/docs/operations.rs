@@ -18,6 +18,9 @@
 //! parameter schemas obtained from the diagnostic layer.
 
 use aide::openapi::{Operation, PathItem};
+use cda_interfaces::{
+    DiagComm, DiagCommType, EcuSchemas, datatypes::ComponentOperationsInfo, subfunction_ids,
+};
 use indexmap::IndexMap;
 use schemars::Schema;
 use sovd_interfaces::docs;
@@ -43,6 +46,51 @@ pub struct OperationDocsMeta {
     pub response_params_schema: Option<Schema>,
 }
 
+/// The [`DiagComm`] used to look up the schemas of an operation (`RoutineControl` Start).
+#[must_use]
+pub fn start_diag_comm(service: &str) -> DiagComm {
+    DiagComm {
+        name: service.to_owned(),
+        type_: DiagCommType::Operations,
+        lookup_name: None,
+        subfunction_id: Some(subfunction_ids::routine::START),
+    }
+}
+
+/// Title of the capability description of an operation.
+#[must_use]
+pub fn docs_title(service: &str) -> String {
+    format!("Operation: {service}")
+}
+
+/// Builds the [`OperationDocsMeta`] of an operation directly from the ECU
+/// description, without going through the UDS layer.
+///
+/// Used by offline tools like the standalone `OpenAPI` generator. Mirrors the
+/// lookups done by the `/operations/{service}/docs` endpoint.
+pub async fn operation_docs_meta<E: EcuSchemas + Sync>(
+    ecu: &E,
+    info: &ComponentOperationsInfo,
+) -> OperationDocsMeta {
+    let diag_comm = start_diag_comm(&info.id);
+    let request_params_schema = ecu
+        .schema_for_request(&diag_comm)
+        .await
+        .ok()
+        .and_then(cda_interfaces::SchemaDescription::into_schema);
+    let response_params_schema = ecu
+        .schema_for_responses(&diag_comm)
+        .await
+        .ok()
+        .and_then(cda_interfaces::SchemaDescription::into_schema);
+    OperationDocsMeta {
+        name: info.id.clone(),
+        is_async: info.has_stop || info.has_request_results,
+        request_params_schema,
+        response_params_schema,
+    }
+}
+
 /// Build the `PathItem` entries for a single operation's execution endpoints.
 ///
 /// Returns an ordered map with two entries:
@@ -50,6 +98,7 @@ pub struct OperationDocsMeta {
 /// - `{base_path}/executions/{execution-id}` - GET (status), PUT (capabilities), DELETE (terminate)
 ///
 /// The second entry is only present for asynchronous operations.
+#[must_use]
 pub fn build_path_items(base_path: &str, meta: &OperationDocsMeta) -> IndexMap<String, PathItem> {
     let mut paths = IndexMap::new();
 

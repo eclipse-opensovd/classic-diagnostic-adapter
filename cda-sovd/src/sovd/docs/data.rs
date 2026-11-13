@@ -23,7 +23,7 @@
 
 use aide::openapi::{Operation, PathItem};
 use axum::{Json, http::StatusCode, response::IntoResponse as _};
-use cda_interfaces::{DiagComm, DiagCommType, SchemaProvider, UdsEcu};
+use cda_interfaces::{DiagComm, DiagCommType, EcuSchemas, SchemaProvider, UdsEcu};
 use indexmap::IndexMap;
 use schemars::Schema;
 use sovd_interfaces::docs;
@@ -65,30 +65,16 @@ pub async fn build_docs_response<T: UdsEcu + SchemaProvider + Clone>(
     resource_type: &str,
 ) -> axum::response::Response {
     // Get the read (GET) response schema (ReadDataByIdentifier / 0x22)
-    let read_service = DiagComm {
-        name: service.to_owned(),
-        type_: DiagCommType::Data,
-        lookup_name: None,
-        subfunction_id: None,
-    };
-
     let read_response_schema = uds
-        .schema_for_responses(ecu_name, &read_service)
+        .schema_for_responses(ecu_name, &read_diag_comm(service))
         .await
         .ok()
         .and_then(|s| s.with_all_binary_encodings().into_schema());
 
     // Check if a corresponding WriteDataByIdentifier (0x2E) service exists
     // by attempting to resolve its request schema
-    let write_service = DiagComm {
-        name: service.to_owned(),
-        type_: DiagCommType::Configurations,
-        lookup_name: None,
-        subfunction_id: None,
-    };
-
     let write_request_schema = uds
-        .schema_for_request(ecu_name, &write_service)
+        .schema_for_request(ecu_name, &write_diag_comm(service))
         .await
         .ok()
         .and_then(|s| s.with_all_binary_encodings().into_schema());
@@ -99,16 +85,66 @@ pub async fn build_docs_response<T: UdsEcu + SchemaProvider + Clone>(
         write_request_schema,
     };
 
+    let base_path = format!("/components/{ecu_name}/{resource_type}/{service}");
+    let path_items = build_path_items(&base_path, &meta);
+    let doc = super::build_openapi_doc(&docs_title(resource_type, service), path_items);
+
+    (StatusCode::OK, Json(doc)).into_response()
+}
+
+/// The [`DiagComm`] used to look up the read (GET, 0x22) schema of a data service.
+#[must_use]
+pub fn read_diag_comm(service: &str) -> DiagComm {
+    DiagComm {
+        name: service.to_owned(),
+        type_: DiagCommType::Data,
+        lookup_name: None,
+        subfunction_id: None,
+    }
+}
+
+/// The [`DiagComm`] used to look up the write (PUT, 0x2E) schema of a data service.
+#[must_use]
+pub fn write_diag_comm(service: &str) -> DiagComm {
+    DiagComm {
+        name: service.to_owned(),
+        type_: DiagCommType::Configurations,
+        lookup_name: None,
+        subfunction_id: None,
+    }
+}
+
+/// Title of the capability description of a data or configuration service.
+#[must_use]
+pub fn docs_title(resource_type: &str, service: &str) -> String {
     let title_prefix = match resource_type {
         "configurations" => "Configuration",
         _ => "Data",
     };
+    format!("{title_prefix}: {service}")
+}
 
-    let base_path = format!("/components/{ecu_name}/{resource_type}/{service}");
-    let path_items = build_path_items(&base_path, &meta);
-    let doc = super::build_openapi_doc(&format!("{title_prefix}: {service}"), path_items);
-
-    (StatusCode::OK, Json(doc)).into_response()
+/// Builds the [`DataDocsMeta`] of a data or configuration service directly from
+/// the ECU description, without going through the UDS layer.
+///
+/// Used by offline tools like the standalone `OpenAPI` generator. Mirrors the
+/// lookups done by [`build_docs_response`].
+pub async fn data_docs_meta<E: EcuSchemas + Sync>(ecu: &E, service: &str) -> DataDocsMeta {
+    let read_response_schema = ecu
+        .schema_for_responses(&read_diag_comm(service))
+        .await
+        .ok()
+        .and_then(cda_interfaces::SchemaDescription::into_schema);
+    let write_request_schema = ecu
+        .schema_for_request(&write_diag_comm(service))
+        .await
+        .ok()
+        .and_then(cda_interfaces::SchemaDescription::into_schema);
+    DataDocsMeta {
+        name: service.to_owned(),
+        read_response_schema,
+        write_request_schema,
+    }
 }
 
 /// Build the `PathItem` entries for a single data service.
@@ -118,6 +154,7 @@ pub async fn build_docs_response<T: UdsEcu + SchemaProvider + Clone>(
 ///
 /// PUT is only included when `meta.write_request_schema` is `Some`, indicating
 /// that a `WriteDataByIdentifier` (0x2E) service exists for this data identifier.
+#[must_use]
 pub fn build_path_items(base_path: &str, meta: &DataDocsMeta) -> IndexMap<String, PathItem> {
     let mut paths = IndexMap::new();
 

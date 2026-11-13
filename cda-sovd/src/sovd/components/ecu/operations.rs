@@ -727,10 +727,7 @@ pub(crate) mod service {
             http::StatusCode,
             response::{IntoResponse as _, Response},
         };
-        use cda_interfaces::{
-            DiagComm, DiagCommType, DynamicPlugin, SchemaProvider, UdsEcu,
-            file_manager::FileManager, subfunction_ids,
-        };
+        use cda_interfaces::{DynamicPlugin, SchemaProvider, UdsEcu, file_manager::FileManager};
         use cda_plugin_security::Secured;
 
         use crate::{
@@ -776,12 +773,7 @@ pub(crate) mod service {
 
             let is_async = op_info.has_stop || op_info.has_request_results;
 
-            let diag_service = DiagComm {
-                name: service.clone(),
-                type_: DiagCommType::Operations,
-                lookup_name: None,
-                subfunction_id: Some(subfunction_ids::routine::START),
-            };
+            let diag_service = docs::operations::start_diag_comm(&service);
 
             let request_params_schema = uds
                 .schema_for_request(&ecu_name, &diag_service)
@@ -804,7 +796,7 @@ pub(crate) mod service {
 
             let base_path = format!("/components/{ecu_name}/operations/{service}");
             let path_items = docs::operations::build_path_items(&base_path, &meta);
-            let doc = docs::build_openapi_doc(&format!("Operation: {service}"), path_items);
+            let doc = docs::build_openapi_doc(&docs::operations::docs_title(&service), path_items);
 
             (StatusCode::OK, Json(doc)).into_response()
         }

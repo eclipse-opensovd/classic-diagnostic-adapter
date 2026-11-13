@@ -383,7 +383,7 @@ pub(crate) mod id {
             .with(openapi::error_bad_request)
             .with(openapi::error_forbidden)
             .with(openapi::error_not_found)
-            .id("ecu_faults_get")
+            .id("ecu_faults_get_by_id")
     }
 
     pub(crate) async fn delete<

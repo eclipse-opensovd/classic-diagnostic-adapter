@@ -509,6 +509,32 @@ fn load_ecu_from_file<S: SecurityPlugin>(
     Ok(EcuLoadResult { manager, files })
 }
 
+/// Loads a single MDD file without any side effects on the file system and
+/// returns the ECU name and its [`EcuManager`].
+///
+/// Intended for offline tools (e.g. the standalone `OpenAPI` generator). The
+/// database settings (naming convention, per-ECU overrides, protocol) are taken
+/// from `config`, so the result matches what the CDA would serve at runtime.
+/// Unlike the runtime loading, the MDD is never rewritten uncompressed.
+///
+/// # Errors
+/// Returns [`MddLoadingError`] if loading the MDD or creating the manager fails.
+pub fn load_ecu_manager_offline<S: SecurityPlugin>(
+    path: &Path,
+    config: &Configuration,
+) -> Result<(String, EcuManager<S>), MddLoadingError> {
+    let mut config = config.clone();
+    config.flat_buf.mdd_decompress = false;
+    let ecu_config_map: HashMap<String, EcuConfig> = config
+        .ecu
+        .iter()
+        .map(|(k, v)| (k.to_lowercase(), v.clone()))
+        .collect();
+    let protocol = Protocol::new(config.doip.protocol_name.clone());
+    load_single_mdd::<S>(path, &config, &ecu_config_map, &protocol)
+        .map(|(ecu_name, manager, _)| (ecu_name, manager))
+}
+
 /// Loads a single MDD file and returns the ECU name, manager, and file manager.
 ///
 /// # Errors

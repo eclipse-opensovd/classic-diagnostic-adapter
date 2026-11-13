@@ -734,6 +734,38 @@ impl<'a> EcuDataBuilder<'a> {
         dataformat::AdditionalAudience::create(&mut self.fbb, &additional_audience_args)
     }
 
+    /// Create a [`dataformat::Audience`].
+    ///
+    /// `flags` are, in order: supplier, development, manufacturing, after sales, after market.
+    pub fn create_audience(
+        &mut self,
+        flags: [bool; 5],
+        enabled_audiences: Option<Vec<WIPOffset<dataformat::AdditionalAudience<'a>>>>,
+        disabled_audiences: Option<Vec<WIPOffset<dataformat::AdditionalAudience<'a>>>>,
+    ) -> WIPOffset<dataformat::Audience<'a>> {
+        let [
+            is_supplier,
+            is_development,
+            is_manufacturing,
+            is_after_sales,
+            is_after_market,
+        ] = flags;
+        let enabled_audiences = enabled_audiences.map(|v| self.fbb.create_vector(&v));
+        let disabled_audiences = disabled_audiences.map(|v| self.fbb.create_vector(&v));
+        dataformat::Audience::create(
+            &mut self.fbb,
+            &dataformat::AudienceArgs {
+                enabled_audiences,
+                disabled_audiences,
+                is_supplier,
+                is_development,
+                is_manufacturing,
+                is_after_sales,
+                is_after_market,
+            },
+        )
+    }
+
     pub fn create_param(
         &mut self,
         params: &ParameterParams<'a>,
@@ -1222,6 +1254,32 @@ impl<'a> EcuDataBuilder<'a> {
         };
         let normal_dop = dataformat::NormalDOP::create(&mut self.fbb, &normal_dop_args);
         dataformat::SpecificDOPData::tag_as_normal_dop(normal_dop)
+    }
+
+    /// Creates a `PHYSICAL-TYPE` with the given base data type.
+    pub fn create_physical_type(
+        &mut self,
+        base_data_type: DataType,
+    ) -> WIPOffset<dataformat::PhysicalType<'a>> {
+        use dataformat::PhysicalTypeDataType as T;
+        let base_data_type = match base_data_type {
+            DataType::Int32 => T::A_INT_32,
+            DataType::UInt32 => T::A_UINT_32,
+            DataType::Float32 => T::A_FLOAT_32,
+            DataType::Float64 => T::A_FLOAT_64,
+            DataType::AsciiString => T::A_ASCIISTRING,
+            DataType::Utf8String => T::A_UTF_8_STRING,
+            DataType::Unicode2String => T::A_UNICODE_2_STRING,
+            DataType::ByteField => T::A_BYTEFIELD,
+        };
+        dataformat::PhysicalType::create(
+            &mut self.fbb,
+            &dataformat::PhysicalTypeArgs {
+                precision: None,
+                base_data_type,
+                display_radix: dataformat::Radix::DEC,
+            },
+        )
     }
 
     /// Shorthand for creating a regular `NormalDOP` with only a compu method and diag coded type.

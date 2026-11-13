@@ -39,7 +39,7 @@ endif
 	precommit precommit-all-features \
 	coverage coverage-can integration-coverage deny \
 	generate-config generate-test-config generate-flatbuffers generate-protos docs rustdoc \
-	tool-versions setup-devenv install-uv install-protoc doctor run profile depgraph clean clean-doc help
+	tool-versions setup-devenv install-uv install-protoc doctor run build-openapi-gen run-openapi-gen profile depgraph clean clean-doc help
 
 build:
 	cargo +$(STABLE) build --locked $(ARGS)
@@ -138,7 +138,7 @@ deny:
 	cargo +$(STABLE) deny check $(ARGS)
 
 generate-config:
-	cargo +$(STABLE) run --locked --all-features -- generate-config --output $(or $(OUTPUT),opensovd-cda.toml)
+	cargo +$(STABLE) run --locked --all-features --bin opensovd-cda -- generate-config --output $(or $(OUTPUT),opensovd-cda.toml)
 
 generate-test-config:
 	cargo +$(STABLE) test --locked --workspace --all-features --test integration_tests -- --exact --ignored util::config::tests::generate_compose_configs
@@ -233,7 +233,13 @@ doctor:
 	@uv run --locked --group tools ruff --version
 
 run:
-	cargo +$(STABLE) run --locked --release -- $(ARGS)
+	cargo +$(STABLE) run --locked --release --bin opensovd-cda -- $(ARGS)
+
+build-openapi-gen:
+	$(MAKE) build ARGS="-p cda-openapi-gen --release $(ARGS)"
+
+run-openapi-gen:
+	cargo +$(STABLE) run --locked --release -p cda-openapi-gen --bin cda-openapi-gen -- $(ARGS)
 
 profile:
 	RUSTFLAGS="-C force-frame-pointers=yes" cargo +$(STABLE) build --profile release-with-debug --bin opensovd-cda --features heap-profiling
@@ -286,6 +292,8 @@ help:
 		'setup-devenv                 Install pinned development tools' \
 		'doctor                       Check development prerequisites' \
 		'run ARGS="..."               Run the release binary' \
+		'build-openapi-gen            Build the standalone OpenAPI generator (release)' \
+		'run-openapi-gen ARGS="..."   Run the OpenAPI generator, e.g. ARGS="--mdd x.mdd -d out"' \
 		'profile                      Build the heap-profiling binary' \
 		'depgraph                     Generate depgraph.png' \
 		'clean / clean-doc            Clean all artifacts or Rustdoc artifacts'

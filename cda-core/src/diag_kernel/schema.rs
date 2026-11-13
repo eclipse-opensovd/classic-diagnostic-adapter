@@ -67,10 +67,9 @@ impl<S: SecurityPlugin> EcuSchemas for EcuManager<S> {
                 .next()
                 .and_then(SchemaDescription::into_schema),
             _ => Some(schemars::json_schema!({
-                "any-of": responses.into_iter()
+                "anyOf": responses.into_iter()
                     .filter_map(SchemaDescription::into_schema)
-                    .collect::<Vec<_>>(),
-                "type": "array"
+                    .collect::<Vec<_>>()
             })),
         };
         Ok(SchemaDescription::new(
@@ -360,27 +359,14 @@ fn normal_dop_to_schema(
     match category {
         datatypes::CompuCategory::TextTable => {
             let enum_values = text_table_enum_values(normal_dop);
-
-            if enum_values.is_empty() {
-                schema.insert(
-                    name,
-                    schemars::json_schema!({
-                        "default": default_value,
-                        "type": "string"
-                    })
-                    .into(),
-                );
-            } else {
-                schema.insert(
-                    name,
-                    schemars::json_schema!({
-                        "default": default_value,
-                        "type": "string",
-                        "enum": enum_values
-                    })
-                    .into(),
-                );
+            let mut param_schema = schemars::json_schema!({ "type": "string" });
+            if !enum_values.is_empty() {
+                param_schema.insert("enum".to_owned(), enum_values.into());
             }
+            if !default_value.is_empty() {
+                param_schema.insert("default".to_owned(), default_value.into());
+            }
+            schema.insert(name, param_schema.into());
         }
         datatypes::CompuCategory::Identical
         | datatypes::CompuCategory::Linear
@@ -394,13 +380,17 @@ fn normal_dop_to_schema(
                     "Mapping {ctx}: Diag Coded Type not found in ECU database"
                 )));
             };
-            let type_ = ecu_datatype_to_jsontype(datatype.base_datatype());
+            let type_ = ecu_datatype_to_jsontype(value_datatype(
+                category,
+                datatype.base_datatype(),
+                normal_dop,
+            ));
 
-            let mut param_schema = schemars::json_schema!({
-                "default": default_value,
-                "type": type_
-            });
-            if datatype.base_datatype() == datatypes::DataType::ByteField {
+            let mut param_schema = schemars::json_schema!({ "type": type_ });
+            if let Some(default) = default_to_json(default_value, &type_) {
+                param_schema.insert("default".to_owned(), default);
+            }
+            if datatype.base_datatype() == datatypes::DataType::ByteField && type_ == "string" {
                 // Base64 is the default, `SchemaDescription::with_binary_encoding`
                 // switches it to the encoding selected for the request.
                 param_schema.insert(
@@ -412,11 +402,14 @@ fn normal_dop_to_schema(
                 // Database defaults are hex coded, convert them so the default
                 // matches the declared format.
                 match cda_interfaces::BinaryEncoding::Hex.decode(default_value) {
-                    Ok(bytes) => {
+                    Ok(bytes) if !bytes.is_empty() => {
                         param_schema.insert(
                             "default".to_owned(),
                             cda_interfaces::BinaryEncoding::Base64.encode(&bytes).into(),
                         );
+                    }
+                    Ok(_) => {
+                        param_schema.remove("default");
                     }
                     Err(e) => {
                         tracing::debug!(
@@ -483,7 +476,7 @@ fn dop_variant_to_schema(
         datatypes::DataOperationVariant::EnvDataDesc(env_data_desc_dop) => {
             let variants = env_data_desc_to_variants(&env_data_desc_dop, ctx, ecu_db, request);
             if !variants.is_empty() {
-                schema.insert(name, schemars::json_schema!({ "any-of": variants }).into());
+                schema.insert(name, schemars::json_schema!({ "anyOf": variants }).into());
             }
         }
         datatypes::DataOperationVariant::EnvData(_env_data_dop) => {
@@ -563,7 +556,7 @@ fn map_dynamic_length_field_to_schema(
         .map(datatypes::StructureDop)
     {
         Ok(map_struct_to_schema(&structure_dop, ctx, ecu_db, request)
-            .map(|s| serde_json::Value::Array(vec![s.into()])))
+            .map(|s| schemars::json_schema!({ "type": "array", "items": s }).into()))
     } else if let Some(env_data_desc) = dynamic_length_field
         .field()
         .and_then(|f| f.env_data_desc())
@@ -575,7 +568,7 @@ fn map_dynamic_length_field_to_schema(
             Ok(None)
         } else {
             Ok(Some(
-                schemars::json_schema!({ "type": "array", "items": { "any-of": variants } }).into(),
+                schemars::json_schema!({ "type": "array", "items": { "anyOf": variants } }).into(),
             ))
         }
     } else {
@@ -616,7 +609,7 @@ fn map_dop_field_to_schema(
         if variants.is_empty() {
             None
         } else {
-            Some(schemars::json_schema!({ "any-of": variants }))
+            Some(schemars::json_schema!({ "anyOf": variants }))
         }
     } else {
         tracing::trace!(
@@ -639,7 +632,6 @@ fn map_mux_to_schema(
 ) -> schemars::Schema {
     let mut schemas: Vec<serde_json::Value> = Vec::new();
     if let Some(cases) = mux.cases() {
-        // probably an any-of here instead of a list?
         for case in cases {
             let Some(case_struct) = case
                 .structure()
@@ -658,8 +650,50 @@ fn map_mux_to_schema(
         }
     }
     schemars::json_schema!({
-        "any-of": schemas
+        "anyOf": schemas
     })
+}
+
+/// Data type of the value the CDA returns and accepts for a parameter.
+///
+/// Matches `operations::uds_data_to_physical`: values of an `IDENTICAL` compu
+/// method keep the coded type, all other compu methods compute a value of the
+/// DOP's physical type (e.g. `A_FLOAT64` for a LINEAR scaling of an `A_UINT32`).
+fn value_datatype(
+    category: datatypes::CompuCategory,
+    coded: datatypes::DataType,
+    normal_dop: &datatypes::NormalDop,
+) -> datatypes::DataType {
+    if matches!(category, datatypes::CompuCategory::Identical) {
+        return coded;
+    }
+    normal_dop
+        .physical_type()
+        .map_or(coded, |p| datatypes::PhysicalType::from(p).base_type)
+}
+
+/// Convert a database default value to the JSON type of the schema.
+///
+/// Returns `None` for an empty default (none defined in the database) or a
+/// default that is not valid for the type, so the schema omits it instead of
+/// declaring a value of the wrong type.
+fn default_to_json(default_value: &str, json_type: &str) -> Option<serde_json::Value> {
+    if default_value.is_empty() {
+        return None;
+    }
+    match json_type {
+        "integer" => default_value
+            .parse::<i64>()
+            .map(Into::into)
+            .or_else(|_| default_value.parse::<u64>().map(Into::into))
+            .ok(),
+        "number" => default_value
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Into::into),
+        _ => Some(default_value.into()),
+    }
 }
 
 fn ecu_datatype_to_jsontype(type_: datatypes::DataType) -> String {
@@ -671,5 +705,62 @@ fn ecu_datatype_to_jsontype(type_: datatypes::DataType) -> String {
         | datatypes::DataType::Utf8String
         | datatypes::DataType::Unicode2String
         | datatypes::DataType::ByteField => "string".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cda_interfaces::EcuSchemas;
+    use serde_json::json;
+
+    use super::default_to_json;
+    use crate::diag_kernel::test_utils::ecu_manager_builder::create_ecu_manager_with_physical_type_service;
+
+    #[tokio::test]
+    async fn value_types_follow_the_physical_type_and_defaults_are_typed() {
+        let (ecu_manager, dc) = create_ecu_manager_with_physical_type_service();
+        let schema = ecu_manager
+            .schema_for_responses(&dc)
+            .await
+            .expect("Schema must be created")
+            .into_schema()
+            .expect("Response has parameters");
+        let properties = schema
+            .as_value()
+            .pointer("/properties")
+            .expect("Object schema");
+
+        // LINEAR compu method: the CDA returns the physical (float) value.
+        assert_eq!(properties.get("scaled"), Some(&json!({ "type": "number" })));
+        // IDENTICAL keeps the coded type, the default has the JSON type.
+        assert_eq!(
+            properties.get("identical"),
+            Some(&json!({ "type": "integer", "default": 5 }))
+        );
+        assert_eq!(
+            properties.get("identical_float_phys"),
+            Some(&json!({ "type": "integer" }))
+        );
+        // No default in the database: no empty string default.
+        assert_eq!(
+            properties.get("state"),
+            Some(&json!({ "type": "string", "enum": ["ON"] }))
+        );
+    }
+
+    #[test]
+    fn defaults_are_converted_to_the_json_type() {
+        assert_eq!(default_to_json("", "integer"), None);
+        assert_eq!(default_to_json("", "string"), None);
+        assert_eq!(default_to_json("-3", "integer"), Some(json!(-3)));
+        assert_eq!(
+            default_to_json("4294967295", "integer"),
+            Some(json!(4_294_967_295u32))
+        );
+        assert_eq!(default_to_json("1.5", "integer"), None);
+        assert_eq!(default_to_json("1.5", "number"), Some(json!(1.5)));
+        assert_eq!(default_to_json("2", "number"), Some(json!(2.0)));
+        assert_eq!(default_to_json("x", "number"), None);
+        assert_eq!(default_to_json("ACTIVE", "string"), Some(json!("ACTIVE")));
     }
 }

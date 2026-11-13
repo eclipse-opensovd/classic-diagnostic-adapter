@@ -670,6 +670,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "cda-openapi-gen"
+version = "0.1.0"
+dependencies = [
+ "aide",
+ "async-trait",
+ "cda-comm-uds",
+ "cda-core",
+ "cda-database",
+ "cda-interfaces",
+ "cda-plugin-security",
+ "cda-sovd",
+ "clap",
+ "indexmap 2.14.2",
+ "opensovd-cda",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "cda-plugin-communication-management"
 version = "0.1.0"
 dependencies = [
