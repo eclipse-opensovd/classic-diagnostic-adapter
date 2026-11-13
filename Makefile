@@ -133,6 +133,10 @@ integration-coverage:
 deny:
 	cargo +$(STABLE) deny check $(ARGS)
 
+# Update dependencies via Nightly, because dependency cooldown is only available with Rust 1.100.
+update:
+	cargo +$(NIGHTLY) update
+
 generate-config:
 	cargo +$(STABLE) run --locked --all-features -- generate-config --output $(or $(OUTPUT),opensovd-cda.toml)
 

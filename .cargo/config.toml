@@ -11,3 +11,6 @@
 
 [alias]
 lint = "clippy --all-targets --all-features -- -D warnings"
+
+[registry]
+global-min-publish-age = "7 days"
