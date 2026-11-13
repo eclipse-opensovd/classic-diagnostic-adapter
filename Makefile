@@ -19,7 +19,7 @@ STABLE := $(shell sed -n 's/^rust-version = "\([^"]*\)"$$/\1/p' '$(CARGO_TOML)')
 ifeq ($(shell printf '%s' '$(STABLE)' | grep -Ex '[0-9]+\.[0-9]+\.[0-9]+'),)
 $(error rust-version in $(CARGO_TOML) must be a full version like 1.88.0, found "$(STABLE)")
 endif
-NIGHTLY := nightly-2026-07-21
+NIGHTLY := nightly-2026-11-12
 CARGO_DENY_VERSION := 0.20.2
 CARGO_LLVM_COV_VERSION := 0.9.1
 PROTOC_VERSION := 34.1

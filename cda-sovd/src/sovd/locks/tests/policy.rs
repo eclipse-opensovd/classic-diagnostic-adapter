@@ -396,7 +396,10 @@ async fn metadata_verification_timeout_is_service_unavailable() {
         .await;
 
     assert!(matches!(result, Err(ApiError::ServiceUnavailable { .. })));
-    assert!(locks.active_snapshots().await.is_empty());
+    assert_eq!(
+        locks.active_snapshots().await,
+        [] as [cda_interfaces::lock_priority_api::LockSnapshot; 0]
+    );
 }
 
 #[tokio::test]
@@ -422,7 +425,10 @@ async fn metadata_verification_panic_is_internal_error() {
         error.into_response().status(),
         StatusCode::INTERNAL_SERVER_ERROR
     );
-    assert!(locks.active_snapshots().await.is_empty());
+    assert_eq!(
+        locks.active_snapshots().await,
+        [] as [cda_interfaces::lock_priority_api::LockSnapshot; 0]
+    );
 }
 
 #[tokio::test]

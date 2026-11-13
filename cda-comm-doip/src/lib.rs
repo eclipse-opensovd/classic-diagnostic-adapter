@@ -2926,7 +2926,10 @@ mod tests {
                 .flatten()
                 .expect("the discovery must be finished");
         assert!(!outcome.full_vir_discovery);
-        assert!(gateway.state.topology.connected().is_empty());
+        assert_eq!(
+            gateway.state.topology.connected(),
+            [] as [cda_interfaces::topology::KnownGateway; 0]
+        );
         session.connection_tasks.shutdown().await;
     }
 

@@ -572,7 +572,7 @@ mod tests {
         let exec_id = super::start_execution(&f.params(), ExecutionMode::Apply)
             .await
             .unwrap();
-        assert!(!exec_id.is_empty());
+        assert_ne!(exec_id, "");
 
         let status = super::get_execution_status(&f.executions, &exec_id).await;
         assert!(status.is_some());
@@ -646,7 +646,7 @@ mod tests {
         let exec_id = super::start_execution(&f.params(), ExecutionMode::Rollback)
             .await
             .unwrap();
-        assert!(!exec_id.is_empty());
+        assert_ne!(exec_id, "");
     }
 
     #[tokio::test]
@@ -680,7 +680,7 @@ mod tests {
         let exec_id = super::start_execution(&f.params(), ExecutionMode::Cleanup)
             .await
             .unwrap();
-        assert!(!exec_id.is_empty());
+        assert_ne!(exec_id, "");
 
         let status = poll_until_terminal(&f.executions, &exec_id).await;
         assert_eq!(status, ExecutionStatus::Completed);
@@ -749,7 +749,7 @@ mod tests {
         let exec_id = super::start_execution(&f.params(), ExecutionMode::Cleanup)
             .await
             .unwrap();
-        assert!(!exec_id.is_empty());
+        assert_ne!(exec_id, "");
     }
 
     #[tokio::test]

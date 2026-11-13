@@ -1310,7 +1310,7 @@ mod tests {
         .await
         .expect("a probe on an unopenable interface fails fast");
         assert!(!probed);
-        assert!(gateway.discovered_names().await.is_empty());
+        assert_eq!(gateway.discovered_names().await, [] as [String; 0]);
     }
 
     fn marker_topology(id: u32) -> CanTopology {
@@ -1404,7 +1404,7 @@ mod tests {
             .expect("an empty topology enables");
 
         assert_eq!(gateway.state().await, TransportState::Enabled);
-        assert!(gateway.discover_ecus().await.is_empty());
+        assert_eq!(gateway.discover_ecus().await, [] as [String; 0]);
 
         gateway.disable().await.expect("disable stops rediscovery");
         assert_eq!(gateway.state().await, TransportState::Disabled);
