@@ -22,9 +22,10 @@ pub use cda_interfaces::communication_control::disable::{
 };
 use cda_interfaces::communication_control::{
     CommunicationOperation, CommunicationOperationFailure, CommunicationState,
+    quiesce::{QuiesceCommunication, QuiesceGuard},
 };
 
-use super::controller::CommunicationHandle;
+use super::{controller::CommunicationHandle, state::CommunicationStateStore};
 use crate::plugin::CommunicationPlugin;
 
 /// Cloneable narrow disable view forwarding to the authoritative plugin, so
@@ -53,6 +54,15 @@ impl DisableCommunication for CommunicationDisableView {
     }
 }
 
+#[async_trait]
+impl QuiesceCommunication for CommunicationDisableView {
+    async fn quiesce(&self, reason: DisableReason) -> Result<Box<dyn QuiesceGuard>, DisableError> {
+        self.plugin
+            .quiesce(reason)
+            .map(|lease| Box::new(lease) as Box<dyn QuiesceGuard>)
+    }
+}
+
 /// Identity used to prevent stale leases from resuming after a later disable.
 ///
 /// A newtype rather than a type alias, so the UUID stays an implementation
@@ -63,6 +73,58 @@ pub(crate) struct DisableLeaseId(uuid::Uuid);
 impl DisableLeaseId {
     pub(crate) fn new() -> Self {
         Self(uuid::Uuid::new_v4())
+    }
+}
+
+/// Identity of one quiesce lease, so a stale lease cannot clear a later one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct QuiesceLeaseId(uuid::Uuid);
+
+impl QuiesceLeaseId {
+    pub(crate) fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+/// Exclusive pause of diagnostic communication that leaves the transport alone.
+///
+/// Dropping the lease admits communication guards again.
+/// [[ dimpl~communication-quiesce-lease, Exclusive quiesce lease, dimpl ]]
+#[must_use = "Dropping the lease ends the quiesce"]
+pub struct QuiesceLease {
+    state: Arc<CommunicationStateStore>,
+    id: QuiesceLeaseId,
+    reason: DisableReason,
+}
+
+impl QuiesceLease {
+    pub(crate) fn new(
+        state: Arc<CommunicationStateStore>,
+        id: QuiesceLeaseId,
+        reason: DisableReason,
+    ) -> Self {
+        Self { state, id, reason }
+    }
+}
+
+impl std::fmt::Debug for QuiesceLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QuiesceLease")
+            .field("reason", &self.reason)
+            .finish_non_exhaustive()
+    }
+}
+
+impl QuiesceGuard for QuiesceLease {}
+
+impl Drop for QuiesceLease {
+    fn drop(&mut self) {
+        let mut state = self.state.lock();
+        if state.quiesce_owner == Some(self.id) {
+            state.quiesce_owner = None;
+            self.state.gate.open();
+        }
     }
 }
 

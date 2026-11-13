@@ -385,7 +385,7 @@ Communication Initialization Mode
 
 .. arch:: Communication Initialization Mode
     :id: arch~dt-deferred-initialization
-    :links: dimpl~communication-control-contracts, dimpl~communication-control-access, dimpl~communication-control-operations, dimpl~communication-lifecycle-controller, dimpl~default-communication-policy, dimpl~deferred-communication-startup, dimpl~deferred-sovd-admission, dimpl~deferred-doip-transport, testset~deferred-communication-startup, testset~deferred-communication-activation, dimpl~doip-persisted-reconnect, dimpl~doip-reconnect-discovery-mode, dimpl~doip-failed-announcement-connect-reported, dimpl~ecu-topology-restore, dimpl~ecu-state-restore, dimpl~doip-vam-during-connect-connects-after-failure, dimpl~doip-discovery-connect-waits-for-direct-connect, dimpl~doip-cancelled-connect-reverts-ecu-states, testset~persisted-topology-reconnect, testset~ecu-state-restore
+    :links: dimpl~communication-control-contracts, dimpl~communication-control-access, dimpl~communication-control-operations, dimpl~communication-lifecycle-controller, dimpl~default-communication-policy, dimpl~deferred-communication-startup, dimpl~deferred-sovd-admission, dimpl~deferred-doip-transport, testset~deferred-communication-startup, testset~deferred-communication-activation, dimpl~doip-persisted-reconnect, dimpl~doip-reconnect-discovery-mode, dimpl~doip-failed-announcement-connect-reported, dimpl~ecu-topology-restore, dimpl~ecu-state-restore, dimpl~doip-vam-during-connect-connects-after-failure, dimpl~doip-discovery-connect-waits-for-direct-connect, dimpl~doip-cancelled-connect-reverts-ecu-states, testset~persisted-topology-reconnect, testset~ecu-state-restore, dimpl~communication-explicit-detection-enables, testset~communication-quiesce
     :status: draft
 
     The CDA supports a configurable ``[communication] init_mode`` to enable scenarios where
@@ -453,6 +453,9 @@ Communication Initialization Mode
       explicitly initiated. Once triggered, this always initializes all gateways/ECUs at once (there is no
       first-request trigger in this mode), applying the same persisted-vs-broadcast behavior as
       **WhenNotPersisted**.
+
+    An explicit detection request (``networkreset`` rediscovery or a plugin's explicit detection) brings a
+    stopped transport up with a full initialization in every ``init_mode``, including ``Disabled``.
 
     **OnDemand** and **Disabled** always behave like **WhenNotPersisted** once triggered, rather than
     offering their own **Always**/**WhenNotPersisted** choice, since these modes exist specifically to
@@ -523,8 +526,8 @@ Communication Initialization Mode
       listener does not wait for it and handles the next announcement meanwhile. If that connect fails, the
       gateway is reported unreachable without a broadcast: it has just announced its address itself.
     - A gateway whose connect failed is not retried automatically in the same transport session; it is
-      connected again by its spontaneous announcement (subject to ``vam_handling_mode``) or the next
-      transport start.
+      connected again by its spontaneous announcement (subject to ``vam_handling_mode``), a ``networkreset``
+      with detection, or the next transport start.
     - With ``init_mode = Always``, only ``last_seen`` is restored and the full broadcast discovery runs.
     - Every connect of a gateway (startup discovery, persisted reconnect, spontaneous announcement, direct
       connect) holds the gateway's connect lock while it runs, so connects of one gateway never overlap. A
@@ -603,13 +606,37 @@ Post-Update Deferred Communication
 
 .. arch:: Post-Update Deferred Communication
     :id: arch~dt-post-update-deferred-communication
-    :links: dimpl~communication-control-contracts, dimpl~communication-lifecycle-controller, dimpl~post-update-deferred-communication, testset~deferred-post-update
+    :links: dimpl~communication-control-contracts, dimpl~communication-lifecycle-controller, dimpl~post-update-deferred-communication, testset~deferred-post-update, dimpl~communication-quiesce-lease, dimpl~doip-gate-refuses-direct-connect, testset~communication-quiesce
     :status: draft
 
     Runtime database updates acquire the communication lifecycle controller's exclusive disable lease
     before replacing vehicle data. When ``post_update_mode`` is ``Deferred``, a successful apply or rollback
     drops that lease without requesting transport resumption. The communication lifecycle therefore returns
     to its deferred state while the registered ECU routes remain available.
+
+    Next to the disable lease, the lifecycle controller offers an exclusive quiesce lease for work that must
+    not overlap diagnostic requests but must not touch the transport either (a clear-only ``networkreset``).
+    Clearing persisted topology also changes the live discovery strategy and resets restored ECU states;
+    quiesce prevents new diagnostic requests and gateway connects during those changes, not merely during
+    the serialized storage deletion. The lease ends when the clear finishes; no discovery is triggered by
+    the clear-only operation.
+
+    It is refused while communication guards are held, a lifecycle transition or detection is in flight, or
+    another exclusive lease exists. While it is held, new guards are refused with a retryable not-ready
+    error of their own ("Communication is paused", answered as ``503`` with ``Retry-After``), no
+    transition or detection starts, and the transport and the lifecycle state stay unchanged. The lease also
+    closes a transport gate: the diagnostic transport router refuses sends with the same not-ready error
+    and the DoIP gateway refuses new gateway connects, so traffic that does not pass a communication guard
+    cannot start either. A refused connect is not a failure of the gateway: it is not reported unreachable,
+    its ECUs keep their state and no broadcast fallback runs, also when the gate closes while the connect is
+    in progress, and a spontaneous announcement that arrives meanwhile is not connected. The gateway stays
+    unconnected until its next announcement after the lease was dropped, which opens the gate again, or the
+    next transport start. This also applies to a gateway refused during a persisted reconnect still running:
+    only the clear-only ``networkreset`` closes the gate, and the next transport start after it runs a full
+    broadcast discovery. A direct connect through ``doip-connect-ecu`` is refused as
+    well, normally by the router, else by the DoIP gateway, with the same not-ready error. The gate carries
+    its retry hint (the ``deferred_retry_after_seconds`` of the configuration), and one constructor of the
+    gate builds this error for every transport.
 
     ECU-related requests are rejected with ``503 Service Unavailable`` and ``Retry-After`` while
     communication is disabled. Under ``init_mode = OnDemand``, such a request submits a new activation
@@ -1050,8 +1077,8 @@ ECU List Persistence
     precision. The network address is absent for a gateway that is defined in the diagnostic databases but
     was not found by the last full broadcast discovery, so that a gateway which is not fitted does not force
     a new broadcast on every startup. Such a gateway is found again by its spontaneous announcement (subject
-    to ``vam_handling_mode``) or at a later start that runs the full broadcast discovery; with
-    ``vam_handling_mode = Never`` only the latter.
+    to ``vam_handling_mode``), by a ``networkreset`` with ``trigger_detection=true``, or at a later start
+    that runs the full broadcast discovery; with ``vam_handling_mode = Never`` only the latter two.
     The internal AssumedOnline state is persisted as ``Online``.
 
     .. code-block:: json
@@ -1152,9 +1179,12 @@ ECU List Persistence
       :need:`arch~dt-ecu-list-persistence-shutdown`), to minimize writes to flash storage. If no entry
       changed, the write is skipped.
     - Disabling communication cancels a pending write.
-    - Starting, restarting and cancelling the write task and the shutdown write-back are serialized by one
-      lock, and every read-modify-write of the ``ecu-topology`` bucket runs to its commit even if its caller
-      is dropped. No write task is started after the shutdown write-back.
+    - Starting, restarting and cancelling the write task, a clear and the shutdown write-back are serialized
+      by one lock, and every read-modify-write of the ``ecu-topology`` bucket runs to its commit even if its
+      caller is dropped, so a cleared topology cannot be written back by a concurrent write. No write task
+      is started after the shutdown write-back; a clear that arrives afterwards is still executed. A clear
+      counts the detection results so far as written, so only later runs are persisted; after a failed
+      clear the results that were not written yet are still due.
     - Before each write, entries that are no longer in the loaded diagnostic databases are pruned: gateway
       entries whose logical address is not a physical database gateway, and ECUs no longer reached through
       their gateway. This is independent of the replace-per-gateway rule: an entry is pruned because it is missing from the
@@ -1210,10 +1240,11 @@ ECU List Persistence - Shutdown Update
     configuration.
 
     Only ECUs contacted since their entry was last written are updated, and the ``last_seen`` update never
-    creates entries. The write-back runs before communication is shut down (and so before the persistence
-    provider is closed). Detection results that were not written yet (and no detection is still running)
-    are written as a full snapshot in addition, so a detection run finished shortly before shutdown is not
-    lost. The write is not time-bounded, like the other shutdown steps.
+    creates entries, so a cleared topology stays empty. The write-back runs before communication is shut
+    down (and so before the persistence provider is closed). Detection results that were not written yet
+    (and no detection is still running) are written as a full snapshot in addition, so a detection run
+    finished shortly before shutdown is not lost; results up to a clear do not count as unwritten. The write
+    is not time-bounded, like the other shutdown steps.
 
     .. uml::
         :caption: last_seen Persistence at Shutdown

@@ -396,22 +396,3 @@ pub(crate) async fn disconnect(sim: &EcuSim) -> Result<(), TestingError> {
     crate::util::http::send_request(StatusCode::OK, http::Method::POST, None, None, url).await?;
     Ok(())
 }
-
-/// Configure the ECU simulator's hard reset duration.
-///
-/// When set to a value > 0, subsequent UDS ECU Reset (0x11 0x01) requests will cause
-/// the ECU to close its TCP connection for the specified number of seconds, simulating
-/// a real ECU reboot with `DoIP` disconnection.
-pub(crate) async fn set_hard_reset_duration(
-    sim: &EcuSim,
-    ecu: &str,
-    seconds: i32,
-) -> Result<(), TestingError> {
-    let url = sim_url(sim, &[ecu, "state"])?;
-
-    let body = serde_json::json!({"hardResetForSeconds": seconds}).to_string();
-
-    crate::util::http::send_request(StatusCode::OK, http::Method::PUT, Some(&body), None, url)
-        .await?;
-    Ok(())
-}

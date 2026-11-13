@@ -80,6 +80,19 @@ pub mod sovd2uds {
                 pub schema: Option<schemars::Schema>,
             }
 
+            /// Operation description (`GET .../operations/doip-connect-ecu`).
+            #[derive(serde::Serialize, schemars::JsonSchema)]
+            #[schemars(rename = "DoipConnectEcuOperationResponse")]
+            pub struct OperationResponse {
+                /// The entry of the operation in the operations collection.
+                pub item: crate::common::operations::OperationCollectionItem,
+                /// Schema of the operation's execution request, only present if
+                /// requested with `include-schema=true`.
+                #[schemars(skip)]
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub schema: Option<schemars::Schema>,
+            }
+
             #[cfg(test)]
             mod tests {
                 use super::ExecutionRequest;
@@ -91,6 +104,174 @@ pub mod sovd2uds {
                     }))
                     .unwrap();
                     assert_eq!(request.parameters.protocol_version, 0x02);
+                }
+            }
+        }
+
+        /// The `networkreset` operation, which clears the persisted ECU topology and/or runs a new
+        /// ECU detection.
+        pub mod networkreset {
+            pub use cda_interfaces::topology::{
+                NetworkResetExecution, NetworkResetFlags, NetworkResetStatus,
+            };
+
+            /// The operation-specific parameters of a `networkreset` execution. Both
+            /// flags default to `true`.
+            ///
+            /// Unknown fields are rejected, so a typo cannot silently select the
+            /// destructive defaults.
+            #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+            #[serde(deny_unknown_fields)]
+            pub struct ExecutionParameters {
+                /// Clear the persisted ECU topology.
+                #[serde(default)]
+                #[schemars(with = "bool", default = "crate::default_true")]
+                pub clear_persisted: Option<bool>,
+                /// Run a live detection (VIR/VAM discovery and variant detection).
+                #[serde(default)]
+                #[schemars(with = "bool", default = "crate::default_true")]
+                pub trigger_detection: Option<bool>,
+            }
+
+            impl ExecutionParameters {
+                /// The flags, with omitted values defaulting to `true`.
+                #[must_use]
+                pub fn flags(&self) -> NetworkResetFlags {
+                    NetworkResetFlags {
+                        clear_persisted: self.clear_persisted.unwrap_or(true),
+                        trigger_detection: self.trigger_detection.unwrap_or(true),
+                    }
+                }
+            }
+
+            /// Request body for an execution. The body and `parameters` are optional.
+            ///
+            /// Unknown fields are rejected. The standard SOVD execution field
+            /// `proximity_response` is accepted for compatibility but not used.
+            #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+            #[serde(deny_unknown_fields)]
+            pub struct ExecutionRequest {
+                /// The operation-specific parameters. If omitted, both flags default to `true`.
+                #[serde(default)]
+                pub parameters: ExecutionParameters,
+                /// Seconds after which an execution that is still running is stopped
+                /// (status `stopped`). If omitted, the execution has no timeout.
+                #[serde(default)]
+                pub timeout: Option<u64>,
+                /// Accepted for SOVD compatibility, not used.
+                #[serde(default)]
+                pub proximity_response: Option<String>,
+            }
+
+            impl ExecutionRequest {
+                /// The requested timeout, `None` if no timeout is requested.
+                #[must_use]
+                pub fn timeout(&self) -> Option<std::time::Duration> {
+                    self.timeout.map(std::time::Duration::from_secs)
+                }
+            }
+
+            /// The discriminant of an execution's status.
+            #[derive(
+                Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+            )]
+            #[serde(rename_all = "lowercase")]
+            pub enum ExecutionStatusKind {
+                /// The reset is in progress.
+                Running,
+                /// The reset finished successfully.
+                Completed,
+                /// The reset failed; see `error` and `parameters.reason` of the execution for the cause.
+                Failed,
+                /// The reset was stopped before it finished.
+                Stopped,
+            }
+
+            /// Operation-specific values reported for an execution.
+            #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+            pub struct ExecutionResponseParameters {
+                /// `true` if the persisted ECU topology is cleared by this execution.
+                pub clear_persisted: bool,
+                /// `true` if this execution runs a new ECU detection.
+                pub trigger_detection: bool,
+                /// Failure description, present only when `status` is `failed`.
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                pub reason: Option<String>,
+            }
+
+            /// Response body returned by `GET /executions/{id}`.
+            #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+            pub struct ExecutionResponse {
+                /// Current state of the execution.
+                pub status: ExecutionStatusKind,
+                /// The capability that is active for the execution. Always `execute`.
+                pub capability: ExecutionCapability,
+                /// The parameters the execution was started with, and its failure reason if it failed.
+                pub parameters: ExecutionResponseParameters,
+                /// Structured description of the failure. Empty unless `status` is `failed`.
+                #[serde(default, skip_serializing_if = "Vec::is_empty")]
+                pub error: Vec<crate::error::DataError<String>>,
+                /// JSON schema of the response, only present if requested with `include-schema=true`.
+                #[schemars(skip)]
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                pub schema: Option<schemars::Schema>,
+            }
+
+            /// Capability active for network reset executions (ISO 17978-3 Table 189).
+            #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+            #[serde(rename_all = "lowercase")]
+            pub enum ExecutionCapability {
+                /// The operation is executed once and reports its progress through the execution status.
+                Execute,
+            }
+
+            /// Operation description and optional capability `PathItem` (Table 176).
+            #[derive(serde::Serialize, schemars::JsonSchema)]
+            pub struct OperationResponse {
+                /// The entry of the operation in the operations collection.
+                pub item: crate::common::operations::OperationCollectionItem,
+                /// `OpenAPI` path item describing the requests of the operation, only present if requested
+                /// with `include-schema=true`.
+                #[schemars(skip)]
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub schema: Option<serde_json::Value>,
+            }
+
+            impl From<NetworkResetExecution> for ExecutionResponse {
+                fn from(exec: NetworkResetExecution) -> Self {
+                    let (status, reason) = match exec.status {
+                        NetworkResetStatus::Running => (ExecutionStatusKind::Running, None),
+                        NetworkResetStatus::Completed => (ExecutionStatusKind::Completed, None),
+                        NetworkResetStatus::Stopped => (ExecutionStatusKind::Stopped, None),
+                        NetworkResetStatus::Failed(reason) => {
+                            (ExecutionStatusKind::Failed, Some(reason))
+                        }
+                    };
+                    Self {
+                        status,
+                        capability: ExecutionCapability::Execute,
+                        error: reason
+                            .as_ref()
+                            .map(|reason| crate::error::DataError {
+                                path: "/".to_owned(),
+                                error: crate::error::ApiErrorResponse {
+                                    message: reason.clone(),
+                                    error_code: crate::error::ErrorCode::SovdServerFailure,
+                                    vendor_code: None,
+                                    parameters: None,
+                                    error_source: None,
+                                    schema: None,
+                                },
+                            })
+                            .into_iter()
+                            .collect(),
+                        parameters: ExecutionResponseParameters {
+                            clear_persisted: exec.flags.clear_persisted,
+                            trigger_detection: exec.flags.trigger_detection,
+                            reason,
+                        },
+                        schema: None,
+                    }
                 }
             }
         }
@@ -125,13 +306,6 @@ pub mod sovd2uds {
                 Failed,
             }
 
-            /// Response body returned by `POST /executions`.
-            #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
-            pub struct ExecutionCreatedResponse {
-                /// Unique execution identifier assigned by the server.
-                pub id: String,
-            }
-
             /// Operation-specific values reported for an execution.
             #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
             pub struct ExecutionResponseParameters {
@@ -152,12 +326,6 @@ pub mod sovd2uds {
                 #[schemars(skip)]
                 #[serde(default, skip_serializing_if = "Option::is_none")]
                 pub schema: Option<schemars::Schema>,
-            }
-
-            /// Response body returned by `GET /executions`.
-            #[derive(serde::Serialize, schemars::JsonSchema)]
-            pub struct ExecutionListResponse {
-                pub items: Vec<crate::common::operations::OperationIdItem>,
             }
 
             impl From<UpdateExecution> for ExecutionResponse {

@@ -16,7 +16,7 @@
 
 use std::{
     sync::{Arc, atomic::AtomicU64},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use async_trait::async_trait;
@@ -26,8 +26,8 @@ use cda_interfaces::{
     communication_control::{CommControlError, CommunicationLifecycle},
     topology::{
         DiscoveryStrategy, EcuTopologyEntry, EcuTopologyStore, KnownGateway, PersistedEcu,
-        PersistedEcuState, PersistedGateway, PersistedTopology, PersistedVariant, TopologyState,
-        TopologyStoreError,
+        PersistedEcuState, PersistedGateway, PersistedTopology, PersistedVariant, RediscoveryWait,
+        TopologyClearError, TopologyState, TopologyStoreError,
     },
 };
 use tokio::{sync::Mutex, task::JoinHandle};
@@ -35,8 +35,17 @@ use tokio_util::sync::CancellationToken;
 
 use crate::plugin::TopologySource;
 
+/// Verdict of the persist task on a discovery generation, see
+/// [`TopologyPersistence::wait_rediscovered`].
+#[derive(Debug, Clone)]
+struct Rediscovered {
+    /// Discovery generation the verdict is for.
+    generation: u64,
+    verdict: RediscoveryWait,
+}
+
 /// The persist task and whether persistence was shut down. Guarded by one mutex,
-/// so a shutdown write cannot interleave with a restart.
+/// so a shutdown write cannot interleave with a clear or a restart.
 #[derive(Default)]
 struct TaskSlot {
     task: Option<(CancellationToken, JoinHandle<()>)>,
@@ -72,11 +81,13 @@ struct TopologyWriter {
     /// Whether the persisted topology is reused on the next transport start,
     /// i.e. `init_mode` is not `Always`.
     reuse_topology: bool,
-    /// Detection generation whose results are written, see
-    /// [`Self::has_unwritten_results`].
+    /// Detection generation whose results are written (or deliberately not
+    /// written, e.g. after a clear), see [`Self::has_unwritten_results`].
     acknowledged: AtomicU64,
     /// Number of completed persist runs.
     persisted: tokio::sync::watch::Sender<u64>,
+    /// Verdict on the last discovery generation that settled.
+    rediscovered: tokio::sync::watch::Sender<Rediscovered>,
 }
 
 impl TopologyPersistence {
@@ -96,12 +107,30 @@ impl TopologyPersistence {
                 reuse_topology,
                 acknowledged: AtomicU64::new(0),
                 persisted: tokio::sync::watch::Sender::new(0),
+                rediscovered: tokio::sync::watch::Sender::new(Rediscovered {
+                    generation: 0,
+                    verdict: RediscoveryWait::TimedOut,
+                }),
             }),
             task: Mutex::new(TaskSlot::default()),
         })
     }
 
-    /// Cancels a pending persist run and waits for it to stop.
+    /// Waits for the verdict on a discovery generation newer than `after`:
+    /// settled and persisted, or settled but the write failed
+    /// ([`RediscoveryWait::PersistFailed`]). Nothing bounds a discovery here, so
+    /// `timeout` does: without a verdict by then it is
+    /// [`RediscoveryWait::TimedOut`].
+    pub async fn wait_rediscovered(&self, after: u64, timeout: Duration) -> RediscoveryWait {
+        let mut rx = self.writer.rediscovered.subscribe();
+        match tokio::time::timeout(timeout, rx.wait_for(|state| state.generation > after)).await {
+            Ok(Ok(state)) => state.verdict.clone(),
+            Ok(Err(_)) | Err(_) => RediscoveryWait::TimedOut,
+        }
+    }
+
+    /// Cancels a pending persist run and waits for it to stop, e.g. before the
+    /// persisted topology is cleared.
     pub async fn cancel_pending(&self) {
         let mut slot = self.task.lock().await;
         Self::stop_task(&mut slot).await;
@@ -127,8 +156,9 @@ impl TopologyPersistence {
     /// half-finished states are not written). `last_seen` of contacted ECUs is
     /// written back in any case.
     ///
-    /// Runs under the task lock, after the running task was cancelled: a restart
-    /// cannot interleave with the write, and no task is started afterwards.
+    /// Runs under the task lock, after the running task was cancelled: a clear or
+    /// restart cannot interleave with the write, and no task is started
+    /// afterwards. A clear arriving after the shutdown is still executed.
     /// [[ dimpl~ecu-topology-persist-when-idle, Persist follow-up runs when idle and at shutdown, dimpl ]]
     pub async fn persist_on_shutdown(&self) {
         let mut slot = self.task.lock().await;
@@ -148,6 +178,70 @@ impl TopologyPersistence {
         slot.shut_down = true;
     }
 
+    /// Runs `clear`, which clears the persisted topology, with the persist task
+    /// stopped and the task lock held, so a shutdown write cannot interleave and
+    /// bring the topology back.
+    ///
+    /// After a successful clear the results so far count as written (they are not
+    /// written back) and only later detection runs are persisted. After a failed
+    /// or panicked clear the store is treated as unchanged. In every case the
+    /// task state from before is restored: a running task restarts (after a
+    /// failed or panicked clear with a write, so results that were not written
+    /// yet are still due); without one (communication disabled) none is
+    /// started, and `on_enabled` starts it later. A clear after the shutdown
+    /// write is executed, but starts no task.
+    ///
+    /// The sequence runs in its own task, so a dropped caller cannot leave the
+    /// persist task stopped.
+    ///
+    /// # Errors
+    /// Returns the error of `clear` as [`TopologyClearError::Store`], or
+    /// [`TopologyClearError::Aborted`] if `clear` or the sequence panicked or
+    /// was cancelled.
+    pub async fn run_clear(
+        self: &Arc<Self>,
+        clear: impl Future<Output = Result<(), TopologyStoreError>> + Send + 'static,
+    ) -> Result<(), TopologyClearError> {
+        let this = Arc::clone(self);
+        let sequence = cda_interfaces::spawn_named!("ecu-topology-clear", async move {
+            this.clear_sequence(clear).await
+        });
+        match sequence.await {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::error!(%error, "Clearing the persisted topology was aborted");
+                Err(TopologyClearError::Aborted)
+            }
+        }
+    }
+
+    async fn clear_sequence(
+        &self,
+        clear: impl Future<Output = Result<(), TopologyStoreError>> + Send + 'static,
+    ) -> Result<(), TopologyClearError> {
+        let mut slot = self.task.lock().await;
+        let was_running = slot.task.is_some();
+        Self::stop_task(&mut slot).await;
+        // In a task of its own, so a panic in `clear` still restores the persist task.
+        let result = match cda_interfaces::spawn_named!("ecu-topology-clear-store", clear).await {
+            Ok(result) => result.map_err(TopologyClearError::from),
+            Err(error) => {
+                tracing::error!(%error, "Clearing the persisted topology was aborted");
+                Err(TopologyClearError::Aborted)
+            }
+        };
+        if result.is_ok() {
+            let generation = self.writer.source.detection_activity().await.generation();
+            self.writer
+                .acknowledged
+                .store(generation, std::sync::atomic::Ordering::Release);
+        }
+        if was_running && !slot.shut_down {
+            slot.task = Some(self.spawn_writer_task(result.is_err()).await);
+        }
+        result
+    }
+
     /// Cancels the running task and starts a new one, atomically with respect to
     /// other callers: the `task` lock is held for the whole sequence, so no task
     /// can be orphaned or started after a later cancel.
@@ -156,7 +250,7 @@ impl TopologyPersistence {
         let mut slot = self.task.lock().await;
         Self::stop_task(&mut slot).await;
         if !slot.shut_down {
-            slot.task = Some(self.spawn_writer_task().await);
+            slot.task = Some(self.spawn_writer_task(true).await);
         }
     }
 
@@ -172,7 +266,9 @@ impl TopologyPersistence {
         }
     }
 
-    async fn spawn_writer_task(&self) -> (CancellationToken, JoinHandle<()>) {
+    /// Starts the persist task. With `initial_write` it first writes the settled
+    /// result, without it only later detection runs.
+    async fn spawn_writer_task(&self, initial_write: bool) -> (CancellationToken, JoinHandle<()>) {
         let writer = Arc::clone(&self.writer);
         let cancel = CancellationToken::new();
         let task_cancel = cancel.clone();
@@ -181,8 +277,8 @@ impl TopologyPersistence {
         let activity = self.writer.source.detection_activity().await;
         let generations = activity.subscribe();
         let unreachable = self.writer.state.subscribe_unreachable();
-        // What was written is not for this task to write again; an initial run
-        // writes the rest.
+        // What was written (or deliberately not written, after a clear) is not
+        // for this task to write again; an initial run writes the rest.
         let acknowledged = self
             .writer
             .acknowledged
@@ -190,7 +286,7 @@ impl TopologyPersistence {
         let task = cda_interfaces::spawn_named!("ecu-topology-persistence", async move {
             tokio::select! {
                 () = task_cancel.cancelled() => {}
-                () = writer.run(activity, generations, unreachable, acknowledged) => {}
+                () = writer.run(activity, generations, unreachable, acknowledged, initial_write) => {}
             }
         });
         (cancel, task)
@@ -251,10 +347,12 @@ impl TopologyWriter {
         mut generations: tokio::sync::watch::Receiver<u64>,
         mut unreachable: tokio::sync::watch::Receiver<u64>,
         mut acknowledged: u64,
+        initial_write: bool,
     ) {
-        if let Ok(generation) = self
-            .persist_settled(&variant_detection_activity, true)
-            .await
+        if initial_write
+            && let Ok(generation) = self
+                .persist_settled(&variant_detection_activity, true)
+                .await
         {
             acknowledged = generation;
             self.acknowledged
@@ -310,9 +408,34 @@ impl TopologyWriter {
         let outcome = self.state.settled().await;
         activity.wait_until_idle().await;
         let generation = activity.generation();
-        self.persist(initial && outcome.is_some_and(|outcome| outcome.full_vir_discovery))
-            .await?;
+        let result = self
+            .persist(initial && outcome.is_some_and(|outcome| outcome.full_vir_discovery))
+            .await;
+        if let Some(outcome) = outcome {
+            self.publish_rediscovered(outcome.generation, &result);
+        }
+        result?;
         Ok(generation)
+    }
+
+    /// Publishes the verdict on discovery `generation`, unless a later
+    /// generation has one already. A later write of the same generation
+    /// replaces it, so a retried write can settle a failed one.
+    fn publish_rediscovered(&self, generation: u64, result: &Result<(), TopologyStoreError>) {
+        let verdict = match result {
+            Ok(()) => RediscoveryWait::Settled,
+            Err(error) => RediscoveryWait::PersistFailed(error.to_string()),
+        };
+        self.rediscovered.send_if_modified(|state| {
+            let publish = generation >= state.generation;
+            if publish {
+                *state = Rediscovered {
+                    generation,
+                    verdict,
+                };
+            }
+            publish
+        });
     }
 
     async fn persist(&self, full_vir_discovery: bool) -> Result<(), TopologyStoreError> {
@@ -734,6 +857,7 @@ mod tests {
     struct BlockingStore {
         inner: Arc<dyn EcuTopologyStore>,
         block_next: std::sync::atomic::AtomicBool,
+        fail_next: std::sync::atomic::AtomicBool,
         started: tokio::sync::Notify,
         release: tokio::sync::Notify,
     }
@@ -758,6 +882,10 @@ mod tests {
             self.inner.merge_last_seen(last_seen).await
         }
 
+        async fn clear(&self) -> Result<(), TopologyStoreError> {
+            self.inner.clear().await
+        }
+
         async fn prune_and_persist_gateways(
             &self,
             keep: &HashMap<u16, HashSet<String>>,
@@ -770,6 +898,12 @@ mod tests {
                 self.started.notify_one();
                 self.release.notified().await;
             }
+            if self
+                .fail_next
+                .swap(false, std::sync::atomic::Ordering::AcqRel)
+            {
+                return Err(TopologyStoreError::Serialization("disk full".to_owned()));
+            }
             self.inner.prune_and_persist_gateways(keep, gateways).await
         }
     }
@@ -780,6 +914,7 @@ mod tests {
         let store = Arc::new(BlockingStore {
             inner: Arc::clone(&original.writer.store),
             block_next: std::sync::atomic::AtomicBool::new(true),
+            fail_next: std::sync::atomic::AtomicBool::new(false),
             started: tokio::sync::Notify::new(),
             release: tokio::sync::Notify::new(),
         });
@@ -811,6 +946,8 @@ mod tests {
         async fn detection_activity(&self) -> VariantDetectionActivity {
             self.activity.clone()
         }
+
+        async fn reset_ecu_states(&self, _only_assumed_online: bool) {}
     }
 
     struct GatedSource {
@@ -836,6 +973,8 @@ mod tests {
             }
             self.inner.detection_activity().await
         }
+
+        async fn reset_ecu_states(&self, _only_assumed_online: bool) {}
     }
 
     struct GatedFixture {
@@ -1272,6 +1411,248 @@ mod tests {
         persistence.deinitialize().await;
     }
 
+    /// [[ test~ecu-list-persistence-failed-write-of-a-settled-rediscovery-is-reported, A settled rediscovery whose write failed is reported as failed, test ]]
+    #[tokio::test]
+    async fn failed_write_of_a_settled_rediscovery_is_reported() {
+        let (original, _store, runtime, _dir) = fixture(vehicle());
+        let (persistence, blocking) = blocking_persistence(&original);
+        blocking
+            .block_next
+            .store(false, std::sync::atomic::Ordering::Release);
+        blocking
+            .fail_next
+            .store(true, std::sync::atomic::Ordering::Release);
+        let generation = runtime.begin_discovery();
+        runtime.record_connected(known("GW", 0x1000));
+        runtime.finish_discovery(generation, true);
+        persistence.on_enabled().await;
+
+        match persistence
+            .wait_rediscovered(0, Duration::from_secs(5))
+            .await
+        {
+            RediscoveryWait::PersistFailed(error) => {
+                assert!(error.contains("disk full"), "{error}");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        persistence.deinitialize().await;
+    }
+
+    /// Without a verdict the wait ends at its timeout.
+    #[tokio::test]
+    async fn unsettled_rediscovery_times_out() {
+        let (persistence, _store, runtime, _dir) = fixture(vehicle());
+        let _running = runtime.begin_discovery();
+        persistence.on_enabled().await;
+
+        assert_eq!(
+            persistence
+                .wait_rediscovered(0, Duration::from_millis(10))
+                .await,
+            RediscoveryWait::TimedOut
+        );
+        persistence.deinitialize().await;
+    }
+
+    /// [[ test~ecu-list-persistence-shutdown-after-clear-does-not-recreate-entries, Results up to a clear are not written back at shutdown, test ]]
+    #[tokio::test]
+    async fn shutdown_after_clear_does_not_recreate_entries() {
+        let entries = vehicle();
+        let gw_state = entries.first().unwrap().runtime_state.clone();
+        let (persistence, store, runtime, _dir) = fixture(entries);
+        let generation = runtime.begin_discovery();
+        runtime.record_connected(known("GW", 0x1000));
+        runtime.finish_discovery(generation, false);
+        persistence.on_enabled().await;
+        assert!(persistence.wait_persisted(0, Duration::from_secs(5)).await);
+        persistence.cancel_pending().await;
+        let activity = persistence.writer.source.detection_activity().await;
+        drop(activity.begin());
+
+        persistence
+            .run_clear({
+                let store = Arc::clone(&store);
+                async move { store.clear().await }
+            })
+            .await
+            .unwrap();
+        gw_state.update_last_seen();
+        assert!(!persistence.has_unwritten_results(&activity));
+
+        persistence.persist_on_shutdown().await;
+        assert!(store.load().await.unwrap().gateways.is_empty());
+    }
+
+    /// The task restarted by a clear does not write the results the clear
+    /// removed, unlike the first task of a transport start.
+    /// [[ test~ecu-list-persistence-clear-skips-initial-write, The task restarted by a clear writes only later detection runs, test ]]
+    #[tokio::test]
+    async fn task_restarted_by_a_clear_writes_only_later_runs() {
+        let (persistence, store, runtime, _dir) = fixture(vehicle());
+        let generation = runtime.begin_discovery();
+        runtime.record_connected(known("GW", 0x1000));
+        runtime.finish_discovery(generation, false);
+        persistence.on_enabled().await;
+        assert!(persistence.wait_persisted(0, Duration::from_secs(5)).await);
+        let written = persistence.persisted_count();
+
+        persistence
+            .run_clear({
+                let store = Arc::clone(&store);
+                async move { store.clear().await }
+            })
+            .await
+            .unwrap();
+        assert!(
+            !persistence
+                .wait_persisted(written, Duration::from_millis(100))
+                .await,
+            "the clear must not be undone"
+        );
+        assert!(store.load().await.unwrap().gateways.is_empty());
+
+        let activity = persistence.writer.source.detection_activity().await;
+        drop(activity.begin());
+        assert!(
+            persistence
+                .wait_persisted(written, Duration::from_secs(5))
+                .await,
+            "a later detection run is written"
+        );
+        persistence.deinitialize().await;
+    }
+
+    /// [[ test~ecu-list-persistence-shutdown-serialized-with-clear, A clear during the shutdown write is not undone, test ]]
+    #[tokio::test]
+    async fn clear_during_the_shutdown_write_is_not_undone() {
+        let (original, store, runtime, _dir) = fixture(vehicle());
+        let (persistence, blocking) = blocking_persistence(&original);
+        let generation = runtime.begin_discovery();
+        runtime.record_connected(known("GW", 0x1000));
+        runtime.finish_discovery(generation, false);
+        let activity = persistence.writer.source.detection_activity().await;
+        drop(activity.begin());
+        assert!(persistence.has_unwritten_results(&activity));
+
+        let shutdown = tokio::spawn({
+            let persistence = Arc::clone(&persistence);
+            async move { persistence.persist_on_shutdown().await }
+        });
+        // The shutdown write is inside the store, holding the task lock.
+        blocking.started.notified().await;
+        let clear = tokio::spawn({
+            let persistence = Arc::clone(&persistence);
+            let store = Arc::clone(&store);
+            async move {
+                persistence
+                    .run_clear(async move { store.clear().await })
+                    .await
+            }
+        });
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(50)).await;
+        assert!(
+            !clear.is_finished(),
+            "the clear waits for the shutdown write"
+        );
+        blocking.release.notify_one();
+        shutdown.await.unwrap();
+        clear.await.unwrap().unwrap();
+
+        assert!(
+            store.load().await.unwrap().gateways.is_empty(),
+            "the clear ran last"
+        );
+        let slot = persistence.task.lock().await;
+        assert!(slot.shut_down);
+        assert!(slot.task.is_none(), "no task is started after the shutdown");
+    }
+
+    /// [[ test~ecu-list-persistence-failed-clear-keeps-unwritten, A failed clear leaves unwritten results due, test ]]
+    #[tokio::test]
+    async fn failed_clear_keeps_unwritten_results_due() {
+        let (original, store, runtime, _dir) = fixture(vehicle());
+        let (persistence, blocking) = blocking_persistence(&original);
+        blocking
+            .block_next
+            .store(false, std::sync::atomic::Ordering::Release);
+        let generation = runtime.begin_discovery();
+        runtime.record_connected(known("GW", 0x1000));
+        runtime.finish_discovery(generation, false);
+        // A running task; the running detection keeps it from writing before the
+        // clear.
+        let activity = persistence.writer.source.detection_activity().await;
+        let ticket = activity.begin();
+        persistence.restart_task().await;
+
+        // The detection ends during the clear, so the restarted task sees it idle.
+        let cleared = persistence
+            .run_clear(async move {
+                drop(ticket);
+                Err(TopologyStoreError::Serialization("disk full".into()))
+            })
+            .await;
+        assert!(matches!(cleared, Err(TopologyClearError::Store(_))));
+        assert!(
+            persistence.wait_persisted(0, Duration::from_secs(5)).await,
+            "the restarted task writes the unwritten result"
+        );
+        assert!(!store.load().await.unwrap().gateways.is_empty());
+        persistence.deinitialize().await;
+    }
+
+    /// [[ test~ecu-list-persistence-clear-restores-task, A clear restarts the persist task only if one was running, test ]]
+    #[tokio::test]
+    async fn clear_restores_the_task_state() {
+        fn panicking_clear() -> Result<(), TopologyStoreError> {
+            panic!("clear panicked")
+        }
+        let (persistence, _store, _runtime, _dir) = fixture(vehicle());
+        let fail = || async { Err(TopologyStoreError::Serialization("disk full".into())) };
+        let succeed = || async { Ok(()) };
+
+        // Communication disabled: no task, and neither clear starts one.
+        assert!(persistence.run_clear(fail()).await.is_err());
+        assert!(persistence.task.lock().await.task.is_none());
+        assert!(persistence.run_clear(succeed()).await.is_ok());
+        assert!(persistence.task.lock().await.task.is_none());
+
+        // Communication enabled: the running task is restarted.
+        persistence.restart_task().await;
+        assert!(persistence.run_clear(fail()).await.is_err());
+        assert!(persistence.task.lock().await.task.is_some());
+
+        // Also after a clear that panicked.
+        let cleared = persistence.run_clear(async { panicking_clear() }).await;
+        assert!(matches!(cleared, Err(TopologyClearError::Aborted)));
+        assert!(persistence.task.lock().await.task.is_some());
+        persistence.deinitialize().await;
+    }
+
+    /// [[ test~ecu-list-persistence-rediscovery-verdict, A discovery started during the write does not take the verdict of the generation waited on, test ]]
+    #[tokio::test]
+    async fn generation_change_during_the_write_settles_the_waited_generation() {
+        let (original, _store, runtime, _dir) = fixture(vehicle());
+        let (persistence, blocking) = blocking_persistence(&original);
+        let generation = runtime.begin_discovery();
+        runtime.record_connected(known("GW", 0x1000));
+        runtime.finish_discovery(generation, true);
+        persistence.on_enabled().await;
+
+        blocking.started.notified().await;
+        // A new discovery starts during the write and does not settle.
+        let _next = runtime.begin_discovery();
+        blocking.release.notify_one();
+
+        assert_eq!(
+            persistence
+                .wait_rediscovered(0, Duration::from_secs(5))
+                .await,
+            RediscoveryWait::Settled
+        );
+        persistence.deinitialize().await;
+    }
+
     #[tokio::test]
     async fn contact_during_storage_remains_dirty_for_shutdown() {
         let entries = vehicle();
@@ -1449,6 +1830,10 @@ mod tests {
             last_seen: &HashMap<String, SystemTime>,
         ) -> Result<(), cda_interfaces::topology::TopologyStoreError> {
             self.inner.merge_last_seen(last_seen).await
+        }
+
+        async fn clear(&self) -> Result<(), cda_interfaces::topology::TopologyStoreError> {
+            self.inner.clear().await
         }
 
         async fn prune_and_persist_gateways(

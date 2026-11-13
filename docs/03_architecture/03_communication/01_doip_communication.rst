@@ -348,8 +348,9 @@ Spontaneous VAM Handling Mode
 
     The mode is configured as ``communication.vam_handling_mode = "Always" | "PersistedOnly" | "Never"``.
     Whether a persisted topology exists is tracked in memory: it is set when a non-empty topology is loaded at
-    startup or written after a detection run. In ``PersistedOnly`` mode, the listener checks this flag for
-    every received announcement, so handling starts as soon as a topology has been persisted.
+    startup or written after a detection run, and cleared by a ``networkreset`` that clears the persisted
+    topology. In ``PersistedOnly`` mode, the listener checks this flag for every received announcement, so
+    handling starts as soon as a topology has been persisted.
 
     Independent of ``vam_handling_mode``, the spontaneous VAM listener task itself is only started once
     ECU/DoIP communication has actually been initialized (see :need:`arch~dt-deferred-initialization`).

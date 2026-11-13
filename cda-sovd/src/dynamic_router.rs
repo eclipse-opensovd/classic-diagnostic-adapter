@@ -107,6 +107,7 @@ pub struct DynamicRouter {
     finalizers: Arc<RwLock<Vec<RouteFinalizer>>>,
     router: Arc<RwLock<axum::Router>>,
     next_id: Arc<AtomicU64>,
+    operations: sovd::apps::sovd2uds::operations::collection::OperationsCollection,
 }
 
 impl DynamicRouter {
@@ -133,7 +134,15 @@ impl DynamicRouter {
             finalizers,
             router: Arc::new(RwLock::new(initial_router)),
             next_id: Arc::new(AtomicU64::new(0)),
+            operations: sovd::apps::sovd2uds::operations::collection::OperationsCollection::default(
+            ),
         }
+    }
+
+    pub(crate) fn operations(
+        &self,
+    ) -> &sovd::apps::sovd2uds::operations::collection::OperationsCollection {
+        &self.operations
     }
 
     /// Returns a clone of the current composed router.

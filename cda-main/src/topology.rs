@@ -58,6 +58,8 @@ pub fn topology_plugin_input(config: &Configuration) -> TopologyPolicy {
         settings,
         init_mode: config.communication.init_mode,
         ecus_pinned_to_can_transport,
+        doip_enabled: config.doip.enabled,
+        deferred_retry_after: config.deferred_retry_after(),
     }
 }
 
@@ -155,6 +157,14 @@ impl<SP: SecurityPlugin> TopologySource for UdsTopologySource<SP> {
 
     async fn detection_activity(&self) -> cda_interfaces::VariantDetectionActivity {
         self.uds_manager.read().await.detection_activity().clone()
+    }
+
+    async fn reset_ecu_states(&self, only_assumed_online: bool) {
+        self.uds_manager
+            .read()
+            .await
+            .reset_ecu_states(only_assumed_online)
+            .await;
     }
 }
 
