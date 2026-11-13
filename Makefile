@@ -48,7 +48,7 @@ endif
 	precommit precommit-all-features \
 	coverage coverage-can integration-coverage deny deny-unused-ignores \
 	generate-config generate-test-config generate-flatbuffers generate-protos docs rustdoc \
-	tool-versions setup-devenv install-uv install-protoc doctor run profile depgraph clean clean-doc help
+	tool-versions setup-devenv install-uv install-protoc doctor run profile depgraph clean clean-doc help update
 
 build:
 	cargo +$(STABLE) build --locked $(ARGS)
@@ -144,6 +144,10 @@ deny:
 
 deny-unused-ignores:
 	$(MAKE) --no-print-directory deny ARGS="advisories -A vulnerability -A unmaintained -A unsound -A notice -A yanked -D advisory-not-detected"
+
+# Update dependencies via Nightly, because dependency cooldown is only available with Rust 1.100.
+update:
+	cargo +$(NIGHTLY) update
 
 generate-config:
 	cargo +$(STABLE) run --locked --all-features -- generate-config --output $(or $(OUTPUT),opensovd-cda.toml)
@@ -284,6 +288,7 @@ help:
 		'integration-coverage         Generate integration-test LCOV coverage' \
 		'deny ARGS="..."              Run all or selected cargo-deny checks (FORMAT=json for JSON)' \
 		'deny-unused-ignores          Fail on advisory ignores in deny.toml that are no longer needed' \
+		'update                       Update Cargo.lock dependencies' \
 		'generate-config              Regenerate opensovd-cda.toml' \
 		'generate-test-config         Generate testcontainer/cda-test-config*.toml for docker compose' \
 		'generate-flatbuffers         Regenerate FlatBuffers sources' \
