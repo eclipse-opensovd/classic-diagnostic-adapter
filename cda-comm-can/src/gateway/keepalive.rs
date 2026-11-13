@@ -26,10 +26,12 @@
 use std::time::Duration;
 
 use cda_interfaces::{CanId, util::tokio_ext::sleep_for};
-use tokio_socketcan_isotp::{IsoTpBehaviour, IsoTpOptions, IsoTpSocket};
+use tokio_socketcan_isotp::{IsoTpBehaviour, IsoTpSocket};
 use tokio_util::sync::CancellationToken;
 
-use super::{background::BackgroundTask, can_id::CanIdExt, error::CanError};
+use super::{
+    background::BackgroundTask, can_id::CanIdExt, connection::CanLinkSettings, error::CanError,
+};
 
 /// Default functional broadcast CAN ID (ISO 15765-4), used when the MDD
 /// com-params do not define `CP_CanFuncReqId`.
@@ -56,6 +58,7 @@ const TESTER_PRESENT_PAYLOAD: [u8; 2] = [0x3E, 0x80];
 /// * `functional_id` - Functional broadcast CAN ID (from com-params), 11-bit
 ///   standard (e.g. `0x7DF`) or 29-bit extended (e.g. `0x18DB33F1`)
 /// * `interval` - How often to send the keep-alive
+/// * `link` - ISO-TP link layer settings (padding, CAN FD)
 ///
 /// # Returns
 /// A [`BackgroundTask`] that stops the broadcast via
@@ -65,6 +68,7 @@ pub(crate) fn start_keepalive_broadcast(
     interface: String,
     functional_id: CanId,
     interval: Duration,
+    link: CanLinkSettings,
 ) -> BackgroundTask {
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
@@ -80,7 +84,7 @@ pub(crate) fn start_keepalive_broadcast(
         let mut consecutive_open_failures: u64 = 0;
         loop {
             if socket.is_none() {
-                match open_broadcast_socket(&interface, functional_id) {
+                match open_broadcast_socket(&interface, functional_id, link) {
                     Ok(s) => {
                         if consecutive_open_failures > 0 {
                             tracing::info!(
@@ -157,7 +161,11 @@ pub(crate) fn start_keepalive_broadcast(
 }
 
 /// Opens the ISO-TP socket used for the functional broadcast.
-fn open_broadcast_socket(interface: &str, functional_id: CanId) -> Result<IsoTpSocket, CanError> {
+fn open_broadcast_socket(
+    interface: &str,
+    functional_id: CanId,
+    link: CanLinkSettings,
+) -> Result<IsoTpSocket, CanError> {
     let tx_id = functional_id.to_socket_id()?;
     // Match the dummy RX kind to the broadcast kind so standard and extended
     // buses both work.
@@ -168,17 +176,17 @@ fn open_broadcast_socket(interface: &str, functional_id: CanId) -> Result<IsoTpS
     })?
     .to_socket_id()?;
 
-    let isotp_opts = IsoTpOptions::new(
-        IsoTpBehaviour::CAN_ISOTP_TX_PADDING,
-        Duration::ZERO,
-        0,
-        0x00,
-        0x00,
-        0,
-    )
-    .ok();
+    let isotp_opts = link.isotp_options(IsoTpBehaviour::empty(), 0);
 
-    IsoTpSocket::open_with_opts(interface, rx_id, tx_id, isotp_opts, None, None).map_err(|e| {
+    IsoTpSocket::open_with_opts(
+        interface,
+        rx_id,
+        tx_id,
+        isotp_opts,
+        None,
+        link.link_layer_options(),
+    )
+    .map_err(|e| {
         CanError::SocketError(format!(
             "Failed to open keep-alive socket on {interface}: {e}"
         ))

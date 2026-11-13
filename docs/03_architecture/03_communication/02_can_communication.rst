@@ -49,10 +49,19 @@ Physical ISO-TP Exchange
     :status: draft
 
     The gateway opens a fresh ISO-TP socket for each physical request. Its receive ID is
-    the ECU response ID and its transmit ID is the ECU request ID. TX padding is enabled
-    with ``0x00`` so the gateway can communicate with ECUs that require padded eight-byte
-    CAN frames. The socket stays open for the entire exchange, which is required to receive
-    a final response after an NRC ``0x78``.
+    the ECU response ID and its transmit ID is the ECU request ID. TX padding is always
+    enabled, with the configurable ``can.padding_byte`` (default ``0x00``), so the gateway
+    can communicate with ECUs that require padded eight-byte CAN frames. The socket stays
+    open for the entire exchange, which is required to receive a final response after an
+    NRC ``0x78``.
+
+    With a ``[can.fd]`` section, all ISO-TP sockets (including the functional
+    TesterPresent broadcast) use a CAN FD link layer per ISO 15765-2:2016: frames are
+    sent as CAN FD frames with up to ``tx_dl`` data bytes and optional bit rate switch,
+    single frames longer than seven bytes use the escaped ``SF_DL`` encoding, and frames
+    are padded to valid CAN FD lengths. Without it, classic CAN frames are sent. The
+    socketcand transport requires a CAN FD capable server for this (upstream socketcand
+    is classic CAN only).
 
     The CAN bus is shared. Before forwarding a terminal response, the gateway verifies that
     its response SID belongs to the sent request. Frames that do not match are discarded and
