@@ -29,10 +29,10 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagServiceError, EcuAddresses, EcuConnectivityHandler, FunctionalTransport, NetworkTopology,
-    PhysicalTransport, ReloadComponent, Reloadable, ReloadableOwner, RouteStatus, ServicePayload,
-    Shutdown, TransmissionParameters, TransportProbe, TransportResponse, VariantDetectionRequest,
-    VariantDetectionSender,
+    CanId, DiagServiceError, EcuAddresses, EcuConnectivityHandler, FunctionalTransport,
+    NetworkTopology, PhysicalTransport, ReloadComponent, Reloadable, ReloadableOwner, RouteStatus,
+    ServicePayload, Shutdown, TransmissionParameters, TransportProbe, TransportResponse,
+    VariantDetectionRequest, VariantDetectionSender,
     communication_control::{
         GatewayLifecycle, TransportControl, TransportState, error::CommControlError,
     },
@@ -47,7 +47,67 @@ use self::{
     error::{CanError, CanGatewaySetupError},
     probe::ProbeRequest,
 };
-use crate::config::CanConfig;
+use crate::config::{CanAddressingMode, CanConfig};
+
+/// What a probe actually reached. Compared against the current topology, never used for I/O.
+///
+/// "Discovered" is a fact about the addressing that answered, not about the
+/// ECU name it is stored under: an ECU counts as discovered only while this
+/// equals the fingerprint of its addressing in the current topology. The
+/// address-extension byte of extended addressing is part of `mode` and so of
+/// the fingerprint, because on a shared ID pair it selects which ECU answers.
+/// The interface is not: it is gateway-wide configuration
+/// (`CanConfig::interface`), not topology.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct DiscoveredAs {
+    request_id: CanId,
+    response_id: CanId,
+    mode: CanAddressingMode,
+}
+
+impl From<&CanEcuAddressing> for DiscoveredAs {
+    fn from(addressing: &CanEcuAddressing) -> Self {
+        Self {
+            request_id: addressing.request_id,
+            response_id: addressing.response_id,
+            mode: addressing.addressing_mode,
+        }
+    }
+}
+
+impl From<&CanEcuConnection> for DiscoveredAs {
+    fn from(conn: &CanEcuConnection) -> Self {
+        Self::from(conn.addressing())
+    }
+}
+
+type DiscoveredEcus = cda_interfaces::HashMap<String, DiscoveredAs>;
+
+/// Whether `ecu_name` was discovered on the addressing `topology` holds for it
+/// now. Callers take the topology guard before the `discovered` guard.
+fn discovered_on_current(
+    topology: &CanTopology,
+    discovered: &DiscoveredEcus,
+    ecu_name: &str,
+) -> bool {
+    topology.connection(ecu_name).is_some_and(|addressing| {
+        discovered.get(ecu_name) == Some(&DiscoveredAs::from(addressing.as_ref()))
+    })
+}
+
+/// Removes the discovery of `ecu_name` only if it is still the one recorded
+/// for `observed_as`: a late failure on addressing a reload has since replaced
+/// must not erase a discovery made on the new addressing.
+async fn forget_discovery(
+    discovered: &RwLock<DiscoveredEcus>,
+    ecu_name: &str,
+    observed_as: DiscoveredAs,
+) {
+    let mut discovered = discovered.write().await;
+    if discovered.get(ecu_name) == Some(&observed_as) {
+        discovered.remove(ecu_name);
+    }
+}
 
 /// The instant `timeout` from now, saturating instead of panicking on the
 /// (theoretical) overflow of the underlying monotonic clock.
@@ -65,16 +125,35 @@ pub struct CanDiagGateway {
     interface: String,
     /// Read per use, because the gateway outlives any one topology.
     ///
-    /// Lookups copy what they need out and drop the guard before any bus I/O,
-    /// against [`Reloadable::read`]'s advice: holding it across a probe would
-    /// stall a reload, and every lookup queued behind it, on an unreachable
-    /// ECU. The trade is that an operation already in flight finishes against
+    /// Uses the copy-out style [`Reloadable::read`] allows for components that
+    /// must not block on I/O: the guard is held for the lookup only, never
+    /// across bus I/O or a channel send. Holding it across a probe would stall
+    /// a reload, and, because the lock is fair, every lookup queued behind it,
+    /// on an unreachable ECU. Callers resolve what they need under the guard -
+    /// one ECU via `probe_target`, several in a scoped snapshot block as
+    /// `discover_ecus` and `undiscovered_targets` do - drop it, and only then
+    /// probe or send. Nothing takes `&CanTopology` and then awaits I/O.
+    ///
+    /// Lifetime rule: an addressing value copied out (`Arc<CanEcuAddressing>`,
+    /// `CanEcuConnection`) lives for one operation only - a function body or
+    /// one spawned exchange - and is never stored in `self` or in a long-lived
+    /// task. `CanEcuConnection` is deliberately not `Clone`. The keepalive
+    /// reads the functional ID on every tick instead of keeping a copy.
+    ///
+    /// The trade is that an operation already in flight finishes against
     /// the addressing it started with, so `ReloadComponent::apply` can return
     /// while the old topology is still partly alive - accepted, since CAN
     /// addressing cannot be retargeted mid-frame.
+    ///
+    /// Discovery is not part of the topology: `discovered_ecus` stores a
+    /// fingerprint of the addressing that answered and every check re-validates
+    /// it against this topology, so an `apply` needs no reconciliation.
     topology: Reloadable<CanTopology>,
-    /// Set of ECU names that responded to discovery
-    discovered_ecus: Arc<RwLock<cda_interfaces::HashSet<String>>>,
+    /// Per ECU name (lowercase), the addressing a probe last reached it on.
+    /// The ECU counts as discovered only while this matches its addressing in
+    /// the current `topology`; see [`DiscoveredAs`]. Lock order: `topology`
+    /// first, then this.
+    discovered_ecus: Arc<RwLock<DiscoveredEcus>>,
     /// Response timeout duration
     response_timeout: Duration,
     /// Probe timeout duration
@@ -145,6 +224,11 @@ impl CanDiagGateway {
     /// Not named `new` precisely because it does not hand back only a `Self` -
     /// the caller cannot get one half without deciding where the other goes.
     ///
+    /// `apply` is safe while the gateway is enabled. Discovery is re-validated
+    /// against the current topology through its fingerprint, so an ECU whose
+    /// addressing changed needs a new probe, an unchanged one stays
+    /// discovered, and a removed one is never matched again.
+    ///
     /// # Errors
     /// Returns [`CanGatewaySetupError`] if the configured probe sequence is
     /// unusable.
@@ -168,7 +252,7 @@ impl CanDiagGateway {
         let gateway = Self {
             interface: config.interface.clone(),
             topology: reloader.reader(),
-            discovered_ecus: Arc::new(RwLock::new(cda_interfaces::HashSet::default())),
+            discovered_ecus: Arc::new(RwLock::new(DiscoveredEcus::default())),
             response_timeout: Duration::from_millis(config.response_timeout_ms),
             probe_timeout: Duration::from_millis(config.probe_timeout_ms),
             probe_retries: config.probe_retries,
@@ -182,55 +266,77 @@ impl CanDiagGateway {
         Ok((gateway, reloader as Arc<dyn ReloadComponent<CanTopology>>))
     }
 
-    /// Checks if an ECU was discovered by logical address.
+    /// Checks if an ECU was discovered by logical address, on the addressing
+    /// the current topology holds for it.
     ///
     /// Uses the topology's address lookup instead of iterating the shared ECU
     /// `RwLock`s, avoiding potential deadlocks.
     pub async fn is_ecu_discovered(&self, logical_addr: u16) -> bool {
         let topology = self.topology.read().await;
-        if let Some(ecu_name) = topology.ecu_for_logical_address(logical_addr) {
-            return self.discovered_ecus.read().await.contains(ecu_name);
-        }
-        false
-    }
-
-    /// Checks if a specific ECU was discovered by name.
-    async fn is_ecu_discovered_by_name(&self, ecu_name: &str) -> bool {
-        self.discovered_ecus.read().await.contains(ecu_name)
-    }
-
-    async fn probe_ecu_with_topology(&self, topology: &CanTopology, ecu_name: &str) -> bool {
-        let ecu_name = ecu_name.to_lowercase();
-        let Some(conn) = topology.connection(&ecu_name).map(CanEcuConnection::new) else {
+        let Some(ecu_name) = topology.ecu_for_logical_address(logical_addr) else {
             return false;
         };
+        discovered_on_current(&topology, &*self.discovered_ecus.read().await, ecu_name)
+    }
+
+    /// Checks if `ecu_name` was discovered on `current`, the fingerprint of
+    /// the addressing the caller resolved from the topology for this operation.
+    async fn is_ecu_discovered_by_name(&self, ecu_name: &str, current: DiscoveredAs) -> bool {
+        self.discovered_ecus.read().await.get(ecu_name) == Some(&current)
+    }
+
+    /// Resolves everything a probe of `ecu_name` (lowercase) needs and
+    /// releases the topology guard before returning, so no caller can hold it
+    /// across the probe; see `topology`.
+    async fn probe_target(&self, ecu_name: &str) -> Option<(CanEcuConnection, u16)> {
+        let topology = self.topology.read().await;
+        let conn = topology.connection(ecu_name).map(CanEcuConnection::new)?;
         let logical_addr = topology
-            .logical_address_for_ecu(&ecu_name)
+            .logical_address_for_ecu(ecu_name)
             .unwrap_or_default();
-        self.probe_and_record(&conn, logical_addr, ecu_name).await
+        Some((conn, logical_addr))
     }
 
     /// Probes one ECU over a connection the caller already owns, recording
-    /// the outcome in `discovered_ecus`.
+    /// the outcome in `discovered_ecus` as the fingerprint of `conn`, the
+    /// addressing actually probed.
     ///
-    /// Takes the connection and address by value so a caller can release the
-    /// topology guard first: `probe_connection` waits out `probe_timeout` x
-    /// `probe_retries` plus `probe_retry_delay`, and holding the read guard
-    /// across that makes a topology reload - and, because the lock is fair,
-    /// every CAN lookup queued behind that reload - wait on an unreachable ECU.
+    /// Takes no topology: the caller resolves `conn` and `logical_addr` first
+    /// (via `probe_target`, or a snapshot such as `undiscovered_targets`) and
+    /// has dropped the guard before calling, because `probe_connection` waits
+    /// out `probe_timeout` x `probe_retries` plus `probe_retry_delay`; see
+    /// `topology`. A success that a reload overtook records the old
+    /// fingerprint, which no longer matches, so the ECU is probed again; a
+    /// failure only removes a discovery made on the same addressing.
     async fn probe_and_record(
         &self,
         conn: &CanEcuConnection,
         logical_addr: u16,
         ecu_name: String,
     ) -> bool {
+        let probed_as = DiscoveredAs::from(conn);
         if self.probe_connection(conn, logical_addr).await.is_ok() {
-            self.discovered_ecus.write().await.insert(ecu_name);
+            self.discovered_ecus
+                .write()
+                .await
+                .insert(ecu_name, probed_as);
             true
         } else {
-            self.discovered_ecus.write().await.remove(&ecu_name);
+            forget_discovery(&self.discovered_ecus, &ecu_name, probed_as).await;
             false
         }
+    }
+
+    /// Drops the discovery of every ECU the current topology no longer
+    /// contains. Such entries are never matched again, but would otherwise
+    /// accumulate across reloads. Lock order is topology, then
+    /// `discovered_ecus`.
+    async fn prune_removed_ecus(&self) {
+        let topology = self.topology.read().await;
+        self.discovered_ecus
+            .write()
+            .await
+            .retain(|ecu_name, _| topology.has_connection(ecu_name));
     }
 }
 
@@ -256,8 +362,9 @@ impl PhysicalTransport for CanDiagGateway {
         // Copied out so the guard is released before the send; see `topology`.
         drop(topology);
 
-        // Check if ECU was discovered
-        if !self.is_ecu_discovered_by_name(&ecu_name).await {
+        // Discovered on exactly the addressing this exchange will use.
+        let sent_as = DiscoveredAs::from(&conn);
+        if !self.is_ecu_discovered_by_name(&ecu_name, sent_as).await {
             return Err(DiagServiceError::EcuOffline(
                 transmission_params.ecu_name.clone(),
             ));
@@ -401,7 +508,9 @@ impl PhysicalTransport for CanDiagGateway {
                 // receive window (CP_P6Max) usually closes the channel
                 // before the gateway deadline; an awake ECU emits something
                 // within P6Max. The probe-timeout floor keeps instant
-                // client aborts from striking healthy ECUs.
+                // client aborts from striking healthy ECUs. Only the
+                // discovery this exchange relied on is removed, so a task
+                // that outlived a reload cannot erase one on new IDs.
                 if !received_any_frame && exchange_start.elapsed() >= probe_timeout {
                     tracing::info!(
                         ecu = %ecu_name,
@@ -410,7 +519,7 @@ impl PhysicalTransport for CanDiagGateway {
                         "No frame received for the whole exchange; marking the ECU undiscovered \
                          so background rediscovery re-probes it"
                     );
-                    discovered_ecus.write().await.remove(&ecu_map_key);
+                    forget_discovery(&discovered_ecus, &ecu_map_key, sent_as).await;
                 }
             }
         });
@@ -426,21 +535,14 @@ impl PhysicalTransport for CanDiagGateway {
     ) -> Result<(), DiagServiceError> {
         let ecu_name = ecu_name.to_lowercase();
         // All lookups use the derived topology; no shared ECU RwLock is
-        // touched. Everything the probe needs is copied out so the guard is
-        // released before it runs - see `topology` for the trade that makes.
-        let probe_target = {
-            let topology = self.topology.read().await;
-            topology.connection(&ecu_name).map(|addressing| {
-                let logical_addr = topology
-                    .logical_address_for_ecu(&ecu_name)
-                    .unwrap_or_default();
-                (CanEcuConnection::new(addressing), logical_addr)
-            })
-        };
-        let Some((conn, logical_addr)) = probe_target else {
+        // touched. The guard is released before the probe runs.
+        let Some((conn, logical_addr)) = self.probe_target(&ecu_name).await else {
             return Err(DiagServiceError::EcuOffline(ecu_name));
         };
-        if self.is_ecu_discovered_by_name(&ecu_name).await {
+        if self
+            .is_ecu_discovered_by_name(&ecu_name, DiscoveredAs::from(&conn))
+            .await
+        {
             return Ok(());
         }
         // On-demand re-detection: the ECU may have come online after the
@@ -461,12 +563,14 @@ impl NetworkTopology for CanDiagGateway {
     async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
         let topology = self.topology.read().await;
         let ecu_name = topology.ecu_for_logical_address(logical_address)?;
-        if !self.is_ecu_discovered_by_name(ecu_name).await {
+        let addressing = topology.connection(ecu_name)?;
+        if !self
+            .is_ecu_discovered_by_name(ecu_name, DiscoveredAs::from(addressing.as_ref()))
+            .await
+        {
             return None;
         }
-        topology
-            .connection(ecu_name)
-            .map(|addressing| addressing.network_address())
+        Some(addressing.network_address())
     }
 
     async fn get_ecu_network_address(&self, ecu_name: &str) -> Option<String> {
@@ -511,7 +615,7 @@ impl TransportProbe for CanDiagGateway {
         if !topology.has_connection(&ecu_name) {
             return RouteStatus::NotConfigured;
         }
-        if self.discovered_ecus.read().await.contains(&ecu_name) {
+        if discovered_on_current(&topology, &*self.discovered_ecus.read().await, &ecu_name) {
             RouteStatus::Ready
         } else {
             // CAN has a resolved ID pair and supports a bounded physical probe.
@@ -520,8 +624,11 @@ impl TransportProbe for CanDiagGateway {
     }
 
     async fn probe_ecu(&self, ecu_name: &str) -> bool {
-        let topology = self.topology.read().await;
-        self.probe_ecu_with_topology(&topology, ecu_name).await
+        let ecu_name = ecu_name.to_lowercase();
+        let Some((conn, logical_addr)) = self.probe_target(&ecu_name).await else {
+            return false;
+        };
+        self.probe_and_record(&conn, logical_addr, ecu_name).await
     }
 }
 
@@ -680,6 +787,22 @@ impl CanDiagGateway {
         self.topology.read().await.functional_id()
     }
 
+    /// Records `ecu_name` as discovered on `addressing`, as a probe reaching
+    /// it there would.
+    async fn seed_discovered(&self, ecu_name: &str, addressing: &CanEcuAddressing) {
+        self.discovered_ecus
+            .write()
+            .await
+            .insert(ecu_name.to_lowercase(), DiscoveredAs::from(addressing));
+    }
+
+    /// The names with a recorded discovery, whether or not it still matches.
+    async fn discovered_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.discovered_ecus.read().await.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
     /// Builds a gateway instance for unit tests without touching any CAN
     /// interface: no init check, no discovery, keep-alive disabled.
     pub(crate) fn test_instance(
@@ -687,10 +810,32 @@ impl CanDiagGateway {
         discovered: Vec<&str>,
         connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     ) -> Self {
-        let discovered: cda_interfaces::HashSet<String> =
-            discovered.into_iter().map(str::to_lowercase).collect();
-        let owner = ReloadableOwner::new(topology);
-        Self {
+        Self::reloadable_test_instance(topology, discovered, connectivity_handler).0
+    }
+
+    /// [`Self::test_instance`] plus the authority to replace its topology, for
+    /// applying a reload to a gateway that is `Enabled`.
+    ///
+    /// Each name in `discovered` is recorded as discovered on its addressing
+    /// in `topology`; a name the topology does not contain panics.
+    fn reloadable_test_instance(
+        topology: CanTopology,
+        discovered: Vec<&str>,
+        connectivity_handler: Arc<dyn EcuConnectivityHandler>,
+    ) -> (Self, Arc<dyn ReloadComponent<CanTopology>>) {
+        let discovered: DiscoveredEcus = discovered
+            .into_iter()
+            .map(|name| {
+                let name = name.to_lowercase();
+                let addressing = topology
+                    .connection(&name)
+                    .unwrap_or_else(|| panic!("discovered test ECU {name} is not in the topology"));
+                let discovered_as = DiscoveredAs::from(addressing.as_ref());
+                (name, discovered_as)
+            })
+            .collect();
+        let owner = Arc::new(ReloadableOwner::new(topology));
+        let gateway = Self {
             interface: "test0".to_owned(),
             topology: owner.reader(),
             discovered_ecus: Arc::new(RwLock::new(discovered)),
@@ -703,7 +848,8 @@ impl CanDiagGateway {
             variant_detection: VariantDetectionSender::new(mpsc::channel(1).0),
             connectivity_handler,
             lifecycle: Arc::new(GatewayLifecycle::new(TransportState::Enabled)),
-        }
+        };
+        (gateway, owner as Arc<dyn ReloadComponent<CanTopology>>)
     }
 }
 
@@ -860,7 +1006,8 @@ mod tests {
         );
     }
 
-    /// Changing an existing ECU's CAN IDs must reach the live gateway.
+    /// Changing an existing ECU's CAN IDs must reach the live gateway, and its
+    /// discovery on the old IDs must not carry over to the new ones.
     #[tokio::test]
     async fn changed_can_ids_reach_the_live_gateway() {
         let config = CanConfig {
@@ -875,6 +1022,10 @@ mod tests {
             Arc::new(cda_interfaces::util::test_utils::RecordingConnectivityHandler::default()),
         )
         .expect("build test gateway");
+        gateway
+            .seed_discovered("ecu1", &addressing("ecu1", 0x700, 0x708))
+            .await;
+        assert_eq!(gateway.route_status("ecu1").await, RouteStatus::Ready);
 
         let before = gateway.get_ecu_network_address("ecu1").await;
 
@@ -885,6 +1036,281 @@ mod tests {
         let after = gateway.get_ecu_network_address("ecu1").await;
         assert!(after.is_some());
         assert_ne!(before, after);
+        assert_eq!(
+            gateway.route_status("ecu1").await,
+            RouteStatus::ProbeRequired
+        );
+        let targets = gateway.undiscovered_targets().await;
+        assert_eq!(
+            targets
+                .iter()
+                .map(|(name, conn, _)| (name.as_str(), conn.network_address()))
+                .collect::<Vec<_>>(),
+            vec![("ecu1", after.expect("checked above"))],
+            "rediscovery must re-probe ecu1 on its new IDs"
+        );
+    }
+
+    const ECU1_ADDRESS: u16 = 0x1000;
+    const ECU2_ADDRESS: u16 = 0x2000;
+
+    fn addressing(name: &str, request: u32, response: u32) -> CanEcuAddressing {
+        CanEcuAddressing::new(
+            name.to_owned(),
+            "test0".to_owned(),
+            CanId::try_from(request).expect("valid test CAN ID"),
+            CanId::try_from(response).expect("valid test CAN ID"),
+            CanAddressingMode::Standard,
+        )
+    }
+
+    /// Like `topology_with`, plus each ECU's logical address, for the
+    /// address-based lookups.
+    fn addressed_topology(ecus: Vec<(CanEcuAddressing, u16)>) -> CanTopology {
+        let mut connections = HashMap::default();
+        let mut logical_address_to_ecu = HashMap::default();
+        let mut ecu_to_logical_address = HashMap::default();
+        for (addressing, logical_address) in ecus {
+            let name = addressing.ecu_name.to_lowercase();
+            logical_address_to_ecu.insert(logical_address, name.clone());
+            ecu_to_logical_address.insert(name.clone(), logical_address);
+            connections.insert(name, Arc::new(addressing));
+        }
+        CanTopology::new(
+            connections,
+            logical_address_to_ecu,
+            ecu_to_logical_address,
+            CanId::try_from(0x7DF).expect("valid test CAN ID"),
+        )
+    }
+
+    fn handler() -> Arc<dyn EcuConnectivityHandler> {
+        Arc::new(cda_interfaces::util::test_utils::RecordingConnectivityHandler::default())
+    }
+
+    async fn send_to_ecu1(
+        gateway: &CanDiagGateway,
+    ) -> Result<tokio::task::JoinHandle<()>, DiagServiceError> {
+        let (response_sender, _response_receiver) = mpsc::channel(1);
+        gateway
+            .send(
+                TransmissionParameters {
+                    gateway_address: ECU1_ADDRESS,
+                    timeout_ack: Duration::from_millis(100),
+                    ecu_name: "ecu1".to_owned(),
+                    repeat_request_count_transmission: 0,
+                },
+                ServicePayload {
+                    data: vec![0x3E, 0x00],
+                    source_address: 0x0E80,
+                    target_address: ECU1_ADDRESS,
+                    new_session: None,
+                    new_security: None,
+                },
+                response_sender,
+                true,
+            )
+            .await
+    }
+
+    /// An ECU discovered on 0x700/0x708 whose IDs an `apply` on the enabled
+    /// gateway changes is not discovered on the new IDs: every check reports
+    /// it as needing a probe, and a send is rejected before reaching the bus.
+    #[tokio::test]
+    async fn changed_ids_of_a_discovered_ecu_require_a_new_probe() {
+        let (gateway, reload) = CanDiagGateway::reloadable_test_instance(
+            addressed_topology(vec![(addressing("ecu1", 0x700, 0x708), ECU1_ADDRESS)]),
+            vec!["ecu1"],
+            handler(),
+        );
+        assert_eq!(gateway.state().await, TransportState::Enabled);
+        assert_eq!(gateway.route_status("ecu1").await, RouteStatus::Ready);
+        assert!(gateway.is_ecu_discovered(ECU1_ADDRESS).await);
+        assert!(
+            gateway
+                .get_gateway_network_address(ECU1_ADDRESS)
+                .await
+                .is_some()
+        );
+
+        reload
+            .apply(addressed_topology(vec![(
+                addressing("ecu1", 0x7E0, 0x7E8),
+                ECU1_ADDRESS,
+            )]))
+            .await;
+
+        assert_eq!(
+            gateway.route_status("ecu1").await,
+            RouteStatus::ProbeRequired
+        );
+        assert!(!gateway.is_ecu_discovered(ECU1_ADDRESS).await);
+        assert_eq!(
+            gateway.get_gateway_network_address(ECU1_ADDRESS).await,
+            None
+        );
+        assert!(matches!(
+            send_to_ecu1(&gateway).await,
+            Err(DiagServiceError::EcuOffline(name)) if name == "ecu1"
+        ));
+    }
+
+    /// The address-extension byte selects which ECU answers on a shared ID
+    /// pair, so changing only it also requires a new probe.
+    #[tokio::test]
+    async fn changed_address_extension_requires_a_new_probe() {
+        let (gateway, reload) = CanDiagGateway::reloadable_test_instance(
+            topology_with(vec![("ecu1", 0x700, 0x708)]),
+            vec!["ecu1"],
+            handler(),
+        );
+
+        let mut extended = addressing("ecu1", 0x700, 0x708);
+        extended.addressing_mode = CanAddressingMode::Extended(0xF1);
+        reload
+            .apply(shared_topology(vec![("ecu1", extended)]))
+            .await;
+
+        assert_eq!(
+            gateway.route_status("ecu1").await,
+            RouteStatus::ProbeRequired
+        );
+    }
+
+    /// A new topology with the same addressing for an ECU keeps it discovered:
+    /// no false offline period after an `apply` that did not change it.
+    #[tokio::test]
+    async fn identical_addressing_stays_discovered_across_apply() {
+        let (gateway, reload) = CanDiagGateway::reloadable_test_instance(
+            addressed_topology(vec![(addressing("ecu1", 0x700, 0x708), ECU1_ADDRESS)]),
+            vec!["ecu1"],
+            handler(),
+        );
+
+        reload
+            .apply(addressed_topology(vec![(
+                addressing("ecu1", 0x700, 0x708),
+                ECU1_ADDRESS,
+            )]))
+            .await;
+
+        assert_eq!(gateway.route_status("ecu1").await, RouteStatus::Ready);
+        assert!(gateway.is_ecu_discovered(ECU1_ADDRESS).await);
+        assert_eq!(
+            gateway.get_gateway_network_address(ECU1_ADDRESS).await,
+            Some(addressing("ecu1", 0x700, 0x708).network_address())
+        );
+        assert!(gateway.undiscovered_targets().await.is_empty());
+        send_to_ecu1(&gateway)
+            .await
+            .expect("a discovered ECU is sent to")
+            .abort();
+    }
+
+    /// A removed ECU is not configured and matches nothing; its entry stays
+    /// until the next rediscovery round prunes it, which keeps the entries of
+    /// ECUs still in the topology.
+    #[tokio::test]
+    async fn removed_ecu_is_not_configured_and_pruned() {
+        let (gateway, reload) = CanDiagGateway::reloadable_test_instance(
+            addressed_topology(vec![
+                (addressing("ecu1", 0x700, 0x708), ECU1_ADDRESS),
+                (addressing("ecu2", 0x710, 0x718), ECU2_ADDRESS),
+            ]),
+            vec!["ecu1", "ecu2"],
+            handler(),
+        );
+
+        reload
+            .apply(addressed_topology(vec![(
+                addressing("ecu2", 0x710, 0x718),
+                ECU2_ADDRESS,
+            )]))
+            .await;
+
+        assert_eq!(
+            gateway.route_status("ecu1").await,
+            RouteStatus::NotConfigured
+        );
+        assert!(!gateway.is_ecu_discovered(ECU1_ADDRESS).await);
+        assert_eq!(
+            gateway.get_gateway_network_address(ECU1_ADDRESS).await,
+            None
+        );
+        assert!(matches!(
+            send_to_ecu1(&gateway).await,
+            Err(DiagServiceError::EcuOffline(_))
+        ));
+        assert_eq!(gateway.route_status("ecu2").await, RouteStatus::Ready);
+        assert_eq!(gateway.discovered_names().await, ["ecu1", "ecu2"]);
+
+        gateway.prune_removed_ecus().await;
+        assert_eq!(gateway.discovered_names().await, ["ecu2"]);
+
+        // Pruned, so re-adding it even on the same IDs needs a probe.
+        reload
+            .apply(addressed_topology(vec![
+                (addressing("ecu1", 0x700, 0x708), ECU1_ADDRESS),
+                (addressing("ecu2", 0x710, 0x718), ECU2_ADDRESS),
+            ]))
+            .await;
+        assert_eq!(
+            gateway.route_status("ecu1").await,
+            RouteStatus::ProbeRequired
+        );
+        assert_eq!(gateway.route_status("ecu2").await, RouteStatus::Ready);
+    }
+
+    /// The silent-exchange path removes only the discovery its exchange used:
+    /// one on IDs a reload has since replaced leaves the newer one alone.
+    #[tokio::test]
+    async fn forgetting_an_older_discovery_keeps_a_newer_one() {
+        let discovered = RwLock::new(DiscoveredEcus::default());
+        let older = DiscoveredAs::from(&addressing("ecu1", 0x700, 0x708));
+        let newer = DiscoveredAs::from(&addressing("ecu1", 0x7E0, 0x7E8));
+        discovered.write().await.insert("ecu1".to_owned(), newer);
+
+        forget_discovery(&discovered, "ecu1", older).await;
+        assert_eq!(discovered.read().await.get("ecu1"), Some(&newer));
+
+        forget_discovery(&discovered, "ecu1", newer).await;
+        assert!(discovered.read().await.is_empty());
+    }
+
+    /// A failed probe on addressing a reload has replaced must not remove the
+    /// discovery made on the new addressing; on the same addressing it does.
+    #[tokio::test]
+    async fn failed_probe_removes_only_its_own_discovery() {
+        let gateway =
+            CanDiagGateway::test_instance(unopenable_interface_topology(), vec![], handler());
+        let (conn, logical_addr) = gateway
+            .probe_target("ecu1")
+            .await
+            .expect("ecu1 is in the topology");
+        let newer = addressing("ecu1", 0x7E0, 0x7E8);
+        gateway.seed_discovered("ecu1", &newer).await;
+
+        let probed = tokio::time::timeout(
+            Duration::from_secs(2),
+            gateway.probe_and_record(&conn, logical_addr, "ecu1".to_owned()),
+        )
+        .await
+        .expect("a probe on an unopenable interface fails fast");
+        assert!(!probed);
+        assert_eq!(
+            gateway.discovered_ecus.read().await.get("ecu1"),
+            Some(&DiscoveredAs::from(&newer))
+        );
+
+        gateway.seed_discovered("ecu1", conn.addressing()).await;
+        let probed = tokio::time::timeout(
+            Duration::from_secs(2),
+            gateway.probe_and_record(&conn, logical_addr, "ecu1".to_owned()),
+        )
+        .await
+        .expect("a probe on an unopenable interface fails fast");
+        assert!(!probed);
+        assert!(gateway.discovered_names().await.is_empty());
     }
 
     fn marker_topology(id: u32) -> CanTopology {
@@ -982,6 +1408,67 @@ mod tests {
 
         gateway.disable().await.expect("disable stops rediscovery");
         assert_eq!(gateway.state().await, TransportState::Disabled);
+    }
+
+    /// A probe against an ECU nobody answers must not keep the topology
+    /// locked: a reload and the lookups queued behind it complete while the
+    /// probe is still waiting out its timeout.
+    ///
+    /// Needs `can-socketcand`: opening a socketcand port succeeds at once and
+    /// the daemon connection is made in the background, so the probe really
+    /// waits for `probe_timeout` without a daemon or a bus. A nonexistent
+    /// kernel interface would fail the open immediately and prove nothing.
+    #[cfg(feature = "can-socketcand")]
+    #[tokio::test]
+    async fn reload_and_lookups_do_not_wait_for_an_inflight_probe() {
+        const INTERFACE: &str = "socketcand:127.0.0.1:29536:vcan0";
+        const BOUND: Duration = Duration::from_millis(200);
+
+        let unanswered = shared_topology(vec![(
+            "ecu1",
+            CanEcuAddressing::new(
+                "ecu1".to_owned(),
+                INTERFACE.to_owned(),
+                CanId::try_from(0x6F0).expect("valid test CAN ID"),
+                CanId::try_from(0x6F8).expect("valid test CAN ID"),
+                crate::config::CanAddressingMode::Standard,
+            ),
+        )]);
+        let (gateway, reload) = CanDiagGateway::build(
+            &CanConfig {
+                interface: INTERFACE.to_owned(),
+                probe_timeout_ms: 2_000,
+                probe_retries: 0,
+                ..CanConfig::default()
+            },
+            unanswered,
+            VariantDetectionSender::new(mpsc::channel(1).0),
+            Arc::new(cda_interfaces::util::test_utils::RecordingConnectivityHandler::default()),
+        )
+        .expect("build test gateway");
+
+        let probing = gateway.clone();
+        let probe = tokio::spawn(async move { probing.probe_ecu("ecu1").await });
+        // Lets the probe resolve its target and get onto the bus.
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(50)).await;
+        assert!(!probe.is_finished(), "the probe must still be waiting");
+
+        tokio::time::timeout(
+            BOUND,
+            reload.apply(topology_with(vec![("ecu2", 0x710, 0x718)])),
+        )
+        .await
+        .expect("apply must not wait for the in-flight probe");
+        let status = tokio::time::timeout(BOUND, gateway.route_status("ecu2"))
+            .await
+            .expect("route_status must not wait for the in-flight probe");
+
+        assert_eq!(status, RouteStatus::ProbeRequired);
+        assert!(
+            !probe.is_finished(),
+            "the probe must still be in flight, otherwise this proves nothing"
+        );
+        probe.abort();
     }
 
     /// A frame with another SID (here a tester present NRC) is dropped as the

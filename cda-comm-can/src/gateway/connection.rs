@@ -23,7 +23,10 @@ use crate::config::CanAddressingMode;
 ///
 /// Holds the current ECU-data topology's derived addressing in shared form, so
 /// resolving a connection per use costs an `Arc` clone rather than a rebuild.
-#[derive(Clone, Debug)]
+///
+/// Not `Clone`: a connection is resolved from the topology for one operation
+/// and never kept beyond it; see `CanDiagGateway::topology`.
+#[derive(Debug)]
 pub struct CanEcuConnection {
     addressing: Arc<CanEcuAddressing>,
 }
@@ -33,6 +36,10 @@ impl CanEcuConnection {
     #[must_use]
     pub fn new(addressing: Arc<CanEcuAddressing>) -> Self {
         Self { addressing }
+    }
+
+    pub(super) fn addressing(&self) -> &CanEcuAddressing {
+        &self.addressing
     }
 
     pub(crate) fn ecu_name(&self) -> &str {

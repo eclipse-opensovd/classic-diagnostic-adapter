@@ -19,7 +19,7 @@ use std::{sync::Arc, time::Instant};
 use cda_interfaces::dlt_ctx;
 
 use super::{
-    CanDiagGateway,
+    CanDiagGateway, DiscoveredAs,
     connection::CanEcuConnection,
     error::{CanError, CanGatewaySetupError},
 };
@@ -192,38 +192,49 @@ impl CanDiagGateway {
     /// A list of ECU names that responded to a probe.
     #[tracing::instrument(skip_all, fields(dlt_context = dlt_ctx!("CAN")))]
     pub async fn discover_ecus(&self) -> Vec<String> {
-        let topology = self.topology.read().await;
-        let futures: Vec<_> = topology
-            .connections()
-            .iter()
-            .map(|(ecu_name, addressing)| {
-                let logical_addr = topology
-                    .logical_address_for_ecu(ecu_name)
-                    .unwrap_or_default();
-                let conn = CanEcuConnection::new(Arc::clone(addressing));
+        // Collect owned targets so the topology guard is not held across the
+        // parallel probes.
+        let targets: Vec<(String, CanEcuConnection, u16)> = {
+            let topology = self.topology.read().await;
+            topology
+                .connections()
+                .iter()
+                .map(|(ecu_name, addressing)| {
+                    (
+                        ecu_name.clone(),
+                        CanEcuConnection::new(Arc::clone(addressing)),
+                        topology
+                            .logical_address_for_ecu(ecu_name)
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect()
+        };
 
-                async move {
-                    let result = self.probe_connection(&conn, logical_addr).await;
-                    match &result {
-                        Ok(()) => tracing::info!(
-                            ecu = %conn.ecu_name(),
-                            logical_addr = logical_addr,
-                            network_addr = %conn.network_address(),
-                            "ECU discovered on CAN"
-                        ),
-                        Err(e) => tracing::debug!(
-                            ecu = %conn.ecu_name(),
-                            logical_addr = logical_addr,
-                            error = %e,
-                            "ECU not responding on CAN"
-                        ),
-                    }
-                    // Return the lowercase map key, not `conn.ecu_name`: for
-                    // ECUs from [[can.ecu_mappings]] the latter carries the
-                    // config-file casing, which the variant-detection
-                    // consumer would not find in its lowercase-keyed ECU map.
-                    (ecu_name.clone(), result)
+        let futures: Vec<_> = targets
+            .into_iter()
+            .map(|(ecu_name, conn, logical_addr)| async move {
+                let probed_as = DiscoveredAs::from(&conn);
+                let result = self.probe_connection(&conn, logical_addr).await;
+                match &result {
+                    Ok(()) => tracing::info!(
+                        ecu = %conn.ecu_name(),
+                        logical_addr = logical_addr,
+                        network_addr = %conn.network_address(),
+                        "ECU discovered on CAN"
+                    ),
+                    Err(e) => tracing::debug!(
+                        ecu = %conn.ecu_name(),
+                        logical_addr = logical_addr,
+                        error = %e,
+                        "ECU not responding on CAN"
+                    ),
                 }
+                // Return the lowercase map key, not `conn.ecu_name`: for
+                // ECUs from [[can.ecu_mappings]] the latter carries the
+                // config-file casing, which the variant-detection
+                // consumer would not find in its lowercase-keyed ECU map.
+                (ecu_name, probed_as, result)
             })
             .collect();
 
@@ -232,15 +243,19 @@ impl CanDiagGateway {
         let mut discovered = Vec::new();
         let mut cache = self.discovered_ecus.write().await;
 
-        for (ecu_name, result) in results {
+        // Records what was probed, not a fresh lookup: a reload during the
+        // probes leaves fingerprints that no longer match, so those ECUs are
+        // probed again on their new addressing.
+        for (ecu_name, probed_as, result) in results {
             match result {
                 Ok(()) => {
-                    cache.insert(ecu_name.clone());
+                    cache.insert(ecu_name.clone(), probed_as);
                     discovered.push(ecu_name);
                 }
-                Err(_) => {
+                Err(_) if cache.get(&ecu_name) == Some(&probed_as) => {
                     cache.remove(&ecu_name);
                 }
+                Err(_) => {}
             }
         }
 
