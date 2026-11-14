@@ -273,7 +273,7 @@ async fn add_connections_from_com_params<T: EcuAddresses + CanComParamProvider>(
     logical_addresses: &mut LogicalAddresses,
 ) {
     let mut sorted_ecus: Vec<_> = ecus.iter().collect();
-    sorted_ecus.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+    sorted_ecus.sort_unstable_by_key(|(name, _)| *name);
     for (name, ecu_lock) in sorted_ecus {
         let ecu = ecu_lock.read().await;
         let logical_addr = ecu.logical_address();
