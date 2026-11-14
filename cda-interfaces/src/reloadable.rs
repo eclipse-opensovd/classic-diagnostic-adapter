@@ -19,9 +19,8 @@ use tokio::sync::{RwLock, RwLockReadGuard};
 
 /// Read access to one component's vehicle data.
 ///
-/// Readers hold a guard for the whole operation, so a runtime update waits for
-/// them rather than replacing the data underneath. The lock is uncontended
-/// outside an update.
+/// A runtime update waits for outstanding guards rather than replacing the
+/// data underneath them. The lock is uncontended outside an update.
 pub struct Reloadable<T> {
     data: Arc<RwLock<T>>,
 }
@@ -29,10 +28,18 @@ pub struct Reloadable<T> {
 impl<T> Reloadable<T> {
     /// Borrows the current vehicle data for the caller's operation.
     ///
-    /// Hold the guard for as long as the data is used: that is what makes
-    /// [`ReloadComponent::apply`] deterministic. Extracting owned handles from
-    /// under it and dropping the guard early defeats that: the extracted value
-    /// keeps the replaced data alive.
+    /// Hold the guard at least for the lookup. Two styles are allowed:
+    ///
+    /// - Hold it for the whole operation (e.g. the UDS layer's ECU data). The
+    ///   data cannot change underneath, and [`ReloadComponent::apply`] returns
+    ///   only once the operation is done.
+    /// - A component that must not block a reload on I/O (e.g. the CAN
+    ///   transport, whose probes wait out timeouts) may copy owned handles out
+    ///   under the guard **for one operation**, drop it, and then do the I/O.
+    ///   Such handles must never be stored beyond that operation, and state
+    ///   derived from them must be re-validated against the current data.
+    ///   The price is that `apply` returning no longer means the previous
+    ///   value is fully dropped: an operation in flight finishes on its copy.
     pub async fn read(&self) -> RwLockReadGuard<'_, T> {
         self.data.read().await
     }
@@ -74,19 +81,26 @@ impl<T> ReloadableOwner<T> {
 
 /// A component whose vehicle data a runtime update can replace.
 ///
-/// Replacing is infallible: every fallible step ran during preflight, and the
-/// update holds the exclusive disable lease. It is asynchronous because it
-/// waits for in-flight readers.
+/// Replacing is infallible: every fallible step ran during preflight. It is
+/// asynchronous because it waits for in-flight readers.
 #[async_trait::async_trait]
 pub trait ReloadComponent<T>: Send + Sync + 'static {
     /// Replaces this component's data with `data`.
+    ///
+    /// The normal update flow calls this under the exclusive communication
+    /// disable lease, with the transport down, but a component must not rely
+    /// on that for correctness: `apply` may run while it is enabled. State
+    /// derived from the previous data must not survive as if it still
+    /// applied.
     async fn apply(&self, data: T);
 }
 
-/// Replaces the data, waiting for in-flight readers to finish first.
+/// Replaces the data, waiting for outstanding read guards to be dropped first.
 ///
-/// When this returns, nothing is reading the previous value: it has been
-/// dropped, along with everything it owned.
+/// When this returns, no guard on the previous value is held and the value
+/// has been dropped. Only owned handles a reader copied out of it for an
+/// operation still in flight can keep parts of it alive; see
+/// [`Reloadable::read`].
 #[async_trait::async_trait]
 impl<T: Send + Sync + 'static> ReloadComponent<T> for ReloadableOwner<T> {
     async fn apply(&self, data: T) {
