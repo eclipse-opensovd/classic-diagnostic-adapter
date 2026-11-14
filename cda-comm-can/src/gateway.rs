@@ -546,29 +546,28 @@ impl TransportControl for CanDiagGateway {
             .coordinator
             .transition(TransportState::Enabling)
             .await;
-        // Released before discovery, which resolves the topology itself.
-        let (functional_id, socket_check) = {
-            let topology = self.topology.read().await;
-            // The check needs one ECU to open a socket against. An empty
-            // topology is an empty vehicle, not a broken interface: there is
-            // nothing to address, so there is nothing to verify and no reason
-            // to refuse the enable. A later update installs a real topology
-            // and this runs again on the next enable.
-            let socket_check = topology.connections().values().next().map_or_else(
-                || Ok(()),
-                |addressing| {
-                    CanEcuConnection::new(Arc::clone(addressing))
-                        .verify_socket_openable()
-                        .map_err(|error| {
-                            CommControlError::InitFailed(format!(
-                                "Failed to open CAN interface {}: {error}",
-                                self.interface
-                            ))
-                        })
-                },
-            );
-            (topology.functional_id(), socket_check)
-        };
+        // The check needs one ECU to open a socket against. An empty topology
+        // is an empty vehicle, not a broken interface: there is nothing to
+        // address, so there is nothing to verify and no reason to refuse the
+        // enable. A later update installs a real topology and this runs again
+        // on the next enable. Copied out so the socket is opened without the
+        // guard; see `topology`.
+        let check_target = self
+            .topology
+            .read()
+            .await
+            .connections()
+            .values()
+            .next()
+            .map(|addressing| CanEcuConnection::new(Arc::clone(addressing)));
+        let socket_check = check_target.map_or(Ok(()), |conn| {
+            conn.verify_socket_openable().map_err(|error| {
+                CommControlError::InitFailed(format!(
+                    "Failed to open CAN interface {}: {error}",
+                    self.interface
+                ))
+            })
+        });
 
         if let Err(error) = socket_check {
             self.lifecycle
@@ -607,7 +606,7 @@ impl TransportControl for CanDiagGateway {
         if !self.keepalive_interval.is_zero() {
             operation.keepalive = Some(keepalive::start_keepalive_broadcast(
                 self.interface.clone(),
-                functional_id,
+                self.topology.clone(),
                 self.keepalive_interval,
             ));
         }
