@@ -14,22 +14,23 @@
 //! Functional broadcast `TesterPresent` keep-alive for CAN bus.
 //!
 //! Periodically sends a UDS `TesterPresent` (`0x3E 0x80`) on the functional
-//! broadcast CAN ID to prevent all ECUs from going to sleep. The ID is
-//! derived from the MDD com-params (`CP_CanFuncReqId`) when available and
-//! defaults to `0x7DF` (ISO 15765-4). The sub-function `0x80` sets the
-//! `suppressPositiveResponse` bit so no ECU will reply, keeping the bus
-//! quiet.
+//! broadcast CAN ID to prevent all ECUs from going to sleep. The ID comes
+//! from the current [`CanTopology`] (derived from the MDD com-params
+//! `CP_CanFuncReqId`, default `0x7DF` per ISO 15765-4) and is read on every
+//! tick, because a topology reload can change it while the task runs. The
+//! sub-function `0x80` sets the `suppressPositiveResponse` bit so no ECU will
+//! reply, keeping the bus quiet.
 //!
 //! The interval comes from `can.keepalive_interval_ms`; `0` disables the
 //! broadcast for resident (on-board) deployments.
 
 use std::time::Duration;
 
-use cda_interfaces::{CanId, util::tokio_ext::sleep_for};
+use cda_interfaces::{CanId, Reloadable, util::tokio_ext::sleep_for};
 use tokio_socketcan_isotp::{IsoTpBehaviour, IsoTpOptions, IsoTpSocket};
 use tokio_util::sync::CancellationToken;
 
-use super::{background::BackgroundTask, can_id::CanIdExt, error::CanError};
+use super::{background::BackgroundTask, can_id::CanIdExt, error::CanError, topology::CanTopology};
 
 /// Default functional broadcast CAN ID (ISO 15765-4), used when the MDD
 /// com-params do not define `CP_CanFuncReqId`.
@@ -48,13 +49,14 @@ const TESTER_PRESENT_PAYLOAD: [u8; 2] = [0x3E, 0x80];
 /// `TesterPresent` (`0x3E 0x80`) on the given CAN interface.
 ///
 /// This keeps all ECUs on the bus awake without requiring individual
-/// physical addressing. The socket is opened once and reused across
-/// iterations; it is only reopened after a send failure.
+/// physical addressing. The functional ID (11-bit standard, e.g. `0x7DF`, or
+/// 29-bit extended, e.g. `0x18DB33F1`) is read from the topology on every
+/// tick. The socket is reused across iterations; it is reopened after a send
+/// failure and whenever the topology's functional ID changed.
 ///
 /// # Arguments
 /// * `interface` - CAN interface name (e.g. `"can0"`, `"vxcan0"`)
-/// * `functional_id` - Functional broadcast CAN ID (from com-params), 11-bit
-///   standard (e.g. `0x7DF`) or 29-bit extended (e.g. `0x18DB33F1`)
+/// * `topology` - Handle to the reloadable topology that owns the functional ID
 /// * `interval` - How often to send the keep-alive
 ///
 /// # Returns
@@ -63,7 +65,7 @@ const TESTER_PRESENT_PAYLOAD: [u8; 2] = [0x3E, 0x80];
 #[must_use]
 pub(crate) fn start_keepalive_broadcast(
     interface: String,
-    functional_id: CanId,
+    topology: Reloadable<CanTopology>,
     interval: Duration,
 ) -> BackgroundTask {
     let cancel = CancellationToken::new();
@@ -72,13 +74,29 @@ pub(crate) fn start_keepalive_broadcast(
         tracing::info!(
             interface = %interface,
             interval_ms = u32::try_from(interval.as_millis()).unwrap_or(u32::MAX),
-            broadcast_id = %functional_id,
             "Starting functional broadcast TesterPresent keep-alive"
         );
 
-        let mut socket: Option<IsoTpSocket> = None;
+        // The socket is stored with the ID it was opened on.
+        let mut socket: Option<(IsoTpSocket, CanId)> = None;
         let mut consecutive_open_failures: u64 = 0;
         loop {
+            // The topology can be replaced while enabled, so the ID is read
+            // every tick instead of being copied at enable(). The guard is
+            // dropped at the end of this statement, before any socket I/O.
+            let functional_id = topology.read().await.functional_id();
+            if let BroadcastAction::Reopen { from } =
+                broadcast_action(socket.as_ref().map(|(_, id)| *id), functional_id)
+            {
+                tracing::info!(
+                    interface = %interface,
+                    old_broadcast_id = %from,
+                    new_broadcast_id = %functional_id,
+                    "Functional broadcast ID changed, reopening keep-alive socket"
+                );
+                socket = None;
+            }
+
             if socket.is_none() {
                 match open_broadcast_socket(&interface, functional_id) {
                     Ok(s) => {
@@ -90,7 +108,7 @@ pub(crate) fn start_keepalive_broadcast(
                             );
                         }
                         consecutive_open_failures = 0;
-                        socket = Some(s);
+                        socket = Some((s, functional_id));
                     }
                     Err(e) => {
                         // Warn once per outage instead of on every tick: with
@@ -115,7 +133,7 @@ pub(crate) fn start_keepalive_broadcast(
                 }
             }
 
-            if let Some(ref s) = socket {
+            if let Some((ref s, _)) = socket {
                 tokio::select! {
                     // Prefer shutdown when both arms are ready.
                     biased;
@@ -183,4 +201,53 @@ fn open_broadcast_socket(interface: &str, functional_id: CanId) -> Result<IsoTpS
             "Failed to open keep-alive socket on {interface}: {e}"
         ))
     })
+}
+
+/// What the keep-alive loop has to do with its socket on this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BroadcastAction {
+    /// No socket is open yet; open one on the current ID.
+    Open,
+    /// The open socket already uses the current ID.
+    Keep,
+    /// The ID changed since the socket was opened; replace the socket.
+    Reopen { from: CanId },
+}
+
+fn broadcast_action(open_on: Option<CanId>, current: CanId) -> BroadcastAction {
+    match open_on {
+        None => BroadcastAction::Open,
+        Some(id) if id == current => BroadcastAction::Keep,
+        Some(from) => BroadcastAction::Reopen { from },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(raw: u32) -> CanId {
+        CanId::try_from(raw).expect("valid CAN id")
+    }
+
+    #[test]
+    fn first_tick_opens() {
+        assert_eq!(broadcast_action(None, id(0x7DF)), BroadcastAction::Open);
+    }
+
+    #[test]
+    fn same_id_keeps_socket() {
+        assert_eq!(
+            broadcast_action(Some(id(0x7DF)), id(0x7DF)),
+            BroadcastAction::Keep
+        );
+    }
+
+    #[test]
+    fn changed_id_reopens_on_new_id() {
+        assert_eq!(
+            broadcast_action(Some(id(0x7DF)), id(0x700)),
+            BroadcastAction::Reopen { from: id(0x7DF) }
+        );
+    }
 }
