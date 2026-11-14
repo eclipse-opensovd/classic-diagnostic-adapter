@@ -711,7 +711,28 @@ impl CanDiagGateway {
 pub(crate) mod test_utils {
     use std::sync::Arc;
 
-    use crate::{CanEcuAddressing, CanTopology};
+    use cda_interfaces::CanId;
+
+    use crate::{CanEcuAddressing, CanTopology, config::CanAddressingMode};
+
+    /// Longer than the 15 character interface name limit, so no backend can
+    /// resolve it and opening a socket fails immediately (no daemon connect).
+    pub(crate) const UNOPENABLE_INTERFACE: &str = "cda-test-does-not-exist0";
+
+    /// A topology with one ECU on [`UNOPENABLE_INTERFACE`]: `enable()` fails at
+    /// its socket check before any discovery or bus I/O.
+    pub(crate) fn unopenable_interface_topology() -> CanTopology {
+        shared_topology(vec![(
+            "ecu1",
+            CanEcuAddressing::new(
+                "ecu1".to_owned(),
+                UNOPENABLE_INTERFACE.to_owned(),
+                CanId::try_from(0x700).expect("valid test CAN ID"),
+                CanId::try_from(0x708).expect("valid test CAN ID"),
+                CanAddressingMode::Standard,
+            ),
+        )])
+    }
 
     pub(crate) fn shared_topology(connections: Vec<(&str, CanEcuAddressing)>) -> CanTopology {
         let connections = connections
@@ -731,7 +752,10 @@ pub(crate) mod test_utils {
 mod tests {
     use cda_interfaces::{CanId, HashMap};
 
-    use super::{test_utils::shared_topology, *};
+    use super::{
+        test_utils::{UNOPENABLE_INTERFACE, shared_topology, unopenable_interface_topology},
+        *,
+    };
 
     /// A topology built directly, the way `shared_topology` does for the other
     /// modules. These tests are about reload propagation, not derivation:
@@ -906,6 +930,58 @@ mod tests {
         drop(reload);
 
         assert_eq!(gateway.test_functional_id().await.raw(), 0x700);
+    }
+
+    /// An ECU whose interface cannot be opened fails `enable()` at the socket
+    /// check: no background task may be left running and the gateway is
+    /// `Failed`.
+    #[tokio::test]
+    async fn enable_fails_when_the_ecu_interface_cannot_be_opened() {
+        let gateway = CanDiagGateway::test_instance(
+            unopenable_interface_topology(),
+            vec![],
+            Arc::new(cda_interfaces::util::test_utils::RecordingConnectivityHandler::default()),
+        );
+        gateway.disable().await.expect("disable test CAN gateway");
+
+        let result = tokio::time::timeout(Duration::from_secs(2), gateway.enable())
+            .await
+            .expect("enable must fail fast, not wait on the interface");
+
+        let Err(CommControlError::InitFailed(message)) = result else {
+            panic!("expected InitFailed, got {result:?}");
+        };
+        assert!(
+            message.contains(UNOPENABLE_INTERFACE),
+            "message should name the interface: {message}"
+        );
+        assert_eq!(gateway.state().await, TransportState::Failed);
+        let operation = gateway.lifecycle.operation.lock().await;
+        assert!(operation.keepalive.is_none());
+        assert!(operation.rediscovery.is_none());
+    }
+
+    /// An empty topology is an empty vehicle, not a broken interface: there is
+    /// nothing to open a socket for, so `enable()` succeeds.
+    #[tokio::test]
+    async fn enable_succeeds_with_an_empty_topology() {
+        let gateway = CanDiagGateway::test_instance(
+            shared_topology(vec![]),
+            vec![],
+            Arc::new(cda_interfaces::util::test_utils::RecordingConnectivityHandler::default()),
+        );
+        gateway.disable().await.expect("disable test CAN gateway");
+
+        tokio::time::timeout(Duration::from_secs(2), gateway.enable())
+            .await
+            .expect("enable must not block")
+            .expect("an empty topology enables");
+
+        assert_eq!(gateway.state().await, TransportState::Enabled);
+        assert!(gateway.discover_ecus().await.is_empty());
+
+        gateway.disable().await.expect("disable stops rediscovery");
+        assert_eq!(gateway.state().await, TransportState::Disabled);
     }
 
     /// A frame with another SID (here a tester present NRC) is dropped as the

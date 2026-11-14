@@ -175,8 +175,9 @@ mod transport_routing_tests {
     use tokio::sync::{Notify, RwLock, mpsc};
 
     use crate::{
-        CanDiagGateway, CanEcuAddressing, config::CanAddressingMode,
-        gateway::test_utils::shared_topology,
+        CanDiagGateway, CanEcuAddressing,
+        config::CanAddressingMode,
+        gateway::test_utils::{shared_topology, unopenable_interface_topology},
     };
 
     /// `DoIP` gateway stub whose ECU knowledge can be toggled at runtime.
@@ -561,6 +562,34 @@ mod transport_routing_tests {
         assert_eq!(gw.state().await, TransportState::Failed);
         assert_eq!(can.state().await, TransportState::Disabled);
         assert_eq!(doip.disable_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn router_shutdowns_gateway_when_partial_enable_rollback_fails() {
+        // CAN fails after DoIP enables. A failed normal rollback must still use
+        // the gateway shutdown path to terminate DoIP background work. The CAN
+        // failure is real: its one ECU sits on an interface that cannot be
+        // opened, so the socket check in `enable()` fails.
+        let doip = DoipStub::default();
+        doip.fail_disable.store(true, Ordering::Release);
+        let can = CanDiagGateway::test_instance(
+            unopenable_interface_topology(),
+            vec![],
+            Arc::new(cda_interfaces::util::test_utils::RecordingConnectivityHandler::default()),
+        );
+        can.disable().await.expect("disable test CAN gateway");
+        let gw = DiagnosticTransportRouter::<_, CanDiagGateway>::new(HashMap::default())
+            .with_doip(doip.clone())
+            .with_can(can);
+
+        let enabled = tokio::time::timeout(std::time::Duration::from_secs(2), gw.enable())
+            .await
+            .expect("enable must fail fast, not wait on the interface");
+        assert!(enabled.is_err());
+        assert_eq!(gw.state().await, TransportState::Failed);
+        assert_eq!(doip.disable_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(doip.shutdown_calls.load(Ordering::SeqCst), 1);
+        assert!(!doip.communication_active.load(Ordering::Acquire));
     }
 
     #[tokio::test]
