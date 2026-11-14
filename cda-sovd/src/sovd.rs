@@ -715,10 +715,13 @@ pub(crate) fn resource_response(
     let base_path = format!("http://{host}{uri}");
     let items = resources
         .into_iter()
-        .map(|(name, href)| sovd_interfaces::Resource {
-            name: name.to_string(),
-            href: format!("{base_path}/{}", href.unwrap_or(name)),
-            id: None,
+        .map(|(name, href)| {
+            let id = href.unwrap_or(name);
+            sovd_interfaces::Resource {
+                name: name.to_string(),
+                href: format!("{base_path}/{id}"),
+                id: Some(id.to_owned()),
+            }
         })
         .collect();
 
@@ -1533,6 +1536,36 @@ pub(crate) mod tests {
         assert_eq!(
             StoredParameters::<String>::default().in_encoding(cda_interfaces::BinaryEncoding::Hex),
             ""
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_response_includes_resource_ids() {
+        let uri = "/vehicle/v15/apps".parse().expect("valid URI");
+        let response = resource_response(
+            "example.com",
+            &uri,
+            vec![("SOVD to UDS", Some("sovd2uds")), ("Default", None)],
+            false,
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("resource response body");
+        let response: serde_json::Value =
+            serde_json::from_slice(&body).expect("valid resource response");
+        let Some(items) = response.get("items").and_then(serde_json::Value::as_array) else {
+            panic!("expected resource response items");
+        };
+        let [sovd2uds, default] = items.as_slice() else {
+            panic!("expected two resource items");
+        };
+        assert_eq!(
+            sovd2uds.get("id").and_then(serde_json::Value::as_str),
+            Some("sovd2uds")
+        );
+        assert_eq!(
+            default.get("id").and_then(serde_json::Value::as_str),
+            Some("Default")
         );
     }
 
