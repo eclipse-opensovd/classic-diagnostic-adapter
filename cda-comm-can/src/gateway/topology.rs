@@ -85,16 +85,17 @@ pub struct CanTopology {
 }
 
 impl CanTopology {
+    /// Both logical-address maps are passed separately: members of a
+    /// duplicate group share one logical address, so the ECU -> address map
+    /// holds every member while the address -> ECU map holds only one, and
+    /// neither can be derived from the other.
     #[must_use]
     pub fn new(
         connections: HashMap<String, Arc<CanEcuAddressing>>,
         logical_address_to_ecu: HashMap<u16, String>,
+        ecu_to_logical_address: HashMap<String, u16>,
         functional_id: CanId,
     ) -> Self {
-        let ecu_to_logical_address = logical_address_to_ecu
-            .iter()
-            .map(|(address, ecu)| (ecu.clone(), *address))
-            .collect();
         Self {
             connections,
             logical_address_to_ecu,
@@ -171,7 +172,7 @@ pub async fn derive_can_topology<T: EcuAddresses + CanComParamProvider>(
     }
 
     let mut connections: HashMap<String, Arc<CanEcuAddressing>> = HashMap::default();
-    let mut logical_address_to_ecu: HashMap<u16, String> = HashMap::default();
+    let mut logical_addresses = LogicalAddresses::default();
 
     // Initialize connections from explicit mappings first
     for mapping in &config.ecu_mappings {
@@ -209,7 +210,7 @@ pub async fn derive_can_topology<T: EcuAddresses + CanComParamProvider>(
                 "Added CAN connection from config mapping"
             );
 
-            register_logical_address(&mut logical_address_to_ecu, logical_addr, &ecu_name)?;
+            logical_addresses.register(logical_addr, &ecu_name);
             connections.insert(ecu_name, Arc::new(addressing));
         } else {
             tracing::warn!(
@@ -224,9 +225,9 @@ pub async fn derive_can_topology<T: EcuAddresses + CanComParamProvider>(
         ecus,
         functional_id,
         &mut connections,
-        &mut logical_address_to_ecu,
+        &mut logical_addresses,
     )
-    .await?;
+    .await;
 
     validate_can_pins(config, ecus, &connections)?;
 
@@ -242,7 +243,8 @@ pub async fn derive_can_topology<T: EcuAddresses + CanComParamProvider>(
 
     Ok(CanTopology::new(
         connections,
-        logical_address_to_ecu,
+        logical_addresses.to_ecu,
+        logical_addresses.of_ecu,
         functional_id,
     ))
 }
@@ -259,14 +261,20 @@ pub async fn derive_can_topology<T: EcuAddresses + CanComParamProvider>(
 /// radio variants of a duplicate group); each gets its own connection
 /// and variant detection decides which one is actually installed,
 /// exactly like `DoIP` address duplicates.
+///
+/// ECUs are visited in name order so that the member of a duplicate group
+/// registered for a shared logical address does not depend on `HashMap`
+/// iteration order.
 async fn add_connections_from_com_params<T: EcuAddresses + CanComParamProvider>(
     config: &CanConfig,
     ecus: &HashMap<String, RwLock<T>>,
     functional_id: CanId,
     connections: &mut HashMap<String, Arc<CanEcuAddressing>>,
-    logical_address_to_ecu: &mut HashMap<u16, String>,
-) -> Result<(), CanGatewaySetupError> {
-    for (name, ecu_lock) in ecus {
+    logical_addresses: &mut LogicalAddresses,
+) {
+    let mut sorted_ecus: Vec<_> = ecus.iter().collect();
+    sorted_ecus.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+    for (name, ecu_lock) in sorted_ecus {
         let ecu = ecu_lock.read().await;
         let logical_addr = ecu.logical_address();
         let ecu_name = name.to_lowercase();
@@ -324,10 +332,9 @@ async fn add_connections_from_com_params<T: EcuAddresses + CanComParamProvider>(
             response_id = %ids.response,
             "Added CAN connection from MDD COM params"
         );
-        register_logical_address(logical_address_to_ecu, logical_addr, &ecu_name)?;
+        logical_addresses.register(logical_addr, &ecu_name);
         connections.insert(ecu_name, Arc::new(addressing));
     }
-    Ok(())
 }
 
 /// Transport pins to CAN are validated here rather than in the config
@@ -370,35 +377,50 @@ fn validate_can_pins<T>(
     Ok(())
 }
 
-/// Records the logical-address -> ECU lookup used by the
-/// address-oriented `EcuGateway` methods (network structure, discovery
-/// checks). ECUs of CAN-only databases have no `DoIP` addressing and all
-/// carry the unresolved fallback address `0x0000`. Registering that
-/// would map the shared "address" onto whichever ECU came last, so those
-/// ECUs stay unregistered here and are served by the name-based paths
-/// only.
-fn register_logical_address(
-    logical_address_to_ecu: &mut HashMap<u16, String>,
-    logical_addr: u16,
-    ecu_name: &str,
-) -> Result<(), CanGatewaySetupError> {
-    if logical_addr == 0 {
-        tracing::debug!(
-            ecu = %ecu_name,
-            "No resolved logical address; ECU reachable via name-based lookups only"
-        );
-        return Ok(());
-    }
-    if let Some(existing) = logical_address_to_ecu.get(&logical_addr) {
-        if existing != ecu_name {
-            return Err(CanGatewaySetupError::InvalidConfiguration(format!(
-                "ECUs '{existing}' and '{ecu_name}' share logical address {logical_addr:#06x}"
-            )));
+/// The logical-address lookups used by the address-oriented `EcuGateway`
+/// methods (network structure, discovery checks) and for log fields.
+#[derive(Default)]
+struct LogicalAddresses {
+    to_ecu: HashMap<u16, String>,
+    of_ecu: HashMap<String, u16>,
+}
+
+impl LogicalAddresses {
+    /// ECUs of CAN-only databases have no `DoIP` addressing and all carry the
+    /// unresolved fallback address `0x0000`. Registering that would map the
+    /// shared "address" onto an arbitrary ECU, so those ECUs stay unregistered
+    /// in both directions and are served by the name-based paths only.
+    ///
+    /// A resolved address shared by several ECUs is a duplicate group
+    /// (variant detection decides which member is installed), not an error:
+    /// every member keeps its own address, and the address lookup keeps the
+    /// first registration (config mappings in config order, then MDD ECUs in
+    /// name order).
+    fn register(&mut self, logical_addr: u16, ecu_name: &str) {
+        if logical_addr == 0 {
+            tracing::debug!(
+                ecu = %ecu_name,
+                "No resolved logical address; ECU reachable via name-based lookups only"
+            );
+            return;
         }
-        return Ok(());
+        self.of_ecu.insert(ecu_name.to_owned(), logical_addr);
+        match self.to_ecu.get(&logical_addr) {
+            Some(existing) if existing != ecu_name => {
+                tracing::debug!(
+                    ecu = %ecu_name,
+                    registered_ecu = %existing,
+                    logical_addr = logical_addr,
+                    "Logical address shared with another ECU (duplicate group), \
+                     address lookups resolve to the ECU registered first"
+                );
+            }
+            Some(_) => {}
+            None => {
+                self.to_ecu.insert(logical_addr, ecu_name.to_owned());
+            }
+        }
     }
-    logical_address_to_ecu.insert(logical_addr, ecu_name.to_owned());
-    Ok(())
 }
 
 /// IDs no ECU pair may use: the functional broadcast ID and the
@@ -449,5 +471,147 @@ mod tests {
         assert!(validate_can_id("ecu1", "request_id", 0x1FFF_FFFF).is_ok());
         assert!(validate_can_id("ecu1", "request_id", 0x2000_0000).is_err());
         assert!(validate_can_id("ecu1", "request_id", u32::MAX).is_err());
+    }
+
+    struct FakeEcu {
+        name: String,
+        logical_address: u16,
+        can_ids: Option<cda_interfaces::CanIds>,
+    }
+
+    impl EcuAddresses for FakeEcu {
+        fn tester_address(&self) -> u16 {
+            0x0E80
+        }
+        fn logical_address(&self) -> u16 {
+            self.logical_address
+        }
+        fn logical_gateway_address(&self) -> u16 {
+            self.logical_address
+        }
+        fn logical_functional_address(&self) -> u16 {
+            0xE400
+        }
+        fn ecu_name(&self) -> String {
+            self.name.clone()
+        }
+        fn logical_address_eq<T: EcuAddresses>(&self, other: &T) -> bool {
+            self.logical_address == other.logical_address()
+        }
+    }
+
+    impl CanComParamProvider for FakeEcu {
+        fn can_ids(&self) -> Option<cda_interfaces::CanIds> {
+            self.can_ids
+        }
+        fn can_functional_id(&self) -> Option<CanId> {
+            None
+        }
+    }
+
+    /// `(name, logical address, request ID, response ID)`, inserted in order.
+    fn ecus(entries: &[(&str, u16, u32, u32)]) -> HashMap<String, RwLock<FakeEcu>> {
+        let mut ecus = HashMap::default();
+        for &(name, logical_address, request, response) in entries {
+            ecus.insert(
+                name.to_owned(),
+                RwLock::new(FakeEcu {
+                    name: name.to_owned(),
+                    logical_address,
+                    can_ids: Some(
+                        cda_interfaces::CanIds::try_from_raw(request, response)
+                            .expect("valid test CAN IDs"),
+                    ),
+                }),
+            );
+        }
+        ecus
+    }
+
+    async fn derive(entries: &[(&str, u16, u32, u32)]) -> CanTopology {
+        derive_can_topology(&CanConfig::default(), &ecus(entries))
+            .await
+            .expect("topology derivation succeeds")
+    }
+
+    /// Members of a duplicate group share a resolved logical address; that is
+    /// valid data, so derivation succeeds and every member keeps its address.
+    #[tokio::test]
+    async fn shared_logical_address_with_different_can_ids_is_accepted() {
+        let topology = derive(&[
+            ("ecu_a", 0x1010, 0x700, 0x708),
+            ("ecu_b", 0x1010, 0x710, 0x718),
+        ])
+        .await;
+
+        assert!(topology.has_connection("ecu_a"));
+        assert!(topology.has_connection("ecu_b"));
+        assert_eq!(topology.logical_address_for_ecu("ecu_a"), Some(0x1010));
+        assert_eq!(topology.logical_address_for_ecu("ecu_b"), Some(0x1010));
+        assert_eq!(
+            topology.ecu_for_logical_address(0x1010).map(String::as_str),
+            Some("ecu_a")
+        );
+    }
+
+    /// Candidate descriptions of one physical node also share the CAN ID
+    /// pair: each still gets its own connection.
+    #[tokio::test]
+    async fn shared_logical_address_with_identical_can_ids_is_accepted() {
+        let topology = derive(&[
+            ("ecu_a", 0x1010, 0x700, 0x708),
+            ("ecu_b", 0x1010, 0x700, 0x708),
+        ])
+        .await;
+
+        let a = topology.connection("ecu_a").expect("ecu_a connected");
+        let b = topology.connection("ecu_b").expect("ecu_b connected");
+        assert_eq!(a.network_address(), b.network_address());
+        assert_eq!(topology.logical_address_for_ecu("ecu_a"), Some(0x1010));
+        assert_eq!(topology.logical_address_for_ecu("ecu_b"), Some(0x1010));
+    }
+
+    /// The ECU an address lookup resolves to must not depend on `HashMap`
+    /// iteration order: the first ECU name wins. The map's hasher is fixed,
+    /// so insertion order alone does not change iteration order; enough
+    /// group members make it unlikely that the hash order happens to start
+    /// with the lexicographically first name.
+    #[tokio::test]
+    async fn shared_logical_address_resolves_to_first_ecu_name() {
+        let names: Vec<String> = (0..16).map(|i| format!("ecu_{i:02}")).collect();
+        let entries: Vec<(&str, u16, u32, u32)> = names
+            .iter()
+            .zip(0x700u32..)
+            .map(|(name, request)| {
+                let response = request.checked_add(0x80).expect("small test CAN ID");
+                (name.as_str(), 0x1010, request, response)
+            })
+            .collect();
+        let mut reversed = entries.clone();
+        reversed.reverse();
+
+        for order in [&entries, &reversed] {
+            let topology = derive(order).await;
+            assert_eq!(
+                topology.ecu_for_logical_address(0x1010).map(String::as_str),
+                Some("ecu_00")
+            );
+            for name in &names {
+                assert_eq!(topology.logical_address_for_ecu(name), Some(0x1010));
+            }
+        }
+    }
+
+    /// `0x0000` is the unresolved fallback of CAN-only databases, not a real
+    /// address: it is registered in neither direction.
+    #[tokio::test]
+    async fn unresolved_logical_address_is_not_registered() {
+        let topology = derive(&[("ecu_a", 0, 0x700, 0x708), ("ecu_b", 0, 0x710, 0x718)]).await;
+
+        assert!(topology.has_connection("ecu_a"));
+        assert!(topology.has_connection("ecu_b"));
+        assert_eq!(topology.ecu_for_logical_address(0), None);
+        assert_eq!(topology.logical_address_for_ecu("ecu_a"), None);
+        assert_eq!(topology.logical_address_for_ecu("ecu_b"), None);
     }
 }

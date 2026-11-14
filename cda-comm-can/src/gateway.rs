@@ -722,6 +722,7 @@ pub(crate) mod test_utils {
         CanTopology::new(
             connections,
             cda_interfaces::HashMap::default(),
+            cda_interfaces::HashMap::default(),
             cda_interfaces::CanId::try_from(0x7DF).expect("valid test CAN ID"),
         )
     }
@@ -865,6 +866,7 @@ mod tests {
 
     fn marker_topology(id: u32) -> CanTopology {
         CanTopology::new(
+            HashMap::default(),
             HashMap::default(),
             HashMap::default(),
             CanId::try_from(id).unwrap(),
