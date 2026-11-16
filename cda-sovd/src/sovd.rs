@@ -789,6 +789,10 @@ fn ecu_mode_path(path: &str) -> Option<(&str, &str)> {
 /// routes. Modes that depend on optional UDS services are removed from the documentation
 /// of ECUs whose detected variant lacks these services, consistent with the `/modes`
 /// listing (see [`components::ecu::modes::is_mode_available`]).
+///
+/// The lookup is passive: building the documentation must not activate the vehicle
+/// communication or start variant detection. ECUs whose variant has not been detected
+/// yet are documented without their optional modes.
 pub(crate) fn vehicle_openapi_paths_filter<T: UdsEcu + Clone + Send + Sync + 'static>(
     uds: T,
 ) -> crate::OpenApiPathsFilter {
@@ -804,7 +808,14 @@ pub(crate) fn vehicle_openapi_paths_filter<T: UdsEcu + Clone + Send + Sync + 'st
                 })
                 .collect();
             for (path, ecu, mode) in mode_paths {
-                if !components::ecu::modes::is_mode_available(&uds, &ecu, &mode).await {
+                if !components::ecu::modes::is_mode_available(
+                    &uds,
+                    &ecu,
+                    &mode,
+                    cda_interfaces::VariantLookupMode::Passive,
+                )
+                .await
+                {
                     paths.paths.shift_remove(&path);
                 }
             }
@@ -2029,12 +2040,15 @@ pub(crate) mod tests {
         let mut uds = cda_interfaces::mock::MockUdsEcu::new();
         uds.expect_clone().returning(|| {
             let mut clone = cda_interfaces::mock::MockUdsEcu::new();
+            // The documentation must never activate the vehicle communication.
             clone
                 .expect_has_authentication_services()
-                .returning(|ecu| ecu == "full");
+                .withf(|_, mode| *mode == cda_interfaces::VariantLookupMode::Passive)
+                .returning(|ecu, _| ecu == "full");
             clone
                 .expect_has_services_for_sid()
-                .returning(|ecu, _| ecu == "full");
+                .withf(|_, _, mode| *mode == cda_interfaces::VariantLookupMode::Passive)
+                .returning(|ecu, _, _| ecu == "full");
             clone
         });
         let filter = vehicle_openapi_paths_filter(uds);

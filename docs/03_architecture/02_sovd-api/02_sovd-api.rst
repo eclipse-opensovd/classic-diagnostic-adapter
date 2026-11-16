@@ -870,7 +870,9 @@ Authentication -- SID 29\ :sub:`16`
     ``authentication`` if the diagnostic database of the ECU contains at least one SID 29\ :sub:`16` service.
     Otherwise ``GET`` and ``PUT /modes/authentication`` return ``404 Not Found``, and the path is omitted
     from the ECU's part of ``openapi.json``. Since the routes are registered before variant detection, both
-    checks are evaluated per request against the detected variant.
+    checks are evaluated per request against the detected variant. Building ``openapi.json`` never activates the
+    communication or starts variant detection; ECUs whose variant is not yet detected are documented without the
+    optional modes (``authentication``, ``commctrl``, ``dtcsetting``).
 
     The CDA follows the client-driven approach of ISO 17978-3 §8.3.3: every ``PUT`` is translated into exactly
     one UDS Authentication request. The client orchestrates multi-step procedures and provides all certificates,

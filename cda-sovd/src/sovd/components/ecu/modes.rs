@@ -21,7 +21,7 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    BinaryEncoding, HashMap, UdsEcu,
+    BinaryEncoding, HashMap, UdsEcu, VariantLookupMode,
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     file_manager::FileManager,
     service_ids,
@@ -89,7 +89,7 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
         (DTC_SETTING_ID, DTC_SETTING_NAME),
         (AUTHENTICATION_ID, AUTHENTICATION_NAME),
     ] {
-        if is_mode_available(&uds, &ecu_name, id).await {
+        if is_mode_available(&uds, &ecu_name, id, VariantLookupMode::RequestActivation).await {
             items.push(sovd_modes::get::ResponseItem {
                 id: id.to_owned(),
                 name: Some(name.to_owned()),
@@ -108,16 +108,22 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
 ///
 /// Modes backed by an optional UDS service are only available if the diagnostic
 /// description of the detected variant (including its parent refs) contains that
-/// service. Until variant detection has concluded, these modes are not available.
-pub(crate) async fn is_mode_available<T: UdsEcu>(uds: &T, ecu_name: &str, mode_id: &str) -> bool {
+/// service. Until variant detection has concluded, these modes are not available;
+/// `lookup_mode` controls whether communication is activated in that case.
+pub(crate) async fn is_mode_available<T: UdsEcu>(
+    uds: &T,
+    ecu_name: &str,
+    mode_id: &str,
+    lookup_mode: VariantLookupMode,
+) -> bool {
     match mode_id {
-        AUTHENTICATION_ID => uds.has_authentication_services(ecu_name).await,
+        AUTHENTICATION_ID => uds.has_authentication_services(ecu_name, lookup_mode).await,
         COMM_CONTROL_ID => {
-            uds.has_services_for_sid(ecu_name, service_ids::COMMUNICATION_CONTROL)
+            uds.has_services_for_sid(ecu_name, service_ids::COMMUNICATION_CONTROL, lookup_mode)
                 .await
         }
         DTC_SETTING_ID => {
-            uds.has_services_for_sid(ecu_name, service_ids::CONTROL_DTC_SETTING)
+            uds.has_services_for_sid(ecu_name, service_ids::CONTROL_DTC_SETTING, lookup_mode)
                 .await
         }
         _ => true,
@@ -132,7 +138,7 @@ async fn mode_unavailable_response<T: UdsEcu>(
     mode_id: &str,
     include_schema: bool,
 ) -> Option<Response> {
-    if is_mode_available(uds, ecu_name, mode_id).await {
+    if is_mode_available(uds, ecu_name, mode_id, VariantLookupMode::RequestActivation).await {
         None
     } else {
         Some(
@@ -1373,7 +1379,8 @@ mod tests {
 
     async fn get_handler_value(connectivity: Connectivity) -> Option<String> {
         let mut uds = MockUdsEcu::new();
-        uds.expect_has_authentication_services().returning(|_| true);
+        uds.expect_has_authentication_services()
+            .returning(|_, _| true);
         uds.expect_get_ecu_state().returning(move |_| {
             Ok(EcuState {
                 connectivity,
@@ -1415,7 +1422,7 @@ mod tests {
     async fn get_handler_returns_not_found_without_authentication_services() {
         let mut uds = MockUdsEcu::new();
         uds.expect_has_authentication_services()
-            .returning(|_| false);
+            .returning(|_, _| false);
         let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
             ECU.to_owned(),
             uds,
@@ -1460,9 +1467,9 @@ mod tests {
     fn uds_with_mode_services(available: bool) -> MockUdsEcu {
         let mut uds = MockUdsEcu::new();
         uds.expect_has_authentication_services()
-            .returning(move |_| available);
-        uds.expect_has_services_for_sid()
             .returning(move |_, _| available);
+        uds.expect_has_services_for_sid()
+            .returning(move |_, _, _| available);
         uds
     }
 
