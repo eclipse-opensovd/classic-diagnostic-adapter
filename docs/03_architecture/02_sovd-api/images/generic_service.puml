@@ -19,8 +19,10 @@ participant "Diagnostic\nKernel" as DIAG
 participant "UDS / DoIP" as COMM
 participant ECU
 
-Client -> CDA : PUT /components/{ecu}/genericservice\nContent-Type: application/octet-stream\nAccept: application/octet-stream\nRaw bytes: 22 F1 90
+Client -> CDA : PUT /components/{ecu}/genericservice[?x-sovd2uds-binary-encoding=hex]\nContent-Type: application/json\n{ \"request\": \"0x22F190\" }
 activate CDA
+
+CDA -> CDA : decode request\n(JSON in selected binary encoding,\nor raw bytes for application/octet-stream)
 
 CDA -> DIAG : send raw UDS (byte array)
 activate DIAG
@@ -49,7 +51,7 @@ deactivate COMM
 DIAG -> CDA : raw response bytes
 deactivate DIAG
 
-CDA -> Client : HTTP 200 OK\nContent-Type: application/octet-stream\nRaw bytes: 62 F1 90 {data}
+CDA -> Client : HTTP 200 OK\nContent-Type: application/json\n{ \"response\": \"0x62F190...\" }\n(hex notation of the request,\nraw bytes if Accept: application/octet-stream,\nalso for 7F <SID> <NRC>)
 deactivate CDA
 
 @enduml

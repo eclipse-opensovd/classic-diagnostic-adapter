@@ -410,6 +410,10 @@ impl Response {
     pub(crate) fn header(&self, name: http::header::HeaderName) -> Option<&http::HeaderValue> {
         self.header_map.get(name)
     }
+
+    pub(crate) fn body(&self) -> Option<&str> {
+        self.body.as_deref()
+    }
 }
 
 /// Sends a request over a Unix domain socket connection using `reqwest`
