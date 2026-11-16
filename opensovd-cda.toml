@@ -748,6 +748,8 @@
 # enabled = true
 # UDP/TCP port for `DoIP` gateway discovery and communication.
 # gateway_port = 13400
+# IPv6 multicast group used for `DoIP` vehicle discovery.
+# ipv6_multicast_group = "ff15::1515:1515"
 # The name of the protocol to use.
 # Matched case-insensitive against the database.
 # The special value `"auto-can"` defers the choice to the MDD-driven

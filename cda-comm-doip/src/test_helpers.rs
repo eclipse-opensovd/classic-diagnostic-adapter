@@ -356,6 +356,8 @@ fn session_with_sender(
     Arc::new(GatewaySession::new(
         DoipTransportConfig {
             tester_ip: "127.0.0.1".to_owned(),
+            ipv6_interface_index: None,
+            ipv6_multicast_group: DoipConfig::default().ipv6_multicast_group,
             port: fake.port(),
             tls_port: 0,
             send_diagnostic_message_ack: false,

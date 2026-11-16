@@ -66,6 +66,9 @@ pub struct DoipConfig {
     pub tester_address: String,
     /// Subnet mask for the tester network.
     pub tester_subnet: String,
+    /// IPv6 multicast group used for `DoIP` vehicle discovery.
+    #[serde(default = "default_ipv6_multicast_group")]
+    pub ipv6_multicast_group: String,
     /// UDP/TCP port for `DoIP` gateway discovery and communication.
     pub gateway_port: u16,
     /// TLS port for secure `DoIP` communication.
@@ -105,6 +108,10 @@ pub struct DoipConfig {
     pub protocol_name: String,
 }
 
+fn default_ipv6_multicast_group() -> String {
+    "ff15::1515:1515".to_owned()
+}
+
 impl DoipConfig {
     /// Checks that `tester_address` is assigned to a local network interface.
     ///
@@ -124,8 +131,14 @@ impl DoipConfig {
                 field: "tester_address".to_owned(),
                 reason: format!("{} is not a valid IP address: {e}", self.tester_address),
             })?;
-        // Binding only succeeds for addresses that belong to a local interface.
-        std::net::UdpSocket::bind((ip, 0)).map(|_| ()).map_err(|e| {
+        // Link-local IPv6 addresses need an interface scope even when they are
+        // assigned locally.
+        let address = crate::address::socket_address(
+            ip,
+            0,
+            crate::address::resolve_interface(ip)?.unwrap_or_default(),
+        );
+        std::net::UdpSocket::bind(address).map(|_| ()).map_err(|e| {
             ConfigSanityError::InvalidValue {
                 field: "tester_address".to_owned(),
                 reason: format!(
@@ -143,6 +156,7 @@ impl Default for DoipConfig {
             enabled: true,
             tester_address: "127.0.0.1".to_owned(),
             tester_subnet: "255.255.0.0".to_owned(),
+            ipv6_multicast_group: "ff15::1515:1515".to_owned(),
             gateway_port: 13400,
             tls_port: 3496,
             send_timeout_ms: 1000,
@@ -194,8 +208,38 @@ impl ConfigSanity for DoipConfig {
             return Ok(());
         }
 
-        validate_ip(&self.tester_address, "tester_address")?;
-        validate_ip(&self.tester_subnet, "tester_address")?;
+        let tester_ip = self
+            .tester_address
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| ConfigSanityError::InvalidValue {
+                field: "tester_address".to_owned(),
+                reason: format!(
+                    "{} is neither a valid IPv4 nor IPv6 address",
+                    self.tester_address
+                ),
+            })?;
+        match tester_ip {
+            std::net::IpAddr::V4(_) => validate_ip(&self.tester_subnet, "tester_subnet")?,
+            std::net::IpAddr::V6(ip) => {
+                crate::address::validate_ipv6_endpoint(ip, "tester_address")?;
+                let group = self
+                    .ipv6_multicast_group
+                    .parse::<std::net::Ipv6Addr>()
+                    .map_err(|_| ConfigSanityError::InvalidValue {
+                        field: "ipv6_multicast_group".to_owned(),
+                        reason: format!(
+                            "{} is not a valid IPv6 address",
+                            self.ipv6_multicast_group
+                        ),
+                    })?;
+                if !group.is_multicast() {
+                    return Err(ConfigSanityError::InvalidValue {
+                        field: "ipv6_multicast_group".to_owned(),
+                        reason: "Address must be an IPv6 multicast address".to_owned(),
+                    });
+                }
+            }
+        }
         validate_port(self.gateway_port, "gateway_port")?;
         validate_port(self.tls_port, "tls_port")?;
         validate_timeout(self.send_timeout_ms, "send_timeout_ms")?;
@@ -216,6 +260,7 @@ mod tests {
     use doip_definitions::header::ProtocolVersion;
 
     use super::{DiscoveryMode, DoipConfig};
+    use crate::address::socket_address;
 
     #[test]
     fn disabled_doip_skips_field_validation() {
@@ -274,6 +319,45 @@ mod tests {
             ..Default::default()
         };
         assert!(config.check_tester_address_available().is_err());
+    }
+
+    #[test]
+    fn tester_socket_address_scopes_link_local_ipv6_only() {
+        let link_local = socket_address("fe80::1".parse().expect("valid IPv6"), 0, 2);
+        let ula = socket_address("fd72::1".parse().expect("valid IPv6"), 0, 2);
+        let ipv4 = socket_address("192.0.2.1".parse().expect("valid IPv4"), 0, 2);
+
+        assert_eq!(link_local.to_string(), "[fe80::1%2]:0");
+        assert_eq!(ula.to_string(), "[fd72::1]:0");
+        assert_eq!(ipv4.to_string(), "192.0.2.1:0");
+    }
+
+    #[test]
+    fn ipv6_config_validation() {
+        for address in ["fe80::42", "fd00::42", "2001:db8::42", "::1"] {
+            let mut config = DoipConfig {
+                tester_address: address.to_owned(),
+                tester_subnet: "unused".to_owned(),
+                ..Default::default()
+            };
+            assert!(config.validate_sanity().is_ok());
+            for group in ["invalid", "192.0.2.1", "fd00::1"] {
+                group.clone_into(&mut config.ipv6_multicast_group);
+                assert!(config.validate_sanity().is_err());
+            }
+        }
+        for address in ["::", "ff02::1", "::ffff:192.0.2.1"] {
+            let config = DoipConfig {
+                tester_address: address.to_owned(),
+                ..Default::default()
+            };
+            assert!(config.validate_sanity().is_err());
+        }
+        let config = DoipConfig {
+            tester_address: "::1".to_owned(),
+            ..Default::default()
+        };
+        assert!(config.check_tester_address_available().is_ok());
     }
 
     #[test]

@@ -44,6 +44,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod address;
 pub mod config;
 pub mod error;
 pub use error::{ConnectionError, DoipGatewaySetupError};
@@ -164,9 +165,9 @@ pub(crate) struct DoipGatewayState<T: EcuAddresses + DoipComParams> {
     /// `None` until the first successful `start()` binds it. No UDP socket is
     /// created at construction time, only when an authorized activation runs.
     pub(crate) socket: Arc<Mutex<Option<DoIPUdpSocket>>>,
-    /// Network of the tester address (`tester_address` & `tester_subnet`), VAMs
-    /// from outside it are ignored.
-    pub(crate) netmask: u32,
+    /// IPv4 network of the tester address (`tester_address` & `tester_subnet`),
+    /// VAMs from outside it are ignored. `None` for IPv6.
+    pub(crate) netmask: Option<u32>,
     /// Discovery plan and connected gateways, shared with topology persistence.
     pub(crate) topology: Arc<TopologyState>,
     /// Connect state of the current transport start, `None` while stopped.
@@ -391,6 +392,10 @@ impl From<&DiscoveredGateway> for KnownGateway {
 pub(crate) struct DoipTransportConfig {
     /// IP address of the diagnostic tester interface.
     pub(crate) tester_ip: String,
+    /// Interface index for IPv6 multicast and link-local TCP connections.
+    pub(crate) ipv6_interface_index: Option<u32>,
+    /// Multicast group used for IPv6 vehicle discovery.
+    pub(crate) ipv6_multicast_group: String,
     /// TCP port for `DoIP` communication.
     pub(crate) port: u16,
     /// TCP port for `DoIP` over TLS communication.
@@ -549,6 +554,8 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         let config = &self.config;
         DoipTransportConfig {
             tester_ip: config.tester_address.clone(),
+            ipv6_interface_index: None,
+            ipv6_multicast_group: config.ipv6_multicast_group.clone(),
             port: config.gateway_port,
             tls_port: config.tls_port,
             send_diagnostic_message_ack: config.send_diagnostic_message_ack,
@@ -588,7 +595,12 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             .check_tester_address_available()
             .map_err(|error| DoipGatewaySetupError::InvalidConfiguration(error.to_string()))?;
 
-        let transport_config = self.transport_config();
+        let mut transport_config = self.transport_config();
+        transport_config.ipv6_interface_index =
+            address::resolve_interface(config.tester_address.parse().map_err(|error| {
+                DoipGatewaySetupError::InvalidAddress(format!("Invalid tester address: {error}"))
+            })?)
+            .map_err(|error| DoipGatewaySetupError::InvalidConfiguration(error.to_string()))?;
         let cancel = CancellationToken::new();
         let shutdown = cancel.child_token().cancelled_owned().shared();
         let connection_tasks = Arc::new(ConnectionTasks::new());
@@ -629,10 +641,9 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             || (matches!(discovery_strategy, DiscoveryStrategy::Vir)
                 && config.discovery.sends_vir());
         if needs_socket {
-            *socket_guard = Some(create_udp_vir_socket(
-                &config.tester_address,
-                config.gateway_port,
-            )?);
+            let (socket, _) =
+                create_discovery_socket(&session.transport_config, config.gateway_port)?;
+            *socket_guard = Some(socket);
         }
         match discovery_strategy {
             DiscoveryStrategy::Vir if !config.discovery.sends_vir() => {
@@ -647,7 +658,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                 let gateways = vir_vam::get_vehicle_identification::<T, _>(
                     socket,
                     self.state.netmask,
-                    config.gateway_port,
+                    discovery_target(&session.transport_config)?,
                     &self.state.ecus,
                     shutdown.clone(),
                 )
@@ -668,7 +679,12 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             DiscoveryStrategy::Persisted { known, search } => {
                 drop(socket_guard);
                 let db_gateways = self.db_gateways().await;
-                let plan = reconnect::plan_reconnect(&known, &search, &db_gateways);
+                let plan = reconnect::plan_reconnect(
+                    &known,
+                    &search,
+                    &db_gateways,
+                    self.state.netmask.is_none(),
+                );
                 tracing::info!(
                     unicast = plan.unicast.len(),
                     vir = plan.vir_for.len(),
@@ -855,9 +871,8 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             .cancelled_owned()
             .shared();
         reconnect::fallback_identification(
-            &session.transport_config.tester_ip,
+            &session.transport_config,
             state.netmask,
-            session.transport_config.port,
             &state.ecus,
             wanted,
             shutdown,
@@ -1690,19 +1705,93 @@ async fn connected_gateways(
     connected
 }
 
-fn create_netmask(tester_ip: &str, tester_subnet: &str) -> Result<u32, DoipGatewaySetupError> {
-    let ip = tester_ip.parse::<std::net::Ipv4Addr>().map_err(|e| {
+/// Selects the broadcast or multicast destination for both discovery paths.
+fn discovery_target(
+    config: &DoipTransportConfig,
+) -> Result<std::net::SocketAddr, DoipGatewaySetupError> {
+    let tester_ip = config
+        .tester_ip
+        .parse::<std::net::IpAddr>()
+        .map_err(|error| {
+            DoipGatewaySetupError::InvalidAddress(format!(
+                "DoipGateway: Failed to parse tester IP address: {error:?}"
+            ))
+        })?;
+    match tester_ip {
+        std::net::IpAddr::V4(_) => Ok(std::net::SocketAddr::from((
+            [255, 255, 255, 255],
+            config.port,
+        ))),
+        std::net::IpAddr::V6(_) => {
+            let group = config
+                .ipv6_multicast_group
+                .parse::<std::net::Ipv6Addr>()
+                .map_err(|error| {
+                    DoipGatewaySetupError::InvalidAddress(format!(
+                        "DoipGateway: Failed to parse IPv6 multicast group: {error:?}"
+                    ))
+                })?;
+            if !group.is_multicast() {
+                return Err(DoipGatewaySetupError::InvalidConfiguration(
+                    "An IPv6 multicast address is required for discovery".to_owned(),
+                ));
+            }
+            let interface_index = config
+                .ipv6_interface_index
+                .filter(|index| *index != 0)
+                .ok_or_else(|| {
+                    DoipGatewaySetupError::InvalidConfiguration(
+                        "An IPv6 interface index is required for multicast discovery".to_owned(),
+                    )
+                })?;
+            Ok(std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+                group,
+                config.port,
+                0,
+                interface_index,
+            )))
+        }
+    }
+}
+
+/// Binds discovery to the requested local port; reconnect uses an ephemeral port.
+fn create_discovery_socket(
+    config: &DoipTransportConfig,
+    local_port: u16,
+) -> Result<(DoIPUdpSocket, std::net::SocketAddr), DoipGatewaySetupError> {
+    let target = discovery_target(config)?;
+    let socket = match target {
+        std::net::SocketAddr::V4(_) => create_udp_vir_socket(&config.tester_ip, local_port)?,
+        std::net::SocketAddr::V6(address) => create_udp_vir_socket_v6(
+            &config.tester_ip,
+            local_port,
+            *address.ip(),
+            address.scope_id(),
+        )?,
+    };
+    Ok((socket, target))
+}
+
+fn create_netmask(
+    tester_ip: &str,
+    tester_subnet: &str,
+) -> Result<Option<u32>, DoipGatewaySetupError> {
+    let tester_ip = tester_ip.parse::<std::net::IpAddr>().map_err(|e| {
         DoipGatewaySetupError::InvalidAddress(format!(
             "DoipGateway: Failed to parse tester IP address: {e:?}"
         ))
     })?;
-    let subnet = tester_subnet.parse::<std::net::Ipv4Addr>().map_err(|e| {
-        DoipGatewaySetupError::InvalidAddress(format!(
-            "DoipGateway: Failed to parse tester subnet mask: {e:?}"
-        ))
-    })?;
-
-    Ok(ip.to_bits() & subnet.to_bits())
+    match tester_ip {
+        std::net::IpAddr::V4(ip) => {
+            let subnet = tester_subnet.parse::<std::net::Ipv4Addr>().map_err(|e| {
+                DoipGatewaySetupError::InvalidAddress(format!(
+                    "DoipGateway: Failed to parse tester subnet mask: {e:?}"
+                ))
+            })?;
+            Ok(Some(ip.to_bits() & subnet.to_bits()))
+        }
+        std::net::IpAddr::V6(_) => Ok(None),
+    }
 }
 
 /// Creates a UDP socket for `DoIP` communication.
@@ -1783,6 +1872,75 @@ pub fn create_udp_vir_socket(
             "DoipGateway: Failed to create DoIP socket from std socket: {e:?}"
         ))
     })
+}
+
+fn create_udp_vir_socket_v6(
+    tester_ip: &str,
+    gateway_port: u16,
+    multicast_group: std::net::Ipv6Addr,
+    interface_index: u32,
+) -> Result<DoIPUdpSocket, DoipGatewaySetupError> {
+    let tester_ip = tester_ip.parse::<std::net::Ipv6Addr>().map_err(|e| {
+        DoipGatewaySetupError::InvalidAddress(format!(
+            "DoipGateway: Failed to parse IPv6 tester address: {e:?}"
+        ))
+    })?;
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )
+    .map_err(|e| {
+        DoipGatewaySetupError::SocketCreationFailed(format!(
+            "DoipGateway: Failed to create IPv6 discovery socket: {e:?}"
+        ))
+    })?;
+    socket.set_reuse_address(true).map_err(|e| {
+        DoipGatewaySetupError::SocketCreationFailed(format!(
+            "DoipGateway: Failed to set IPv6 socket reuse address: {e:?}"
+        ))
+    })?;
+    socket.set_only_v6(true).map_err(|e| {
+        DoipGatewaySetupError::SocketCreationFailed(format!(
+            "DoipGateway: Failed to restrict discovery socket to IPv6: {e:?}"
+        ))
+    })?;
+    socket.set_multicast_if_v6(interface_index).map_err(|e| {
+        DoipGatewaySetupError::SocketCreationFailed(format!(
+            "DoipGateway: Failed to set IPv6 multicast interface: {e:?}"
+        ))
+    })?;
+    socket.set_multicast_hops_v6(4).map_err(|e| {
+        DoipGatewaySetupError::SocketCreationFailed(format!(
+            "DoipGateway: Failed to set IPv6 multicast hop limit: {e:?}"
+        ))
+    })?;
+    socket.set_nonblocking(true).map_err(|e| {
+        DoipGatewaySetupError::InvalidConfiguration(format!(
+            "DoipGateway: Failed to set IPv6 discovery socket non-blocking: {e:?}"
+        ))
+    })?;
+    let bind_addr = address::socket_address(tester_ip.into(), gateway_port, interface_index);
+    socket.bind(&bind_addr.into()).map_err(|e| {
+        DoipGatewaySetupError::SocketCreationFailed(format!(
+            "DoipGateway: Failed to bind IPv6 discovery socket to {bind_addr}: {e:?}"
+        ))
+    })?;
+    let std_socket: std::net::UdpSocket = socket.into();
+    let doip_socket =
+        DoIPUdpSocket::new(std_socket, ProtocolVersion::DefaultValue).map_err(|e| {
+            DoipGatewaySetupError::SocketCreationFailed(format!(
+                "DoipGateway: Failed to create DoIP socket from IPv6 UDP socket: {e:?}"
+            ))
+        })?;
+    doip_socket
+        .join_multicast_v6(multicast_group, interface_index)
+        .map_err(|e| {
+            DoipGatewaySetupError::SocketCreationFailed(format!(
+                "DoipGateway: Failed to join IPv6 discovery group {multicast_group}: {e:?}"
+            ))
+        })?;
+    Ok(doip_socket)
 }
 
 impl<T: EcuAddresses + DoipComParams> Clone for DoipDiagGateway<T> {
@@ -1933,6 +2091,49 @@ mod tests {
         wait_for_ack_or_response_until_timeout,
     };
 
+    #[test]
+    fn discovery_target_preserves_family_port_and_interface() {
+        let mut config = super::DoipTransportConfig {
+            tester_ip: "192.0.2.42".to_owned(),
+            ipv6_interface_index: None,
+            ipv6_multicast_group: "ff14::1515:1515".to_owned(),
+            port: 13400,
+            tls_port: 0,
+            send_diagnostic_message_ack: false,
+            send_timeout: Duration::from_secs(1),
+            alive_check_interval: Duration::ZERO,
+        };
+        assert_eq!(
+            super::discovery_target(&config).expect("valid IPv4 target"),
+            std::net::SocketAddr::from(([255, 255, 255, 255], 13400)),
+        );
+
+        for tester_ip in ["fd72::42", "fe80::42"] {
+            config.tester_ip = tester_ip.to_owned();
+            config.ipv6_interface_index = Some(31);
+            let expected = std::net::SocketAddrV6::new(
+                "ff14::1515:1515".parse().expect("valid multicast group"),
+                13400,
+                0,
+                31,
+            );
+            assert_eq!(
+                super::discovery_target(&config).expect("valid IPv6 target"),
+                std::net::SocketAddr::V6(expected),
+            );
+        }
+
+        for index in [None, Some(0)] {
+            config.ipv6_interface_index = index;
+            assert!(super::discovery_target(&config).is_err());
+        }
+        config.ipv6_interface_index = Some(31);
+        for group in ["invalid", "fd72::1"] {
+            config.ipv6_multicast_group = group.to_owned();
+            assert!(super::discovery_target(&config).is_err());
+        }
+    }
+
     const ECU_ADDR: u16 = 0x0E80;
     const GATEWAY_ADDR: u16 = 0x1234;
 
@@ -1990,7 +2191,7 @@ mod tests {
             logical_address_to_connection: Arc::new(RwLock::new(addr_map)),
             ecus: Arc::new(HashMap::new()),
             socket: Arc::new(Mutex::new(Some(udp_socket))),
-            netmask: 0,
+            netmask: Some(0),
             topology: cda_interfaces::topology::TopologyState::new(
                 cda_interfaces::topology::DiscoveryStrategy::Vir,
             ),

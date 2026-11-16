@@ -269,22 +269,53 @@ async fn connect_to_gateway(
     tester_ip: &str,
     gateway_ip: &str,
     port: u16,
+    ipv6_interface_index: Option<u32>,
 ) -> Result<tokio::net::TcpStream, ConnectionError> {
     tracing::debug!("Connecting to gateway at {gateway_ip}:{port} from tester IP {tester_ip}");
-    let target = format!("{gateway_ip}:{port}");
-    // todo: the source port should be configurable
-    let source_ip = format!("{tester_ip}:0");
-    let local_addr = source_ip.parse().map_err(|e| {
+    let target_ip = gateway_ip.parse::<std::net::IpAddr>().map_err(|e| {
+        ConnectionError::ConnectionFailed(format!("Failed to parse target IP address: {e:?}"))
+    })?;
+    let source_ip = tester_ip.parse::<std::net::IpAddr>().map_err(|e| {
         ConnectionError::ConnectionFailed(format!("Failed to parse source IP address: {e:?}"))
     })?;
-    let socket = TcpSocket::new_v4().map_err(|e| {
+    let (socket, target_addr, local_addr) = match (source_ip, target_ip) {
+        (std::net::IpAddr::V4(source), std::net::IpAddr::V4(target)) => (
+            TcpSocket::new_v4(),
+            std::net::SocketAddr::V4(std::net::SocketAddrV4::new(target, port)),
+            std::net::SocketAddr::V4(std::net::SocketAddrV4::new(source, 0)),
+        ),
+        (std::net::IpAddr::V6(source), std::net::IpAddr::V6(target)) => {
+            for ip in [source, target] {
+                crate::address::validate_ipv6_endpoint(ip, "DoIP endpoint")
+                    .map_err(|error| ConnectionError::ConnectionFailed(error.to_string()))?;
+            }
+            let interface_index = ipv6_interface_index.unwrap_or_default();
+            if (source.is_unicast_link_local() || target.is_unicast_link_local())
+                && interface_index == 0
+            {
+                return Err(ConnectionError::ConnectionFailed(
+                    "Cannot scope a link-local DoIP endpoint: tester interface resolution is \
+                     missing"
+                        .to_owned(),
+                ));
+            }
+            (
+                TcpSocket::new_v6(),
+                crate::address::socket_address(target.into(), port, interface_index),
+                crate::address::socket_address(source.into(), 0, interface_index),
+            )
+        }
+        _ => {
+            return Err(ConnectionError::ConnectionFailed(
+                "Tester and gateway IP address families do not match".to_owned(),
+            ));
+        }
+    };
+    let socket = socket.map_err(|e| {
         ConnectionError::ConnectionFailed(format!("Failed to create TCP socket: {e:?}"))
     })?;
     socket.bind(local_addr).map_err(|e| {
         ConnectionError::ConnectionFailed(format!("Failed to bind TCP socket: {e:?}"))
-    })?;
-    let target_addr = target.parse().map_err(|e| {
-        ConnectionError::ConnectionFailed(format!("Failed to parse target IP address: {e:?}"))
     })?;
     let stream = socket.connect(target_addr).await.map_err(|e| {
         ConnectionError::ConnectionFailed(format!("Failed to connect to target: {e:?}"))
@@ -321,6 +352,7 @@ pub(crate) async fn establish_ecu_connection(
             &config.doip.transport.tester_ip,
             &config.doip.gateway_ip,
             config.doip.transport.port,
+            config.doip.transport.ipv6_interface_index,
         ),
     )
     .await
@@ -412,6 +444,7 @@ pub(crate) async fn establish_tls_ecu_connection(
             &config.doip.transport.tester_ip,
             &config.doip.gateway_ip,
             config.doip.transport.tls_port,
+            config.doip.transport.ipv6_interface_index,
         ),
     )
     .await
@@ -613,5 +646,26 @@ async fn try_read_routing_activation_response<T: AsyncRead + AsyncWrite + Unpin>
             "Incomplete routing activation response due to connection closure or error".to_owned(),
         )),
         Err(_) => Err(DiagServiceError::Timeout),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::connect_to_gateway;
+
+    #[tokio::test]
+    async fn rejects_mismatched_families_and_unscoped_link_local_endpoints() {
+        for (source, target) in [
+            ("127.0.0.1", "::1"),
+            ("::1", "127.0.0.1"),
+            ("::1", "fe80::1"),
+            ("fe80::1", "fd00::1"),
+        ] {
+            assert!(
+                connect_to_gateway(source, target, 13400, None)
+                    .await
+                    .is_err()
+            );
+        }
     }
 }

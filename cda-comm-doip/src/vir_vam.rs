@@ -51,8 +51,8 @@ fn add_discovered_gateway(gateways: &mut Vec<DiscoveredGateway>, gateway: Discov
 
 pub(crate) async fn get_vehicle_identification<T, F>(
     socket: &mut DoIPUdpSocket,
-    netmask: u32,
-    gateway_port: u16,
+    netmask: Option<u32>,
+    discovery_target: std::net::SocketAddr,
     ecus: &Arc<HashMap<String, RwLock<T>>>,
     mut shutdown_signal: futures::future::Shared<F>,
 ) -> Result<Vec<DiscoveredGateway>, DiagServiceError>
@@ -61,14 +61,11 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     // send VIR
-    tracing::info!("Broadcasting VIR");
-    let broadcast_ip = "255.255.255.255";
+    tracing::info!(target = %discovery_target, "Sending DoIP vehicle identification request");
     socket
         .send(
             DoipPayload::VehicleIdentificationRequest(VehicleIdentificationRequest {}),
-            format!("{broadcast_ip}:{gateway_port}")
-                .parse()
-                .map_err(|_| DiagServiceError::SendFailed("Invalid port".to_owned()))?,
+            discovery_target,
         )
         .await
         .map_err(|e| DiagServiceError::SendFailed(format!("Failed to send VIR: {e:?}")))?;
@@ -325,7 +322,21 @@ where
         "vam-listen",
         Box::pin(async move {
             let broadcast_ip = "0.0.0.0";
-            let broadcast_socket = if transport_config.tester_ip == broadcast_ip {
+            let is_ipv6 = transport_config
+                .tester_ip
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_ipv6());
+            let broadcast_socket = if is_ipv6 {
+                let mut listener_config = transport_config.clone();
+                "::".clone_into(&mut listener_config.tester_ip);
+                match crate::create_discovery_socket(&listener_config, transport_config.port) {
+                    Ok((socket, _)) => Arc::new(Mutex::new(Some(socket))),
+                    Err(error) => {
+                        tracing::error!(%error, "Failed to listen for IPv6 multicast announcements");
+                        return;
+                    }
+                }
+            } else if transport_config.tester_ip == broadcast_ip {
                 Arc::clone(&state.socket)
             } else {
                 match crate::create_udp_vir_socket(broadcast_ip, transport_config.port) {
@@ -395,14 +406,15 @@ async fn handle_vam<T>(
     ecus: &Arc<HashMap<String, RwLock<T>>>,
     doip_msg: doip_definitions::message::DoipMessage,
     source_addr: std::net::SocketAddr,
-    netmask: u32,
+    netmask: Option<u32>,
 ) -> Result<Option<DiscoveredGateway>, DoipGatewaySetupError>
 where
     T: EcuAddresses,
 {
     match source_addr {
+        std::net::SocketAddr::V4(_) if netmask.is_none() => return Ok(None),
         std::net::SocketAddr::V4(socket_addr_v4) => {
-            if socket_addr_v4.ip().to_bits() & netmask != netmask {
+            if netmask.is_some_and(|mask| socket_addr_v4.ip().to_bits() & mask != mask) {
                 tracing::warn!(
                     source_ip = %source_addr.ip(),
                     subnet_mask = ?netmask,
@@ -412,8 +424,9 @@ where
             }
         }
         std::net::SocketAddr::V6(_) => {
-            // ipv6 is not expected nor supported
-            return Ok(None);
+            if netmask.is_some() {
+                return Ok(None);
+            }
         }
     }
     match doip_msg.payload {
