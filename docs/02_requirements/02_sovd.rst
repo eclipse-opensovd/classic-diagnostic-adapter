@@ -168,7 +168,7 @@ Paths
          - handled internally by CDA
        * - 85
          - /modes/dtcsetting
-         -
+         - only if the ECU has 85\ :sub:`16` services, see below
 
     Modes that depend on an optional UDS service (marked above) must only be provided for ECUs whose
     diagnostic description contains at least one service with that SID. For other ECUs they must not

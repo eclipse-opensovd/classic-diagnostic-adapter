@@ -116,6 +116,10 @@ pub(crate) async fn is_mode_available<T: UdsEcu>(uds: &T, ecu_name: &str, mode_i
             uds.has_services_for_sid(ecu_name, service_ids::COMMUNICATION_CONTROL)
                 .await
         }
+        DTC_SETTING_ID => {
+            uds.has_services_for_sid(ecu_name, service_ids::CONTROL_DTC_SETTING)
+                .await
+        }
         _ => true,
     }
 }
@@ -1494,10 +1498,7 @@ mod tests {
                 "authentication"
             ]
         );
-        assert_eq!(
-            listed_modes(false).await,
-            vec!["session", "security", "dtcsetting"]
-        );
+        assert_eq!(listed_modes(false).await, vec!["session", "security"]);
     }
 
     #[tokio::test]
@@ -1509,6 +1510,19 @@ mod tests {
         );
         let response =
             super::commctrl::get::<MockUdsEcu, MockFileManager>(secured(), query(), State(state))
+                .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn dtcsetting_get_returns_not_found_without_0x85_services() {
+        let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
+            ECU.to_owned(),
+            uds_with_mode_services(false),
+            MockFileManager::new(),
+        );
+        let response =
+            super::dtcsetting::get::<MockUdsEcu, MockFileManager>(secured(), query(), State(state))
                 .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }

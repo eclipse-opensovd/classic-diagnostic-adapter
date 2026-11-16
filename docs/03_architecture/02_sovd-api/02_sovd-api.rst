@@ -1090,6 +1090,10 @@ DTC Setting -- SID 85\ :sub:`16`
     Matching 85\ :sub:`16` service entries must be present in the diagnostic description. Parameters can be provided
     through an additional ``parameters`` attribute.
 
+    ``GET /modes`` lists ``dtcsetting`` only if the diagnostic description of the detected variant (including its
+    parent refs) contains at least one 85\ :sub:`16` service. Otherwise ``GET`` and ``PUT /modes/dtcsetting``
+    return ``404 Not Found``, and the path is omitted from the ECU's part of ``openapi.json``.
+
     .. note::
        Other specific extensions to the values are not supported.
 

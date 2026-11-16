@@ -2039,7 +2039,7 @@ pub(crate) mod tests {
         });
         let filter = vehicle_openapi_paths_filter(uds);
 
-        let modes = ["authentication", "commctrl", "security"];
+        let modes = ["authentication", "commctrl", "dtcsetting", "security"];
         let mut input = aide::openapi::Paths::default();
         for ecu in ["full", "minimal"] {
             for mode in modes {
@@ -2057,6 +2057,7 @@ pub(crate) mod tests {
             vec![
                 "/vehicle/v15/components/full/modes/authentication",
                 "/vehicle/v15/components/full/modes/commctrl",
+                "/vehicle/v15/components/full/modes/dtcsetting",
                 "/vehicle/v15/components/full/modes/security",
                 "/vehicle/v15/components/minimal/modes/security",
             ]
