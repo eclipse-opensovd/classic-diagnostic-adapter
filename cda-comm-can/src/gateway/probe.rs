@@ -14,12 +14,12 @@
 //! ECU discovery probing: the probe sequence and the bounded per-ECU
 //! discovery/re-probe logic of [`CanDiagGateway`].
 
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use cda_interfaces::dlt_ctx;
 
 use super::{
-    CanDiagGateway,
+    CanDiagGateway, DiscoveredAs,
     connection::CanEcuConnection,
     error::{CanError, CanGatewaySetupError},
 };
@@ -92,7 +92,7 @@ impl CanDiagGateway {
                 // the ECU still waking up); retry inside the transport so the
                 // UDS layer only ever sees settled online/offline states.
                 tracing::debug!(
-                    ecu = %conn.ecu_name,
+                    ecu = %conn.ecu_name(),
                     retry_round,
                     probe_retries = self.probe_retries,
                     "Re-running CAN discovery probe sequence"
@@ -108,7 +108,7 @@ impl CanDiagGateway {
             }
         }
 
-        Err(last_error.unwrap_or(CanError::EcuNotResponding(conn.request_id.raw())))
+        Err(last_error.unwrap_or(CanError::EcuNotResponding(conn.request_id().raw())))
     }
 
     /// One round through the configured probe sequence; `Ok` on the first
@@ -123,7 +123,7 @@ impl CanDiagGateway {
         for probe in self.probe_sequence.iter() {
             let start = Instant::now();
             tracing::debug!(
-                ecu = %conn.ecu_name,
+                ecu = %conn.ecu_name(),
                 logical_addr,
                 network_addr = %conn.network_address(),
                 probe_name = %probe.name,
@@ -151,7 +151,7 @@ impl CanDiagGateway {
                     };
 
                     tracing::info!(
-                        ecu = %conn.ecu_name,
+                        ecu = %conn.ecu_name(),
                         logical_addr,
                         network_addr = %conn.network_address(),
                         probe_name = %probe.name,
@@ -166,7 +166,7 @@ impl CanDiagGateway {
                 Err(error) => {
                     let elapsed = start.elapsed();
                     tracing::debug!(
-                        ecu = %conn.ecu_name,
+                        ecu = %conn.ecu_name(),
                         logical_addr,
                         network_addr = %conn.network_address(),
                         probe_name = %probe.name,
@@ -180,7 +180,7 @@ impl CanDiagGateway {
             }
         }
 
-        Err(last_error.unwrap_or(CanError::EcuNotResponding(conn.request_id.raw())))
+        Err(last_error.unwrap_or(CanError::EcuNotResponding(conn.request_id().raw())))
     }
 
     /// Discovers ECUs on the CAN bus by running the configured probe
@@ -192,34 +192,49 @@ impl CanDiagGateway {
     /// A list of ECU names that responded to a probe.
     #[tracing::instrument(skip_all, fields(dlt_context = dlt_ctx!("CAN")))]
     pub async fn discover_ecus(&self) -> Vec<String> {
-        let futures: Vec<_> = self
-            .connections
-            .iter()
-            .map(|(ecu_name, conn)| {
-                let logical_addr = self.logical_address_for_ecu(ecu_name);
+        // Collect owned targets so the topology guard is not held across the
+        // parallel probes.
+        let targets: Vec<(String, CanEcuConnection, u16)> = {
+            let topology = self.topology.read().await;
+            topology
+                .connections()
+                .iter()
+                .map(|(ecu_name, addressing)| {
+                    (
+                        ecu_name.clone(),
+                        CanEcuConnection::new(Arc::clone(addressing)),
+                        topology
+                            .logical_address_for_ecu(ecu_name)
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect()
+        };
 
-                async move {
-                    let result = self.probe_connection(conn, logical_addr).await;
-                    match &result {
-                        Ok(()) => tracing::info!(
-                            ecu = %conn.ecu_name,
-                            logical_addr = logical_addr,
-                            network_addr = %conn.network_address(),
-                            "ECU discovered on CAN"
-                        ),
-                        Err(e) => tracing::debug!(
-                            ecu = %conn.ecu_name,
-                            logical_addr = logical_addr,
-                            error = %e,
-                            "ECU not responding on CAN"
-                        ),
-                    }
-                    // Return the lowercase map key, not `conn.ecu_name`: for
-                    // ECUs from [[can.ecu_mappings]] the latter carries the
-                    // config-file casing, which the variant-detection
-                    // consumer would not find in its lowercase-keyed ECU map.
-                    (ecu_name.clone(), result)
+        let futures: Vec<_> = targets
+            .into_iter()
+            .map(|(ecu_name, conn, logical_addr)| async move {
+                let probed_as = DiscoveredAs::from(&conn);
+                let result = self.probe_connection(&conn, logical_addr).await;
+                match &result {
+                    Ok(()) => tracing::info!(
+                        ecu = %conn.ecu_name(),
+                        logical_addr = logical_addr,
+                        network_addr = %conn.network_address(),
+                        "ECU discovered on CAN"
+                    ),
+                    Err(e) => tracing::debug!(
+                        ecu = %conn.ecu_name(),
+                        logical_addr = logical_addr,
+                        error = %e,
+                        "ECU not responding on CAN"
+                    ),
                 }
+                // Return the lowercase map key, not `conn.ecu_name`: for
+                // ECUs from [[can.ecu_mappings]] the latter carries the
+                // config-file casing, which the variant-detection
+                // consumer would not find in its lowercase-keyed ECU map.
+                (ecu_name, probed_as, result)
             })
             .collect();
 
@@ -228,15 +243,19 @@ impl CanDiagGateway {
         let mut discovered = Vec::new();
         let mut cache = self.discovered_ecus.write().await;
 
-        for (ecu_name, result) in results {
+        // Records what was probed, not a fresh lookup: a reload during the
+        // probes leaves fingerprints that no longer match, so those ECUs are
+        // probed again on their new addressing.
+        for (ecu_name, probed_as, result) in results {
             match result {
                 Ok(()) => {
-                    cache.insert(ecu_name.clone());
+                    cache.insert(ecu_name.clone(), probed_as);
                     discovered.push(ecu_name);
                 }
-                Err(_) => {
+                Err(_) if cache.get(&ecu_name) == Some(&probed_as) => {
                     cache.remove(&ecu_name);
                 }
+                Err(_) => {}
             }
         }
 
@@ -246,6 +265,7 @@ impl CanDiagGateway {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "can-socketcand")]
     use std::time::Duration;
 
     #[cfg(feature = "can-socketcand")]
@@ -254,7 +274,9 @@ mod tests {
     use super::*;
     use crate::config::CanProbeConfig;
     #[cfg(feature = "can-socketcand")]
-    use crate::{config::CanAddressingMode, gateway::connection::CanEcuConnection};
+    use crate::{
+        CanEcuAddressing, config::CanAddressingMode, gateway::test_utils::shared_topology,
+    };
 
     #[test]
     fn default_probe_sequence_starts_with_tester_present() {
@@ -304,10 +326,10 @@ mod tests {
         const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
         let mut gateway = CanDiagGateway::test_instance(
-            vec![
+            shared_topology(vec![
                 (
                     "missing-1",
-                    CanEcuConnection::new(
+                    CanEcuAddressing::new(
                         "missing-1".to_owned(),
                         INTERFACE.to_owned(),
                         CanId::try_from(0x600).unwrap(),
@@ -317,7 +339,7 @@ mod tests {
                 ),
                 (
                     "missing-2",
-                    CanEcuConnection::new(
+                    CanEcuAddressing::new(
                         "missing-2".to_owned(),
                         INTERFACE.to_owned(),
                         CanId::try_from(0x610).unwrap(),
@@ -327,7 +349,7 @@ mod tests {
                 ),
                 (
                     "missing-3",
-                    CanEcuConnection::new(
+                    CanEcuAddressing::new(
                         "missing-3".to_owned(),
                         INTERFACE.to_owned(),
                         CanId::try_from(0x620).unwrap(),
@@ -335,7 +357,7 @@ mod tests {
                         CanAddressingMode::Standard,
                     ),
                 ),
-            ],
+            ]),
             vec![],
             std::sync::Arc::new(
                 cda_interfaces::util::test_utils::RecordingConnectivityHandler::default(),
