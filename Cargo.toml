@@ -187,7 +187,11 @@ allow_attributes_without_reason = "deny"
 mod_module_files = "deny"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(nightly)'] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(nightly)',
+  # required for custom rustc flag "heap_profiling": https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html#check-cfg-in-lintsrust-table
+  'cfg(heap_profiling)'
+] }
 
 [profile.release.package."*"]
 opt-level = 3
