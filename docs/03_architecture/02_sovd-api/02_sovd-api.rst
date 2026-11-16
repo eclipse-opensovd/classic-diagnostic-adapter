@@ -1503,19 +1503,93 @@ Generic Service
 
 .. arch:: Generic Service Endpoint
     :id: arch~sovd-api-generic-service
+    :links: dimpl~sovd-api-generic-service, testset~sovd-api-generic-service
     :status: draft
 
     The ``/genericservice`` endpoint provides raw UDS passthrough functionality, allowing clients to send
     arbitrary UDS requests to an ECU without relying on diagnostic description (MDD) service resolution
-    or parameter encoding.
+    or parameter encoding. ISO 17978-3 defines no such resource, it is a vendor extension.
 
-    The client sends a hex-encoded UDS request in the JSON body, and receives the raw hex-encoded UDS
-    response from the ECU.
+    **Body formats**
+
+    Like every other diagnostic exchange of the SOVD-API (ISO 17978-3 §5.10, Clause 7), request and response
+    are JSON by default. The UDS bytes are a string in the binary encoding selected by the configuration and
+    the ``x-sovd2uds-binary-encoding`` query parameter (see :need:`arch~sovd-api-binary-encoding`):
+
+    .. code-block:: text
+
+       PUT /components/{ecu}/genericservice?x-sovd2uds-binary-encoding=hex
+       Content-Type: application/json
+
+       { "request": "0x22 0xF1 0x90" }
+
+       200 OK
+       Content-Type: application/json
+
+       { "response": "0x62 0xF1 0x90 ..." }
+
+    The request field ``send`` is accepted as alias of ``request``. With the ``hex`` encoding, the response
+    uses the notation of the request. Spaces and commas between the bytes are accepted in the request but
+    not repeated in the response; mixed notations are answered in the default notation:
+
+    .. list-table:: Hex notation
+       :header-rows: 1
+
+       * - Request
+         - Notation
+         - Response
+       * - ``0x22F190``, ``0x22 F1 90``
+         - One leading ``0x``
+         - ``0x62F190...``
+       * - ``22F190``, ``22 F1 90``
+         - No prefix
+         - ``62F190...``
+       * - ``0x22 0xF1 0x90``, raw request with JSON response
+         - ``0x`` per byte (default)
+         - ``0x62 0xF1 0x90 ...``
+
+    To transfer and handle the data efficiently, without encoding and decoding, ``application/octet-stream``
+    can be selected instead to exchange the raw bytes, independently for the request and the response. The
+    headers are evaluated like for the other endpoints supporting both formats (e.g. ``/data``):
+
+    .. list-table:: Format selection
+       :header-rows: 1
+
+       * - Header
+         - Value
+         - Format
+       * - ``Content-Type``
+         - ``application/json`` or missing
+         - JSON request
+       * - ``Content-Type``
+         - ``application/octet-stream``
+         - Raw request bytes
+       * - ``Accept``
+         - missing or ``*/*``
+         - Same format as the request
+       * - ``Accept``
+         - ``application/json`` / ``application/octet-stream``
+         - JSON / raw response
+
+    **Status codes**
+
+    Every ECU response is passed through with ``200 OK``: positive responses, suppressed positive responses
+    (empty) and negative responses (``7F <SID> <NRC>``), i.e. as raw bytes or as ``{ "response": "7F2231" }``.
+    The passthrough does not interpret the response; ``502 Bad Gateway`` would require a SOVD error object
+    describing the NRC. Errors of the CDA itself (e.g. no response, communication failure) are reported as
+    SOVD errors as for the other endpoints.
+
+    Any other ``Content-Type`` or ``Accept``, an invalid or empty request and an undecodable binary value are
+    rejected with ``400 Bad Request`` before anything is sent to the ECU. The binary form is no deviation from
+    ISO 17978-3, since the standard neither defines this resource nor the content types of custom resources.
+
+    **Security**
 
     Permissions for generic service calls can be checked and enforced through the security plugin. Since
     generic service requests bypass the structured service resolution, the security plugin receives the
     raw UDS request payload (e.g. ``22 F1 90``) and is responsible for evaluating whether the authenticated
-    client is authorized to send that specific UDS command to the target ECU.
+    client is authorized to send that specific UDS command to the target ECU. The payload is decoded from
+    the body before, so the plugin is independent of the body format and binary encoding.
 
     .. uml:: images/generic_service.puml
 

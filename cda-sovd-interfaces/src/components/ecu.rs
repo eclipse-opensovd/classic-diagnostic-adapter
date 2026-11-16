@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Items;
 
+pub mod genericservice;
 pub mod modes;
 pub mod operations;
 

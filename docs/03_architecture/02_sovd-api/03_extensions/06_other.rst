@@ -85,6 +85,7 @@ Binary Encoding
     * Response parameters, including nested and repeating structures
     * Security access seeds and keys, authentication parameters
     * DTC extended and snapshot data
+    * Raw UDS request and response of ``/genericservice`` in JSON form, see :need:`arch~sovd-api-generic-service`
     * JSON schemas returned with ``include-schema``: ``A_BYTEFIELD`` values are described as ``string`` with the
       format of the selected encoding, their ``default`` values are converted into that encoding
 

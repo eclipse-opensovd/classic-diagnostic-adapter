@@ -853,7 +853,7 @@ ECU-lock POST requests additionally check stored ECU connectivity as specified i
     **Write endpoints**: ``PUT /data/{id}``, ``PUT /configurations/{id}``,
     ``POST /operations/{op}/executions``, ``GET /operations/{op}/executions/{id}``,
     ``DELETE /operations/{op}/executions/{id}``, ``PUT /modes/*``,
-    ``DELETE /faults``, ``DELETE /faults/{dtc}``, ``POST /genericservice``,
+    ``DELETE /faults``, ``DELETE /faults/{dtc}``, ``PUT /genericservice``,
     download endpoints.
 
     **Read endpoints**: ``GET /data/{id}``, ``GET /configurations/{id}``,

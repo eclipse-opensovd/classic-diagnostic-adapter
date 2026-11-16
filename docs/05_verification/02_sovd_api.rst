@@ -57,6 +57,15 @@ SOVD-API
 
     Verifies that the component details report the ``last_seen`` timestamp of an ECU.
 
+.. testset:: Generic Service
+    :id: testset~sovd-api-generic-service
+    :links: test~sovd-api-generic-service-format, test~sovd-api-generic-service-hex-style, itest~sovd-api-generic-service, itest~sovd-api-generic-service-nrc
+    :status: draft
+
+    Verifies the ``/genericservice`` passthrough in JSON form (with base64 and hex binary encoding) and in
+    ``application/octet-stream`` form, the selection of the format via ``Content-Type`` and ``Accept``, the
+    mirrored hex notation, the passthrough of negative ECU responses and the rejection of invalid requests.
+
 .. testset:: Binary Encoding
     :id: testset~sovd-api-binary-encoding
     :links: test~sovd-api-binary-encoding-codec, test~sovd-api-binary-encoding-selection, test~sovd-api-binary-encoding-config, itest~sovd-api-binary-encoding-security-access, itest~sovd-api-binary-encoding-invalid

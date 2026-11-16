@@ -41,6 +41,7 @@ mod deferred_init;
 mod ecu;
 mod faults;
 mod flash_download;
+mod genericservice;
 mod locks;
 mod operations;
 mod read_only_partition;
