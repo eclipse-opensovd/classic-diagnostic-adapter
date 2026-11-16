@@ -1959,6 +1959,19 @@ pub(crate) mod service {
                     Err(error) => return error.into_response(),
                 };
 
+                // suppress_service: skip sending Stop to the ECU, just remove and return 204
+                if query.suppress_service {
+                    tracing::info!(
+                        service = %service,
+                        exec_id = %exec_id,
+                        "Stop skipped (suppress_service=true), removing execution"
+                    );
+                    if let Some(op_map) = lock_write(&service_executions).get_mut(&service) {
+                        op_map.shift_remove(&exec_id);
+                    }
+                    return StatusCode::NO_CONTENT.into_response();
+                }
+
                 let diag_service = DiagComm {
                     name: service.clone(),
                     type_: DiagCommType::Operations,
@@ -1995,19 +2008,6 @@ pub(crate) mod service {
                                 include_schema,
                             )
                         }
-                    }
-                    Err(cda_interfaces::DiagServiceError::NotFound(_))
-                        if query.suppress_service =>
-                    {
-                        tracing::warn!(
-                            service = %service,
-                            exec_id = %exec_id,
-                            "Stop service not found (suppress_service=true), removing execution"
-                        );
-                        if let Some(op_map) = lock_write(&service_executions).get_mut(&service) {
-                            op_map.shift_remove(&exec_id);
-                        }
-                        StatusCode::NO_CONTENT.into_response()
                     }
                     result => {
                         if let Err(e) = &result {
@@ -3776,16 +3776,13 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_delete_execution_suppress_service_removes_on_not_found() {
+        async fn test_delete_execution_suppress_service_skips_send_and_removes() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
             let mock_file_manager = MockFileManager::new();
 
-            mock_uds.expect_send().times(1).returning(|_, _, _, _, _| {
-                Err(DiagServiceError::NotFound(
-                    "CalibrateSensor_Stop not found".to_string(),
-                ))
-            });
+            // suppress_service=true must skip the UDS Stop entirely
+            mock_uds.expect_send().never();
 
             let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
                 ecu_name,
@@ -3836,7 +3833,7 @@ mod tests {
             )
             .await;
 
-            // suppress_service=true on NotFound -> removes execution, returns 204
+            // suppress_service=true -> removes execution without UDS send, returns 204
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
             assert!(
                 lock_read(&service_executions_ref)
