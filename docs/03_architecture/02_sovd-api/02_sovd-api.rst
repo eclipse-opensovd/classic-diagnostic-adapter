@@ -1140,7 +1140,11 @@ Faults -- SID 14\ :sub:`16` & 19\ :sub:`16`
     All values are either boolean values (true/false), or a bit value (0/1).
 
     Additionally, a special key called ``mask`` is available, which takes a hexadecimal mask as a value
-    to allow filtering by the complete status byte. Using other keys together with ``mask`` is not supported.
+    to allow filtering by the complete status byte (e.g. ``29`` or ``0x29``).
+
+    Keys are matched case-insensitively. All selected bits, including the bits of ``mask``, are OR combined
+    into one status mask, so a DTC is returned if any of the selected bits is set. Unknown keys are ignored.
+    If no bit is selected (including a ``mask`` of 0), no filter is applied and all faults are returned.
 
     .. uml:: images/fault_read.puml
 

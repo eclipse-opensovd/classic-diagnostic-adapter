@@ -30,7 +30,9 @@ use crate::{
     },
     util::{
         ecusim::{self, DtcExtended, DtcMinimal, ExtDataRecord, SnapshotData, SnapshotRecord},
-        http::{extract_field_from_json, response_to_json, send_authenticated_cda_request},
+        http::{
+            QueryParams, extract_field_from_json, response_to_json, send_authenticated_cda_request,
+        },
         locks,
         test_env::TestEnv,
     },
@@ -718,6 +720,104 @@ async fn test_get_faults_with_different_dtc_masks() {
         Some("80".to_string()),
         "DTC6: mask should be 80"
     );
+
+    // Status filter: keys are case-insensitive, bits are OR combined and the
+    // ECU returns DTCs where (status & mask) != 0.
+    let filter_cases: [StatusFilterCase; 6] = [
+        // confirmedDtc (0x08): DTC1 (0x29), DTC2 (0x0C), DTC3 (0xFF), user mem DTC (0x29)
+        (
+            &[("status[confirmedDtc]", "true")],
+            &["01E240", "039447", "01E241", "01E245"],
+        ),
+        (
+            &[("status[CONFIRMEDDTC]", "1")],
+            &["01E240", "039447", "01E241", "01E245"],
+        ),
+        // warningIndicatorRequested (0x80): DTC3 (0xFF), DTC6 (0x80)
+        (
+            &[("status[warningindicatorrequested]", "true")],
+            &["01E241", "01E244"],
+        ),
+        // pendingDtc | testFailedThisOperationCycle (0x06): DTC2, DTC3, DTC5
+        (
+            &[
+                ("status[pendingDtc]", "1"),
+                ("status[TestFailedThisOperationCycle]", "true"),
+            ],
+            &["039447", "01E241", "01E243"],
+        ),
+        // raw mask 0x80
+        (&[("status[mask]", "80")], &["01E241", "01E244"]),
+        // nothing selected -> all faults
+        (
+            &[("status[confirmedDtc]", "false")],
+            &[
+                "01E240", "039447", "01E241", "01E242", "01E243", "01E244", "01E245",
+            ],
+        ),
+    ];
+    for (params, expected) in filter_cases {
+        let mut codes = get_faults_with_query(&test_env, ecu_endpoint, params)
+            .await
+            .into_iter()
+            .map(|f| f.code)
+            .collect::<Vec<_>>();
+        codes.sort();
+        let mut expected = expected.iter().map(|c| (*c).to_owned()).collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(codes, expected, "Unexpected faults for filter {params:?}");
+    }
+
+    // Invalid status values must be rejected
+    let query = QueryParams(
+        [("status[confirmedDtc]".to_owned(), "yes".to_owned())]
+            .into_iter()
+            .collect(),
+    );
+    send_authenticated_cda_request(
+        &test_env,
+        &format!("{ecu_endpoint}/faults"),
+        StatusCode::BAD_REQUEST,
+        Method::GET,
+        None,
+        Some(&query),
+    )
+    .await
+    .expect("Invalid status value should be rejected");
+}
+
+/// Status query parameters and the fault codes expected for them.
+type StatusFilterCase = (
+    &'static [(&'static str, &'static str)],
+    &'static [&'static str],
+);
+
+async fn get_faults_with_query(
+    test_env: &TestEnv,
+    ecu_endpoint: &str,
+    params: &[(&str, &str)],
+) -> Vec<Fault> {
+    let query = QueryParams(
+        params
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect(),
+    );
+    let response = send_authenticated_cda_request(
+        test_env,
+        &format!("{ecu_endpoint}/faults"),
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(&query),
+    )
+    .await
+    .expect("Failed to get filtered faults");
+    extract_field_from_json::<Vec<Fault>>(
+        &response_to_json(&response).expect("Invalid JSON"),
+        "items",
+    )
+    .expect("Failed to parse faults")
 }
 
 #[tokio::test]
