@@ -1065,6 +1065,10 @@ Communication Control -- SID 28\ :sub:`16`
     Matching 28\ :sub:`16` service entries must be present in the diagnostic description. Parameters can be provided
     through an additional ``parameters`` attribute.
 
+    ``GET /modes`` lists ``commctrl`` only if the diagnostic description of the detected variant (including its
+    parent refs) contains at least one 28\ :sub:`16` service. Otherwise ``GET`` and ``PUT /modes/commctrl`` return
+    ``404 Not Found``, and the path is omitted from the ECU's part of ``openapi.json``.
+
     .. note::
        Other values are not supported.
 

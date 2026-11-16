@@ -494,6 +494,10 @@ pub trait UdsQuery: UdsTransport {
         ecu_name: &str,
         service: u8,
     ) -> Result<String, DiagServiceError>;
+    /// Returns true if the diagnostic description of the ECU contains at least one
+    /// service with the given service id. Returns false until variant detection has
+    /// concluded.
+    async fn has_services_for_sid(&self, ecu_name: &str, service_id: u8) -> bool;
     /// Lookup the service id on the ECU and restrict the result to the function class.
     /// After the successful lookup, the found service will be executed with the given payload.
     /// # Errors
@@ -1047,6 +1051,7 @@ pub mod mock {
                 ecu_name: &str,
                 service: u8,
             ) -> Result<String, DiagServiceError>;
+            async fn has_services_for_sid(&self, ecu_name: &str, service_id: u8) -> bool;
             async fn ecu_exec_service_from_function_class(
                 &self,
                 ecu_name: &str,

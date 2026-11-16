@@ -24,6 +24,7 @@ use cda_interfaces::{
     BinaryEncoding, HashMap, UdsEcu,
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     file_manager::FileManager,
+    service_ids,
 };
 use schemars::Schema;
 use serde::Serialize;
@@ -82,29 +83,64 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
             name: Some(SECURITY_NAME.to_owned()),
             translation_id: None,
         },
-        sovd_modes::get::ResponseItem {
-            id: COMM_CONTROL_ID.to_owned(),
-            name: Some(COMM_CONTROL_NAME.to_owned()),
-            translation_id: None,
-        },
-        sovd_modes::get::ResponseItem {
-            id: DTC_SETTING_ID.to_owned(),
-            name: Some(DTC_SETTING_NAME.to_owned()),
-            translation_id: None,
-        },
     ];
-    if uds.has_authentication_services(&ecu_name).await {
-        items.push(sovd_modes::get::ResponseItem {
-            id: AUTHENTICATION_ID.to_owned(),
-            name: Some(AUTHENTICATION_NAME.to_owned()),
-            translation_id: None,
-        });
+    for (id, name) in [
+        (COMM_CONTROL_ID, COMM_CONTROL_NAME),
+        (DTC_SETTING_ID, DTC_SETTING_NAME),
+        (AUTHENTICATION_ID, AUTHENTICATION_NAME),
+    ] {
+        if is_mode_available(&uds, &ecu_name, id).await {
+            items.push(sovd_modes::get::ResponseItem {
+                id: id.to_owned(),
+                name: Some(name.to_owned()),
+                translation_id: None,
+            });
+        }
     }
     (
         StatusCode::OK,
         Json(sovd_modes::get::Response { items, schema }),
     )
         .into_response()
+}
+
+/// Returns whether the ECU supports the mode `mode_id`.
+///
+/// Modes backed by an optional UDS service are only available if the diagnostic
+/// description of the detected variant (including its parent refs) contains that
+/// service. Until variant detection has concluded, these modes are not available.
+pub(crate) async fn is_mode_available<T: UdsEcu>(uds: &T, ecu_name: &str, mode_id: &str) -> bool {
+    match mode_id {
+        AUTHENTICATION_ID => uds.has_authentication_services(ecu_name).await,
+        COMM_CONTROL_ID => {
+            uds.has_services_for_sid(ecu_name, service_ids::COMMUNICATION_CONTROL)
+                .await
+        }
+        _ => true,
+    }
+}
+
+/// Returns a `404 Not Found` response if the ECU does not support the mode `mode_id`,
+/// consistent with `/modes` not listing it.
+async fn mode_unavailable_response<T: UdsEcu>(
+    uds: &T,
+    ecu_name: &str,
+    mode_id: &str,
+    include_schema: bool,
+) -> Option<Response> {
+    if is_mode_available(uds, ecu_name, mode_id).await {
+        None
+    } else {
+        Some(
+            ErrorWrapper {
+                error: ApiError::NotFound(Some(format!(
+                    "ECU '{ecu_name}' does not support the mode '{mode_id}'"
+                ))),
+                include_schema,
+            }
+            .into_response(),
+        )
+    }
 }
 
 pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
@@ -151,6 +187,10 @@ async fn handle_mode_change<T: UdsEcu + Clone>(
     binary_encoding: BinaryEncoding,
 ) -> Response {
     require_ecu_access!(write, security_plugin, ecu_name, locks, include_schema);
+    if let Some(response) = mode_unavailable_response(uds, ecu_name, mode_id, include_schema).await
+    {
+        return response;
+    }
     match uds
         .set_ecu_state(
             ecu_name,
@@ -191,6 +231,10 @@ async fn handle_mode_change<T: UdsEcu + Clone>(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Struct would not improve readability here"
+)]
 async fn handle_mode_get<T: UdsEcu + Clone, R: schemars::JsonSchema + Serialize>(
     uds: &T,
     ecu_name: &str,
@@ -199,8 +243,13 @@ async fn handle_mode_get<T: UdsEcu + Clone, R: schemars::JsonSchema + Serialize>
     security_plugin: Box<dyn cda_plugin_security::SecurityPlugin>,
     include_schema: bool,
     create_response_type_callback: fn(value: String, schema: Option<Schema>) -> R,
+    mode_id: &str,
 ) -> Response {
     require_ecu_access!(read, security_plugin, ecu_name, locks, include_schema);
+    if let Some(response) = mode_unavailable_response(uds, ecu_name, mode_id, include_schema).await
+    {
+        return response;
+    }
     {
         let schema = if include_schema {
             Some(create_schema!(R))
@@ -353,6 +402,7 @@ pub(crate) mod session {
                 translation_id: None,
                 schema,
             },
+            SESSION_ID,
         )
         .await
     }
@@ -410,6 +460,7 @@ pub(crate) mod security {
                 translation_id: None,
                 schema,
             },
+            SECURITY_ID,
         )
         .await
     }
@@ -628,25 +679,6 @@ pub(crate) mod authentication {
         .into_response()
     }
 
-    /// Returns a `404 Not Found` response if the ECU has no Authentication (0x29)
-    /// services, consistent with `/modes` not listing the mode for such ECUs.
-    async fn authentication_unavailable_response<T: UdsEcu>(
-        uds: &T,
-        ecu_name: &str,
-        include_schema: bool,
-    ) -> Option<Response> {
-        if uds.has_authentication_services(ecu_name).await {
-            None
-        } else {
-            Some(error_response(
-                ApiError::NotFound(Some(format!(
-                    "ECU '{ecu_name}' does not support the authentication mode"
-                ))),
-                include_schema,
-            ))
-        }
-    }
-
     /// Builds the GET response from the tracked state.
     pub(crate) fn get_response(
         state: &AuthenticationState,
@@ -680,7 +712,7 @@ pub(crate) mod authentication {
         let include_schema = query.include_schema;
         require_ecu_access!(read, security_plugin, &ecu_name, &locks, include_schema);
         if let Some(response) =
-            authentication_unavailable_response(&uds, &ecu_name, include_schema).await
+            mode_unavailable_response(&uds, &ecu_name, AUTHENTICATION_ID, include_schema).await
         {
             return response;
         }
@@ -789,7 +821,7 @@ pub(crate) mod authentication {
             Err(error) => return error.into_response(),
         };
         if let Some(response) =
-            authentication_unavailable_response(&uds, &ecu_name, include_schema).await
+            mode_unavailable_response(&uds, &ecu_name, AUTHENTICATION_ID, include_schema).await
         {
             return response;
         }
@@ -958,6 +990,7 @@ pub(crate) mod commctrl {
                 translation_id: None,
                 schema,
             },
+            COMM_CONTROL_ID,
         )
         .await
     }
@@ -1074,6 +1107,7 @@ pub(crate) mod dtcsetting {
                 translation_id: None,
                 schema,
             },
+            DTC_SETTING_ID,
         )
         .await
     }
@@ -1399,6 +1433,83 @@ mod tests {
         )
         .await;
 
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    fn query() -> WithRejection<Query<sovd_modes::Query>, crate::sovd::error::ApiError> {
+        WithRejection(
+            Query(sovd_modes::Query {
+                include_schema: false,
+            }),
+            std::marker::PhantomData,
+        )
+    }
+
+    fn secured() -> UseApi<Secured, ()> {
+        UseApi(
+            Secured(Box::new(TestSecurityPlugin)),
+            std::marker::PhantomData,
+        )
+    }
+
+    /// Mock UDS where the ECU has either all or none of the optional mode services.
+    fn uds_with_mode_services(available: bool) -> MockUdsEcu {
+        let mut uds = MockUdsEcu::new();
+        uds.expect_has_authentication_services()
+            .returning(move |_| available);
+        uds.expect_has_services_for_sid()
+            .returning(move |_, _| available);
+        uds
+    }
+
+    async fn listed_modes(available: bool) -> Vec<String> {
+        let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
+            ECU.to_owned(),
+            uds_with_mode_services(available),
+            MockFileManager::new(),
+        );
+        let response =
+            super::get::<MockUdsEcu, MockFileManager>(secured(), query(), State(state)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        body_json(response)
+            .await
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.get("id").and_then(serde_json::Value::as_str))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn modes_lists_optional_modes_only_if_supported() {
+        assert_eq!(
+            listed_modes(true).await,
+            vec![
+                "session",
+                "security",
+                "commctrl",
+                "dtcsetting",
+                "authentication"
+            ]
+        );
+        assert_eq!(
+            listed_modes(false).await,
+            vec!["session", "security", "dtcsetting"]
+        );
+    }
+
+    #[tokio::test]
+    async fn commctrl_get_returns_not_found_without_0x28_services() {
+        let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
+            ECU.to_owned(),
+            uds_with_mode_services(false),
+            MockFileManager::new(),
+        );
+        let response =
+            super::commctrl::get::<MockUdsEcu, MockFileManager>(secured(), query(), State(state))
+                .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 

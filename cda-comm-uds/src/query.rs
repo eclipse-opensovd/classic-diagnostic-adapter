@@ -349,6 +349,16 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
             )))
     }
 
+    async fn has_services_for_sid(&self, ecu_name: &str, service_id: u8) -> bool {
+        let Ok(ecu) = self.uds_ecu_variant_detection_concluded(ecu_name).await else {
+            return false;
+        };
+        ecu.read()
+            .await
+            .lookup_diagcomms_by_request_prefix(&[service_id])
+            .is_ok()
+    }
+
     async fn ecu_exec_service_from_function_class(
         &self,
         ecu_name: &str,

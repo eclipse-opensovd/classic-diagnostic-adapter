@@ -773,36 +773,38 @@ pub struct FlashConfig {
 
 const COMPONENTS_PATH: &str = "/vehicle/v15/components";
 
-/// Returns the ECU name if `path` is the authentication mode path of an ECU.
-fn authentication_mode_path_ecu(path: &str) -> Option<&str> {
-    let ecu_and_mode = path.strip_prefix(COMPONENTS_PATH)?.strip_prefix('/')?;
-    let ecu = ecu_and_mode
-        .strip_suffix(sovd_interfaces::common::modes::AUTHENTICATION_ID)?
-        .strip_suffix("/modes/")?;
-    (!ecu.is_empty() && !ecu.contains('/')).then_some(ecu)
+/// Returns the ECU name and mode id if `path` is the path of a single ECU mode,
+/// i.e. `/vehicle/v15/components/{ecu}/modes/{mode}`.
+fn ecu_mode_path(path: &str) -> Option<(&str, &str)> {
+    let rest = path.strip_prefix(COMPONENTS_PATH)?.strip_prefix('/')?;
+    let (ecu, mode) = rest.split_once("/modes/")?;
+    (!ecu.is_empty() && !ecu.contains('/') && !mode.is_empty() && !mode.contains('/'))
+        .then_some((ecu, mode))
 }
 
-/// `OpenAPI` filter for the vehicle routes that hides paths of ECU features which are only
-/// known after variant detection.
+/// `OpenAPI` filter for the vehicle routes that hides the paths of ECU modes the ECU
+/// does not support.
 ///
-/// The ECU routes are registered before variant detection, so all ECUs get the
-/// `/modes/authentication` route. It is removed from the documentation of ECUs without
-/// Authentication (0x29) services, consistent with the `/modes` listing.
+/// The ECU routes are registered before variant detection, so all ECUs get all mode
+/// routes. Modes that depend on optional UDS services are removed from the documentation
+/// of ECUs whose detected variant lacks these services, consistent with the `/modes`
+/// listing (see [`components::ecu::modes::is_mode_available`]).
 pub(crate) fn vehicle_openapi_paths_filter<T: UdsEcu + Clone + Send + Sync + 'static>(
     uds: T,
 ) -> crate::OpenApiPathsFilter {
     Arc::new(move |mut paths: aide::openapi::Paths| {
         let uds = uds.clone();
         Box::pin(async move {
-            let auth_paths: Vec<(String, String)> = paths
+            let mode_paths: Vec<(String, String, String)> = paths
                 .paths
                 .keys()
                 .filter_map(|path| {
-                    authentication_mode_path_ecu(path).map(|ecu| (path.clone(), ecu.to_owned()))
+                    ecu_mode_path(path)
+                        .map(|(ecu, mode)| (path.clone(), ecu.to_owned(), mode.to_owned()))
                 })
                 .collect();
-            for (path, ecu) in auth_paths {
-                if !uds.has_authentication_services(&ecu).await {
+            for (path, ecu, mode) in mode_paths {
+                if !components::ecu::modes::is_mode_available(&uds, &ecu, &mode).await {
                     paths.paths.shift_remove(&path);
                 }
             }
@@ -1995,53 +1997,57 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn authentication_mode_path_ecu_matches_only_authentication_mode() {
+    fn ecu_mode_path_matches_only_single_ecu_modes() {
         assert_eq!(
-            authentication_mode_path_ecu("/vehicle/v15/components/ecu1/modes/authentication"),
-            Some("ecu1")
+            ecu_mode_path("/vehicle/v15/components/ecu1/modes/authentication"),
+            Some(("ecu1", "authentication"))
         );
         assert_eq!(
-            authentication_mode_path_ecu("/vehicle/v15/components/ecu1/modes/security"),
+            ecu_mode_path("/vehicle/v15/components/ecu1/modes/commctrl"),
+            Some(("ecu1", "commctrl"))
+        );
+        assert_eq!(ecu_mode_path("/vehicle/v15/components/ecu1/modes"), None);
+        assert_eq!(ecu_mode_path("/vehicle/v15/components/ecu1/modes/"), None);
+        assert_eq!(
+            ecu_mode_path("/vehicle/v15/components//modes/authentication"),
             None
         );
         assert_eq!(
-            authentication_mode_path_ecu("/vehicle/v15/components/ecu1/modes"),
+            ecu_mode_path("/vehicle/v15/components/a/b/modes/authentication"),
             None
         );
         assert_eq!(
-            authentication_mode_path_ecu("/vehicle/v15/components//modes/authentication"),
-            None
-        );
-        assert_eq!(
-            authentication_mode_path_ecu("/vehicle/v15/components/a/b/modes/authentication"),
+            ecu_mode_path("/vehicle/v15/functions/fg/modes/commctrl"),
             None
         );
     }
 
     #[tokio::test]
-    async fn openapi_filter_hides_authentication_mode_without_0x29_services() {
+    async fn openapi_filter_hides_unsupported_ecu_modes() {
         // The filter clones the UDS handle for every `openapi.json` request.
+        // ECU "full" has all optional mode services, ECU "minimal" none of them.
         let mut uds = cda_interfaces::mock::MockUdsEcu::new();
         uds.expect_clone().returning(|| {
             let mut clone = cda_interfaces::mock::MockUdsEcu::new();
             clone
                 .expect_has_authentication_services()
-                .returning(|ecu| ecu == "with_auth");
+                .returning(|ecu| ecu == "full");
+            clone
+                .expect_has_services_for_sid()
+                .returning(|ecu, _| ecu == "full");
             clone
         });
         let filter = vehicle_openapi_paths_filter(uds);
 
-        let paths = [
-            "/vehicle/v15/components/with_auth/modes/authentication",
-            "/vehicle/v15/components/without_auth/modes/authentication",
-            "/vehicle/v15/components/without_auth/modes/security",
-        ];
+        let modes = ["authentication", "commctrl", "security"];
         let mut input = aide::openapi::Paths::default();
-        for path in paths {
-            input.paths.insert(
-                path.to_owned(),
-                aide::openapi::ReferenceOr::Item(aide::openapi::PathItem::default()),
-            );
+        for ecu in ["full", "minimal"] {
+            for mode in modes {
+                input.paths.insert(
+                    format!("/vehicle/v15/components/{ecu}/modes/{mode}"),
+                    aide::openapi::ReferenceOr::Item(aide::openapi::PathItem::default()),
+                );
+            }
         }
 
         let output = filter(input).await;
@@ -2049,8 +2055,10 @@ pub(crate) mod tests {
         assert_eq!(
             remaining,
             vec![
-                "/vehicle/v15/components/with_auth/modes/authentication",
-                "/vehicle/v15/components/without_auth/modes/security",
+                "/vehicle/v15/components/full/modes/authentication",
+                "/vehicle/v15/components/full/modes/commctrl",
+                "/vehicle/v15/components/full/modes/security",
+                "/vehicle/v15/components/minimal/modes/security",
             ]
         );
     }
