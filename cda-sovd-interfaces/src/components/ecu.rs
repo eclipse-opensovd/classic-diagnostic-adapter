@@ -635,11 +635,12 @@ pub mod faults {
         /// Query parameters for filtering DTC by the given fields.
         #[serde(rename_all = "camelCase")]
         pub struct FaultQuery {
-            /// Filters the elements based on a status, if the value ia a full match.
-            /// To allow multiple values the parameter is repeated. (0..*), they are 'OR' combined.
-            /// Currently supported  (case-insensitive) keys are:
+            /// Filters the elements based on their status. Each key selects a status bit,
+            /// all selected bits are 'OR' combined into the UDS status mask, so a fault is
+            /// returned if any of the selected bits is set.
+            /// Currently supported (case-insensitive) keys are:
             /// * confirmedDtc
-            /// * mask
+            /// * mask (raw status mask as hex, e.g. `29` or `0x29`)
             /// * pendingDtc
             /// * testFailed
             /// * testFailedSinceLastClear
@@ -648,8 +649,9 @@ pub mod faults {
             /// * testNotCompletedThisOperationCycle
             /// * warningIndicatorRequested
             ///
-            /// Additional keys are not read from the database at this time.
-            /// The value can be allowed values for these keys are 0|1 or true|false.
+            /// Other keys are ignored. For the bit keys the allowed values are 0|1 or
+            /// true|false. If no bit is selected, all faults are returned.
+            /// A mask of 0 is treated like no filter.
             ///
             /// Example:
             ///
@@ -773,6 +775,30 @@ mod tests {
         assert!(query_with_schema.include_extended_data);
         assert!(!query_with_schema.include_snapshot_data);
         assert!(query_with_schema.include_schema);
+    }
+
+    #[test]
+    fn test_deserialize_fault_status_query() {
+        for query_str in [
+            "status[confirmedDtc]=true&status[MASK]=0x29",
+            "status%5BconfirmedDtc%5D=true&status%5BMASK%5D=0x29",
+        ] {
+            let query: super::faults::get::FaultQuery = serde_qs::Config::new()
+                .use_form_encoding(true)
+                .deserialize_str(query_str)
+                .expect("Query should deserialize");
+            let status = query.status.expect("Status should be present");
+            assert_eq!(
+                status.get("confirmedDtc"),
+                Some(&serde_json::json!("true")),
+                "query {query_str}"
+            );
+            assert_eq!(
+                status.get("MASK"),
+                Some(&serde_json::json!("0x29")),
+                "query {query_str}"
+            );
+        }
     }
 
     mod flash_requests {

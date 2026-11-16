@@ -117,8 +117,10 @@ where
     let binary_encoding_layer = axum::Extension(sovd::binary_encoding::DefaultBinaryEncoding(
         binary_encoding,
     ));
-    let service_with_middleware = middleware
-        .layer(trim_trailing_slash_middleware.layer(binary_encoding_layer.layer(service)));
+    let service_with_middleware = middleware.layer(
+        trim_trailing_slash_middleware
+            .layer(binary_encoding_layer.layer(query_config_layer().layer(service))),
+    );
 
     let serve_future: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = match config {
         WebServerConfig::UnixSocket { path: socket_path } => {
@@ -320,6 +322,17 @@ pub async fn add_openapi_routes(dynamic_router: &DynamicRouter) {
                 .route(OPENAPI_JSON_ROUTE, openapi_route)
         }))
         .await;
+}
+
+/// Configures the `QsQuery` extractor for all routes.
+/// Form encoding percent-decodes keys before parsing nested keys, so
+/// `status%5BconfirmedDtc%5D=1` (as sent by most HTTP clients) is handled like
+/// `status[confirmedDtc]=1`. Without it, encoded brackets stay part of the key.
+fn query_config_layer() -> axum::Extension<serde_qs::axum::QsQueryConfig> {
+    axum::Extension(
+        serde_qs::axum::QsQueryConfig::new()
+            .config(serde_qs::Config::new().use_form_encoding(true)),
+    )
 }
 
 fn rewrite_request_uri<B>(mut req: Request<B>) -> Request<B> {
