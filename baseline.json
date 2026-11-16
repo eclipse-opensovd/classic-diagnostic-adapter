@@ -1110,15 +1110,6 @@
       "crate": "cda-storage"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/connections.rs",
-      "function": "try_read",
-      "line": 515,
-      "cyclomatic": 11.0,
-      "coverage": 66.66666666666666,
-      "crap": 15.481481481481488,
-      "crate": "cda-comm-doip"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel.rs",
       "function": "DiagDataValue::new",
       "line": 61,
@@ -1308,6 +1299,15 @@
       "crate": "opensovd-cda"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/topology.rs",
+      "function": "derive_can_topology",
+      "line": 152,
+      "cyclomatic": 13.0,
+      "coverage": 83.60655737704919,
+      "crap": 13.744555711711552,
+      "crate": "cda-comm-can"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/lib.rs",
       "function": "DoipDiagGateway::connect_direct",
       "line": 1246,
@@ -1333,15 +1333,6 @@
       "coverage": 78.08219178082192,
       "crap": 13.516190809142017,
       "crate": "cda-core"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
-      "function": "CanDiagGateway::add_connections_from_com_params",
-      "line": 288,
-      "cyclomatic": 6.0,
-      "coverage": 40.909090909090914,
-      "crap": 13.427873779113446,
-      "crate": "cda-comm-can"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/util.rs",
@@ -1398,6 +1389,15 @@
       "crate": "cda-core"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/connections.rs",
+      "function": "try_read",
+      "line": 515,
+      "cyclomatic": 11.0,
+      "coverage": 73.80952380952381,
+      "crap": 13.173779829392073,
+      "crate": "cda-comm-doip"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/error.rs",
       "function": "ApiError::from",
       "line": 142,
@@ -1432,15 +1432,6 @@
       "coverage": 94.73684210526315,
       "crap": 13.024639160227439,
       "crate": "cda-storage"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
-      "function": "CanDiagGateway::new",
-      "line": 155,
-      "cyclomatic": 13.0,
-      "coverage": 100.0,
-      "crap": 13.0,
-      "crate": "cda-comm-can"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups.rs",
@@ -1630,15 +1621,6 @@
       "coverage": 0.0,
       "crap": 12.0,
       "crate": "cda-core"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
-      "function": "CanDiagGateway::get_gateway_network_address",
-      "line": 679,
-      "cyclomatic": 3.0,
-      "coverage": 0.0,
-      "crap": 12.0,
-      "crate": "cda-comm-can"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/query.rs",
@@ -2255,7 +2237,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "DiagCommType::try_from",
-      "line": 300,
+      "line": 302,
       "cyclomatic": 7.0,
       "coverage": 63.63636363636363,
       "crap": 9.356123215627349,
@@ -2449,15 +2431,6 @@
       "coverage": 100.0,
       "crap": 9.0,
       "crate": "opensovd-cda"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
-      "function": "CanDiagGateway::enable",
-      "line": 768,
-      "cyclomatic": 7.0,
-      "coverage": 68.75,
-      "crap": 8.495361328125,
-      "crate": "cda-comm-can"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/payload_decode.rs",
@@ -2741,7 +2714,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "DiagCommAction::fmt",
-      "line": 529,
+      "line": 531,
       "cyclomatic": 6.0,
       "coverage": 62.5,
       "crap": 7.8984375,
@@ -3090,6 +3063,15 @@
       "crate": "cda-comm-doip"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
+      "function": "CanDiagGateway::enable",
+      "line": 646,
+      "cyclomatic": 7.0,
+      "coverage": 100.0,
+      "crap": 7.0,
+      "crate": "cda-comm-can"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-transport-router/src/lib.rs",
       "function": "DiagnosticTransportRouter::resolve_transport",
       "line": 187,
@@ -3216,6 +3198,15 @@
       "crate": "cda-sovd"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/topology.rs",
+      "function": "add_connections_from_com_params",
+      "line": 268,
+      "cyclomatic": 6.0,
+      "coverage": 73.91304347826086,
+      "crap": 6.639105777923893,
+      "crate": "cda-comm-can"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/mdd.rs",
       "function": "load_single_mdd",
       "line": 517,
@@ -3254,7 +3245,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/keepalive.rs",
       "function": "open_broadcast_socket",
-      "line": 160,
+      "line": 178,
       "cyclomatic": 5.0,
       "coverage": 60.0,
       "crap": 6.6000000000000005,
@@ -3286,6 +3277,15 @@
       "coverage": 75.55555555555556,
       "crap": 6.525827160493828,
       "crate": "cda-sovd"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/connection_receiver.rs",
+      "function": "handle_send_pending",
+      "line": 31,
+      "cyclomatic": 5.0,
+      "coverage": 61.53846153846154,
+      "crap": 6.422394173873464,
+      "crate": "cda-comm-doip"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-plugin-communication-management/src/lifecycle/controller.rs",
@@ -3522,15 +3522,6 @@
       "crate": "cda-sovd"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/connection_receiver.rs",
-      "function": "handle_send_pending",
-      "line": 31,
-      "cyclomatic": 5.0,
-      "coverage": 65.38461538461539,
-      "crap": 6.036925352753755,
-      "crate": "cda-comm-doip"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/uds.rs",
       "function": "pending_nrc_from_raw",
       "line": 210,
@@ -3668,7 +3659,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "DiagCommType::service_prefixes",
-      "line": 376,
+      "line": 378,
       "cyclomatic": 6.0,
       "coverage": 100.0,
       "crap": 6.0,
@@ -3801,18 +3792,9 @@
       "crate": "cda-build"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
-      "function": "CanDiagGateway::is_ecu_discovered",
-      "line": 446,
-      "cyclomatic": 2.0,
-      "coverage": 0.0,
-      "crap": 6.0,
-      "crate": "cda-comm-can"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::DoipStub::state",
-      "line": 320,
+      "line": 324,
       "cyclomatic": 2.0,
       "coverage": 0.0,
       "crap": 6.0,
@@ -4287,15 +4269,6 @@
       "crate": "cda-core"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/lib.rs",
-      "function": "read_ecu_responses",
-      "line": 1521,
-      "cyclomatic": 4.0,
-      "coverage": 51.92307692307693,
-      "crap": 5.77799271734183,
-      "crate": "cda-comm-doip"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/apps/sovd2uds/bulk_data/flash_files.rs",
       "function": "get",
       "line": 129,
@@ -4316,10 +4289,19 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/connection.rs",
       "function": "CanExchange::read_response",
-      "line": 199,
+      "line": 197,
       "cyclomatic": 4.0,
       "coverage": 53.333333333333336,
       "crap": 5.626074074074074,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/probe.rs",
+      "function": "CanDiagGateway::probe_sequence_once",
+      "line": 116,
+      "cyclomatic": 5.0,
+      "coverage": 71.11111111111111,
+      "crap": 5.602743484224965,
       "crate": "cda-comm-can"
     },
     {
@@ -4339,15 +4321,6 @@
       "coverage": 73.68421052631578,
       "crap": 5.455605773436361,
       "crate": "cda-core"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/probe.rs",
-      "function": "CanDiagGateway::probe_sequence_once",
-      "line": 116,
-      "cyclomatic": 5.0,
-      "coverage": 73.80952380952381,
-      "crap": 5.449128063923982,
-      "crate": "cda-comm-can"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-database/src/datatypes/diag_coded_type.rs",
@@ -4377,12 +4350,21 @@
       "crate": "cda-sovd"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
-      "function": "CanDiagGateway::validate_can_pins",
-      "line": 368,
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/topology.rs",
+      "function": "validate_can_pins",
+      "line": 350,
       "cyclomatic": 4.0,
       "coverage": 56.00000000000001,
       "crap": 5.362944,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/topology.rs",
+      "function": "LogicalAddresses::register",
+      "line": 399,
+      "cyclomatic": 5.0,
+      "coverage": 76.47058823529412,
+      "crap": 5.325666598819459,
       "crate": "cda-comm-can"
     },
     {
@@ -4600,6 +4582,15 @@
       "coverage": 90.9090909090909,
       "crap": 5.018782870022539,
       "crate": "cda-plugin-topology"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/probe.rs",
+      "function": "CanDiagGateway::discover_ecus",
+      "line": 194,
+      "cyclomatic": 5.0,
+      "coverage": 91.66666666666666,
+      "crap": 5.014467592592593,
+      "crate": "cda-comm-can"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-plugin-runtime-update/src/storage.rs",
@@ -5106,6 +5097,15 @@
       "crate": "cda-sovd"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/lib.rs",
+      "function": "read_ecu_responses",
+      "line": 1521,
+      "cyclomatic": 4.0,
+      "coverage": 71.15384615384616,
+      "crap": 4.384046426945835,
+      "crate": "cda-comm-doip"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/locks/handlers/common.rs",
       "function": "post_handler",
       "line": 349,
@@ -5113,6 +5113,15 @@
       "coverage": 73.07692307692307,
       "crap": 4.312243969048703,
       "crate": "cda-sovd"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/connection.rs",
+      "function": "CanEcuConnection::begin_exchange",
+      "line": 130,
+      "cyclomatic": 3.0,
+      "coverage": 47.368421052631575,
+      "crap": 4.31214462749672,
+      "crate": "cda-comm-can"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
@@ -5214,6 +5223,15 @@
       "crate": "cda-interfaces"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/probe.rs",
+      "function": "CanDiagGateway::probe_connection",
+      "line": 82,
+      "cyclomatic": 4.0,
+      "coverage": 80.95238095238095,
+      "crap": 4.110571212612029,
+      "crate": "cda-comm-can"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/local_storage.rs",
       "function": "LocalStorageCommitter::discard",
       "line": 392,
@@ -5252,7 +5270,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "DiagCommAction::from",
-      "line": 268,
+      "line": 270,
       "cyclomatic": 4.0,
       "coverage": 83.33333333333334,
       "crap": 4.0740740740740735,
@@ -5284,15 +5302,6 @@
       "coverage": 84.61538461538461,
       "crap": 4.058261265361857,
       "crate": "cda-sovd"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/probe.rs",
-      "function": "CanDiagGateway::probe_connection",
-      "line": 82,
-      "cyclomatic": 4.0,
-      "coverage": 85.0,
-      "crap": 4.054,
-      "crate": "cda-comm-can"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-database/src/datatypes.rs",
@@ -5383,15 +5392,6 @@
       "coverage": 88.0,
       "crap": 4.027648,
       "crate": "cda-database"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/probe.rs",
-      "function": "CanDiagGateway::discover_ecus",
-      "line": 194,
-      "cyclomatic": 4.0,
-      "coverage": 88.23529411764706,
-      "crap": 4.026053327905557,
-      "crate": "cda-comm-can"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/apps/sovd2uds/operations.rs",
@@ -5518,6 +5518,15 @@
       "coverage": 92.3076923076923,
       "crap": 4.007282658170232,
       "crate": "cda-core"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/vehicle.rs",
+      "function": "init_can_gateway",
+      "line": 464,
+      "cyclomatic": 4.0,
+      "coverage": 92.3076923076923,
+      "crap": 4.007282658170232,
+      "crate": "opensovd-cda"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/security.rs",
@@ -5827,8 +5836,17 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
-      "function": "CanDiagGateway::ecu_online",
-      "line": 653,
+      "function": "CanDiagGateway::get_gateway_network_address",
+      "line": 563,
+      "cyclomatic": 4.0,
+      "coverage": 100.0,
+      "crap": 4.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/keepalive.rs",
+      "function": "broadcast_action",
+      "line": 217,
       "cyclomatic": 4.0,
       "coverage": 100.0,
       "crap": 4.0,
@@ -6250,17 +6268,8 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/connection.rs",
-      "function": "CanEcuConnection::begin_exchange",
-      "line": 132,
-      "cyclomatic": 3.0,
-      "coverage": 69.23076923076923,
-      "crap": 3.262175694128357,
-      "crate": "cda-comm-can"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/connection.rs",
       "function": "CanEcuConnection::probe_with_payload",
-      "line": 160,
+      "line": 161,
       "cyclomatic": 3.0,
       "coverage": 69.23076923076923,
       "crap": 3.262175694128357,
@@ -6274,6 +6283,15 @@
       "coverage": 70.0,
       "crap": 3.2430000000000003,
       "crate": "cda-plugin-communication-management"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
+      "function": "CanDiagGateway::send",
+      "line": 349,
+      "cyclomatic": 3.0,
+      "coverage": 71.42857142857143,
+      "crap": 3.2099125364431487,
+      "crate": "cda-comm-can"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
@@ -6319,15 +6337,6 @@
       "coverage": 77.77777777777779,
       "crap": 3.0987654320987654,
       "crate": "cda-plugin-communication-management"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
-      "function": "CanDiagGateway::send",
-      "line": 478,
-      "cyclomatic": 3.0,
-      "coverage": 79.22077922077922,
-      "crap": 3.080747722508559,
-      "crate": "cda-comm-can"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/ecu_connection.rs",
@@ -6733,15 +6742,6 @@
       "coverage": 90.9090909090909,
       "crap": 3.006761833208114,
       "crate": "cda-comm-uds"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/vehicle.rs",
-      "function": "init_can_gateway",
-      "line": 464,
-      "cyclomatic": 3.0,
-      "coverage": 91.66666666666666,
-      "crap": 3.0052083333333335,
-      "crate": "opensovd-cda"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/reconnect.rs",
@@ -7501,8 +7501,8 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
-      "function": "CanDiagGateway::is_reserved_can_id",
-      "line": 422,
+      "function": "CanDiagGateway::ecu_online",
+      "line": 531,
       "cyclomatic": 3.0,
       "coverage": 100.0,
       "crap": 3.0,
@@ -7511,7 +7511,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
       "function": "CanDiagGateway::route_status",
-      "line": 728,
+      "line": 612,
       "cyclomatic": 3.0,
       "coverage": 100.0,
       "crap": 3.0,
@@ -7520,7 +7520,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
       "function": "CanDiagGateway::disable",
-      "line": 849,
+      "line": 730,
       "cyclomatic": 3.0,
       "coverage": 100.0,
       "crap": 3.0,
@@ -7529,7 +7529,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::DoipStub::enable",
-      "line": 294,
+      "line": 298,
       "cyclomatic": 3.0,
       "coverage": 100.0,
       "crap": 3.0,
@@ -7547,7 +7547,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/connection.rs",
       "function": "CanEcuConnection::open_socket",
-      "line": 59,
+      "line": 57,
       "cyclomatic": 3.0,
       "coverage": 100.0,
       "crap": 3.0,
@@ -7556,7 +7556,16 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/connection.rs",
       "function": "CanEcuConnection::resolve_addressing",
-      "line": 89,
+      "line": 87,
+      "cyclomatic": 3.0,
+      "coverage": 100.0,
+      "crap": 3.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/topology.rs",
+      "function": "is_reserved_can_id",
+      "line": 428,
       "cyclomatic": 3.0,
       "coverage": 100.0,
       "crap": 3.0,
@@ -8202,15 +8211,6 @@
       "crate": "cda-plugin-runtime-update"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
-      "function": "CanDiagGateway::register_logical_address",
-      "line": 405,
-      "cyclomatic": 2.0,
-      "coverage": 75.0,
-      "crap": 2.0625,
-      "crate": "cda-comm-can"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/session.rs",
       "function": "UdsManager::defer_reset",
       "line": 120,
@@ -8339,7 +8339,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
       "function": "check_answer_or_report",
-      "line": 102,
+      "line": 184,
       "cyclomatic": 2.0,
       "coverage": 81.25,
       "crap": 2.0263671875,
@@ -8510,7 +8510,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::DoipStub::ecu_online",
-      "line": 225,
+      "line": 229,
       "cyclomatic": 2.0,
       "coverage": 90.0,
       "crap": 2.004,
@@ -8542,15 +8542,6 @@
       "coverage": 90.9090909090909,
       "crap": 2.0030052592036065,
       "crate": "cda-core"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
-      "function": "CanDiagGateway::probe_ecu",
-      "line": 741,
-      "cyclomatic": 2.0,
-      "coverage": 90.9090909090909,
-      "crap": 2.0030052592036065,
-      "crate": "cda-comm-can"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/lock_state.rs",
@@ -9014,7 +9005,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionActivity::wait_until_idle",
-      "line": 155,
+      "line": 157,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -9023,7 +9014,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "DiagComm::fmt",
-      "line": 518,
+      "line": 520,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10219,8 +10210,44 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
+      "function": "forget_discovery",
+      "line": 101,
+      "cyclomatic": 2.0,
+      "coverage": 100.0,
+      "crap": 2.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
+      "function": "CanDiagGateway::build",
+      "line": 242,
+      "cyclomatic": 2.0,
+      "coverage": 100.0,
+      "crap": 2.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
+      "function": "CanDiagGateway::probe_target",
+      "line": 291,
+      "cyclomatic": 2.0,
+      "coverage": 100.0,
+      "crap": 2.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
+      "function": "CanDiagGateway::probe_and_record",
+      "line": 311,
+      "cyclomatic": 2.0,
+      "coverage": 100.0,
+      "crap": 2.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
       "function": "CanDiagGateway::send_functional",
-      "line": 701,
+      "line": 585,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10229,7 +10256,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
       "function": "CanDiagGateway::shutdown",
-      "line": 759,
+      "line": 637,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -10337,7 +10364,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::DoipStub::get_gateway_network_address",
-      "line": 258,
+      "line": 262,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10346,7 +10373,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::DoipStub::route_status",
-      "line": 271,
+      "line": 275,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -10355,7 +10382,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::DoipStub::probe_ecu",
-      "line": 279,
+      "line": 283,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10364,7 +10391,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::DoipStub::disable",
-      "line": 309,
+      "line": 313,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -10373,7 +10400,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::EcuStub::tester_address",
-      "line": 332,
+      "line": 336,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10382,7 +10409,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::EcuStub::logical_address",
-      "line": 335,
+      "line": 339,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10391,7 +10418,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::EcuStub::logical_gateway_address",
-      "line": 338,
+      "line": 342,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10400,7 +10427,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::EcuStub::logical_functional_address",
-      "line": 341,
+      "line": 345,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10409,7 +10436,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::EcuStub::ecu_name",
-      "line": 344,
+      "line": 348,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10418,7 +10445,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::EcuStub::logical_address_eq",
-      "line": 347,
+      "line": 351,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -10436,16 +10463,16 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/connection.rs",
       "function": "CanEcuConnection::send_receive",
-      "line": 116,
+      "line": 114,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
       "crate": "cda-comm-can"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/connection.rs",
-      "function": "CanEcuConnection::fmt",
-      "line": 222,
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/topology.rs",
+      "function": "CanEcuAddressing::fmt",
+      "line": 67,
       "cyclomatic": 1.0,
       "coverage": 0.0,
       "crap": 2.0,
@@ -13710,6 +13737,15 @@
       "crate": "cda-tracing"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/rediscovery.rs",
+      "function": "CanDiagGateway::start_rediscovery",
+      "line": 48,
+      "cyclomatic": 1.0,
+      "coverage": 44.18604651162791,
+      "crap": 1.1738714830140742,
+      "crate": "cda-comm-can"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-database/src/datatypes/data_operation.rs",
       "function": "try_into",
       "line": 256,
@@ -13744,15 +13780,6 @@
       "coverage": 50.0,
       "crap": 1.125,
       "crate": "cda-sovd"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/rediscovery.rs",
-      "function": "CanDiagGateway::start_rediscovery",
-      "line": 46,
-      "cyclomatic": 1.0,
-      "coverage": 54.347826086956516,
-      "crap": 1.095144653571135,
-      "crate": "cda-comm-can"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-database/src/storage.rs",
@@ -13818,6 +13845,15 @@
       "crate": "cda-comm-doip"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/keepalive.rs",
+      "function": "start_keepalive_broadcast",
+      "line": 66,
+      "cyclomatic": 1.0,
+      "coverage": 64.28571428571429,
+      "crap": 1.0455539358600583,
+      "crate": "cda-comm-can"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/apps/sovd2uds/bulk_data/runtimefiles.rs",
       "function": "bulk_data_created_response",
       "line": 158,
@@ -13825,15 +13861,6 @@
       "coverage": 64.28571428571429,
       "crap": 1.0455539358600583,
       "crate": "cda-sovd"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/keepalive.rs",
-      "function": "start_keepalive_broadcast",
-      "line": 64,
-      "cyclomatic": 1.0,
-      "coverage": 67.3469387755102,
-      "crap": 1.0348154255454785,
-      "crate": "cda-comm-can"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/locks/cleanup.rs",
@@ -13917,6 +13944,15 @@
       "crate": "cda-comm-doip"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
+      "function": "CanDiagGateway::probe_ecu",
+      "line": 626,
+      "cyclomatic": 1.0,
+      "coverage": 83.33333333333334,
+      "crap": 1.0046296296296295,
+      "crate": "cda-comm-can"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/lock_state.rs",
       "function": "LockState::insert_vehicle",
       "line": 314,
@@ -13969,6 +14005,15 @@
       "coverage": 87.5,
       "crap": 1.001953125,
       "crate": "opensovd-cda"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/connection_receiver.rs",
+      "function": "spawn_gateway_receiver_task",
+      "line": 255,
+      "cyclomatic": 1.0,
+      "coverage": 87.75510204081633,
+      "crap": 1.0018359697064998,
+      "crate": "cda-comm-doip"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/component_info.rs",
@@ -14113,15 +14158,6 @@
       "coverage": 90.9090909090909,
       "crap": 1.0007513148009015,
       "crate": "opensovd-cda"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/connection_receiver.rs",
-      "function": "spawn_gateway_receiver_task",
-      "line": 255,
-      "cyclomatic": 1.0,
-      "coverage": 91.83673469387756,
-      "crap": 1.000543991024148,
-      "crate": "cda-comm-doip"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/connection_receiver.rs",
@@ -15206,7 +15242,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionRequest::new",
-      "line": 98,
+      "line": 100,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15215,7 +15251,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionRequest::into_ecus",
-      "line": 103,
+      "line": 105,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15224,7 +15260,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionActivity::new",
-      "line": 123,
+      "line": 125,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15233,7 +15269,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionActivity::begin",
-      "line": 129,
+      "line": 131,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15242,7 +15278,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionActivity::is_idle",
-      "line": 138,
+      "line": 140,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15251,7 +15287,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionActivity::generation",
-      "line": 144,
+      "line": 146,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15260,7 +15296,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionActivity::subscribe",
-      "line": 150,
+      "line": 152,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15269,7 +15305,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionGuard::drop",
-      "line": 173,
+      "line": 175,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15278,7 +15314,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionSender::new",
-      "line": 191,
+      "line": 193,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15287,7 +15323,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionSender::send",
-      "line": 198,
+      "line": 200,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15296,7 +15332,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionReceiver::new",
-      "line": 214,
+      "line": 216,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15305,7 +15341,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionReceiver::recv",
-      "line": 218,
+      "line": 220,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15314,7 +15350,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "VariantDetectionReceiver::try_recv",
-      "line": 225,
+      "line": 227,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15323,7 +15359,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "DiagComm::new",
-      "line": 251,
+      "line": 253,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15332,7 +15368,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "DiagComm::action",
-      "line": 262,
+      "line": 264,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15341,7 +15377,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "TesterPresentType::is_functional",
-      "line": 356,
+      "line": 358,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15350,7 +15386,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "FunctionalDescriptionConfig::default",
-      "line": 403,
+      "line": 405,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15359,7 +15395,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "DiagServiceError::demotes_connectivity",
-      "line": 506,
+      "line": 508,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -15368,7 +15404,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lib.rs",
       "function": "shutdown_signal",
-      "line": 544,
+      "line": 546,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -16629,6 +16665,51 @@
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/lock_config.rs",
       "function": "LockConfig::resolve_exclusivity",
       "line": 124,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-interfaces"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/reloadable.rs",
+      "function": "Reloadable::read",
+      "line": 43,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-interfaces"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/reloadable.rs",
+      "function": "Reloadable::clone",
+      "line": 49,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-interfaces"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/reloadable.rs",
+      "function": "ReloadableOwner::new",
+      "line": 67,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-interfaces"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/reloadable.rs",
+      "function": "ReloadableOwner::reader",
+      "line": 75,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-interfaces"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/reloadable.rs",
+      "function": "ReloadableOwner::apply",
+      "line": 106,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19066,8 +19147,35 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
+      "function": "DiscoveredAs::from",
+      "line": 69,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
+      "function": "DiscoveredAs::from",
+      "line": 79,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
+      "function": "discovered_on_current",
+      "line": 88,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
       "function": "deadline_in",
-      "line": 52,
+      "line": 114,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19075,17 +19183,8 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
-      "function": "CanDiagGateway::validate_can_id",
-      "line": 432,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "cda-comm-can"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
-      "function": "CanDiagGateway::logical_address_for_ecu",
-      "line": 454,
+      "function": "CanDiagGateway::is_ecu_discovered",
+      "line": 274,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19094,7 +19193,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
       "function": "CanDiagGateway::is_ecu_discovered_by_name",
-      "line": 462,
+      "line": 284,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19102,8 +19201,8 @@
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
-      "function": "CanDiagGateway::get_connection",
-      "line": 467,
+      "function": "CanDiagGateway::prune_removed_ecus",
+      "line": 334,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19112,7 +19211,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
       "function": "CanDiagGateway::get_ecu_network_address",
-      "line": 689,
+      "line": 576,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19121,7 +19220,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
       "function": "CanDiagGateway::state",
-      "line": 873,
+      "line": 754,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19130,7 +19229,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
       "function": "CanDiagGateway::clone",
-      "line": 879,
+      "line": 760,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19139,7 +19238,34 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
       "function": "CanDiagGateway::clear_discovered",
-      "line": 903,
+      "line": 782,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
+      "function": "CanDiagGateway::test_functional_id",
+      "line": 786,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
+      "function": "CanDiagGateway::seed_discovered",
+      "line": 792,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
+      "function": "CanDiagGateway::discovered_names",
+      "line": 800,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19148,7 +19274,16 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
       "function": "CanDiagGateway::test_instance",
-      "line": 909,
+      "line": 808,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway.rs",
+      "function": "CanDiagGateway::reloadable_test_instance",
+      "line": 821,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19220,7 +19355,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::DoipStub::default",
-      "line": 196,
+      "line": 200,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19229,7 +19364,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::DoipStub::send",
-      "line": 214,
+      "line": 218,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19238,7 +19373,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::DoipStub::send_functional",
-      "line": 240,
+      "line": 244,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19247,7 +19382,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::DoipStub::shutdown",
-      "line": 286,
+      "line": 290,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19256,7 +19391,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::can_gateway_with_discovered_ecu1",
-      "line": 352,
+      "line": 356,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19265,7 +19400,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::pin_beats_detection",
-      "line": 370,
+      "line": 374,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19274,7 +19409,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::doip_preferred_at_first_detection",
-      "line": 389,
+      "line": 393,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19283,7 +19418,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::can_binding_is_sticky_and_has_no_failover",
-      "line": 403,
+      "line": 407,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19292,7 +19427,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::test_send_params",
-      "line": 431,
+      "line": 435,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19301,7 +19436,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::send_functional_prefers_doip",
-      "line": 450,
+      "line": 454,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19310,7 +19445,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::send_functional_over_can_is_not_supported_yet",
-      "line": 470,
+      "line": 474,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19319,7 +19454,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::send_functional_without_transports_is_offline",
-      "line": 494,
+      "line": 498,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19328,7 +19463,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::undetected_ecu_is_offline",
-      "line": 511,
+      "line": 515,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19337,7 +19472,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::router_lifecycle_fans_out_and_supports_re_enable",
-      "line": 525,
+      "line": 529,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19346,7 +19481,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::router_rolls_back_successful_gateway_after_partial_enable_failure",
-      "line": 547,
+      "line": 551,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19355,7 +19490,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::router_shutdowns_gateway_when_partial_enable_rollback_fails",
-      "line": 564,
+      "line": 568,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19364,7 +19499,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::router_gates_datapath_while_disabled",
-      "line": 587,
+      "line": 596,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19373,7 +19508,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::router_clones_share_lifecycle_state",
-      "line": 609,
+      "line": 618,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19382,7 +19517,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/lib.rs",
       "function": "transport_routing_tests::concurrent_router_enables_fan_out_once",
-      "line": 621,
+      "line": 630,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19392,6 +19527,15 @@
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/background.rs",
       "function": "BackgroundTask::new",
       "line": 34,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/rediscovery.rs",
+      "function": "CanDiagGateway::undiscovered_targets",
+      "line": 110,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19409,7 +19553,34 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/connection.rs",
       "function": "CanEcuConnection::new",
-      "line": 39,
+      "line": 37,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/connection.rs",
+      "function": "CanEcuConnection::addressing",
+      "line": 41,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/connection.rs",
+      "function": "CanEcuConnection::ecu_name",
+      "line": 45,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/connection.rs",
+      "function": "CanEcuConnection::request_id",
+      "line": 49,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19418,7 +19589,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/connection.rs",
       "function": "CanEcuConnection::verify_socket_openable",
-      "line": 107,
+      "line": 105,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -19427,7 +19598,97 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/connection.rs",
       "function": "CanEcuConnection::network_address",
-      "line": 180,
+      "line": 181,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/topology.rs",
+      "function": "CanEcuAddressing::new",
+      "line": 41,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/topology.rs",
+      "function": "CanEcuAddressing::network_address",
+      "line": 58,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/topology.rs",
+      "function": "CanTopology::new",
+      "line": 93,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/topology.rs",
+      "function": "CanTopology::connections",
+      "line": 108,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/topology.rs",
+      "function": "CanTopology::connection",
+      "line": 113,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/topology.rs",
+      "function": "CanTopology::has_connection",
+      "line": 118,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/topology.rs",
+      "function": "CanTopology::ecu_for_logical_address",
+      "line": 123,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/topology.rs",
+      "function": "CanTopology::logical_address_for_ecu",
+      "line": 128,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/topology.rs",
+      "function": "CanTopology::functional_id",
+      "line": 133,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "cda-comm-can"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-can/src/gateway/topology.rs",
+      "function": "validate_can_id",
+      "line": 438,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
