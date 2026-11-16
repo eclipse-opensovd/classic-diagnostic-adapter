@@ -236,7 +236,7 @@ run:
 	cargo +$(STABLE) run --locked --release -- $(ARGS)
 
 profile:
-	RUSTFLAGS="-C force-frame-pointers=yes" cargo +$(STABLE) build --profile release-with-debug --bin opensovd-cda --features heap-profiling
+	RUSTFLAGS="--cfg heap_profiling -C force-frame-pointers=yes" cargo +$(STABLE) build --profile release-with-debug --bin opensovd-cda
 
 depgraph:
 	cargo +$(STABLE) depgraph --target-deps --dedup-transitive-deps --workspace-only | dot -Tpng > depgraph.png
