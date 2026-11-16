@@ -1214,10 +1214,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         let num_items_diag_type: datatypes::DiagCodedType = num_items_dop.diag_coded_type()?;
 
+        // ISO 22901-1 7.3.5.4: without BYTE-POSITION the field starts at the byte edge
+        // following the previously extracted parameter. DETERMINE-NUMBER-OF-ITEMS and
+        // OFFSET are relative to this position (7.3.6.10.4).
         let param_abs_byte_pos = if param_ctx.parameter.has_byte_position() {
             param_ctx.abs_byte_pos()
         } else {
-            param_ctx.base_offset
+            uds_payload.last_read_byte_pos()
         };
         let (num_items_data, _count_field_bit_len) = num_items_diag_type.decode(
             uds_payload
@@ -1230,9 +1233,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
             determine_num_items.bit_position() as usize,
         )?;
 
+        // ISO 22901-1 7.3.6.10.4: the number of items is the *physical* value of the
+        // DETERMINE-NUMBER-OF-ITEMS DOP (of type A_UINT32), so its compu method applies.
+        let num_items_compu: Option<datatypes::CompuMethod> =
+            num_items_dop.compu_method().map(Into::into);
         let num_items_diag_val = operations::uds_data_to_serializable(
-            datatypes::DataType::UInt32, // Using hard coded UInt32 as per ISO 22901-1:2008
-            None,                        // Also according per spec, no compu method defined.
+            datatypes::DataType::UInt32,
+            num_items_compu.as_ref(),
             false,
             &num_items_data,
         )?;
@@ -1241,7 +1248,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
             DiagServiceError::InvalidDatabase("DynamicLengthField field is None".to_owned()),
         )?);
         let num_items: u32 = num_items_diag_val.try_into()?;
-        let num_items_byte_pos = determine_num_items.byte_position() as usize;
+        let num_items_byte_pos =
+            param_abs_byte_pos.saturating_add(determine_num_items.byte_position() as usize);
         uds_payload.set_last_read_byte_pos(num_items_byte_pos.saturating_add(num_items_data.len()));
 
         let mut repeated_data = Vec::new();
@@ -2081,6 +2089,7 @@ mod tests {
         EndOfPduStructureType, SID_PARM_NAME, create_ecu_manager_dlf_sibling_no_byte_pos,
         create_ecu_manager_env_data_no_wildcard, create_ecu_manager_with_dtc,
         create_ecu_manager_with_dynamic_length_field_service,
+        create_ecu_manager_with_dynamic_length_field_service_and_count_compu,
         create_ecu_manager_with_end_pdu_service, create_ecu_manager_with_env_data_desc,
         create_ecu_manager_with_env_data_desc_wildcard, create_ecu_manager_with_mux_service,
         create_ecu_manager_with_mux_service_and_default_case,
@@ -2397,6 +2406,26 @@ mod tests {
                    { "item_param": 0x1122 },
                    { "item_param": 0x3344 },
                    { "item_param": 0x5566 },
+                ],
+                "test_service_pos_sid": sid
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_map_dynamic_length_field_from_uds_count_with_compu_method() {
+        // phys = 2 * internal: the coded count 1 means 2 items
+        let (ecu_manager, service, sid) =
+            create_ecu_manager_with_dynamic_length_field_service_and_count_compu(Some((0.0, 2.0)));
+        assert_uds_converts_to_json(
+            &ecu_manager,
+            &service,
+            vec![sid, 0x01, 0x11, 0x22, 0x33, 0x44],
+            json!({
+                "pos_response_param": [
+                   { "item_param": 0x1122 },
+                   { "item_param": 0x3344 },
                 ],
                 "test_service_pos_sid": sid
             }),

@@ -1303,6 +1303,40 @@ impl<'a> EcuDataBuilder<'a> {
         dataformat::SpecificDOPData::tag_as_dynamic_length_field(dynamic_length_field)
     }
 
+    /// Creates a `LINEAR` compu method `phys = (offset + factor * internal) / denominator`.
+    pub fn create_linear_compu_method(
+        &mut self,
+        offset: f64,
+        factor: f64,
+        denominator: f64,
+    ) -> WIPOffset<dataformat::CompuMethod<'a>> {
+        let numerator = self.fbb.create_vector(&[offset, factor]);
+        let denominator = self.fbb.create_vector(&[denominator]);
+        let coeffs = dataformat::CompuRationalCoEffs::create(
+            &mut self.fbb,
+            &dataformat::CompuRationalCoEffsArgs {
+                numerator: Some(numerator),
+                denominator: Some(denominator),
+            },
+        );
+        let scale = dataformat::CompuScale::create(
+            &mut self.fbb,
+            &dataformat::CompuScaleArgs {
+                rational_co_effs: Some(coeffs),
+                ..Default::default()
+            },
+        );
+        let scales = self.fbb.create_vector(&[scale]);
+        let itp = dataformat::CompuInternalToPhys::create(
+            &mut self.fbb,
+            &dataformat::CompuInternalToPhysArgs {
+                compu_scales: Some(scales),
+                ..Default::default()
+            },
+        );
+        self.create_compu_method(CompuCategory::Linear, Some(itp), None)
+    }
+
     pub fn create_mux_dop(
         &mut self,
         name: &str,
