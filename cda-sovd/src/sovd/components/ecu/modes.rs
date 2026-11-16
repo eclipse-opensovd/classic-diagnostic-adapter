@@ -628,6 +628,25 @@ pub(crate) mod authentication {
         .into_response()
     }
 
+    /// Returns a `404 Not Found` response if the ECU has no Authentication (0x29)
+    /// services, consistent with `/modes` not listing the mode for such ECUs.
+    async fn authentication_unavailable_response<T: UdsEcu>(
+        uds: &T,
+        ecu_name: &str,
+        include_schema: bool,
+    ) -> Option<Response> {
+        if uds.has_authentication_services(ecu_name).await {
+            None
+        } else {
+            Some(error_response(
+                ApiError::NotFound(Some(format!(
+                    "ECU '{ecu_name}' does not support the authentication mode"
+                ))),
+                include_schema,
+            ))
+        }
+    }
+
     /// Builds the GET response from the tracked state.
     pub(crate) fn get_response(
         state: &AuthenticationState,
@@ -660,6 +679,11 @@ pub(crate) mod authentication {
     ) -> Response {
         let include_schema = query.include_schema;
         require_ecu_access!(read, security_plugin, &ecu_name, &locks, include_schema);
+        if let Some(response) =
+            authentication_unavailable_response(&uds, &ecu_name, include_schema).await
+        {
+            return response;
+        }
 
         let offline = match uds.get_ecu_state(&ecu_name).await {
             Ok(state) => state.connectivity == Connectivity::Offline,
@@ -764,6 +788,11 @@ pub(crate) mod authentication {
             Ok(guard) => guard,
             Err(error) => return error.into_response(),
         };
+        if let Some(response) =
+            authentication_unavailable_response(&uds, &ecu_name, include_schema).await
+        {
+            return response;
+        }
         // Keep the UDS operation and its state update alive if the HTTP request
         // is cancelled after transmission. Cleanup waits for this guard.
         let task = cda_interfaces::spawn_named!("ecu-authentication", async move {
@@ -1306,6 +1335,7 @@ mod tests {
 
     async fn get_handler_value(connectivity: Connectivity) -> Option<String> {
         let mut uds = MockUdsEcu::new();
+        uds.expect_has_authentication_services().returning(|_| true);
         uds.expect_get_ecu_state().returning(move |_| {
             Ok(EcuState {
                 connectivity,
@@ -1341,6 +1371,35 @@ mod tests {
             .pointer("/value")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
+    }
+
+    #[tokio::test]
+    async fn get_handler_returns_not_found_without_authentication_services() {
+        let mut uds = MockUdsEcu::new();
+        uds.expect_has_authentication_services()
+            .returning(|_| false);
+        let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
+            ECU.to_owned(),
+            uds,
+            MockFileManager::new(),
+        );
+
+        let response = authentication::get::<MockUdsEcu, MockFileManager>(
+            UseApi(
+                Secured(Box::new(TestSecurityPlugin)),
+                std::marker::PhantomData,
+            ),
+            WithRejection(
+                Query(sovd_modes::Query {
+                    include_schema: false,
+                }),
+                std::marker::PhantomData,
+            ),
+            State(state),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

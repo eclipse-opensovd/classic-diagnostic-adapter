@@ -771,6 +771,46 @@ pub struct FlashConfig {
     pub functional_class_default: String,
 }
 
+const COMPONENTS_PATH: &str = "/vehicle/v15/components";
+
+/// Returns the ECU name if `path` is the authentication mode path of an ECU.
+fn authentication_mode_path_ecu(path: &str) -> Option<&str> {
+    let ecu_and_mode = path.strip_prefix(COMPONENTS_PATH)?.strip_prefix('/')?;
+    let ecu = ecu_and_mode
+        .strip_suffix(sovd_interfaces::common::modes::AUTHENTICATION_ID)?
+        .strip_suffix("/modes/")?;
+    (!ecu.is_empty() && !ecu.contains('/')).then_some(ecu)
+}
+
+/// `OpenAPI` filter for the vehicle routes that hides paths of ECU features which are only
+/// known after variant detection.
+///
+/// The ECU routes are registered before variant detection, so all ECUs get the
+/// `/modes/authentication` route. It is removed from the documentation of ECUs without
+/// Authentication (0x29) services, consistent with the `/modes` listing.
+pub(crate) fn vehicle_openapi_paths_filter<T: UdsEcu + Clone + Send + Sync + 'static>(
+    uds: T,
+) -> crate::OpenApiPathsFilter {
+    Arc::new(move |mut paths: aide::openapi::Paths| {
+        let uds = uds.clone();
+        Box::pin(async move {
+            let auth_paths: Vec<(String, String)> = paths
+                .paths
+                .keys()
+                .filter_map(|path| {
+                    authentication_mode_path_ecu(path).map(|ecu| (path.clone(), ecu.to_owned()))
+                })
+                .collect();
+            for (path, ecu) in auth_paths {
+                if !uds.has_authentication_services(&ecu).await {
+                    paths.paths.shift_remove(&path);
+                }
+            }
+            paths
+        })
+    })
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "Combining parameters into a struct is not preferred here, to keep route setup \
@@ -959,10 +999,8 @@ async fn components_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + '
     state: WebserverState<T>,
     file_manager: &mut HashMap<String, U>,
 ) -> Router<WebserverState<T>> {
-    let mut router = Router::new().api_route(
-        "/vehicle/v15/components",
-        get_with(get_components, docs_components),
-    );
+    let mut router =
+        Router::new().api_route(COMPONENTS_PATH, get_with(get_components, docs_components));
     let mut ecus = state.uds.get_physical_ecus().await;
     for ecu_name in ecus.drain(0..) {
         match ecu_route::<T, U>(&ecu_name, &state, file_manager) {
@@ -1002,7 +1040,7 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
             ))
         })?),
     };
-    let ecu_path = format!("/vehicle/v15/components/{ecu_lower}");
+    let ecu_path = format!("{COMPONENTS_PATH}/{ecu_lower}");
 
     let router = Router::new()
         .api_route(
@@ -1954,6 +1992,67 @@ pub(crate) mod tests {
             sovd_ecu::State::NoVariantDetected
         );
         assert_eq!(assumed(VariantState::Duplicate), sovd_ecu::State::Duplicate);
+    }
+
+    #[test]
+    fn authentication_mode_path_ecu_matches_only_authentication_mode() {
+        assert_eq!(
+            authentication_mode_path_ecu("/vehicle/v15/components/ecu1/modes/authentication"),
+            Some("ecu1")
+        );
+        assert_eq!(
+            authentication_mode_path_ecu("/vehicle/v15/components/ecu1/modes/security"),
+            None
+        );
+        assert_eq!(
+            authentication_mode_path_ecu("/vehicle/v15/components/ecu1/modes"),
+            None
+        );
+        assert_eq!(
+            authentication_mode_path_ecu("/vehicle/v15/components//modes/authentication"),
+            None
+        );
+        assert_eq!(
+            authentication_mode_path_ecu("/vehicle/v15/components/a/b/modes/authentication"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn openapi_filter_hides_authentication_mode_without_0x29_services() {
+        // The filter clones the UDS handle for every `openapi.json` request.
+        let mut uds = cda_interfaces::mock::MockUdsEcu::new();
+        uds.expect_clone().returning(|| {
+            let mut clone = cda_interfaces::mock::MockUdsEcu::new();
+            clone
+                .expect_has_authentication_services()
+                .returning(|ecu| ecu == "with_auth");
+            clone
+        });
+        let filter = vehicle_openapi_paths_filter(uds);
+
+        let paths = [
+            "/vehicle/v15/components/with_auth/modes/authentication",
+            "/vehicle/v15/components/without_auth/modes/authentication",
+            "/vehicle/v15/components/without_auth/modes/security",
+        ];
+        let mut input = aide::openapi::Paths::default();
+        for path in paths {
+            input.paths.insert(
+                path.to_owned(),
+                aide::openapi::ReferenceOr::Item(aide::openapi::PathItem::default()),
+            );
+        }
+
+        let output = filter(input).await;
+        let remaining: Vec<&str> = output.paths.keys().map(String::as_str).collect();
+        assert_eq!(
+            remaining,
+            vec![
+                "/vehicle/v15/components/with_auth/modes/authentication",
+                "/vehicle/v15/components/without_auth/modes/security",
+            ]
+        );
     }
 
     pub fn create_test_webserver_state<T: UdsEcu + Clone, U: FileManager>(

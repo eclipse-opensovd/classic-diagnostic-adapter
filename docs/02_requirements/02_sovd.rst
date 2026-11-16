@@ -1291,6 +1291,9 @@ Authentication (UDS 29\ :sub:`16`)
     * Negative responses of the ECU (including NRC 34\ :sub:`16` and
       50\ :sub:`16` -- 5D\ :sub:`16`) must be reported to the client, including the NRC.
     * The endpoint is not provided for functional groups.
+    * The endpoint is only provided for ECUs whose diagnostic database contains at least one
+      Authentication service. For other ECUs it must not be listed in ``/modes`` nor
+      documented, and requests to it must be answered with ``404 Not Found``.
 
     **Rationale**
 

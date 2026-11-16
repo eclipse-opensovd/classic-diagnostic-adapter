@@ -29,7 +29,7 @@ use cda_interfaces::{
 };
 use cda_plugin_security::SecurityPluginLoader;
 use dynamic_router::DynamicRouter;
-pub use dynamic_router::{RouteGroupNotFound, RouteHandle};
+pub use dynamic_router::{ApiRoutes, OpenApiPathsFilter, RouteGroupNotFound, RouteHandle};
 pub use http::Method;
 use opensovd_axum_extra::ExtractHost;
 use sovd::apps::sovd2uds::bulk_data::runtimefiles::RuntimeUpdateRouteState;
@@ -248,13 +248,14 @@ where
 pub async fn build_vehicle_routes<T, M, S>(
     config: VehicleConfig,
     resources: VehicleResources<T, M>,
-) -> aide::axum::ApiRouter
+) -> ApiRoutes
 where
     T: UdsEcu + SchemaProvider + Clone + Send + Sync + 'static,
     M: FileManager + Send + Sync + 'static,
     S: SecurityPluginLoader,
 {
-    sovd::route::<T, M, S>(
+    let paths_filter = sovd::vehicle_openapi_paths_filter(resources.ecu_uds.clone());
+    let router = sovd::route::<T, M, S>(
         config.functional_group_config,
         config.components_config,
         &resources.ecu_uds,
@@ -267,7 +268,8 @@ where
         resources.communication_access,
         resources.doip_connect,
     )
-    .await
+    .await;
+    ApiRoutes::new(router).with_openapi_paths_filter(paths_filter)
 }
 
 /// Mounts the runtime-update HTTP routes onto the dynamic router and returns a handle to them.
@@ -297,7 +299,9 @@ where
     let operations_router =
         sovd::apps::sovd2uds::operations::runtimefilesupdate::routes::<S, P, L>(route_state);
     let router = bulk_data_router.merge(operations_router);
-    let handle = dynamic_router.add_routes(router.into()).await;
+    let handle = dynamic_router
+        .add_routes(aide::axum::ApiRouter::from(router))
+        .await;
     for path in sovd::apps::sovd2uds::bulk_data::runtimefiles::CATEGORY_PATHS {
         dynamic_router.register_bulk_data_category(path).await;
     }

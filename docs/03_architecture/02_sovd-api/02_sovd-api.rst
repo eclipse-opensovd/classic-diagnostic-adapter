@@ -868,6 +868,9 @@ Authentication -- SID 29\ :sub:`16`
     The endpoints are available under ``/components/{ecu-name}/modes/authentication``. They are not provided
     for functional groups, since authentication procedures are ECU specific. ``GET /modes`` lists the mode
     ``authentication`` if the diagnostic database of the ECU contains at least one SID 29\ :sub:`16` service.
+    Otherwise ``GET`` and ``PUT /modes/authentication`` return ``404 Not Found``, and the path is omitted
+    from the ECU's part of ``openapi.json``. Since the routes are registered before variant detection, both
+    checks are evaluated per request against the detected variant.
 
     The CDA follows the client-driven approach of ISO 17978-3 §8.3.3: every ``PUT`` is translated into exactly
     one UDS Authentication request. The client orchestrates multi-step procedures and provides all certificates,
