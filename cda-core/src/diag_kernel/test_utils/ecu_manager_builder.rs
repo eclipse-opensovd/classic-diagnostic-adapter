@@ -3015,3 +3015,96 @@ pub(crate) fn create_ecu_manager_with_write_did_services_and_plugin<S: SecurityP
         &[0xF191],
     )
 }
+
+/// DOP classes that ISO 22901-1 does not allow inside a REQUEST.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ForbiddenRequestDop {
+    StaticField,
+    DynamicLengthField,
+    EnvDataDesc,
+    EnvData,
+    EndOfPduWithEnvDataDesc,
+}
+
+/// Creates an ECU manager with a `WriteDataByIdentifier` service whose request contains
+/// a VALUE parameter `forbidden` referencing a DOP of the given class, which ODX does
+/// not allow inside a REQUEST.
+///
+/// With `nested`, the parameter is placed inside a STRUCTURE referenced by the
+/// request parameter `outer` instead of directly in the request.
+pub(crate) fn create_ecu_manager_with_forbidden_request_dop(
+    kind: ForbiddenRequestDop,
+    nested: bool,
+) -> (
+    crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
+    cda_interfaces::DiagComm,
+) {
+    let mut db_builder = EcuDataBuilder::new();
+    let u8_diag_type = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
+    let default_protocol = Protocol::default();
+    let protocol = db_builder.create_protocol(default_protocol.str(), None, None, None);
+    let compu_identical =
+        db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
+    let u8_dop = db_builder.create_regular_normal_dop("u8_dop", u8_diag_type, compu_identical);
+
+    let item_param = db_builder.create_value_param("val", u8_dop, 0, 0);
+    let item_structure = db_builder.create_structure(Some(vec![item_param]), Some(1), true);
+    let env_data_param = db_builder.create_value_param("val", u8_dop, 0, 0);
+    let env_data = db_builder.create_env_data_dop(&[1], &[env_data_param]);
+
+    let forbidden_dop = match kind {
+        ForbiddenRequestDop::StaticField => {
+            db_builder.create_static_field_dop(2, 1, item_structure)
+        }
+        ForbiddenRequestDop::DynamicLengthField => {
+            let specific_data = db_builder
+                .create_dynamic_length_specific_dop_data(1, 0, 0, u8_dop, Some(item_structure))
+                .value_offset();
+            db_builder.create_dop(
+                *DopType::REGULAR,
+                Some("dlf_dop"),
+                None,
+                *SpecificDOPData::DynamicLengthField,
+                Some(specific_data),
+            )
+        }
+        ForbiddenRequestDop::EnvDataDesc => {
+            db_builder.create_env_data_desc_dop("env_data_desc", "selector", &[env_data])
+        }
+        ForbiddenRequestDop::EnvData => env_data,
+        ForbiddenRequestDop::EndOfPduWithEnvDataDesc => {
+            let env_data_desc =
+                db_builder.create_env_data_desc_dop("env_data_desc", "selector", &[env_data]);
+            db_builder.create_end_of_pdu_field_env_data_desc_dop(0, None, env_data_desc)
+        }
+    };
+
+    let sid = service_ids::WRITE_DATA_BY_IDENTIFIER;
+    let dc_name = "TestForbiddenRequestDopService";
+    let diag_comm = new_diag_comm!(db_builder, dc_name, protocol);
+
+    let request = {
+        let sid_param = create_sid_param!(db_builder, sid);
+        let forbidden_param = if nested {
+            let inner = db_builder.create_value_param("forbidden", forbidden_dop, 0, 0);
+            let structure = db_builder.create_structure(Some(vec![inner]), None, true);
+            let structure_dop = db_builder.create_structure_dop("outer_dop", structure);
+            db_builder.create_value_param("outer", structure_dop, 1, 0)
+        } else {
+            db_builder.create_value_param("forbidden", forbidden_dop, 1, 0)
+        };
+        db_builder.create_request(Some(vec![sid_param, forbidden_param]), None)
+    };
+    let pos_response = {
+        let sid_param = create_sid_param!(db_builder, "test_service_pos_sid", sid);
+        db_builder.create_response(ResponseType::Positive, Some(vec![sid_param]), None)
+    };
+
+    let diag_service =
+        new_diag_service!(db_builder, diag_comm, request, vec![pos_response], vec![]);
+    let db = finish_db!(db_builder, protocol, vec![diag_service]);
+    (
+        new_ecu_manager(db),
+        cda_interfaces::DiagComm::new(dc_name, DiagCommType::Configurations),
+    )
+}

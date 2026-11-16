@@ -22,9 +22,7 @@ use cda_plugin_security::SecurityPlugin;
 
 use super::ecumanager::EcuManager;
 use crate::diag_kernel::{
-    operations::{self, json_value_to_uds_data},
-    payload::str_to_json_value,
-    payload_decode::mux_case_struct_from_selector_value,
+    operations::json_value_to_uds_data, payload::str_to_json_value,
     security::check_raw_service_plugin,
 };
 
@@ -249,6 +247,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
             ));
         };
 
+        // Check the DOP class before resolving the value, so a forbidden DOP is
+        // reported as such and not as a missing parameter.
+        reject_dop_forbidden_in_request(&dop, param)?;
+
         let (value, enc) = resolve_required_param(
             value,
             &dop,
@@ -339,24 +341,20 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 payload,
                 enc,
             ),
-            datatypes::DataOperationVariant::StaticField(_static_field) => {
-                Err(DiagServiceError::ParameterConversionError(
-                    "Mapping StaticField DoP to UDS payload not implemented".to_owned(),
-                ))
-            }
-            datatypes::DataOperationVariant::Mux(mux_dop) => {
-                self.map_mux_to_uds(&mux_dop, &value, payload, enc)
-            }
-            datatypes::DataOperationVariant::EnvDataDesc(_)
-            | datatypes::DataOperationVariant::EnvData(_)
-            | datatypes::DataOperationVariant::Dtc(_) => Err(DiagServiceError::InvalidDatabase(
-                "EnvData(Desc) and DTC DoPs cannot be mapped via parameters to request, but \
-                 handled via a dedicated 'faults' endpoint"
+            datatypes::DataOperationVariant::Dtc(_) => Err(DiagServiceError::InvalidDatabase(
+                "DTC DoPs cannot be mapped via parameters to request, but handled via a dedicated \
+                 'faults' endpoint"
                     .to_owned(),
             )),
-            datatypes::DataOperationVariant::DynamicLengthField(_dynamic_length_field) => {
-                Err(DiagServiceError::ParameterConversionError(
-                    "Mapping DynamicLengthField DoP to UDS payload not implemented".to_owned(),
+            datatypes::DataOperationVariant::StaticField(_)
+            | datatypes::DataOperationVariant::Mux(_)
+            | datatypes::DataOperationVariant::EnvDataDesc(_)
+            | datatypes::DataOperationVariant::EnvData(_)
+            | datatypes::DataOperationVariant::DynamicLengthField(_) => {
+                // Already rejected by `reject_dop_forbidden_in_request` above.
+                Err(forbidden_in_request_error(
+                    forbidden_request_dop_class(&dop)?.unwrap_or("complex DOP"),
+                    param,
                 ))
             }
         }
@@ -462,6 +460,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     "PhysConst has no DOP".to_owned(),
                 ))?;
 
+        reject_dop_forbidden_in_request(&dop, param)?;
+
         let (value, enc) = resolve_required_param(
             param_data,
             &dop,
@@ -497,9 +497,6 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     enc,
                 )?;
             }
-            datatypes::DataOperationVariant::Mux(mux_dop) => {
-                self.map_mux_to_uds(&mux_dop, &value, uds_payload_data, enc)?;
-            }
             _ => {
                 return Err(DiagServiceError::InvalidDatabase(format!(
                     "PhysConst has unsupported DOP variant: {:?}",
@@ -526,113 +523,6 @@ impl<S: SecurityPlugin> EcuManager<S> {
             }
         }
         Ok(())
-    }
-
-    fn map_mux_to_uds(
-        &self,
-        mux_dop: &datatypes::MuxDop,
-        value: &serde_json::Value,
-        uds_payload: &mut Vec<u8>,
-        enc: BinaryEncoding,
-    ) -> Result<(), DiagServiceError> {
-        let Some(value) = value.as_object() else {
-            return Err(DiagServiceError::InvalidRequest(format!(
-                "Expected value to be object type, but it was: {value:#?}"
-            )));
-        };
-
-        let switch_key = &mux_dop
-            .switch_key()
-            .ok_or(DiagServiceError::InvalidDatabase(
-                "Mux switch key is None".to_owned(),
-            ))?;
-        let switch_key_dop = switch_key.dop().map(datatypes::DataOperation).ok_or(
-            DiagServiceError::InvalidDatabase("Mux switch key DoP is None".to_owned()),
-        )?;
-
-        match switch_key_dop.variant()? {
-            datatypes::DataOperationVariant::Normal(normal_dop) => {
-                let switch_key_diag_type = normal_dop.diag_coded_type()?;
-                let mut mux_payload = Vec::new();
-
-                // Process selector and encode switch key if present
-                let selected_case = value
-                    .get("Selector")
-                    .or(Some(&serde_json::Value::from(serde_json::Number::from(0))))
-                    .map(|selector| -> Result<_, DiagServiceError> {
-                        let switch_key_value = json_value_to_uds_data(
-                            &switch_key_diag_type,
-                            normal_dop.compu_method().map(Into::into),
-                            normal_dop.physical_type().map(Into::into),
-                            selector,
-                            enc,
-                        )?;
-
-                        switch_key_diag_type.encode(
-                            switch_key_value.clone(),
-                            &mut mux_payload,
-                            switch_key.byte_position() as usize,
-                            switch_key.bit_position().unwrap_or(0) as usize,
-                        )?;
-
-                        let selector = operations::uds_data_to_serializable(
-                            switch_key_diag_type.base_datatype(),
-                            None,
-                            false,
-                            &mux_payload,
-                        )?;
-
-                        Ok(
-                            mux_case_struct_from_selector_value(mux_dop, &selector).and_then(
-                                |(case, struct_)| case.short_name().map(|name| (name, struct_)),
-                            ),
-                        )
-                    })
-                    .transpose()?
-                    .flatten();
-
-                // Get case name and structure from selected case or default
-                let (case_name, struct_) = selected_case
-                    .or_else(|| {
-                        mux_dop.default_case().and_then(|default_case| {
-                            default_case
-                                .short_name()
-                                .zip(default_case.structure().and_then(|s| {
-                                    s.specific_data_as_structure().map(|s| Some(s.into()))
-                                }))
-                        })
-                    })
-                    .ok_or_else(|| {
-                        DiagServiceError::InvalidRequest(
-                            "Cannot find selector value or default case".to_owned(),
-                        )
-                    })?;
-
-                self.reject_unexpected_keys(
-                    ["Selector", case_name].into_iter(),
-                    value.keys().map(String::as_str),
-                )?;
-
-                if let Some(struct_) = struct_ {
-                    let struct_data = value.get(case_name).ok_or_else(|| {
-                        DiagServiceError::BadPayload(format!(
-                            "Mux case {case_name} value not found in json"
-                        ))
-                    })?;
-
-                    let mut struct_payload = Vec::new();
-                    self.map_struct_to_uds(&struct_, 0, struct_data, &mut struct_payload, enc)?;
-
-                    mux_payload.extend_from_slice(&struct_payload);
-                }
-
-                uds_payload.extend_from_slice(&mux_payload);
-                Ok(())
-            }
-            _ => Err(DiagServiceError::InvalidDatabase(
-                "Mux switch key DoP is not a NormalDoP".to_owned(),
-            )),
-        }
     }
 
     /// Encode a TABLE-KEY parameter: resolve the key string to its wire
@@ -1008,6 +898,52 @@ fn try_parse_str_as_json_number(value: &str) -> Result<serde_json::Value, DiagSe
     }
 }
 
+/// Returns the ODX class name of `dop` if it must not be used in a REQUEST.
+///
+/// ISO 22901-1:2008 7.3.6.10.1: "Only STRUCTURE and END-OF-PDU-FIELD are usable
+/// directly or indirectly inside a REQUEST." ASAM MCD-2D ODX 2.2 additionally forbids
+/// an END-OF-PDU-FIELD referencing an ENV-DATA-DESC inside a REQUEST.
+/// DTC-DOPs are simple DOPs and therefore not covered here.
+fn forbidden_request_dop_class(
+    dop: &datatypes::DataOperation,
+) -> Result<Option<&'static str>, DiagServiceError> {
+    Ok(match dop.variant()? {
+        datatypes::DataOperationVariant::StaticField(_) => Some("STATIC-FIELD"),
+        datatypes::DataOperationVariant::DynamicLengthField(_) => Some("DYNAMIC-LENGTH-FIELD"),
+        datatypes::DataOperationVariant::Mux(_) => Some("MUX"),
+        datatypes::DataOperationVariant::EnvDataDesc(_) => Some("ENV-DATA-DESC"),
+        datatypes::DataOperationVariant::EnvData(_) => Some("ENV-DATA"),
+        datatypes::DataOperationVariant::EndOfPdu(end_of_pdu)
+            if end_of_pdu
+                .field()
+                .is_some_and(|f| f.env_data_desc().is_some()) =>
+        {
+            Some("END-OF-PDU-FIELD referencing an ENV-DATA-DESC")
+        }
+        _ => None,
+    })
+}
+
+fn forbidden_in_request_error(class: &str, param: &datatypes::Parameter) -> DiagServiceError {
+    DiagServiceError::InvalidDatabase(format!(
+        "Parameter '{}' references a {class}, which is not allowed in a REQUEST (ISO 22901-1:2008 \
+         7.3.6.10.1)",
+        param.short_name().unwrap_or_default()
+    ))
+}
+
+/// Rejects DOPs that ODX does not allow inside a REQUEST, see
+/// [`forbidden_request_dop_class`].
+fn reject_dop_forbidden_in_request(
+    dop: &datatypes::DataOperation,
+    param: &datatypes::Parameter,
+) -> Result<(), DiagServiceError> {
+    match forbidden_request_dop_class(dop)? {
+        Some(class) => Err(forbidden_in_request_error(class, param)),
+        None => Ok(()),
+    }
+}
+
 /// Absolute byte position of a top-level request param. Without
 /// BYTE-POSITION the param follows the data encoded so far.
 fn effective_byte_pos(param: &datatypes::Parameter, uds: &[u8]) -> usize {
@@ -1128,8 +1064,9 @@ mod tests {
 
     use super::*;
     use crate::diag_kernel::test_utils::ecu_manager_builder::{
-        create_ecu_manager_with_coded_const_in_struct_service,
+        ForbiddenRequestDop, create_ecu_manager_with_coded_const_in_struct_service,
         create_ecu_manager_with_end_pdu_request_service,
+        create_ecu_manager_with_forbidden_request_dop,
         create_ecu_manager_with_length_key_request_service,
         create_ecu_manager_with_multiple_routine_control_services,
         create_ecu_manager_with_multiple_write_did_services, create_ecu_manager_with_mux_service,
@@ -1162,15 +1099,15 @@ mod tests {
         }
     }
 
-    async fn test_mux_from_and_to_uds(
+    async fn test_mux_from_uds_and_rejected_to_uds(
         ecu_manager: super::super::ecumanager::EcuManager<DefaultSecurityPluginData>,
         service: &cda_interfaces::DiagComm,
         sid: u8,
-        data: &Vec<u8>,
+        data: &[u8],
         mux_1_json: serde_json::Value,
     ) {
         let response = ecu_manager
-            .convert_from_uds(service, &create_payload(data.clone()), true, None)
+            .convert_from_uds(service, &create_payload(data.to_owned()), true, None)
             .await
             .unwrap();
 
@@ -1191,23 +1128,16 @@ mod tests {
             expected_response_json
         );
 
+        // MUX is not allowed in a REQUEST (ISO 22901-1:2008 7.3.6.10.1)
         let payload_data = hex_param_map(serde_json::from_value(mux_1_json).unwrap());
-        let mut service_payload = ecu_manager
+        let err = ecu_manager
             .create_uds_payload(service, &skip_sec_plugin!(), Some(payload_data), None)
             .await
-            .unwrap();
-        if let Some(byte) = service_payload.data.get_mut(1)
-            && let Some(&val) = data.get(1)
-        {
-            *byte = val;
-        }
-        if let Some(byte) = service_payload.data.get_mut(4)
-            && let Some(&val) = data.get(4)
-        {
-            *byte = val;
-        }
-
-        assert_eq!(*service_payload.data, *data);
+            .unwrap_err();
+        assert!(
+            matches!(&err, DiagServiceError::InvalidDatabase(msg) if msg.contains("MUX")),
+            "{err:?}"
+        );
     }
 
     async fn validate_struct_payload(struct_byte_pos: u32) {
@@ -1343,109 +1273,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_map_mux_to_uds_with_default_case() {
-        async fn test_default(
-            ecu_manager: &super::super::ecumanager::EcuManager<DefaultSecurityPluginData>,
-            service: &cda_interfaces::DiagComm,
-            test_value: serde_json::Value,
-            select_value: u16,
-            sid: u8,
-        ) {
-            let payload_data = hex_param_map(serde_json::from_value(test_value).unwrap());
-
-            let service_payload = ecu_manager
-                .create_uds_payload(service, &skip_sec_plugin!(), Some(payload_data), None)
-                .await
-                .unwrap();
-
-            assert_eq!(service_payload.data.first().copied(), Some(sid));
-            assert_eq!(service_payload.data.get(1).copied(), Some(0));
-
-            assert_eq!(
-                service_payload.data.get(2).copied(),
-                Some(((select_value >> 8) & 0xFF) as u8)
-            );
-            assert_eq!(
-                service_payload.data.get(3).copied(),
-                Some((select_value & 0xFF) as u8)
-            );
-
-            assert_eq!(service_payload.data.get(4).copied(), Some(0x42));
-        }
-
-        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service_and_default_case();
-        let with_selector = json!({
-            "mux_1_param": {
-                "Selector": 0xffff,
-                "default_case": {
-                    "default_structure_param_1": 0x42,
-                }
-            },
-        });
-
-        let without_selector = json!({
-            "mux_1_param": {
-                "default_case": {
-                    "default_structure_param_1": 0x42,
-                }
-            },
-        });
-
-        test_default(&ecu_manager, &service, with_selector, 0xFFFF, sid).await;
-        test_default(&ecu_manager, &service, without_selector, 0, sid).await;
-    }
-
-    #[tokio::test]
-    async fn test_map_mux_to_uds_invalid_json_type() {
-        let (ecu_manager, service, _) = create_ecu_manager_with_mux_service(None, None, None);
-
-        let test_value = json!([1, 2, 3]);
-
-        let payload_data = hex_param_map(
-            [("mux_1_param".to_string(), test_value)]
-                .into_iter()
-                .collect(),
-        );
-
-        let result = ecu_manager
-            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data), None)
-            .await;
-
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(
-                e.to_string().contains("Expected value to be object type"),
-                "Expected error message to contain 'Expected value to be object type', but got: \
-                 {e}",
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_map_mux_to_uds_missing_case_data() {
-        let (ecu_manager, service, _) = create_ecu_manager_with_mux_service(None, None, None);
-
-        let test_value = json!({
-            "mux_1_param": {
-                "Selector": 0x0a,
-            },
-        });
-
-        let payload_data = hex_param_map(serde_json::from_value(test_value).unwrap());
-
-        let result = ecu_manager
-            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data), None)
-            .await;
-
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Mux case mux_1_case_1 value not found in json")
-        );
-    }
-
-    #[tokio::test]
     async fn test_phys_const_normal_dop_to_uds() {
         let (ecu_manager, dc, _sid) = create_ecu_manager_with_phys_const_normal_dop_service();
 
@@ -1559,7 +1386,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mux_from_and_to_uds_case_1() {
+    async fn test_mux_from_uds_and_rejected_to_uds_case_1() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
         let param_1_value: f32 = 13.37;
         let param_1_bytes = param_1_value.to_be_bytes();
@@ -1583,11 +1410,11 @@ mod tests {
             },
         });
 
-        test_mux_from_and_to_uds(ecu_manager, &service, sid, &data.to_vec(), mux_1_json).await;
+        test_mux_from_uds_and_rejected_to_uds(ecu_manager, &service, sid, &data, mux_1_json).await;
     }
 
     #[tokio::test]
-    async fn test_mux_from_and_to_uds_case_2() {
+    async fn test_mux_from_uds_and_rejected_to_uds_case_2() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
         #[rustfmt::skip]
         let data = [
@@ -1612,11 +1439,11 @@ mod tests {
             }
         });
 
-        test_mux_from_and_to_uds(ecu_manager, &service, sid, &data.to_vec(), mux_1_json).await;
+        test_mux_from_uds_and_rejected_to_uds(ecu_manager, &service, sid, &data, mux_1_json).await;
     }
 
     #[tokio::test]
-    async fn test_mux_from_and_to_uds_case_3() {
+    async fn test_mux_from_uds_and_rejected_to_uds_case_3() {
         use cda_database::datatypes::{DataType, database_builder::EcuDataBuilder};
 
         let mut db_builder = EcuDataBuilder::new();
@@ -1646,7 +1473,7 @@ mod tests {
             }
         });
 
-        test_mux_from_and_to_uds(ecu_manager, &service, sid, &data.to_vec(), mux_1_json).await;
+        test_mux_from_uds_and_rejected_to_uds(ecu_manager, &service, sid, &data, mux_1_json).await;
     }
 
     #[tokio::test]
@@ -1976,50 +1803,6 @@ mod tests {
             assert!(
                 e.to_string().contains("Unexpected parameters in request"),
                 "Expected unexpected parameter error for nested param, got: {e}"
-            );
-        }
-    }
-
-    /// Strict mode must reject unexpected keys inside a Mux parameter object.
-    ///
-    /// `map_mux_to_uds` only reads `"Selector"` and the matched case name;
-    /// any extra keys must be rejected when `strict_parameter_validation` is
-    /// enabled, mirroring the behaviour of `map_struct_to_uds` and
-    /// `process_parameter_map`.
-    #[tokio::test]
-    async fn test_map_mux_to_uds_unexpected_params_strict() {
-        let (mut ecu_manager, service, _) = create_ecu_manager_with_mux_service(None, None, None);
-        ecu_manager.strict_parameter_validation = true;
-
-        // Valid mux payload with an extra key "bogus_mux_key" at the mux
-        // object level.  "Selector" and "mux_1_case_1" are the only
-        // legitimate keys for this request.
-        let test_value = json!({
-            "mux_1_param": {
-                "Selector": 5,
-                "mux_1_case_1": {
-                    "mux_1_case_1_param_1": 13.37f32,
-                    "mux_1_case_1_param_2": 7
-                },
-                "bogus_mux_key": "should be rejected"
-            }
-        });
-
-        let payload_data = hex_param_map(serde_json::from_value(test_value).unwrap());
-
-        let result = ecu_manager
-            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data), None)
-            .await;
-
-        assert!(
-            result.is_err(),
-            "Expected strict mode to reject unexpected mux-level key 'bogus_mux_key', but the \
-             request succeeded"
-        );
-        if let Err(e) = result {
-            assert!(
-                e.to_string().contains("Unexpected parameters in request"),
-                "Expected 'Unexpected parameters in request' error, got: {e}"
             );
         }
     }
@@ -2409,5 +2192,84 @@ mod tests {
             "Error message should not reference the unrelated service '{unrestricted_name}', got: \
              {err_msg}"
         );
+    }
+
+    async fn assert_forbidden_in_request(
+        ecu_manager: &super::super::ecumanager::EcuManager<DefaultSecurityPluginData>,
+        service: &cda_interfaces::DiagComm,
+        value: serde_json::Value,
+        class: &str,
+    ) {
+        let payload_data = hex_param_map(serde_json::from_value(value).unwrap());
+        let err = ecu_manager
+            .create_uds_payload(service, &skip_sec_plugin!(), Some(payload_data), None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, DiagServiceError::InvalidDatabase(msg)
+                if msg.contains(class) && msg.contains("not allowed in a REQUEST")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dops_forbidden_in_request_are_rejected() {
+        for (kind, class) in [
+            (ForbiddenRequestDop::StaticField, "STATIC-FIELD"),
+            (
+                ForbiddenRequestDop::DynamicLengthField,
+                "DYNAMIC-LENGTH-FIELD",
+            ),
+            (ForbiddenRequestDop::EnvDataDesc, "ENV-DATA-DESC"),
+            (ForbiddenRequestDop::EnvData, "ENV-DATA"),
+            (
+                ForbiddenRequestDop::EndOfPduWithEnvDataDesc,
+                "END-OF-PDU-FIELD referencing an ENV-DATA-DESC",
+            ),
+        ] {
+            let (ecu_manager, service) = create_ecu_manager_with_forbidden_request_dop(kind, false);
+            // with a value
+            assert_forbidden_in_request(
+                &ecu_manager,
+                &service,
+                json!({"forbidden": [{"val": 1}]}),
+                class,
+            )
+            .await;
+            // without a value the DOP class is reported, not a missing parameter
+            assert_forbidden_in_request(&ecu_manager, &service, json!({}), class).await;
+
+            // nested in a STRUCTURE
+            let (ecu_manager, service) = create_ecu_manager_with_forbidden_request_dop(kind, true);
+            assert_forbidden_in_request(
+                &ecu_manager,
+                &service,
+                json!({"outer": {"forbidden": [{"val": 1}]}}),
+                class,
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mux_in_request_is_rejected() {
+        let (ecu_manager, service, _) = create_ecu_manager_with_mux_service(None, None, None);
+        assert_forbidden_in_request(
+            &ecu_manager,
+            &service,
+            json!({"mux_1_param": {"Selector": 5}}),
+            "MUX",
+        )
+        .await;
+        assert_forbidden_in_request(&ecu_manager, &service, json!({}), "MUX").await;
+
+        let (ecu_manager, service, _) = create_ecu_manager_with_mux_service_and_default_case();
+        assert_forbidden_in_request(
+            &ecu_manager,
+            &service,
+            json!({"mux_1_param": {"default_case": {"default_structure_param_1": 0x42}}}),
+            "MUX",
+        )
+        .await;
     }
 }
