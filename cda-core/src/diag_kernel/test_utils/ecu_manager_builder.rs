@@ -201,6 +201,18 @@ pub(crate) fn create_ecu_manager_with_dynamic_length_field_service() -> (
     cda_interfaces::DiagComm,
     u8,
 ) {
+    create_ecu_manager_with_dynamic_length_field_service_and_count_compu(None)
+}
+
+/// Same as [`create_ecu_manager_with_dynamic_length_field_service`], but the item count
+/// DOP uses a `LINEAR` compu method `phys = offset + factor * internal` if given.
+pub(crate) fn create_ecu_manager_with_dynamic_length_field_service_and_count_compu(
+    linear_count_compu: Option<(f64, f64)>,
+) -> (
+    crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
+    cda_interfaces::DiagComm,
+    u8,
+) {
     let mut db_builder = EcuDataBuilder::new();
     let u8_diag_type = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
     let u16_diag_type = db_builder.create_diag_coded_type_standard_length(16, DataType::UInt32);
@@ -210,8 +222,12 @@ pub(crate) fn create_ecu_manager_with_dynamic_length_field_service() -> (
         db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
 
     // Create DOPs for structure parameters
+    let num_items_compu = match linear_count_compu {
+        Some((offset, factor)) => db_builder.create_linear_compu_method(offset, factor, 1.0),
+        None => compu_identical,
+    };
     let num_items_dop =
-        db_builder.create_regular_normal_dop("num_items_dop", u8_diag_type, compu_identical);
+        db_builder.create_regular_normal_dop("num_items_dop", u8_diag_type, num_items_compu);
 
     // Create the structure for the repeated item
     let repeated_struct = {
@@ -1193,11 +1209,11 @@ pub(crate) fn create_ecu_manager_dlf_sibling_no_byte_pos() -> (
     let item_param = db_builder.create_value_param("item_val", item_dop, 0, 0);
     let repeated_struct = db_builder.create_structure(Some(vec![item_param]), Some(2), true);
 
-    // offset=3: items start at param_abs_byte_pos + 3 (= byte 0 + 3 = byte 3 absolute)
-    // number_of_items_byte_pos=2:
-    // count at param_abs_byte_pos + 2 (= byte 0 + 2 = byte 2 absolute)
+    // The DLF has no BYTE-POSITION, so it starts right after `sibling_val` at byte 2
+    // (ISO 22901-1 7.3.5.4). Count and OFFSET are relative to that position:
+    // number_of_items_byte_pos=0 -> count at byte 2, offset=1 -> items from byte 3.
     let dlf_specific = db_builder
-        .create_dynamic_length_specific_dop_data(3, 2, 0, num_items_dop, Some(repeated_struct))
+        .create_dynamic_length_specific_dop_data(1, 0, 0, num_items_dop, Some(repeated_struct))
         .value_offset();
     let dlf_dop = db_builder.create_dop(
         *DopType::REGULAR,
@@ -1216,7 +1232,7 @@ pub(crate) fn create_ecu_manager_dlf_sibling_no_byte_pos() -> (
         let sid_param = create_sid_param!(db_builder, "test_service_pos_sid", sid);
         // sibling at explicit byte_pos=1, advances last_read_byte_pos to 2 after decoding
         let sibling_param = db_builder.create_value_param("sibling_val", sibling_dop, 1, 0);
-        // DLF with NO explicit byte_position - must use base_offset=0, not last_read_byte_pos
+        // DLF with NO explicit byte_position - starts at last_read_byte_pos (byte 2)
         let dlf_param = db_builder.create_value_param_no_byte_pos("dlf_items", dlf_dop);
         db_builder.create_response(
             ResponseType::Positive,
