@@ -36,6 +36,7 @@ from odxtools.parameters.tablekeyparameter import TableKeyParameter
 from odxtools.parameters.tablestructparameter import TableStructParameter
 from odxtools.parameters.valueparameter import ValueParameter
 from odxtools.physicaltype import PhysicalType
+from odxtools.preconditionstateref import PreConditionStateRef
 from odxtools.request import Request
 from odxtools.response import Response, ResponseType
 from odxtools.structure import Structure
@@ -61,6 +62,7 @@ def add_routine(
     description: str | None = None,
     is_functional: bool = False,
     sdgs: list | None = None,
+    pre_condition_state_refs: list[PreConditionStateRef] | None = None,
 ) -> None:
     """Add a RoutineControl (0x31) operation service to the diagnostic layer.
 
@@ -159,6 +161,7 @@ def add_routine(
             request_ref=ref(request),
             pos_response_refs=[ref(response)],
             sdgs=sdgs or [],
+            pre_condition_state_refs=pre_condition_state_refs or [],
         )
     )
 
