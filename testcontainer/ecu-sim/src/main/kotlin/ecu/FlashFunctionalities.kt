@@ -47,7 +47,14 @@ class RequestDownloadRequest(
             val memoryAddress = ByteArray(memAddressLength)
             data.get(memoryAddress)
             val memSizeLength = addressAndLengthFormatIdentifier.and(0x0F.toByte()).toInt().and(0x0F)
+            if (memAddressLength == 0 || memSizeLength == 0) {
+                throw NrcException(NrcError.RequestOutOfRange)
+            }
             val memorySize = ByteArray(memSizeLength)
+            data.get(memorySize)
+            if (data.hasRemaining()) {
+                throw NrcException(NrcError.IncorrectMessageLengthOrInvalidFormat)
+            }
 
             return RequestDownloadRequest(
                 dataFormatIdentifier = dataFormatIdentifier,
@@ -64,7 +71,8 @@ class RequestDownloadResponse(
     val maxNumberOfBlockLength: ULong,
 ) {
     val asByteArray: ByteArray
-        get() = byteArrayOf(type.lengthInBytes.toByte()) + maxNumberOfBlockLength.toByteArray(type.lengthInBytes)
+        // lengthFormatIdentifier: high nibble = length of maxNumberOfBlockLength, low nibble reserved (ISO 14229-1)
+        get() = byteArrayOf((type.lengthInBytes shl 4).toByte()) + maxNumberOfBlockLength.toByteArray(type.lengthInBytes)
 
     enum class IdentifierType(
         val lengthInBytes: Int,
@@ -87,34 +95,71 @@ class DataTransferDownload(
     val addressAndLengthIdentifier: Byte,
     val memoryAddress: ByteArray,
     val memorySize: ByteArray,
+    val maxNumberOfBlockLength: Int,
 ) {
     val isActive: Boolean
         get() =
             state == DataTransferState.IN_PROGRESS
 
+    val expectedBytes: Long = memorySize.fold(0L) { acc, b -> (acc shl 8) or (b.toLong() and 0xFF) }
+
     var checksum: ByteArray? = null
     var dataTransferCount: Int = 0
+    var bytesReceived: Long = 0
+    var repeatedBlocks: Int = 0
+    var startedAtMs: Long? = null
+    var finishedAtMs: Long? = null
 
     private var state = DataTransferState.IN_PROGRESS
     private var lastBlockSequenceCounter: Int = 0 // first transfer has to start with 1
 
     private val checksumCalculator: MessageDigest = MessageDigest.getInstance("SHA1")
 
+    /**
+     * Handles one TransferData request like a flash bootloader would:
+     * - the complete request (SID + BSC + data) must not exceed maxNumberOfBlockLength
+     * - the BSC must be the next one (wraps 0xFF -> 0x00); a repetition of the last BSC is a
+     *   retransmission and is acknowledged without writing the data again
+     * - the total data must not exceed the memorySize from RequestDownload
+     */
     fun addDataTransfer(
         blockSequenceCounter: Int,
+        requestLength: Int,
         data: ByteBuffer,
     ) {
         if (state != DataTransferState.IN_PROGRESS) {
             throw NrcException(NrcError.RequestSequenceError)
-        } else if ((blockSequenceCounter % 256) != ((lastBlockSequenceCounter + 1) % 256)) {
+        }
+        if (requestLength > maxNumberOfBlockLength || !data.hasRemaining()) {
+            throw NrcException(NrcError.IncorrectMessageLengthOrInvalidFormat)
+        }
+        if (dataTransferCount > 0 && blockSequenceCounter == lastBlockSequenceCounter) {
+            repeatedBlocks += 1
+            return
+        }
+        if (blockSequenceCounter != (lastBlockSequenceCounter + 1) % 256) {
             throw NrcException(NrcError.WrongBlockSequenceCounter)
         }
+        if (bytesReceived + data.remaining() > expectedBytes) {
+            throw NrcException(NrcError.TransferDataSuspended)
+        }
+        if (startedAtMs == null) startedAtMs = System.currentTimeMillis()
+        bytesReceived += data.remaining()
         checksumCalculator.update(data)
         dataTransferCount += 1
+        lastBlockSequenceCounter = blockSequenceCounter
     }
 
     fun finish() {
+        if (state != DataTransferState.IN_PROGRESS) {
+            throw NrcException(NrcError.RequestSequenceError)
+        }
+        if (bytesReceived != expectedBytes) {
+            // not all announced data was transferred
+            throw NrcException(NrcError.RequestSequenceError)
+        }
         state = DataTransferState.FINISHED
+        finishedAtMs = System.currentTimeMillis()
         checksum = checksumCalculator.digest()
     }
 
@@ -144,7 +189,11 @@ fun RequestsData.addFlashRequests() {
                 addressAndLengthIdentifier = request.addressAndLengthIdentifier,
                 memoryAddress = request.memoryAddress,
                 memorySize = request.memorySize,
+                maxNumberOfBlockLength = ecuState.maxNumberOfBlockLength,
             )
+        if (dataTransfer.expectedBytes == 0L) {
+            throw NrcException(NrcError.RequestOutOfRange)
+        }
         dataTransfers.add(dataTransfer)
 
         val response = RequestDownloadResponse(RequestDownloadResponse.IdentifierType.UINT32, ecuState.maxNumberOfBlockLength.toULong())
@@ -164,6 +213,7 @@ fun RequestsData.addFlashRequests() {
 
         currentTransfer.addDataTransfer(
             blockSequenceCounter = blockSequenceCounter.toUByte().toInt(),
+            requestLength = message.size,
             data = data,
         )
 
