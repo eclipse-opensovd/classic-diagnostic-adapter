@@ -135,7 +135,7 @@ integration-coverage:
 	CDA_INTEGRATION_TEST_COVERAGE=true cargo +$(STABLE) llvm-cov --features integration-tests --lcov --output-path lcov.info
 
 deny:
-	cargo +$(STABLE) deny check $(ARGS)
+	cargo +$(STABLE) deny $(if $(FORMAT),--format $(FORMAT)) check $(ARGS)
 
 generate-config:
 	cargo +$(STABLE) run --locked --all-features -- generate-config --output $(or $(OUTPUT),opensovd-cda.toml)
@@ -275,7 +275,7 @@ help:
 		'coverage                     Generate unit-test LCOV coverage' \
 		'coverage-can                 Generate CAN unit-test LCOV coverage' \
 		'integration-coverage         Generate integration-test LCOV coverage' \
-		'deny ARGS="..."              Run all or selected cargo-deny checks' \
+		'deny ARGS="..."              Run all or selected cargo-deny checks (FORMAT=json for JSON)' \
 		'generate-config              Regenerate opensovd-cda.toml' \
 		'generate-test-config         Generate testcontainer/cda-test-config*.toml for docker compose' \
 		'generate-flatbuffers         Regenerate FlatBuffers sources' \

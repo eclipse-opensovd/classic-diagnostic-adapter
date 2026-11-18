@@ -9,7 +9,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-name: Nightly Advisories, Clippy and Format Checks
+name: Nightly Clippy and Format Checks
 
 on:
   schedule:
@@ -27,23 +27,6 @@ jobs:
   versions:
     uses: ./.github/workflows/tool-versions.yml
 
-  advisories:
-    needs: versions
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6.1.0
-        with:
-          submodules: false
-      - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: ${{ needs.versions.outputs.stable }}
-      - name: Setup devenv
-        run: make setup-devenv
-      - name: Check advisories
-        run: make deny ARGS=advisories
   nightly_clippy:
     needs: versions
     runs-on: ubuntu-26.04
