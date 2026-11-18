@@ -31,6 +31,9 @@ use crate::{
     },
 };
 
+/// Resource identifier returned as `id` in a JSON response.
+const GENERICSERVICE_ID: &str = "genericservice";
+
 /// Body format of a generic service request or response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BodyFormat {
@@ -100,7 +103,7 @@ fn request_payload(
         BodyFormat::Json => {
             let request: sovd_put::Request = serde_json::from_slice(body)
                 .map_err(|e| ApiError::BadRequest(format!("Invalid JSON body: {e}")))?;
-            let value = request.request.trim();
+            let value = request.data.trim();
             let payload = encoding.decode(value).map_err(|e| {
                 ApiError::BadRequest(format!("Invalid {encoding} encoded request: {e}"))
             })?;
@@ -170,7 +173,8 @@ pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
         BodyFormat::Json => (
             StatusCode::OK,
             Json(sovd_put::Response {
-                response: encode_response(&ecu_response, binary_encoding, hex_notation),
+                id: GENERICSERVICE_ID.to_owned(),
+                data: encode_response(&ecu_response, binary_encoding, hex_notation),
             }),
         )
             .into_response(),
@@ -193,8 +197,9 @@ pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
              with the UDS bytes encoded as selected by `x-sovd2uds-binary-encoding`. \
              `application/octet-stream` can be used for the request (`Content-Type`) and the \
              response (`Accept`) to exchange raw bytes instead. A hex coded JSON response uses \
-             the notation of the request (`0x22F190`, `22F190` or `0x22 0xF1 0x90`). The request \
-             field `send` is accepted as alias of `request`.",
+             the notation of the request (`0x22F190`, `22F190` or `0x22 0xF1 0x90`). Following \
+             the data resources, the bytes are in the field `data` of request and response; \
+             `request` and `send` are accepted as aliases in the request.",
         )
         .response_with::<200, Json<sovd_put::Response>, _>(|res| {
             res.description(
@@ -256,7 +261,7 @@ mod tests {
     }
 
     fn json_request(value: &str) -> Result<(Vec<u8>, Option<HexNotation>), ApiError> {
-        let body = Bytes::from(serde_json::json!({ "request": value }).to_string());
+        let body = Bytes::from(serde_json::json!({ "data": value }).to_string());
         request_payload(
             BodyFormat::Json,
             &HeaderMap::new(),

@@ -58,11 +58,12 @@ async fn put_generic(
 }
 
 fn response_field(response: &Response) -> String {
-    extract_field_from_json(
-        &response_to_json(response).expect("Response is not JSON"),
-        "response",
-    )
-    .expect("Response has no response field")
+    let json = response_to_json(response).expect("Response is not JSON");
+    assert_eq!(
+        extract_field_from_json::<String>(&json, "id").expect("Response has no id field"),
+        "genericservice"
+    );
+    extract_field_from_json(&json, "data").expect("Response has no data field")
 }
 
 /// `22 F1 90` (VIN) and `10 01` (default session) in all combinations of JSON,
@@ -82,7 +83,7 @@ async fn test_genericservice_json_and_octet_stream() {
     // JSON with the configured default encoding (hex)
     let response = put_generic(
         &test_env,
-        r#"{"request": "0x22 0xF1 0x90"}"#,
+        r#"{"data": "0x22 0xF1 0x90"}"#,
         &[],
         None,
         StatusCode::OK,
@@ -92,7 +93,7 @@ async fn test_genericservice_json_and_octet_stream() {
 
     // The hex notation of the request is mirrored in the response
     for (request, prefix) in [
-        (r#"{"request": "22 F1 90"}"#, "62F190"),
+        (r#"{"data": "22 F1 90"}"#, "62F190"),
         (r#"{"request": "0x22F190"}"#, "0x62F190"),
         (r#"{"send": "0x22F190"}"#, "0x62F190"),
     ] {
@@ -110,7 +111,7 @@ async fn test_genericservice_json_and_octet_stream() {
     );
     let response = put_generic(
         &test_env,
-        r#"{"request": "IvGQ"}"#,
+        r#"{"data": "IvGQ"}"#,
         &[],
         Some(&base64),
         StatusCode::OK,
@@ -121,7 +122,7 @@ async fn test_genericservice_json_and_octet_stream() {
     // JSON request, raw response
     let response = put_generic(
         &test_env,
-        r#"{"request": "1001"}"#,
+        r#"{"data": "1001"}"#,
         &[(header::ACCEPT, "application/octet-stream")],
         None,
         StatusCode::OK,
@@ -181,12 +182,12 @@ async fn test_genericservice_nrc() {
     .await;
 
     // RequestTransferExit outside of the boot variant: NRC 0x31 (requestOutOfRange)
-    let response = put_generic(&test_env, r#"{"request": "37"}"#, &[], None, StatusCode::OK).await;
+    let response = put_generic(&test_env, r#"{"data": "37"}"#, &[], None, StatusCode::OK).await;
     assert_eq!(response_field(&response), "7F3731");
 
     let response = put_generic(
         &test_env,
-        r#"{"request": "37"}"#,
+        r#"{"data": "37"}"#,
         &[(header::ACCEPT, "application/octet-stream")],
         None,
         StatusCode::OK,
@@ -206,12 +207,12 @@ async fn test_genericservice_invalid_json_request() {
     )
     .await;
 
-    for body in [r#"{"request": "zz"}"#, r#"{"request": ""}"#, "{}"] {
+    for body in [r#"{"data": "zz"}"#, r#"{"data": ""}"#, "{}"] {
         put_generic(&test_env, body, &[], None, StatusCode::BAD_REQUEST).await;
     }
     put_generic(
         &test_env,
-        r#"{"request": "1001"}"#,
+        r#"{"data": "1001"}"#,
         &[(header::ACCEPT, "text/plain")],
         None,
         StatusCode::BAD_REQUEST,

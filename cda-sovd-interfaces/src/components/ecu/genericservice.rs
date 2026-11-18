@@ -21,19 +21,21 @@ pub mod put {
     #[schemars(rename = "GenericServiceRequest")]
     pub struct Request {
         /// UDS request bytes (service id and payload), encoded as selected by
-        /// `x-sovd2uds-binary-encoding` (base64 or hex). `send` is accepted
-        /// as alias.
-        #[serde(alias = "send")]
-        pub request: String,
+        /// `x-sovd2uds-binary-encoding` (base64 or hex). `request` and `send`
+        /// are accepted as aliases.
+        #[serde(alias = "request", alias = "send")]
+        pub data: String,
     }
 
     /// Raw UDS response received from the ECU.
     #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
     #[schemars(rename = "GenericServiceResponse")]
     pub struct Response {
+        /// Identifier of the resource, always `genericservice`.
+        pub id: String,
         /// UDS response bytes, encoded as selected by
         /// `x-sovd2uds-binary-encoding` (base64 or hex). Hex uses the notation
         /// of a hex coded request.
-        pub response: String,
+        pub data: String,
     }
 }
