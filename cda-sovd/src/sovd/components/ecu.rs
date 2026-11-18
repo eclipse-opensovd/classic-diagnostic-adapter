@@ -382,7 +382,7 @@ fn format_data_response<R: cda_interfaces::diagservices::DiagServiceResponse>(
         return api_error_from_diag_response(&response, include_schema).into_response();
     }
 
-    if response.is_empty() {
+    if !response.has_application_data() {
         return StatusCode::NO_CONTENT.into_response();
     }
 
@@ -544,10 +544,25 @@ mod tests {
         let mut mock = MockDiagServiceResponse::new();
         mock.expect_response_type()
             .returning(|| DiagServiceResponseType::Positive);
-        mock.expect_is_empty().returning(|| true);
+        mock.expect_has_application_data().returning(|| false);
 
         let service = DiagComm::new("ReadRPM", DiagCommType::Data);
         let response = format_data_response(mock, &service, true, false, None, BinaryEncoding::Hex);
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(body_bytes(response).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn positive_ack_without_client_data_returns_no_content_for_raw_accept() {
+        let mut mock = MockDiagServiceResponse::new();
+        mock.expect_response_type()
+            .returning(|| DiagServiceResponseType::Positive);
+        mock.expect_has_application_data().returning(|| false);
+
+        let service = DiagComm::new("WriteDID", DiagCommType::Data);
+        let response =
+            format_data_response(mock, &service, false, false, None, BinaryEncoding::Hex);
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert!(body_bytes(response).await.is_empty());
@@ -558,7 +573,7 @@ mod tests {
         let mut mock = MockDiagServiceResponse::new();
         mock.expect_response_type()
             .returning(|| DiagServiceResponseType::Positive);
-        mock.expect_is_empty().returning(|| false);
+        mock.expect_has_application_data().returning(|| true);
         mock.expect_into_json().returning(|_| {
             let mut map = serde_json::Map::new();
             map.insert("rpm".to_string(), serde_json::json!(1200));
@@ -588,7 +603,7 @@ mod tests {
         let mut mock = MockDiagServiceResponse::new();
         mock.expect_response_type()
             .returning(|| DiagServiceResponseType::Positive);
-        mock.expect_is_empty().returning(|| false);
+        mock.expect_has_application_data().returning(|| true);
         mock.expect_into_json().returning(|_| {
             Ok(DiagServiceJsonResponse {
                 data: serde_json::Value::Null,
@@ -607,7 +622,7 @@ mod tests {
         let mut mock = MockDiagServiceResponse::new();
         mock.expect_response_type()
             .returning(|| DiagServiceResponseType::Positive);
-        mock.expect_is_empty().returning(|| false);
+        mock.expect_has_application_data().returning(|| true);
         mock.expect_into_json().returning(|_| {
             Ok(DiagServiceJsonResponse {
                 data: serde_json::json!([1, 2, 3]),
@@ -629,7 +644,7 @@ mod tests {
         let mut mock = MockDiagServiceResponse::new();
         mock.expect_response_type()
             .returning(|| DiagServiceResponseType::Positive);
-        mock.expect_is_empty().returning(|| false);
+        mock.expect_has_application_data().returning(|| true);
         mock.expect_into_json().returning(|_| {
             Err(cda_interfaces::DiagServiceError::InvalidRequest(
                 "test".into(),
@@ -647,7 +662,7 @@ mod tests {
         let mut mock = MockDiagServiceResponse::new();
         mock.expect_response_type()
             .returning(|| DiagServiceResponseType::Positive);
-        mock.expect_is_empty().returning(|| false);
+        mock.expect_has_application_data().returning(|| true);
         mock.expect_get_raw()
             .return_const(vec![0xDEu8, 0xAD, 0xBE, 0xEF]);
 
@@ -665,7 +680,7 @@ mod tests {
         let mut mock = MockDiagServiceResponse::new();
         mock.expect_response_type()
             .returning(|| DiagServiceResponseType::Positive);
-        mock.expect_is_empty().returning(|| false);
+        mock.expect_has_application_data().returning(|| true);
         mock.expect_into_json().returning(|_| {
             Ok(DiagServiceJsonResponse {
                 data: serde_json::Value::Object(serde_json::Map::new()),
@@ -701,7 +716,7 @@ mod tests {
         let mut mock = MockDiagServiceResponse::new();
         mock.expect_response_type()
             .returning(|| DiagServiceResponseType::Positive);
-        mock.expect_is_empty().returning(|| false);
+        mock.expect_has_application_data().returning(|| true);
         mock.expect_into_json().returning(|_| {
             let mut map = serde_json::Map::new();
             map.insert("voltage".to_string(), serde_json::json!(12.0));

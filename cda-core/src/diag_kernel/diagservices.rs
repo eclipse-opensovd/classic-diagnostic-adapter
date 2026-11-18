@@ -30,6 +30,7 @@ pub struct DiagServiceResponseStruct {
     pub data: Vec<u8>,
     pub mapped_data: Option<MappedResponseData>,
     pub response_type: DiagServiceResponseType,
+    pub has_application_data: bool,
 }
 
 pub const DTC_CODE_BIT_LEN: u32 = 24;
@@ -87,6 +88,7 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
             data: Vec::new(),
             mapped_data: None,
             response_type: DiagServiceResponseType::Positive,
+            has_application_data: false,
         }
     }
 
@@ -95,6 +97,10 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
     }
     fn response_type(&self) -> DiagServiceResponseType {
         self.response_type
+    }
+
+    fn has_application_data(&self) -> bool {
+        self.has_application_data
     }
 
     fn get_raw(&self) -> &[u8] {
