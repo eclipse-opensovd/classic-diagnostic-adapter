@@ -15,6 +15,7 @@ use aide::UseApi;
 use axum::{Json, body::Bytes, extract::State, response::Response};
 use cda_interfaces::{
     BinaryEncoding, UdsEcu, diagservices::UdsPayloadData, file_manager::FileManager,
+    util::HexNotation,
 };
 use cda_plugin_security::Secured;
 use http::{HeaderMap, header};
@@ -53,70 +54,36 @@ impl BodyFormat {
     }
 }
 
+/// Request and response body format of a generic service exchange.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BodyFormats {
+    /// Format of the request body, from `Content-Type`.
+    request: BodyFormat,
+    /// Format of the response body, from `Accept`.
+    response: BodyFormat,
+}
+
 /// Request and response body format from `Content-Type` and `Accept`.
 ///
 /// Uses the common header handling: a missing `Content-Type` means JSON, a
 /// missing `Accept` or `*/*` answers in the format of the request.
-fn body_formats(headers: &HeaderMap) -> Result<(BodyFormat, BodyFormat), ApiError> {
+fn body_formats(headers: &HeaderMap) -> Result<BodyFormats, ApiError> {
     let (content_type, accept) = get_content_type_and_accept(headers)?;
     let request = content_type
         .map(|m| BodyFormat::from_mime(&m, "Content-Type"))
         .transpose()?
         .unwrap_or(BodyFormat::Json);
-    Ok((request, BodyFormat::from_mime(&accept, "Accept")?))
-}
-
-/// Notation of a hex coded JSON request, mirrored in the JSON response.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HexStyle {
-    /// One leading `0x` for all bytes, e.g. `0x22F190`.
-    PrefixedCompact,
-    /// No prefix, e.g. `22F190` or `22 F1 90`.
-    Compact,
-    /// `0x` before every byte, e.g. `0x22 0xF1 0x90`, the default hex output.
-    PerByte,
-}
-
-impl HexStyle {
-    /// Detects the notation of a hex value. Spaces and commas between the
-    /// bytes are not mirrored; mixed notations fall back to [`HexStyle::PerByte`].
-    fn detect(value: &str) -> Self {
-        let has_prefix = |t: &str| t.starts_with("0x") || t.starts_with("0X");
-        let tokens: Vec<&str> = value
-            .split(|c: char| c.is_whitespace() || c == ',')
-            .filter(|t| !t.is_empty())
-            .collect();
-        let prefixed = tokens.iter().filter(|t| has_prefix(t)).count();
-        match (tokens.first(), prefixed) {
-            (_, 0) => HexStyle::Compact,
-            (Some(first), 1) if has_prefix(first) => HexStyle::PrefixedCompact,
-            _ => HexStyle::PerByte,
-        }
-    }
-
-    fn encode(self, data: &[u8]) -> String {
-        use std::fmt::Write as _;
-
-        let compact = || {
-            data.iter().fold(String::new(), |mut out, b| {
-                let _ = write!(out, "{b:02X}");
-                out
-            })
-        };
-        match self {
-            HexStyle::PerByte => BinaryEncoding::Hex.encode(data),
-            HexStyle::Compact => compact(),
-            HexStyle::PrefixedCompact if data.is_empty() => String::new(),
-            HexStyle::PrefixedCompact => format!("0x{}", compact()),
-        }
-    }
+    Ok(BodyFormats {
+        request,
+        response: BodyFormat::from_mime(&accept, "Accept")?,
+    })
 }
 
 /// Encodes the ECU response for a JSON body. Hex follows the notation of the
 /// request, if the request was hex coded JSON.
-fn encode_response(data: &[u8], encoding: BinaryEncoding, style: Option<HexStyle>) -> String {
-    match (encoding, style) {
-        (BinaryEncoding::Hex, Some(style)) => style.encode(data),
+fn encode_response(data: &[u8], encoding: BinaryEncoding, notation: Option<HexNotation>) -> String {
+    match (encoding, notation) {
+        (BinaryEncoding::Hex, Some(notation)) => notation.encode(data),
         _ => encoding.encode(data),
     }
 }
@@ -128,8 +95,8 @@ fn request_payload(
     headers: &HeaderMap,
     body: &Bytes,
     encoding: BinaryEncoding,
-) -> Result<(Vec<u8>, Option<HexStyle>), ApiError> {
-    let (payload, style) = match format {
+) -> Result<(Vec<u8>, Option<HexNotation>), ApiError> {
+    let (payload, notation) = match format {
         BodyFormat::Json => {
             let request: sovd_put::Request = serde_json::from_slice(body)
                 .map_err(|e| ApiError::BadRequest(format!("Invalid JSON body: {e}")))?;
@@ -137,8 +104,8 @@ fn request_payload(
             let payload = encoding.decode(value).map_err(|e| {
                 ApiError::BadRequest(format!("Invalid {encoding} encoded request: {e}"))
             })?;
-            let style = (encoding == BinaryEncoding::Hex).then(|| HexStyle::detect(value));
-            (payload, style)
+            let notation = (encoding == BinaryEncoding::Hex).then(|| HexNotation::detect(value));
+            (payload, notation)
         }
         BodyFormat::OctetStream => match get_octet_stream_payload(headers, body)? {
             Some(UdsPayloadData::Raw(data)) => (data, None),
@@ -148,7 +115,7 @@ fn request_payload(
     if payload.is_empty() {
         return Err(ApiError::BadRequest("Empty UDS request".to_owned()));
     }
-    Ok((payload, style))
+    Ok((payload, notation))
 }
 
 /// [[ dimpl~sovd-api-generic-service, JSON and octet-stream generic service passthrough ]]
@@ -166,10 +133,11 @@ pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
 ) -> Response {
     require_ecu_access!(write, security_plugin, &ecu_name, &locks, false);
 
-    let payload = body_formats(&headers).and_then(|(req, resp)| {
-        request_payload(req, &headers, &body, binary_encoding).map(|p| (p, resp))
+    let parsed = body_formats(&headers).and_then(|formats| {
+        let payload = request_payload(formats.request, &headers, &body, binary_encoding)?;
+        Ok((formats, payload))
     });
-    let ((uds_raw_payload, hex_style), response_format) = match payload {
+    let (formats, (uds_raw_payload, hex_notation)) = match parsed {
         Ok(v) => v,
         Err(error) => {
             return ErrorWrapper {
@@ -198,11 +166,11 @@ pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
         }
         Ok(v) => v,
     };
-    match response_format {
+    match formats.response {
         BodyFormat::Json => (
             StatusCode::OK,
             Json(sovd_put::Response {
-                response: encode_response(&ecu_response, binary_encoding, hex_style),
+                response: encode_response(&ecu_response, binary_encoding, hex_notation),
             }),
         )
             .into_response(),
@@ -256,7 +224,7 @@ mod tests {
         if let Some(v) = accept {
             headers.insert(header::ACCEPT, v.parse().unwrap());
         }
-        body_formats(&headers)
+        body_formats(&headers).map(|f| (f.request, f.response))
     }
 
     /// [[ test~sovd-api-generic-service-format, Content negotiation of the generic service, test ]]
@@ -287,7 +255,7 @@ mod tests {
         assert!(formats(None, Some("text/plain")).is_err());
     }
 
-    fn json_request(value: &str) -> Result<(Vec<u8>, Option<HexStyle>), ApiError> {
+    fn json_request(value: &str) -> Result<(Vec<u8>, Option<HexNotation>), ApiError> {
         let body = Bytes::from(serde_json::json!({ "request": value }).to_string());
         request_payload(
             BodyFormat::Json,
@@ -302,7 +270,7 @@ mod tests {
         let headers = HeaderMap::new();
         assert_eq!(
             json_request(" 22F190 ").unwrap(),
-            (vec![0x22, 0xF1, 0x90], Some(HexStyle::Compact))
+            (vec![0x22, 0xF1, 0x90], Some(HexNotation::Compact))
         );
         let b64 = Bytes::from_static(br#"{"request": "IvGQ"}"#);
         assert_eq!(
@@ -312,7 +280,7 @@ mod tests {
         let alias = Bytes::from_static(br#"{"send": "0x22F190"}"#);
         assert_eq!(
             request_payload(BodyFormat::Json, &headers, &alias, BinaryEncoding::Hex).unwrap(),
-            (vec![0x22, 0xF1, 0x90], Some(HexStyle::PrefixedCompact))
+            (vec![0x22, 0xF1, 0x90], Some(HexNotation::PrefixedCompact))
         );
         assert!(json_request("").is_err());
         assert!(json_request("zz").is_err());
@@ -322,49 +290,29 @@ mod tests {
         );
     }
 
-    /// [[ test~sovd-api-generic-service-hex-style, Hex notation of the request is mirrored in the response, test ]]
-    #[test]
-    fn test_hex_style_detect() {
-        for (value, style) in [
-            ("0x22F190", HexStyle::PrefixedCompact),
-            ("0X22f190", HexStyle::PrefixedCompact),
-            ("0x22 F1 90", HexStyle::PrefixedCompact),
-            ("0x22", HexStyle::PrefixedCompact),
-            ("22F190", HexStyle::Compact),
-            ("22 F1 90", HexStyle::Compact),
-            ("22,F1,90", HexStyle::Compact),
-            ("0x22 0xF1 0x90", HexStyle::PerByte),
-            ("0x22,0xF1", HexStyle::PerByte),
-            ("22 0xF1", HexStyle::PerByte),
-            ("0x22 F1 0x90", HexStyle::PerByte),
-        ] {
-            assert_eq!(HexStyle::detect(value), style, "{value}");
-        }
-    }
-
     #[test]
     fn test_encode_response() {
         let data = [0x62, 0xF1, 0x0A];
         let hex = BinaryEncoding::Hex;
         assert_eq!(
-            encode_response(&data, hex, Some(HexStyle::PrefixedCompact)),
+            encode_response(&data, hex, Some(HexNotation::PrefixedCompact)),
             "0x62F10A"
         );
         assert_eq!(
-            encode_response(&data, hex, Some(HexStyle::Compact)),
+            encode_response(&data, hex, Some(HexNotation::Compact)),
             "62F10A"
         );
         assert_eq!(
-            encode_response(&data, hex, Some(HexStyle::PerByte)),
+            encode_response(&data, hex, Some(HexNotation::PerByte)),
             "0x62 0xF1 0x0A"
         );
         assert_eq!(encode_response(&data, hex, None), "0x62 0xF1 0x0A");
         assert_eq!(
-            encode_response(&data, BinaryEncoding::Base64, Some(HexStyle::Compact)),
+            encode_response(&data, BinaryEncoding::Base64, Some(HexNotation::Compact)),
             "YvEK"
         );
         assert_eq!(
-            encode_response(&[], hex, Some(HexStyle::PrefixedCompact)),
+            encode_response(&[], hex, Some(HexNotation::PrefixedCompact)),
             ""
         );
     }

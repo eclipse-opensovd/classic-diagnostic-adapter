@@ -562,6 +562,50 @@ pub fn normalize_hex(value: &str) -> String {
         .collect()
 }
 
+/// Notation of a hex coded byte string, e.g. to answer in the notation of a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HexNotation {
+    /// One leading `0x` for all bytes, e.g. `0x22F190`.
+    PrefixedCompact,
+    /// No prefix, e.g. `22F190` or `22 F1 90`.
+    Compact,
+    /// `0x` before every byte, e.g. `0x22 0xF1 0x90`, the default hex output
+    /// of [`crate::BinaryEncoding::Hex`].
+    PerByte,
+}
+
+impl HexNotation {
+    /// Detects the notation of a hex value. Spaces and commas between the
+    /// bytes are not part of the notation; mixed notations fall back to
+    /// [`HexNotation::PerByte`].
+    #[must_use]
+    pub fn detect(value: &str) -> Self {
+        let has_prefix = |t: &str| try_strip_hex_prefix(t).is_some();
+        let mut tokens = value
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|t| !t.is_empty());
+        let first_prefixed = tokens.next().is_some_and(has_prefix);
+        let more_prefixed = tokens.any(has_prefix);
+        match (first_prefixed, more_prefixed) {
+            (false, false) => HexNotation::Compact,
+            (true, false) => HexNotation::PrefixedCompact,
+            _ => HexNotation::PerByte,
+        }
+    }
+
+    /// Encodes `data` as upper case hex in this notation. Empty data is an
+    /// empty string.
+    #[must_use]
+    pub fn encode(self, data: &[u8]) -> String {
+        match self {
+            HexNotation::PerByte => crate::BinaryEncoding::Hex.encode(data),
+            HexNotation::Compact => hex::encode_upper(data),
+            HexNotation::PrefixedCompact if data.is_empty() => String::new(),
+            HexNotation::PrefixedCompact => format!("0x{}", hex::encode_upper(data)),
+        }
+    }
+}
+
 /// Compare a byte-field parameter against a variant pattern's expected value.
 ///
 /// A decoded `ByteField` serializes as space-separated `0x`-prefixed bytes
@@ -664,6 +708,37 @@ mod tests {
         // Degenerate frames.
         assert!(!uds_response_matches_request_sid(0x22, &[]));
         assert!(!uds_response_matches_request_sid(0x22, &[0x7F]));
+    }
+
+    /// [[ test~sovd-api-generic-service-hex-style, Hex notation of the request is mirrored in the response, test ]]
+    #[test]
+    fn hex_notation_detect() {
+        for (value, notation) in [
+            ("0x22F190", HexNotation::PrefixedCompact),
+            ("0X22f190", HexNotation::PrefixedCompact),
+            ("0x22 F1 90", HexNotation::PrefixedCompact),
+            ("0x22", HexNotation::PrefixedCompact),
+            ("22F190", HexNotation::Compact),
+            ("22 F1 90", HexNotation::Compact),
+            ("22,F1,90", HexNotation::Compact),
+            ("", HexNotation::Compact),
+            ("0x22 0xF1 0x90", HexNotation::PerByte),
+            ("0x22,0xF1", HexNotation::PerByte),
+            ("22 0xF1", HexNotation::PerByte),
+            ("0x22 F1 0x90", HexNotation::PerByte),
+        ] {
+            assert_eq!(HexNotation::detect(value), notation, "{value}");
+        }
+    }
+
+    #[test]
+    fn hex_notation_encode() {
+        let data = [0x62, 0xF1, 0x0A];
+        assert_eq!(HexNotation::PrefixedCompact.encode(&data), "0x62F10A");
+        assert_eq!(HexNotation::Compact.encode(&data), "62F10A");
+        assert_eq!(HexNotation::PerByte.encode(&data), "0x62 0xF1 0x0A");
+        assert_eq!(HexNotation::PrefixedCompact.encode(&[]), "");
+        assert_eq!(HexNotation::Compact.encode(&[]), "");
     }
 
     #[test]
