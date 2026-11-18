@@ -1513,7 +1513,7 @@ mod tests {
             .get_or_create_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
             .await
             .unwrap();
-        assert!(col.list().await.unwrap().is_empty());
+        assert_eq!(col.list().await.unwrap(), [] as [String; 0]);
     }
 
     #[tokio::test]
