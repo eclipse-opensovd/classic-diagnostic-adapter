@@ -119,7 +119,9 @@ async fn persisted_last_seen(env: &TestEnv, name: &str) -> i64 {
         .await
         .expect("Persisted ECU missing");
     let last_seen = ecu.last_seen.expect("Persisted ECU timestamp missing");
-    chrono::DateTime::<chrono::Utc>::from(last_seen).timestamp_millis()
+    jiff::Timestamp::try_from(last_seen)
+        .expect("Persisted ECU timestamp out of range")
+        .as_millisecond()
 }
 
 async fn is_persisted_state(env: &TestEnv, name: &str, state: PersistedEcuState) -> bool {
@@ -333,9 +335,10 @@ async fn last_seen_is_written_back_at_shutdown() {
         .await
         .last_seen
         .expect("Contact timestamp missing");
-    let contact = chrono::DateTime::parse_from_rfc3339(&contact)
+    let contact = contact
+        .parse::<jiff::Timestamp>()
         .expect("Invalid contact timestamp")
-        .timestamp_millis();
+        .as_millisecond();
     assert!(contact > before);
 
     env.restart_cda().await.expect("Failed to restart CDA");

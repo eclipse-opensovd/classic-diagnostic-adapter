@@ -17,11 +17,11 @@ workspace_rust_library(
     crate_deps = [
         "base64",
         "bytes",
-        "chrono",
         "foldhash",
         "futures",
         "hex",
         "http",
+        "jiff",
         "parking_lot",
         "rkyv",
         "schemars",

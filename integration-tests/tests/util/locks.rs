@@ -15,9 +15,9 @@
 
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use const_format::formatcp;
 use http::{Method, StatusCode};
+use jiff::Timestamp;
 use serde_json::Value;
 
 use crate::util::{
@@ -125,12 +125,12 @@ pub(crate) async fn lock_expiration(
     cda: &impl CdaClient,
     endpoint: &str,
     lock_id: &str,
-) -> Result<DateTime<Utc>, TestingError> {
+) -> Result<Timestamp, TestingError> {
     let response = lock_operation(endpoint, Some(lock_id), cda, StatusCode::OK, Method::GET).await;
 
     let expiration: String = response_to_json_to_field(&response, "lock_expiration")?;
 
-    match expiration.parse::<DateTime<Utc>>() {
+    match expiration.parse::<Timestamp>() {
         Ok(date_time) => Ok(date_time),
         Err(_) => Err(TestingError::InvalidData(
             "Failed to parse lock expiration datetime".to_string(),

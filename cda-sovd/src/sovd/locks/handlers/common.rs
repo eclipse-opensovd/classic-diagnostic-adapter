@@ -11,7 +11,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{option::Option, sync::Arc, time::SystemTime};
+use std::{
+    option::Option,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use axum::{
     Json,
@@ -23,10 +27,9 @@ use cda_interfaces::{
     lock_priority_api::{
         LockLifecycleEvent, LockPriorityPolicy, LockRequest, LockScope, LockSnapshot,
     },
-    util::system_time_to_rfc3339,
+    util::{is_rfc3339_representable, system_time_to_rfc3339},
 };
 use cda_plugin_security::{Claims, SecurityPlugin};
-use chrono::Utc;
 use tokio::{sync::oneshot, time::Instant};
 
 use super::super::{
@@ -62,14 +65,16 @@ fn validated_expiration_duration(lock_expiration: u64) -> Result<SystemTime, Api
             "Lock expiration must be greater than zero".to_owned(),
         ));
     }
-    let seconds = i64::try_from(lock_expiration)
-        .map_err(|_| ApiError::BadRequest("Lock expiration is too large".to_owned()))?;
-    let duration = chrono::TimeDelta::try_seconds(seconds)
-        .ok_or_else(|| ApiError::BadRequest("Lock expiration is too large".to_owned()))?;
-    let expiration = Utc::now()
-        .checked_add_signed(duration)
-        .ok_or_else(|| ApiError::BadRequest("Lock expiration is too large".to_owned()))?;
-    Ok(SystemTime::from(expiration))
+    let too_large = || ApiError::BadRequest("Lock expiration is too large".to_owned());
+    let expiration = SystemTime::now()
+        .checked_add(Duration::from_secs(lock_expiration))
+        .ok_or_else(too_large)?;
+    // Reject what `system_time_to_rfc3339` would clamp, so the reported expiration
+    // matches the stored one.
+    if !is_rfc3339_representable(expiration) {
+        return Err(too_large());
+    }
+    Ok(expiration)
 }
 
 #[tracing::instrument(

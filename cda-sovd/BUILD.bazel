@@ -19,7 +19,6 @@ workspace_rust_library(
         "axum",
         "axum-extra",
         "bytes",
-        "chrono",
         "futures",
         "http",
         "indexmap",

@@ -42,7 +42,6 @@ tokio = { workspace = true, features = ["sync"] }
 axum = { workspace = true, features = ["json"] }
 
 aide = { workspace = true, features = ["axum"] }
-chrono = { workspace = true }
 
 [features]
 default = []

@@ -12,25 +12,55 @@
  */
 use crate::{DiagServiceError, service_ids};
 
+/// Earliest timestamp RFC 3339 can express, `0000-01-01T00:00:00Z`: it only allows
+/// four-digit years. The latest is [`jiff::Timestamp::MAX`], `9999-12-30T22:00:00Z`.
+const RFC3339_MIN: jiff::Timestamp = jiff::Timestamp::constant(-62_167_219_200, 0);
+
+/// `time` as [`jiff::Timestamp`], `None` if it is outside the range RFC 3339 can express.
+fn rfc3339_timestamp(time: std::time::SystemTime) -> Option<jiff::Timestamp> {
+    jiff::Timestamp::try_from(time)
+        .ok()
+        .filter(|timestamp| *timestamp >= RFC3339_MIN)
+}
+
+/// Whether [`system_time_to_rfc3339`] can format `time` without clamping it, i.e.
+/// it lies between `0000-01-01T00:00:00Z` and `9999-12-30T22:00:00Z`.
+#[must_use]
+pub fn is_rfc3339_representable(time: std::time::SystemTime) -> bool {
+    rfc3339_timestamp(time).is_some()
+}
+
 /// Formats a point in time as an RFC 3339 timestamp as used by the SOVD API.
 ///
 /// The timestamp is always expressed in UTC with second precision and the `Z`
-/// suffix, e.g. `2026-01-02T03:04:05Z`.
+/// suffix, e.g. `2026-01-02T03:04:05Z`. Points in time RFC 3339 cannot express
+/// (see [`is_rfc3339_representable`]) are clamped to the nearest one it can.
 #[must_use]
 pub fn system_time_to_rfc3339(time: std::time::SystemTime) -> String {
-    chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    let timestamp = rfc3339_timestamp(time).unwrap_or(if time < std::time::UNIX_EPOCH {
+        RFC3339_MIN
+    } else {
+        jiff::Timestamp::MAX
+    });
+    jiff::fmt::temporal::DateTimePrinter::new()
+        .precision(Some(0))
+        .timestamp_to_string(&timestamp)
 }
 
-/// Parses an RFC 3339 timestamp. `None` if it is invalid or not representable as
-/// [`SystemTime`](std::time::SystemTime) on this platform, e.g. before 1601 on Windows.
+/// Parses an RFC 3339 timestamp. `None` if it is invalid, outside the range RFC 3339
+/// can express, or not representable as [`SystemTime`](std::time::SystemTime) on this
+/// platform, e.g. before 1601 on Windows.
 #[must_use]
 pub fn rfc3339_to_system_time(value: &str) -> Option<std::time::SystemTime> {
-    let since_epoch = chrono::DateTime::parse_from_rfc3339(value)
-        .ok()?
-        .signed_duration_since(chrono::DateTime::UNIX_EPOCH);
-    match since_epoch.to_std() {
-        Ok(after) => std::time::UNIX_EPOCH.checked_add(after),
-        Err(_) => std::time::UNIX_EPOCH.checked_sub(since_epoch.abs().to_std().ok()?),
+    let since_epoch = value
+        .parse::<jiff::Timestamp>()
+        .ok()
+        .filter(|timestamp| *timestamp >= RFC3339_MIN)?
+        .as_duration();
+    if since_epoch.is_negative() {
+        std::time::UNIX_EPOCH.checked_sub(since_epoch.unsigned_abs())
+    } else {
+        std::time::UNIX_EPOCH.checked_add(since_epoch.unsigned_abs())
     }
 }
 
@@ -601,6 +631,50 @@ mod tests {
     #[test]
     fn formats_unix_epoch() {
         assert_eq!(system_time_to_rfc3339(UNIX_EPOCH), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn formats_out_of_range_time_clamped() {
+        // About 20000 years after the epoch, beyond the RFC 3339 year range.
+        let after = UNIX_EPOCH + Duration::from_secs(632_448_000_000);
+        assert_eq!(system_time_to_rfc3339(after), "9999-12-30T22:00:00Z");
+        // One second before year 0, which RFC 3339 cannot express.
+        let before = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(62_167_219_201))
+            .unwrap();
+        assert_eq!(system_time_to_rfc3339(before), "0000-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn rfc3339_representable_range() {
+        let year_0 = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(62_167_219_200))
+            .unwrap();
+        assert!(is_rfc3339_representable(year_0));
+        // use 1 second resolution for representability check as for example Windows does
+        // not support 1ns steps.
+        assert!(!is_rfc3339_representable(
+            year_0.checked_sub(Duration::from_secs(1)).unwrap()
+        ));
+        // 9999-12-30T22:00:00Z, the latest time jiff can represent.
+        let latest = UNIX_EPOCH + Duration::from_secs(253_402_207_200);
+        assert!(is_rfc3339_representable(latest));
+        assert!(!is_rfc3339_representable(latest + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn rejects_years_rfc3339_cannot_express() {
+        assert!(rfc3339_to_system_time("0000-01-01T00:00:00Z").is_some());
+        assert_eq!(rfc3339_to_system_time("-000001-12-31T23:59:59Z"), None);
+        assert_eq!(rfc3339_to_system_time("+010000-01-01T00:00:00Z"), None);
+    }
+
+    #[test]
+    fn parses_rfc3339_with_offset() {
+        assert_eq!(
+            rfc3339_to_system_time("2026-01-02T04:04:05+01:00"),
+            Some(UNIX_EPOCH + Duration::from_secs(1_767_323_045))
+        );
     }
 
     #[test]
