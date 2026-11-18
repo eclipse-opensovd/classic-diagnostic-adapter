@@ -84,7 +84,7 @@ services:
       ecu-sim:
         condition: service_healthy
     environment:
-      - RUST_LOG=debug
+      - RUST_LOG=${CDA_RUST_LOG:-debug}
       - CDA_CONFIG_FILE=/app/cda-test-config.toml
     command: ["-d", "/app/odx"]
     restart: unless-stopped
