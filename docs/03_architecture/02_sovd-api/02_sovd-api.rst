@@ -1521,14 +1521,17 @@ Generic Service
        PUT /components/{ecu}/genericservice?x-sovd2uds-binary-encoding=hex
        Content-Type: application/json
 
-       { "request": "0x22 0xF1 0x90" }
+       { "data": "0x22 0xF1 0x90" }
 
        200 OK
        Content-Type: application/json
 
-       { "response": "0x62 0xF1 0x90 ..." }
+       { "id": "genericservice", "data": "0x62 0xF1 0x90 ..." }
 
-    The request field ``send`` is accepted as alias of ``request``. With the ``hex`` encoding, the response
+    ISO 17978-3 defines no contract for a raw UDS exchange. The bodies therefore follow the data resources:
+    the bytes are in the field ``data``, like in the request body of writing a data resource, and the
+    response carries the resource ``id`` like ``ReadValue``. ``request`` and ``send`` are accepted as aliases
+    of ``data`` in the request. With the ``hex`` encoding, the response
     uses the notation of the request. Spaces and commas between the bytes are accepted in the request but
     not repeated in the response; mixed notations are answered in the default notation:
 
@@ -1574,7 +1577,8 @@ Generic Service
     **Status codes**
 
     Every ECU response is passed through with ``200 OK``: positive responses, suppressed positive responses
-    (empty) and negative responses (``7F <SID> <NRC>``), i.e. as raw bytes or as ``{ "response": "7F2231" }``.
+    (empty) and negative responses (``7F <SID> <NRC>``), i.e. as raw bytes or as
+    ``{ "id": "genericservice", "data": "7F2231" }``.
     The passthrough does not interpret the response; ``502 Bad Gateway`` would require a SOVD error object
     describing the NRC. Errors of the CDA itself (e.g. no response, communication failure) are reported as
     SOVD errors as for the other endpoints.
