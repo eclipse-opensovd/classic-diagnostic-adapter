@@ -163,6 +163,10 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             })
         }) {
             let response_type = response.response_type().try_into()?;
+            // Use MDD metadata so raw responses need not be decoded just to choose the HTTP status.
+            let data_semantic = &self.database_naming_convention.semantics.data;
+            let has_application_data = response_type == datatypes::ResponseType::Positive
+                && response_has_application_data(&params, data_semantic);
             // in case of a positive response update potential session or security access changes
             if response_type == datatypes::ResponseType::Positive {
                 let (new_session, new_security) =
@@ -192,8 +196,10 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
                     data: raw_uds_payload,
                     mapped_data: None,
                     response_type: DiagServiceResponseType::Positive,
+                    has_application_data,
                 });
             }
+
             let mut mapping_errors = Vec::new();
             // Params are decoded in database order. A param without
             // BYTE-POSITION (ISO 22901-1 §7.4.8) starts where the preceding
@@ -240,6 +246,7 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
                 diag_service,
                 data,
                 response_type,
+                has_application_data,
                 raw_uds_payload,
                 mapping_errors,
             );
@@ -260,6 +267,7 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
                 } else {
                     DiagServiceResponseType::Positive
                 },
+                has_application_data: !payload.data.is_empty(),
             })
         }
     }
@@ -337,6 +345,7 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
                 data: raw_uds_payload,
                 mapped_data: None,
                 response_type: DiagServiceResponseType::Positive,
+                has_application_data: true,
             });
         }
 
@@ -344,6 +353,7 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             diag_service,
             data,
             datatypes::ResponseType::Positive,
+            true,
             raw_uds_payload,
             mapping_errors,
         );
@@ -366,11 +376,14 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
                 ))));
             }
         };
+        let has_application_data =
+            response_type == DiagServiceResponseType::Positive && response.data.len() > 1;
         Ok(DiagServiceResponseStruct {
             service: diag_comm,
             data: response.data,
             mapped_data: None,
             response_type,
+            has_application_data,
         })
     }
 }
@@ -2036,6 +2049,7 @@ fn create_diag_service_response(
     diag_service: &cda_interfaces::DiagComm,
     data: HashMap<String, DiagDataTypeContainer>,
     response_type: datatypes::ResponseType,
+    has_application_data: bool,
     raw_uds_payload: Vec<u8>,
     mapping_errors: Vec<FieldParseError>,
 ) -> DiagServiceResponseStruct {
@@ -2049,6 +2063,7 @@ fn create_diag_service_response(
                     errors: mapping_errors,
                 }),
                 response_type: DiagServiceResponseType::Negative,
+                has_application_data: false,
             }
         }
         datatypes::ResponseType::Positive => DiagServiceResponseStruct {
@@ -2059,7 +2074,36 @@ fn create_diag_service_response(
                 errors: mapping_errors,
             }),
             response_type: DiagServiceResponseType::Positive,
+            has_application_data,
         },
+    }
+}
+
+fn response_has_application_data(params: &[datatypes::Parameter<'_>], data_semantic: &str) -> bool {
+    params.iter().any(|param| {
+        is_application_data_semantic(param.semantic(), data_semantic)
+            && parameter_type_has_application_data(&param.param_type())
+    })
+}
+
+fn is_application_data_semantic(semantic: Option<&str>, data_semantic: &str) -> bool {
+    // Treat parameters without an explicit semantic as application data.
+    semantic.is_none_or(|value| value == data_semantic)
+}
+
+fn parameter_type_has_application_data(
+    param_type: &Result<datatypes::ParamType, DiagServiceError>,
+) -> bool {
+    match param_type {
+        Ok(
+            datatypes::ParamType::CodedConst
+            | datatypes::ParamType::MatchingRequestParam
+            | datatypes::ParamType::PhysConst
+            | datatypes::ParamType::NrcConst
+            | datatypes::ParamType::System,
+        ) => false,
+        // Preserve unknown parameter types rather than silently dropping response content.
+        Ok(_) | Err(_) => true,
     }
 }
 
@@ -2100,6 +2144,23 @@ mod tests {
             new_session: None,
             new_security: None,
         }
+    }
+
+    #[test]
+    fn response_data_classifier_ignores_non_data_semantics() {
+        assert!(is_application_data_semantic(Some("DATA"), "DATA"));
+        assert!(is_application_data_semantic(None, "DATA"));
+        assert!(!is_application_data_semantic(Some("DID"), "DATA"));
+        assert!(!is_application_data_semantic(Some("SERVICE-ID-RQ"), "DATA"));
+        assert!(parameter_type_has_application_data(&Ok(
+            datatypes::ParamType::Value
+        )));
+        assert!(!parameter_type_has_application_data(&Ok(
+            datatypes::ParamType::CodedConst
+        )));
+        assert!(!parameter_type_has_application_data(&Ok(
+            datatypes::ParamType::MatchingRequestParam
+        )));
     }
 
     async fn assert_uds_converts_to_json(
