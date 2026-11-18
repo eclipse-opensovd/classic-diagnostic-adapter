@@ -50,7 +50,6 @@ cda-storage = { workspace = true }
 # args
 clap = { workspace = true, features = ["derive", "env"] }
 backon = { workspace = true }
-chrono = { workspace = true }
 tokio-util = { workspace = true }
 # config
 figment = { workspace = true, features = ["env", "toml"] }
@@ -74,7 +73,6 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = [
   "ansi",
-  "chrono",
   "env-filter",
   "fmt",
   "json",
@@ -91,7 +89,7 @@ cda-plugin-security = { workspace = true, features = ["test-utils"] }
 cda-database = { workspace = true, features = ["database-builder"] }
 
 [build-dependencies]
-chrono = { workspace = true }
+jiff = { workspace = true }
 
 [features]
 default = ["health", "openssl", "config-optional"]

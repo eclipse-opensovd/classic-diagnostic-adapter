@@ -165,16 +165,6 @@ fn validate_metadata<E: de::Error>(metadata: &Map<String, Value>) -> Result<(), 
     Ok(())
 }
 
-impl From<Request> for chrono::DateTime<chrono::Utc> {
-    fn from(value: Request) -> Self {
-        chrono::Utc::now()
-            .checked_add_signed(chrono::TimeDelta::seconds(
-                value.lock_expiration.try_into().unwrap_or(i64::MAX),
-            ))
-            .unwrap_or(chrono::Utc::now())
-    }
-}
-
 pub mod get {
     use super::{Items, Lock};
 

@@ -26,7 +26,6 @@ workspace_rust_library(
     ),
     crate_deps = [
         "backon",
-        "chrono",
         "clap",
         "figment",
         "futures",

@@ -743,7 +743,7 @@ pub struct TracingGuards {
 pub fn setup_tracing(config: &Configuration) -> Result<TracingGuards, TracingSetupError> {
     let tracing = cda_tracing::new();
     let mut layers = vec![];
-    layers.push(cda_tracing::new_term_subscriber(&config.logging));
+    layers.push(cda_tracing::new_term_subscriber(&config.logging)?);
     #[cfg(feature = "tokio-tracing")]
     layers.push(cda_tracing::new_tokio_tracing(
         &config.logging.tokio_tracing,

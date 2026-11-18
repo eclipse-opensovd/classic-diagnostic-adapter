@@ -29,8 +29,8 @@ uuid = { workspace = true, features = ["v4"] }
 http = { workspace = true }
 # internal dependencies
 bytes = { workspace = true }
-chrono = { workspace = true }
 foldhash = { workspace = true }
+jiff = { workspace = true }
 
 rkyv = { workspace = true }
 parking_lot = { workspace = true }

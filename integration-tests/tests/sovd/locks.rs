@@ -130,6 +130,54 @@ async fn lock_unlock() -> Result<(), TestingError> {
     Ok(())
 }
 
+/// Verify that the lock expiration is returned as RFC 3339 timestamp in UTC with second
+/// precision, e.g. `2026-01-02T03:04:05Z`.
+#[tokio::test]
+async fn lock_expiration_is_rfc3339_utc_with_second_precision() -> Result<(), TestingError> {
+    const PATTERN: &[u8] = b"dddd-dd-ddTdd:dd:ddZ";
+
+    let test_env = TestEnv::builder().await?;
+
+    for endpoint in ENDPOINTS {
+        let created =
+            create_lock(default_timeout(), endpoint, StatusCode::CREATED, &test_env).await;
+        let lock_id = extract_field_from_json::<String>(&response_to_json(&created)?, "id")?;
+
+        let lock = lock_operation(
+            endpoint,
+            Some(&lock_id),
+            &test_env,
+            StatusCode::OK,
+            Method::GET,
+        )
+        .await;
+        let expiration: String = response_to_json_to_field(&lock, "lock_expiration")?;
+        let matches_pattern = expiration.len() == PATTERN.len()
+            && expiration
+                .bytes()
+                .zip(PATTERN)
+                .all(|(byte, &expected)| match expected {
+                    b'd' => byte.is_ascii_digit(),
+                    _ => byte == expected,
+                });
+        assert!(
+            matches_pattern,
+            "unexpected lock_expiration format at {endpoint}: {expiration:?}"
+        );
+
+        lock_operation(
+            endpoint,
+            Some(&lock_id),
+            &test_env,
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+        )
+        .await;
+    }
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn unrelated_functional_group_and_ecu_locks_can_coexist() -> Result<(), TestingError> {
     let test_env = TestEnv::builder().await?;
