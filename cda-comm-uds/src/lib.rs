@@ -18,7 +18,9 @@ use cda_interfaces::{
     EcuManager, FunctionalDescriptionConfig, HashMap, HashMapExtensions, SchemaDescription,
     SchemaProvider, UdsEcu, UdsEcuDb, UdsTransport, VariantDetectionActivity,
     VariantDetectionReceiver,
-    communication_control::{ActivationCause, CommunicationAccess, CommunicationGuard},
+    communication_control::{
+        ActivationCause, CommunicationAccess, CommunicationGuard, PreemptibleCommunicationGuard,
+    },
     datatypes::FaultConfig,
     diagservices::UdsPayloadData,
     request_authorization::RequestLockProvider,
@@ -194,6 +196,18 @@ impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
         self.communication_access
             .request_activate(ActivationCause::DiagnosticRequest);
         Err(self.build_communication_not_ready_err("Communication is not currently enabled"))
+    }
+
+    /// Acquires communication for preemptible background work such as tester
+    /// present. Unlike [`Self::require_communication_ready`] it never requests
+    /// activation: background work must not bring communication up, and is
+    /// expected to be refused while a disable proceeds.
+    pub(crate) fn require_preemptible_communication(
+        &self,
+    ) -> Result<PreemptibleCommunicationGuard, DiagServiceError> {
+        self.communication_access
+            .acquire_preemptible()
+            .map_err(|error| self.build_communication_not_ready_err(error.to_string()))
     }
 
     /// Builds a [`DiagServiceError::CommunicationNotReady`] carrying this

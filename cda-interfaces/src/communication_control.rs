@@ -25,9 +25,14 @@ use std::time::Duration;
 
 pub mod disable;
 
-pub use access::{CommunicationAccess, CommunicationError, CommunicationGuard, CommunicationState};
+pub use access::{
+    CommunicationAccess, CommunicationError, CommunicationGuard, CommunicationState,
+    PreemptibleCommunicationGuard,
+};
 use async_trait::async_trait;
-pub use disable::{DisableCommunication, DisableError, DisableGuard, DisableReason};
+pub use disable::{
+    CommunicationInUse, DisableCommunication, DisableError, DisableGuard, DisableReason,
+};
 pub use doip_connect::{DoipConnect, DoipEndpoint};
 pub use error::CommControlError;
 pub use operation::{
@@ -219,6 +224,11 @@ pub enum VamHandlingMode {
 /// Default retry hint for requests deferred while communication starts.
 pub const DEFAULT_DEFERRED_RETRY_AFTER: Duration = Duration::from_secs(30);
 
+/// Default time (in milliseconds) an exclusive disable waits for in-flight
+/// diagnostic requests to finish, see
+/// [`CommunicationSettings::disable_drain_timeout_ms`].
+pub const DEFAULT_DISABLE_DRAIN_TIMEOUT_MS: u64 = 5000;
+
 /// Persistence of the detected ECU/gateway topology across restarts.
 #[derive(
     Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema,
@@ -282,6 +292,12 @@ pub struct CommunicationSettings {
     /// The value (in seconds) for the HTTP `Retry-After` header returned when a
     /// diagnostic request arrives while initialization is still pending.
     pub deferred_retry_after_seconds: u64,
+    /// How long (in milliseconds) an exclusive disable, e.g. for a runtime
+    /// update, waits for in-flight diagnostic requests and variant detection
+    /// to finish before refusing. New requests are refused while it waits.
+    /// Background tester present never blocks a disable. `0` refuses
+    /// immediately while any request is in flight.
+    pub disable_drain_timeout_ms: u64,
     /// Topology plugin settings (`ecu_list_persistence`, `vam_handling_mode`).
     #[serde(flatten)]
     pub topology: TopologySettings,
@@ -294,6 +310,7 @@ impl Default for CommunicationSettings {
             variant_detection: VariantDetectionMode::default(),
             post_update_mode: PostUpdateCommunicationMode::default(),
             deferred_retry_after_seconds: DEFAULT_DEFERRED_RETRY_AFTER.as_secs(),
+            disable_drain_timeout_ms: DEFAULT_DISABLE_DRAIN_TIMEOUT_MS,
             topology: TopologySettings::default(),
         }
     }

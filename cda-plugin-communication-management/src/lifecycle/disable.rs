@@ -84,6 +84,13 @@ pub(crate) struct DisableOwner {
     /// [`variant_detection`](crate::lifecycle::state::CommunicationStateData::variant_detection)
     /// when the lease is granted.
     pub(crate) resume_detects: bool,
+    /// Whether the disable is still waiting for in-flight requests and
+    /// detection to finish.
+    ///
+    /// While set, the state is `Disabling` but the transport is untouched:
+    /// request guards are refused, preemptible guards are still admitted, and
+    /// a timeout restores `Enabled`.
+    pub(crate) draining: bool,
 }
 
 impl DisableOwner {

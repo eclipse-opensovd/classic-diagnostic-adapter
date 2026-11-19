@@ -35,8 +35,8 @@ use cda_interfaces::{
     HashMap, ShutdownSignal,
     communication_control::{
         ActivationCause, CommunicationAccess, CommunicationInitMode, CommunicationLifecycle,
-        CommunicationVariantDetection, DetectionPhase, DoipConnect, PostUpdateCommunicationMode,
-        VariantDetectionMode, error::CommControlError,
+        CommunicationSettings, CommunicationVariantDetection, DetectionPhase, DoipConnect,
+        PostUpdateCommunicationMode, error::CommControlError,
     },
     component_slot::{ComponentSlot, ReplaceComponent},
     health::HealthProvider,
@@ -422,8 +422,7 @@ async fn build_communication_runtime_and_access<SP, CPB>(
         DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
     >,
     communication_plugin: CPB,
-    init_mode: CommunicationInitMode,
-    variant_detection: VariantDetectionMode,
+    settings: &CommunicationSettings,
     retry_after: Duration,
     http_protections: &HttpProtectionRegistry,
 ) -> Result<(CommunicationRuntime, Arc<dyn CommunicationAccess>), AppError>
@@ -441,8 +440,9 @@ where
     let communication_runtime = build_communication_runtime(
         communication_plugin,
         transport_control,
-        init_mode,
-        variant_detection,
+        settings.init_mode,
+        settings.variant_detection,
+        Duration::from_millis(settings.disable_drain_timeout_ms),
     )
     .await
     .map_err(|error| AppError::InitializationFailed(error.to_string()))?;
@@ -609,8 +609,7 @@ where
         ws,
         vehicle_data.diagnostic_gateway.clone(),
         communication_plugin,
-        config.communication.init_mode,
-        config.communication.variant_detection,
+        &config.communication,
         communication_retry_after,
         &http_protections,
     )
@@ -818,7 +817,8 @@ mod tests {
                 DefaultCommunicationPluginBuilder,
                 Arc::new(NoopTransport),
                 mode,
-                VariantDetectionMode::Always,
+                cda_interfaces::communication_control::VariantDetectionMode::Always,
+                Duration::ZERO,
             )
             .await
             .unwrap();

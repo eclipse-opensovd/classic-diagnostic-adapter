@@ -25,12 +25,15 @@ path = "src/lib.rs"
 
 [dependencies]
 cda-interfaces = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 http = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time", "test-util"] }
 
 [features]
 default = []

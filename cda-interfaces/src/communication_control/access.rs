@@ -105,6 +105,33 @@ impl CommunicationGuard {
     }
 }
 
+/// Opaque RAII guard for background work that a disable may cut off at any
+/// time, such as the tester present loop.
+///
+/// Unlike [`CommunicationGuard`], holding it neither blocks a disable nor a
+/// whole-vehicle detection. It is still admitted while a disable waits for
+/// in-flight requests, so the work keeps running if that wait times out.
+///
+/// Whoever holds one must tolerate being aborted mid-send, and must be stopped
+/// by a lifecycle `deinitialize` hook, because the transport goes down right
+/// after deinitialization.
+///
+/// [[ dimpl~communication-preemptible-guard, Preemptible communication guard, dimpl ]]
+#[must_use = "The guard must be held for the complete duration of the preemptible work."]
+pub struct PreemptibleCommunicationGuard {
+    _inner: Box<dyn Send + Sync>,
+}
+
+impl PreemptibleCommunicationGuard {
+    /// Wraps an implementation-defined guard so that its concrete type stays
+    /// private to the [`CommunicationAccess`] implementation that minted it.
+    pub fn new(inner: impl Send + Sync + 'static) -> Self {
+        Self {
+            _inner: Box::new(inner),
+        }
+    }
+}
+
 /// Narrow capability that does not expose full lifecycle control.
 ///
 /// Consumers can inspect state, hold communication active for an operation and
@@ -121,6 +148,20 @@ pub trait CommunicationAccess: Send + Sync + 'static {
     ///
     /// Returns an error when communication is not enabled.
     fn acquire(&self) -> Result<CommunicationGuard, CommunicationError>;
+
+    /// Acquires communication for background work that a disable may cut off,
+    /// see [`PreemptibleCommunicationGuard`].
+    ///
+    /// The default falls back to [`acquire`](Self::acquire), which keeps
+    /// custom implementations correct but lets the work block a disable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when communication is not available for preemptible
+    /// work.
+    fn acquire_preemptible(&self) -> Result<PreemptibleCommunicationGuard, CommunicationError> {
+        self.acquire().map(PreemptibleCommunicationGuard::new)
+    }
 
     /// Requests activation without blocking.
     ///

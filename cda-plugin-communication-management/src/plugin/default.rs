@@ -41,7 +41,8 @@ use async_trait::async_trait;
 use cda_interfaces::communication_control::{
     ActivationCause, CommunicationError, CommunicationGuard, CommunicationInitMode,
     CommunicationLifecycle, CommunicationOperation, CommunicationOperationFailure,
-    CommunicationState, CommunicationVariantDetection, DetectionCause, VariantDetectionMode,
+    CommunicationState, CommunicationVariantDetection, DetectionCause,
+    PreemptibleCommunicationGuard, VariantDetectionMode,
 };
 
 use super::{CommunicationPlugin, CommunicationPluginBuilder};
@@ -75,6 +76,10 @@ impl CommunicationPlugin for DefaultCommunicationPlugin {
 
     fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
         self.handle.acquire()
+    }
+
+    fn acquire_preemptible(&self) -> Result<PreemptibleCommunicationGuard, CommunicationError> {
+        self.handle.acquire_preemptible()
     }
 
     async fn activate(

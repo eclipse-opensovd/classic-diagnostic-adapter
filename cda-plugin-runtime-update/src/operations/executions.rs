@@ -110,9 +110,9 @@ async fn acquire_execution_guards<S, R: ?Sized, T, L>(
         .await
         .map_err(|error| match error {
             DisableError::Conflict => RuntimeUpdateError::ExecutionConflict,
-            DisableError::InUse => RuntimeUpdateError::OperationsInProgress(
-                "another operation is running (i.e. flash transfer)".to_string(),
-            ),
+            DisableError::InUse(in_use) => {
+                RuntimeUpdateError::OperationsInProgress(in_use.to_string())
+            }
             DisableError::Failed(failure) => {
                 RuntimeUpdateError::CommunicationFailure(failure.to_string())
             }
