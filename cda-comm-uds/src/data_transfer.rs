@@ -216,6 +216,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
             file_path,
             offset,
             length,
+            owner,
             transfer_meta_data,
         } = parameters;
 
@@ -303,6 +304,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
 
         entry.insert(EcuDataTransfer {
             meta_data: transfer_meta_data,
+            owner: owner.to_owned(),
             status_receiver: receiver,
             task: transfer_task,
             _communication_guard: communication_guard,
@@ -314,11 +316,19 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
         &self,
         ecu_name: &str,
         id: &str,
+        owner: &str,
     ) -> Result<(), DiagServiceError> {
         let mut lock = self.data_transfers.lock().await;
-        let transfer = lock.get(ecu_name).ok_or_else(|| {
-            DiagServiceError::NotFound(format!("Data transfer for ECU {ecu_name} not found"))
-        })?;
+        // A transfer of another owner is reported like a missing one, so callers cannot
+        // probe or remove transfers they did not start.
+        let transfer = match lock.get(ecu_name) {
+            Some(transfer) if transfer.meta_data.id == id && transfer.owner == owner => transfer,
+            _ => {
+                return Err(DiagServiceError::NotFound(format!(
+                    "Data transfer with id {id} not found for ECU {ecu_name}"
+                )));
+            }
+        };
 
         if !matches!(
             transfer.meta_data.status,
@@ -350,6 +360,31 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
             DiagServiceError::InvalidRequest(format!("Failed to await data transfer task: {e:?}"))
         })?;
         Ok(())
+    }
+
+    async fn ecu_flash_transfer_abort(&self, ecu_name: &str, owner: &str) {
+        let task = {
+            let mut transfers = self.data_transfers.lock().await;
+            let transfer = match transfers.entry(ecu_name.to_owned()) {
+                std::collections::hash_map::Entry::Occupied(entry)
+                    if entry.get().owner == owner =>
+                {
+                    entry.remove()
+                }
+                _ => return,
+            };
+            // Abort while the map is still locked, so the task cannot pick up a transfer
+            // started for this ECU right after the removal.
+            transfer.task.abort();
+            transfer.task
+        };
+        // Wait for the task to stop, so no TransferData block is sent after this returns.
+        if let Err(e) = task.await
+            && !e.is_cancelled()
+        {
+            tracing::warn!(error = ?e, "Data transfer task for ECU {ecu_name} failed");
+        }
+        tracing::info!("Aborted data transfer for ECU {ecu_name}");
     }
 
     async fn ecu_flash_transfer_status(
@@ -388,7 +423,61 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
 
 #[cfg(test)]
 mod tests {
+    use cda_interfaces::datatypes::FaultConfig;
+    use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
+    use tokio::task::{AbortHandle, JoinHandle};
+
     use super::*;
+    use crate::test_helpers::{TestEcuDb, TestGateway};
+
+    const ECU: &str = "TestECU";
+    const TRANSFER_ID: &str = "transfer-id";
+    const OWNER: &str = "owner";
+
+    fn make_manager() -> UdsManager<TestGateway, TestEcuDb> {
+        UdsManager::new_for_raw_payload_tests(
+            TestGateway {
+                send_fn: Arc::new(|_, _| Ok(())),
+            },
+            Arc::new(HashMap::default()),
+            FaultConfig::default(),
+            enabled_communication_access_for_test(),
+        )
+    }
+
+    /// Registers a transfer owned by [`OWNER`] whose completion signal was already sent,
+    /// as the transfer task does on finish or abort.
+    async fn insert_transfer(
+        manager: &UdsManager<TestGateway, TestEcuDb>,
+        status: DataTransferStatus,
+        task: JoinHandle<()>,
+    ) -> AbortHandle {
+        let (sender, receiver) = watch::channel(false);
+        sender.send(true).expect("Receiver is alive");
+        let abort_handle = task.abort_handle();
+        manager.data_transfers.lock().await.insert(
+            ECU.to_owned(),
+            EcuDataTransfer {
+                meta_data: DataTransferMetaData {
+                    acknowledged_bytes: 0,
+                    blocksize: 1,
+                    next_block_sequence_counter: 1,
+                    id: TRANSFER_ID.to_owned(),
+                    file_id: "file-id".to_owned(),
+                    status,
+                    error: None,
+                },
+                owner: OWNER.to_owned(),
+                status_receiver: receiver,
+                task,
+                _communication_guard: manager
+                    .communication_access
+                    .acquire()
+                    .expect("Communication is enabled"),
+            },
+        );
+        abort_handle
+    }
 
     #[test]
     fn probe_is_a_prefix_of_every_transfer_data_block() {
@@ -397,5 +486,92 @@ mod tests {
         assert_eq!(probe.source_address, 0x0E00);
         assert_eq!(probe.target_address, 0x1234);
         assert!(probe.new_session.is_none() && probe.new_security.is_none());
+    }
+
+    #[tokio::test]
+    async fn transfer_exit_rejects_foreign_owner_and_unknown_id() {
+        let manager = make_manager();
+        insert_transfer(
+            &manager,
+            DataTransferStatus::Finished,
+            tokio::spawn(async {}),
+        )
+        .await;
+
+        for (id, owner) in [(TRANSFER_ID, "other-owner"), ("other-id", OWNER)] {
+            assert!(matches!(
+                manager.ecu_flash_transfer_exit(ECU, id, owner).await,
+                Err(DiagServiceError::NotFound(_))
+            ));
+        }
+        assert!(manager.data_transfers.lock().await.contains_key(ECU));
+    }
+
+    #[tokio::test]
+    async fn transfer_exit_removes_finished_transfer_of_owner() {
+        let manager = make_manager();
+        insert_transfer(
+            &manager,
+            DataTransferStatus::Finished,
+            tokio::spawn(async {}),
+        )
+        .await;
+
+        manager
+            .ecu_flash_transfer_exit(ECU, TRANSFER_ID, OWNER)
+            .await
+            .expect("Owner can exit its finished transfer");
+        assert!(!manager.data_transfers.lock().await.contains_key(ECU));
+    }
+
+    #[tokio::test]
+    async fn transfer_exit_rejects_running_transfer() {
+        let manager = make_manager();
+        insert_transfer(
+            &manager,
+            DataTransferStatus::Running,
+            tokio::spawn(std::future::pending()),
+        )
+        .await;
+
+        assert!(matches!(
+            manager
+                .ecu_flash_transfer_exit(ECU, TRANSFER_ID, OWNER)
+                .await,
+            Err(DiagServiceError::InvalidRequest(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn transfer_abort_ignores_transfer_of_other_owner() {
+        let manager = make_manager();
+        let task = insert_transfer(
+            &manager,
+            DataTransferStatus::Running,
+            tokio::spawn(std::future::pending()),
+        )
+        .await;
+
+        manager.ecu_flash_transfer_abort(ECU, "other-owner").await;
+
+        assert!(manager.data_transfers.lock().await.contains_key(ECU));
+        assert!(!task.is_finished());
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn transfer_abort_stops_and_removes_running_transfer_of_owner() {
+        let manager = make_manager();
+        let task = insert_transfer(
+            &manager,
+            DataTransferStatus::Running,
+            tokio::spawn(std::future::pending()),
+        )
+        .await;
+
+        manager.ecu_flash_transfer_abort(ECU, OWNER).await;
+
+        assert!(!manager.data_transfers.lock().await.contains_key(ECU));
+        assert!(task.is_finished());
     }
 }

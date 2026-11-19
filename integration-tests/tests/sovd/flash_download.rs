@@ -27,7 +27,7 @@ use crate::{
             extract_field_from_json, response_to_json, response_to_t,
             send_authenticated_cda_request,
         },
-        locks::{self, create_lock, lock_operation},
+        locks::{self, Lock, create_lock, lock_operation},
         test_env::TestEnv,
     },
 };
@@ -1187,7 +1187,100 @@ async fn test_flash_download_functional_class_selection() {
     .await;
 }
 
-/// Verify that attempting a flash transfer with no body is rejected with a bad request error
+/// A flash transfer belongs to the client that started it. Releasing that client's lock
+/// aborts and removes the transfer, so the next lock holder neither inherits it nor is
+/// blocked by it.
+#[tokio::test]
+async fn test_flash_transfer_removed_when_owner_releases_lock() {
+    let test_env = TestEnv::builder().await.unwrap();
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
+    let flash_transfer_url = format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer");
+
+    let lock_id = prepare_flxc1000_for_flashing(&test_env).await;
+    let (file_id, file_size) = find_test_flash_file(&test_env).await;
+
+    let request_download_body = serde_json::json!({
+        "requestdownload": {
+            "DataFormatIdentifier": 0,
+            "AddressAndLengthFormatIdentifier": 0x44,
+            "MemoryAddress": "0x00 0x00 0x00 0x00",
+            "MemorySize": format!("0x{:02x} 0x{:02x} 0x{:02x} 0x{:02x}",
+                (file_size >> 24) & 0xFF,
+                (file_size >> 16) & 0xFF,
+                (file_size >> 8) & 0xFF,
+                file_size & 0xFF
+            )
+        }
+    });
+    send_authenticated_cda_request(
+        &test_env,
+        &format!("{ecu_endpoint}/x-sovd2uds-download/requestdownload"),
+        StatusCode::OK,
+        Method::PUT,
+        Some(&request_download_body.to_string()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let flash_transfer_response = send_authenticated_cda_request(
+        &test_env,
+        &flash_transfer_url,
+        StatusCode::OK,
+        Method::POST,
+        Some(
+            &serde_json::json!({
+                "blocksequencecounter": 1,
+                "blocksize": 128,
+                "offset": 0,
+                "length": file_size,
+                "id": file_id
+            })
+            .to_string(),
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+    let transfer_id = response_to_json(&flash_transfer_response)
+        .unwrap()
+        .get("id")
+        .and_then(|v| v.as_str())
+        .expect("Expected 'id' in flash transfer response")
+        .to_owned();
+
+    // Release the lock without removing the transfer
+    lock_operation(
+        locks::COMPONENTS_FLXC1000_LOCKS,
+        Some(&lock_id),
+        &test_env,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    // Another client locks the ECU and finds no transfer of the previous owner
+    let auth_other = test_env.auth_header_for("flash-takeover").await.unwrap();
+    let other = test_env.with_headers(&auth_other);
+    let other_lock = Lock::acquire(
+        &other,
+        locks::COMPONENTS_FLXC1000_LOCKS,
+        Duration::from_secs(120),
+    )
+    .await;
+    for (method, url) in [
+        (Method::GET, flash_transfer_url.clone()),
+        (
+            Method::DELETE,
+            format!("{flash_transfer_url}/{transfer_id}"),
+        ),
+    ] {
+        send_authenticated_cda_request(&other, &url, StatusCode::NOT_FOUND, method, None, None)
+            .await
+            .unwrap();
+    }
+    other_lock.release(&other).await;
+}
 /// and a JSON error message.
 #[tokio::test]
 async fn test_flash_transfer_with_no_body_rejected_with_json_error_message() {

@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use super::{
     ActiveLock, ApiError, LockCoverage, Locks, ScopeKey,
-    cleanup::{LockCleanupFnHelper, reset_ecu_session_and_security},
+    cleanup::{LockCleanupFnHelper, release_ecu},
 };
 
 pub(super) async fn create_lock<T: UdsEcu + Clone>(
@@ -65,36 +65,38 @@ pub(super) async fn create_lock<T: UdsEcu + Clone>(
     let cleanup_fn = match &scope_key {
         ScopeKey::Ecu(ecu_name) => {
             let ecu_name = ecu_name.clone();
+            let owner = principal.subject.clone();
             let tp_type = TesterPresentType::Ecu(ecu_name.clone());
             let uds = (*uds).clone();
             let locks = Arc::clone(locks);
             LockCleanupFnHelper::new(async move || {
                 stop_tester_present_unless_needed(&uds, &locks, tp_type).await;
                 let _authentication_guard = locks.authentication_guard(&ecu_name).await;
-                reset_ecu_session_and_security(&uds, &ecu_name, "ECU lock cleanup").await;
+                release_ecu(&uds, &ecu_name, &owner, "ECU lock cleanup").await;
             })
         }
         ScopeKey::FunctionalGroup(group) => {
             let tp_type = TesterPresentType::Functional(group.clone());
             let covered_ecus = coverage.covered_ecus();
+            let owner = principal.subject.clone();
             let uds = (*uds).clone();
             let locks = Arc::clone(locks);
             LockCleanupFnHelper::new(async move || {
                 stop_tester_present_unless_needed(&uds, &locks, tp_type).await;
                 for ecu in covered_ecus {
                     let _authentication_guard = locks.authentication_guard(&ecu).await;
-                    reset_ecu_session_and_security(&uds, &ecu, "functional group lock cleanup")
-                        .await;
+                    release_ecu(&uds, &ecu, &owner, "functional group lock cleanup").await;
                 }
             })
         }
         ScopeKey::Vehicle => {
+            let owner = principal.subject.clone();
             let uds = (*uds).clone();
             let locks = Arc::clone(locks);
             LockCleanupFnHelper::new(async move || {
                 for ecu in uds.get_ecus().await {
                     let _authentication_guard = locks.authentication_guard(&ecu).await;
-                    reset_ecu_session_and_security(&uds, &ecu, "vehicle lock cleanup").await;
+                    release_ecu(&uds, &ecu, &owner, "vehicle lock cleanup").await;
                 }
             })
         }

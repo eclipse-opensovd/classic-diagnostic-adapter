@@ -96,7 +96,8 @@ API
        * - DELETE
          - /x-sovd2uds-download/flashtransfer/{id}
          - Removes a finished or aborted transfer with ``id``, so that new transfers can be started
-         - Returns ``204 No Content``
+         - Returns ``204 No Content``. Only the client that started the transfer can remove it, for any other
+           client the transfer is reported as not found (``404``).
        * - PUT
          - /x-sovd2uds-download/transferexit
          - Calls the RequestTransferExit service 0x37
@@ -162,6 +163,13 @@ API
            The body itself is optional.
 
     .. uml:: /03_architecture/02_sovd-api/03_extensions/images/flash_data_transfer.puml
+
+    **Ownership**
+
+    A flash transfer is bound to the client that started it. When the lock under which the transfer was started
+    ends (released, expired or preempted), the CDA aborts the transfer of that client and removes it before the
+    ECU session and security access are reset. No further TransferData requests of the transfer are sent, and the
+    next lock holder can start a new transfer.
 
 
 .. arch:: Flash service selection via functional class

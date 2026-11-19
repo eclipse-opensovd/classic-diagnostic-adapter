@@ -32,6 +32,9 @@ pub struct FlashTransferStartParams<'a> {
     pub file_path: &'a str,
     pub offset: u64,
     pub length: u64,
+    /// Subject of the client starting the transfer. Only this client may exit the
+    /// transfer, and releasing its lock aborts it.
+    pub owner: &'a str,
     pub transfer_meta_data: DataTransferMetaData,
 }
 
@@ -287,7 +290,7 @@ pub trait UdsDataTransfer {
     /// # Errors
     /// * `DiagServiceError::NotFound`
     ///  * The ECU with the given name does not exist.
-    ///  * The transfer with the given ID does not exist.
+    ///  * The transfer with the given ID does not exist or was started by another `owner`.
     /// * `DiagServiceError::InvalidRequest`
     ///   * The transfer is not in a state where it can be exited, e.g. it is still in progress.
     ///   * Failures on retrieving the transfer exit status.
@@ -295,7 +298,12 @@ pub trait UdsDataTransfer {
         &self,
         ecu_name: &str,
         id: &str,
+        owner: &str,
     ) -> Result<(), DiagServiceError>;
+    /// Abort and remove the flash transfer of the given ECU if it was started by `owner`.
+    /// Transfers of other owners are left untouched. Used when the lock under which the
+    /// transfer was started ends, so no further `TransferData` blocks are sent.
+    async fn ecu_flash_transfer_abort(&self, ecu_name: &str, owner: &str);
     /// Fetch all flash transfers for the given ECU.
     /// # Errors
     /// * `DiagServiceError::NotFound`
@@ -925,7 +933,9 @@ pub mod mock {
                 &self,
                 ecu_name: &str,
                 id: &str,
+                owner: &str,
             ) -> Result<(), DiagServiceError>;
+            async fn ecu_flash_transfer_abort(&self, ecu_name: &str, owner: &str);
             async fn ecu_flash_transfer_status(
                 &self,
                 ecu_name: &str,
