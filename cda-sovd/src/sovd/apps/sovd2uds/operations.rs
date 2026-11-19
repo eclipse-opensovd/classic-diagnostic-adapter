@@ -464,6 +464,7 @@ pub(crate) mod runtimefilesupdate {
     pub fn routes_accessible_during_update() -> Vec<HttpRouteMatcher> {
         vec![
             HttpRouteMatcher::new("/health", vec![HttpMethod::GET]),
+            HttpRouteMatcher::new("/version-info", vec![HttpMethod::GET]),
             HttpRouteMatcher::new("/vehicle/v15/data/version", vec![HttpMethod::GET]),
             HttpRouteMatcher::new(
                 "/vehicle/v15/apps/sovd2uds/data/version",

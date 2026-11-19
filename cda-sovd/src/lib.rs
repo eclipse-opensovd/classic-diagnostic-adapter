@@ -33,6 +33,7 @@ pub use dynamic_router::{RouteGroupNotFound, RouteHandle};
 pub use http::Method;
 use opensovd_axum_extra::ExtractHost;
 use sovd::apps::sovd2uds::bulk_data::runtimefiles::RuntimeUpdateRouteState;
+pub use sovd_interfaces::version_info;
 use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::UnixListener;
@@ -534,6 +535,14 @@ mod uri_rewrite_tests {
         assert!(query.suppress_service);
         assert!(delete_query.suppress_service);
     }
+
+    #[tokio::test]
+    async fn rewrite_request_uri_preserves_version_segment() {
+        let uri = rewrite_uri("/Vehicle/V1/components/ECU?include-schema=true").await;
+
+        assert_eq!(uri.path(), "/vehicle/v1/components/ecu");
+        assert_eq!(uri.query(), Some("include-schema=true"));
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -624,6 +633,35 @@ mod webserver_bind_tests {
         .await
         .expect("failed to launch webserver on unix socket");
 
+        assert_reachable_then_shutdown(&socket_path, shutdown_tx, webserver_task).await;
+    }
+
+    #[tokio::test]
+    async fn launch_webserver_does_not_alias_version_segments() {
+        let (_dir, socket_path, config) = temp_socket_config();
+        let (shutdown_tx, shutdown_signal) = shutdown_channel();
+        let (dynamic_router, webserver_task) = launch_webserver(
+            config,
+            cda_interfaces::BinaryEncoding::default(),
+            shutdown_signal,
+        )
+        .await
+        .expect("failed to launch webserver on unix socket");
+        dynamic_router
+            .add_routes(aide::axum::ApiRouter::new().route(
+                "/vehicle/v15/example",
+                aide::axum::routing::get(|| async { http::StatusCode::OK }),
+            ))
+            .await;
+
+        assert_eq!(
+            get_over_unix_socket(&socket_path, "/vehicle/v15/example").await,
+            http::StatusCode::OK
+        );
+        assert_eq!(
+            get_over_unix_socket(&socket_path, "/vehicle/v1/example").await,
+            http::StatusCode::NOT_FOUND
+        );
         assert_reachable_then_shutdown(&socket_path, shutdown_tx, webserver_task).await;
     }
 

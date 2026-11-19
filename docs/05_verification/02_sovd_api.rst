@@ -23,10 +23,11 @@ SOVD-API
 
 .. testset:: Version Endpoint
     :id: testset~sovd-api-version-endpoint
-    :links: itest~sovd-api-version-endpoint
+    :links: itest~sovd-api-version-endpoint, itest~sovd-api-version-info-endpoint
     :status: draft
 
-    Verifies the version endpoint registered by the version registration function.
+    Verifies the ``version-info`` and ``data/version`` endpoints registered by the version
+    registration function.
 
 .. testset:: Component SDG/SDs
     :id: testset~sovd-api-component-sdgsd

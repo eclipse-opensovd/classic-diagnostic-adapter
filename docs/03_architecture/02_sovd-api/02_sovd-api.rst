@@ -1640,6 +1640,12 @@ Version Endpoint
             ]
         }
 
+    **Version segments**
+
+    The SOVD routes are currently mounted under ``/vehicle/v15``, which is reported in ``sovd_info``
+    with ``version`` ``1.1.0``. The standard's ``v1`` version identifier and configurable base URI
+    are tracked in `issue #181 <https://github.com/eclipse-opensovd/classic-diagnostic-adapter/issues/181>`_.
+
     **Optional Vendor-Specific Endpoints: /data/version, /apps/sovd2uds/data/version**
 
     When enabled, these endpoints are registered as static data endpoints returning:
@@ -1661,8 +1667,8 @@ Version Endpoint
             }
         }
 
-    Both endpoint types are available immediately after the HTTP server starts and do not require
-    any ECU communication.
+    All version endpoints are available immediately after the HTTP server starts, do not require
+    any ECU communication, and stay accessible while a runtime update is running.
 
     The vendor-specific endpoints are registered as static data endpoints with the data category
     ``identData``. Registering a static data endpoint also lists it in its ``data`` collection
@@ -1671,8 +1677,6 @@ Version Endpoint
     ``/apps/sovd2uds/data/networkstructure`` (``sysInfo``), are registered for listing separately.
 
     .. uml:: images/version_registration.puml
-
-    .. note:: The current implementation only registers ``/data/version`` and ``/apps/sovd2uds/data/version``
 
 Error Codes & Messages
 ----------------------
