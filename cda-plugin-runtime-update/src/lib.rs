@@ -15,10 +15,6 @@ pub use default_runtime_update_plugin::DefaultRuntimeUpdatePlugin;
 pub use security::DefaultUpdatePolicy;
 
 pub mod config;
-pub mod default_runtime_reloader_plugin;
-pub use default_runtime_reloader_plugin::{
-    DefaultReloadContext, DefaultRuntimeReloaderPlugin, RuntimeReloaderConfig,
-};
 pub mod default_runtime_update_plugin;
 pub mod operations;
 pub mod security;
@@ -38,8 +34,9 @@ mod tests {
     use async_trait::async_trait;
     use cda_interfaces::runtime_update_api::{
         BulkDataCreatedList, BulkDataList, ExclusiveRuntimePlugin, ExecutionMode,
-        RuntimeFileCatalog, RuntimeFileStore, RuntimeFilesQuery, RuntimeFilesUpdatePlugin,
-        RuntimeUpdateError, RuntimeUpdateExecutor, UpdateExecution, UploadFile,
+        RuntimeFileCatalog, RuntimeFileStore, RuntimeFileTransaction, RuntimeFilesQuery,
+        RuntimeFilesUpdatePlugin, RuntimeUpdateError, RuntimeUpdateExecutor, UpdateExecution,
+        UploadFile,
     };
     use tokio::sync::{Barrier, Notify};
 
@@ -53,6 +50,35 @@ mod tests {
     }
 
     type PluginHandle = ExclusiveRuntimePlugin<DelayPlugin>;
+
+    /// The exclusion this file is about lives on the catalog, store and executor
+    /// calls, so the file transaction only has to exist here.
+    #[async_trait]
+    impl RuntimeFileTransaction for DelayPlugin {
+        async fn apply_files(&self) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+
+        async fn rollback_files(&self) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+
+        async fn discard_staged(&self) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+
+        async fn cleanup_files(&self) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+
+        async fn restore_after_apply(&self) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+
+        async fn restore_after_rollback(&self) -> Result<(), RuntimeUpdateError> {
+            Ok(())
+        }
+    }
     type Counter = Arc<AtomicUsize>;
     type Notifier = Arc<Notify>;
 

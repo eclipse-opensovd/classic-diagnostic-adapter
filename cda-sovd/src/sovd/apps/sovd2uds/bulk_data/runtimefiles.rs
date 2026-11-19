@@ -18,8 +18,11 @@ use axum::{
     http::{StatusCode, header::LOCATION},
     response::{IntoResponse, Response},
 };
-use cda_interfaces::runtime_update_api::{
-    LockStateProvider, RuntimeFileCatalog, RuntimeFileStore, RuntimeUpdateError,
+use cda_interfaces::{
+    runtime_update_api::{
+        LockStateProvider, RuntimeFileCatalog, RuntimeFileStore, RuntimeUpdateError,
+    },
+    storage_api::StorageError,
 };
 use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
 
@@ -112,9 +115,16 @@ impl IntoResponse for DbUpdateErrorResponse {
                 Some(VendorErrorCode::InvalidData),
                 None,
             ),
+            RuntimeUpdateError::StorageError(StorageError::Unavailable(_)) => {
+                build_api_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    ErrorCode::VendorSpecific,
+                    Some(VendorErrorCode::StorageUnavailable),
+                    Some(self.retry_after),
+                )
+            }
             RuntimeUpdateError::StorageError(_)
             | RuntimeUpdateError::UpdateStartError(_)
-            | RuntimeUpdateError::ReloadFailed(_)
             | RuntimeUpdateError::CommunicationFailure(_)
             | RuntimeUpdateError::ReplacementFailure(_) => build_api_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -703,4 +713,44 @@ pub fn routes<
             cda_plugin_security::security_plugin_middleware::<S>,
         ))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::header::RETRY_AFTER;
+
+    use super::*;
+
+    /// A storage that is not mounted yet is transient, so the client is told
+    /// to come back rather than that the server failed.
+    #[test]
+    fn unavailable_storage_answers_service_unavailable_with_retry_after() {
+        let response = DbUpdateErrorResponse::new(
+            RuntimeUpdateError::StorageError(StorageError::Unavailable(
+                "storage is not mounted yet".to_owned(),
+            )),
+            Duration::from_secs(3),
+        )
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("3")
+        );
+    }
+
+    #[test]
+    fn other_storage_errors_stay_internal_server_errors() {
+        let response = DbUpdateErrorResponse::new(
+            RuntimeUpdateError::StorageError(StorageError::Other("broken".to_owned())),
+            Duration::from_secs(3),
+        )
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
 }

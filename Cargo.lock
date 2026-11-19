@@ -668,6 +668,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cda-lifecycle"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cda-interfaces",
+ "kameo",
+ "strum_macros",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "cda-plugin-communication-management"
 version = "0.1.0"
 dependencies = [
@@ -2202,10 +2215,13 @@ name = "integration-tests"
 version = "0.1.0"
 dependencies = [
  "aide",
+ "async-trait",
  "axum",
  "cargo_metadata",
  "cda-health",
  "cda-interfaces",
+ "cda-plugin-communication-management",
+ "cda-plugin-security",
  "cda-sovd",
  "cda-tracing",
  "chrono",
@@ -2831,6 +2847,7 @@ dependencies = [
  "cda-extra",
  "cda-health",
  "cda-interfaces",
+ "cda-lifecycle",
  "cda-plugin-communication-management",
  "cda-plugin-lock-priority",
  "cda-plugin-runtime-update",

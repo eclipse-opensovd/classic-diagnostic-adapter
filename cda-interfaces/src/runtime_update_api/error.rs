@@ -44,8 +44,6 @@ pub enum RuntimeUpdateError {
     NoBackup,
     #[error("Another transaction is already active")]
     TransactionBusy,
-    #[error("Reload failed: {0}")]
-    ReloadFailed(#[from] ReloadFailure),
     #[error("An execution is already in progress")]
     ExecutionConflict,
     #[error("File not found: {0}")]
@@ -113,15 +111,4 @@ pub enum RecoveryError {
     /// Both the candidate and the database that worked until now are unusable.
     #[error("The restored databases could not be prepared: {0}")]
     RestoredPreparation(ReloadError),
-}
-
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum ReloadFailure {
-    #[error("Requested reload failed but the previous state was restored: {original}")]
-    RejectedAndRestored { original: ReloadError },
-    #[error("Requested reload failed and coherence could not be restored: {original}; {recovery}")]
-    RecoveryFailed {
-        original: ReloadError,
-        recovery: RecoveryError,
-    },
 }

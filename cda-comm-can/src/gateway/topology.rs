@@ -102,6 +102,14 @@ impl CanTopology {
             functional_id,
         }
     }
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::new(
+            HashMap::default(),
+            HashMap::default(),
+            keepalive::DEFAULT_FUNCTIONAL_BROADCAST_ID,
+        )
+    }
 
     #[must_use]
     pub fn connections(&self) -> &HashMap<String, Arc<CanEcuAddressing>> {
@@ -157,11 +165,7 @@ pub async fn derive_can_topology<T: EcuAddresses + CanComParamProvider>(
     // default 0x7DF. May be an 11-bit standard or a 29-bit extended ID
     // (e.g. 0x18DB33F1 for normal fixed addressing). Resolved before the
     // connections so their IDs can be checked against it.
-    let mut functional_id = validate_can_id(
-        "<functional>",
-        "default",
-        keepalive::DEFAULT_FUNCTIONAL_BROADCAST_ID,
-    )?;
+    let mut functional_id = keepalive::DEFAULT_FUNCTIONAL_BROADCAST_ID;
     for ecu_lock in ecus.values() {
         // Already range-validated at MDD extraction.
         if let Some(id) = ecu_lock.read().await.can_functional_id() {

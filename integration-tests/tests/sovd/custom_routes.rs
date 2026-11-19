@@ -137,12 +137,13 @@ async fn test_custom_demo_endpoint() {
 
     let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
-    let (dynamic_router, webserver_join_handle) =
-        cda_sovd::launch_webserver(webserver_config, shutdown_signal.clone())
-            .await
-            .expect("Failed to launch webserver");
+    let dynamic_router = cda_sovd::dynamic_router::DynamicRouter::new();
 
-    let health = cda_health::add_health_routes(&dynamic_router, cda_version().to_owned()).await;
+    // Registered before the routes are mounted and the port is opened: an
+    // instance with no provider registered answers `/health/ready` with 204,
+    // so a reader that copies this must not be shown a reachable empty state.
+    // See `cda_health::HealthState::new`.
+    let health = cda_health::HealthState::new(cda_version().to_owned());
     let main_health_provider = {
         let provider = Arc::new(cda_health::StatusHealthProvider::new(
             cda_health::Status::Starting,
@@ -156,6 +157,7 @@ async fn test_custom_demo_endpoint() {
             .expect("Failed to register main health provider");
         provider
     };
+    cda_health::mount_health_routes(&dynamic_router, &health).await;
 
     // Add custom routes directly. No vehicle routes are needed for this test.
     add_custom_routes(&dynamic_router).await;
@@ -163,6 +165,14 @@ async fn test_custom_demo_endpoint() {
     main_health_provider
         .update_status(cda_health::Status::Up)
         .await;
+
+    let webserver_join_handle = cda_sovd::launch_webserver(
+        dynamic_router.clone(),
+        webserver_config,
+        shutdown_signal.clone(),
+    )
+    .await
+    .expect("Failed to launch webserver");
 
     let url = reqwest::Url::parse(&format!("http://{host}:{test_port}/test")).expect("Invalid URL");
     wait_for_cda_online(&ServerTransport::Tcp {
@@ -212,15 +222,20 @@ async fn test_custom_demo_endpoint_over_unix_socket() {
 
     let (shutdown_tx, shutdown_signal) = shutdown_channel();
 
-    let (dynamic_router, webserver_join_handle) =
-        cda_sovd::launch_webserver(webserver_config, shutdown_signal.clone())
-            .await
-            .expect("Failed to launch webserver");
+    let dynamic_router = cda_sovd::dynamic_router::DynamicRouter::new();
 
     // Add custom routes directly. No vehicle routes or health checks are
     // needed for this test since we talk to the raw socket directly instead
     // of polling the health endpoint for readiness.
     add_custom_routes(&dynamic_router).await;
+
+    let webserver_join_handle = cda_sovd::launch_webserver(
+        dynamic_router.clone(),
+        webserver_config,
+        shutdown_signal.clone(),
+    )
+    .await
+    .expect("Failed to launch webserver");
 
     assert_demo_endpoint_get_post(
         || {

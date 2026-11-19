@@ -78,9 +78,20 @@ impl<T> ReloadableOwner<T> {
 /// update holds the exclusive disable lease. It is asynchronous because it
 /// waits for in-flight readers.
 #[async_trait::async_trait]
-pub trait ReloadComponent<T>: Send + Sync + 'static {
+pub trait ReloadComponent<T: Send + 'static>: Send + Sync + 'static {
     /// Replaces this component's data with `data`.
     async fn apply(&self, data: T);
+
+    /// Replaces this component's data with `data` and hands back what it
+    /// displaced, so a dispatch that fails after this can put the previous
+    /// value back.
+    ///
+    /// The default hands nothing back: only a target that owns the value itself
+    /// can, and one that forwards or derives has nothing to return.
+    async fn swap(&self, data: T) -> Option<T> {
+        self.apply(data).await;
+        None
+    }
 }
 
 /// Replaces the data, waiting for in-flight readers to finish first.
@@ -91,6 +102,10 @@ pub trait ReloadComponent<T>: Send + Sync + 'static {
 impl<T: Send + Sync + 'static> ReloadComponent<T> for ReloadableOwner<T> {
     async fn apply(&self, data: T) {
         *self.data.write().await = data;
+    }
+
+    async fn swap(&self, data: T) -> Option<T> {
+        Some(std::mem::replace(&mut *self.data.write().await, data))
     }
 }
 
