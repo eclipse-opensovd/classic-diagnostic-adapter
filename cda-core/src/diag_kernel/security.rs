@@ -381,7 +381,7 @@ pub(in crate::diag_kernel) fn check_security_plugin<S: SecurityPlugin>(
     service: &datatypes::DiagService,
 ) -> Result<(), DiagServiceError> {
     if let Some(()) = security_plugin.downcast_ref::<()>() {
-        tracing::info!("Void security plugin provided, skipping security check");
+        tracing::trace!("Void security plugin provided, skipping security check");
         return Ok(());
     }
     let security_plugin = security_plugin

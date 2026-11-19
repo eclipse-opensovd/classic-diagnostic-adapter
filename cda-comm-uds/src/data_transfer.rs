@@ -139,7 +139,9 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                     request.clone(),
                     &void_plugin,
                     Some(uds_payload),
-                    true,
+                    // the positive response only echoes the block sequence counter, mapping
+                    // its parameters to JSON for every block is wasted time
+                    false,
                 )
                 .await;
             if let Err(e) = result {

@@ -201,7 +201,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         let response = self
             .send_authorized_raw_payload(
                 ecu_name,
-                payload.clone(),
+                payload,
                 Some(security_plugin),
                 timeout,
                 expect_response,
