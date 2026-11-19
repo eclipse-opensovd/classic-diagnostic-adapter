@@ -17,8 +17,10 @@ use async_trait::async_trait;
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, FlashTransferStartParams,
     HashMap, ServicePayload, UdsDataTransfer, UdsTransport,
-    datatypes::{DataTransferError, DataTransferMetaData, DataTransferStatus},
-    diagservices::UdsPayloadData,
+    datatypes::{
+        DataTransferError, DataTransferErrorCause, DataTransferMetaData, DataTransferStatus,
+    },
+    diagservices::{DiagServiceResponse, DiagServiceResponseType, MappedNRC, UdsPayloadData},
     dlt_ctx, service_ids, spawn_named,
 };
 use tokio::{
@@ -46,21 +48,6 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         status_sender: watch::Sender<bool>,
         mut reader: BufReader<File>,
     ) {
-        async fn set_transfer_aborted(
-            ecu_name: &str,
-            transfers: &Arc<Mutex<HashMap<String, EcuDataTransfer>>>,
-            reason: String,
-            sender: &watch::Sender<bool>,
-        ) {
-            if let Some(dt) = transfers.lock().await.get_mut(ecu_name) {
-                dt.meta_data.status = DataTransferStatus::Aborted;
-                dt.meta_data.error = Some(vec![DataTransferError { text: reason }]);
-            }
-            if let Err(e) = sender.send(true) {
-                tracing::error!(error = ?e, "Failed to send data transfer aborted signal");
-            }
-        }
-
         let (mut buffer, mut remaining_bytes, block_size, mut next_block_sequence_counter) = {
             let mut lock = self.data_transfers.lock().await;
             let Some(transfer) = lock.get_mut(ecu_name) else {
@@ -84,7 +71,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 set_transfer_aborted(
                     ecu_name,
                     &self.data_transfers,
-                    "Remaining bytes overflowed usize".to_owned(),
+                    internal_error(None, "Remaining bytes overflowed usize"),
                     &status_sender,
                 )
                 .await;
@@ -97,7 +84,10 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 set_transfer_aborted(
                     ecu_name,
                     &self.data_transfers,
-                    "Buffer slice out of bounds".to_owned(),
+                    internal_error(
+                        Some(next_block_sequence_counter),
+                        "Buffer slice out of bounds",
+                    ),
                     &status_sender,
                 )
                 .await;
@@ -108,7 +98,10 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 set_transfer_aborted(
                     ecu_name,
                     &self.data_transfers,
-                    format!("Failed to read data: {e:?}"),
+                    internal_error(
+                        Some(next_block_sequence_counter),
+                        &format!("Failed to read the flash file: {e}"),
+                    ),
                     &status_sender,
                 )
                 .await;
@@ -124,7 +117,10 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 set_transfer_aborted(
                     ecu_name,
                     &self.data_transfers,
-                    "Buffer slice out of bounds".to_owned(),
+                    internal_error(
+                        Some(next_block_sequence_counter),
+                        "Buffer slice out of bounds",
+                    ),
                     &status_sender,
                 )
                 .await;
@@ -144,14 +140,24 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                     false,
                 )
                 .await;
-            if let Err(e) = result {
-                set_transfer_aborted(
-                    ecu_name,
-                    &self.data_transfers,
-                    format!("Failed to read data: {e:?}"),
-                    &status_sender,
-                )
-                .await;
+            // NRC 0x78 (responsePending), 0x21 (busyRepeatRequest) and 0x94
+            // (temporarilyNotAvailable) never reach this point: the transport keeps waiting or
+            // resends the same block (same block sequence counter) within their com param
+            // limits. A positive response echoing a different block sequence counter is
+            // discarded by the transport as not belonging to this request. Every other
+            // negative response means the ECU rejected the block.
+            if let Some(abort_error) = match result {
+                Err(e) => Some(communication_error(next_block_sequence_counter, e)),
+                Ok(response) if response.response_type() == DiagServiceResponseType::Negative => {
+                    Some(negative_response_error(
+                        next_block_sequence_counter,
+                        &response,
+                    ))
+                }
+                Ok(_) => None,
+            } {
+                set_transfer_aborted(ecu_name, &self.data_transfers, abort_error, &status_sender)
+                    .await;
                 break;
             }
 
@@ -181,6 +187,94 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 }
             }
         }
+    }
+}
+
+/// Marks the transfer of `ecu_name` as aborted with `error` and signals its end.
+async fn set_transfer_aborted(
+    ecu_name: &str,
+    transfers: &Arc<Mutex<HashMap<String, EcuDataTransfer>>>,
+    error: DataTransferError,
+    sender: &watch::Sender<bool>,
+) {
+    tracing::warn!(ecu_name, reason = %error.message, "Aborting data transfer");
+    if let Some(dt) = transfers.lock().await.get_mut(ecu_name) {
+        dt.meta_data.status = DataTransferStatus::Aborted;
+        dt.meta_data.error = Some(vec![error]);
+    }
+    if let Err(e) = sender.send(true) {
+        tracing::error!(error = ?e, "Failed to send data transfer aborted signal");
+    }
+}
+
+// Messages of errors that are not a negative response start with "Failed to read data: ",
+// which clients use to tell them apart from an ECU rejecting a block, e.g. to retry the
+// transfer from the last acknowledged block.
+const FAILED_TO_READ_DATA: &str = "Failed to read data";
+
+fn block_prefix(block_sequence_counter: Option<u8>) -> String {
+    block_sequence_counter
+        .map(|bsc| format!("block {bsc:#04X}: "))
+        .unwrap_or_default()
+}
+
+/// Error for a failure of the CDA itself, e.g. reading the flash file.
+fn internal_error(block_sequence_counter: Option<u8>, reason: &str) -> DataTransferError {
+    DataTransferError {
+        message: format!(
+            "{FAILED_TO_READ_DATA}: {}{reason}",
+            block_prefix(block_sequence_counter)
+        ),
+        cause: DataTransferErrorCause::Internal,
+        block_sequence_counter,
+    }
+}
+
+/// Error for a block whose request or response failed, e.g. with a timeout.
+fn communication_error(block_sequence_counter: u8, error: DiagServiceError) -> DataTransferError {
+    DataTransferError {
+        message: format!(
+            "{FAILED_TO_READ_DATA}: {}{error}",
+            block_prefix(Some(block_sequence_counter))
+        ),
+        cause: DataTransferErrorCause::Communication(error),
+        block_sequence_counter: Some(block_sequence_counter),
+    }
+}
+
+/// Error for a block the ECU answered with a negative response.
+fn negative_response_error<R: DiagServiceResponse>(
+    block_sequence_counter: u8,
+    response: &R,
+) -> DataTransferError {
+    let (sid, nrc, description) = match response.as_nrc() {
+        Ok(MappedNRC {
+            code,
+            description,
+            sid,
+        }) => (sid, code, description),
+        Err(_) => (None, None, None),
+    };
+    let message = match (nrc, &description) {
+        (Some(nrc), Some(description)) => format!(
+            "ECU rejected block {block_sequence_counter:#04X} with NRC {nrc:#04X} ({description})"
+        ),
+        (Some(nrc), None) => {
+            format!("ECU rejected block {block_sequence_counter:#04X} with NRC {nrc:#04X}")
+        }
+        (None, _) => format!(
+            "ECU rejected block {block_sequence_counter:#04X} with negative response {:02X?}",
+            response.get_raw()
+        ),
+    };
+    DataTransferError {
+        message,
+        cause: DataTransferErrorCause::NegativeResponse {
+            sid,
+            nrc,
+            description,
+        },
+        block_sequence_counter: Some(block_sequence_counter),
     }
 }
 
@@ -575,5 +669,38 @@ mod tests {
 
         assert!(!manager.data_transfers.lock().await.contains_key(ECU));
         assert!(task.is_finished());
+    }
+
+    #[test]
+    fn communication_error_names_the_block_and_keeps_the_cause() {
+        let error = communication_error(0x05, DiagServiceError::Timeout);
+        assert_eq!(error.message, "Failed to read data: block 0x05: Timeout");
+        assert_eq!(error.block_sequence_counter, Some(0x05));
+        assert!(matches!(
+            error.cause,
+            DataTransferErrorCause::Communication(DiagServiceError::Timeout)
+        ));
+    }
+
+    #[test]
+    fn internal_error_with_block() {
+        let error = internal_error(Some(0x2A), "Failed to read the flash file: eof");
+        assert_eq!(
+            error.message,
+            "Failed to read data: block 0x2A: Failed to read the flash file: eof"
+        );
+        assert_eq!(error.block_sequence_counter, Some(0x2A));
+        assert!(matches!(error.cause, DataTransferErrorCause::Internal));
+    }
+
+    #[test]
+    fn internal_error_without_block() {
+        let error = internal_error(None, "Remaining bytes overflowed usize");
+        assert_eq!(
+            error.message,
+            "Failed to read data: Remaining bytes overflowed usize"
+        );
+        assert_eq!(error.block_sequence_counter, None);
+        assert!(matches!(error.cause, DataTransferErrorCause::Internal));
     }
 }

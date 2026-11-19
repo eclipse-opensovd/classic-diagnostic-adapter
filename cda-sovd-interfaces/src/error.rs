@@ -88,7 +88,7 @@ pub enum ErrorCode {
     UpdateExecutionInProgress,
 }
 
-#[derive(Serialize, Deserialize, Debug, schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, schemars::JsonSchema)]
 pub struct ApiErrorResponse<T> {
     pub message: String,
     pub error_code: ErrorCode,
