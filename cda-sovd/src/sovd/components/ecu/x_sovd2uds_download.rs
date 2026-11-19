@@ -330,18 +330,22 @@ pub(crate) mod flash_transfer {
     };
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{
-        DynamicPlugin, FlashTransferStartParams, UdsEcu, file_manager::FileManager,
+        DynamicPlugin, FlashTransferStartParams, HashMap, HashMapExtensions, UdsEcu,
+        file_manager::FileManager,
     };
     use cda_plugin_security::Secured;
     use http::StatusCode;
-    use sovd_interfaces::components::ecu::x::sovd2uds;
+    use sovd_interfaces::{
+        components::ecu::x::sovd2uds,
+        error::{ApiErrorResponse, ErrorCode},
+    };
     use uuid::Uuid;
 
     use crate::{
         openapi,
         sovd::{
             IntoSovd, WebserverEcuState, create_schema,
-            error::{ApiError, ErrorWrapper},
+            error::{ApiError, ErrorWrapper, VendorErrorCode},
             locks::require_ecu_access,
         },
     };
@@ -480,7 +484,7 @@ pub(crate) mod flash_transfer {
         require_ecu_access!(write, security_plugin, &ecu_name, &locks, include_schema);
         let schema = if include_schema {
             Some(create_schema!(
-                sovd2uds::download::flash_transfer::get::Response
+                sovd2uds::download::flash_transfer::get::Response<VendorErrorCode>
             ))
         } else {
             None
@@ -490,7 +494,12 @@ pub(crate) mod flash_transfer {
                 let items = data.into_sovd();
                 (
                     StatusCode::OK,
-                    Json(sovd2uds::download::flash_transfer::get::Response { items, schema }),
+                    Json(
+                        sovd2uds::download::flash_transfer::get::Response::<VendorErrorCode> {
+                            items,
+                            schema,
+                        },
+                    ),
                 )
                     .into_response()
             }
@@ -505,7 +514,7 @@ pub(crate) mod flash_transfer {
     pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
         use sovd2uds::download::flash_transfer::get::{DataTransferMetaData, DataTransferStatus};
         op.description("Get all flash transfers for the component")
-            .response_with::<200, Json<sovd2uds::download::flash_transfer::get::Response>, _>(
+            .response_with::<200, Json<sovd2uds::download::flash_transfer::get::Response<VendorErrorCode>>, _>(
                 |res| {
                     res.example(sovd2uds::download::flash_transfer::get::Response {
                         items: vec![DataTransferMetaData {
@@ -528,7 +537,7 @@ pub(crate) mod flash_transfer {
         use super::{
             ApiError, ErrorWrapper, FileManager, IntoResponse, IntoSovd, Json, Path, Query,
             Response, Secured, State, StatusCode, TransformOperation, UdsEcu, UseApi,
-            WebserverEcuState, WithRejection, create_schema, openapi, sovd2uds,
+            VendorErrorCode, WebserverEcuState, WithRejection, create_schema, openapi, sovd2uds,
         };
         use crate::sovd::{components::IdPathParam, locks::require_ecu_access};
         pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
@@ -552,7 +561,9 @@ pub(crate) mod flash_transfer {
                     let mut data = data.into_sovd();
                     if include_schema {
                         data.schema = Some(create_schema!(
-                            sovd2uds::download::flash_transfer::get::DataTransferMetaData
+                            sovd2uds::download::flash_transfer::get::DataTransferMetaData<
+                                VendorErrorCode,
+                            >
                         ));
                     }
                     (StatusCode::OK, Json(data)).into_response()
@@ -571,7 +582,7 @@ pub(crate) mod flash_transfer {
             };
 
             op.description("Get flash transfer status for a specific transfer")
-                .response_with::<200, Json<DataTransferMetaData>, _>(|res| {
+                .response_with::<200, Json<DataTransferMetaData<VendorErrorCode>>, _>(|res| {
                     res.example(DataTransferMetaData {
                         acknowledged_bytes: 0,
                         blocksize: 1024,
@@ -636,15 +647,67 @@ pub(crate) mod flash_transfer {
     }
 
     impl IntoSovd for cda_interfaces::datatypes::DataTransferError {
-        type SovdType = sovd2uds::download::flash_transfer::get::DataTransferError;
+        type SovdType = sovd2uds::download::flash_transfer::get::DataTransferError<VendorErrorCode>;
 
         fn into_sovd(self) -> Self::SovdType {
-            Self::SovdType { text: self.text }
+            use cda_interfaces::datatypes::DataTransferErrorCause;
+
+            let mut parameters = HashMap::new();
+            if let Some(bsc) = self.block_sequence_counter {
+                parameters.insert(
+                    "BlockSequenceCounter".to_owned(),
+                    serde_json::Value::from(bsc),
+                );
+            }
+            let (error_code, vendor_code, error_source) = match self.cause {
+                DataTransferErrorCause::NegativeResponse { sid, nrc, .. } => {
+                    // same parameter names as for other negative responses
+                    if let Some(nrc) = nrc {
+                        parameters.insert("NRC".to_owned(), serde_json::Value::from(nrc));
+                    }
+                    if let Some(sid) = sid {
+                        parameters.insert("SID".to_owned(), serde_json::Value::from(sid));
+                    }
+                    (ErrorCode::ErrorResponse, None, Some("ECU".to_owned()))
+                }
+                DataTransferErrorCause::Communication(e) => {
+                    match ApiError::from(e).error_and_vendor_code() {
+                        // timeouts and other missing responses of the ECU
+                        (ErrorCode::NotResponding, _) => (ErrorCode::NotResponding, None, None),
+                        // keep a more specific vendor code, e.g. communication-not-ready
+                        (ErrorCode::VendorSpecific, Some(vendor_code)) => {
+                            (ErrorCode::VendorSpecific, Some(vendor_code), None)
+                        }
+                        _ => (
+                            ErrorCode::VendorSpecific,
+                            Some(VendorErrorCode::DataTransferFailed),
+                            None,
+                        ),
+                    }
+                }
+                DataTransferErrorCause::Internal => (
+                    ErrorCode::VendorSpecific,
+                    Some(VendorErrorCode::DataTransferFailed),
+                    None,
+                ),
+            };
+            Self::SovdType {
+                text: self.message.clone(),
+                error: ApiErrorResponse {
+                    message: self.message,
+                    error_code,
+                    vendor_code,
+                    parameters: (!parameters.is_empty()).then_some(parameters),
+                    error_source,
+                    schema: None,
+                },
+            }
         }
     }
 
     impl IntoSovd for cda_interfaces::datatypes::DataTransferMetaData {
-        type SovdType = sovd2uds::download::flash_transfer::get::DataTransferMetaData;
+        type SovdType =
+            sovd2uds::download::flash_transfer::get::DataTransferMetaData<VendorErrorCode>;
 
         fn into_sovd(self) -> Self::SovdType {
             Self::SovdType {
@@ -665,7 +728,8 @@ pub(crate) mod flash_transfer {
     }
 
     impl IntoSovd for Vec<cda_interfaces::datatypes::DataTransferMetaData> {
-        type SovdType = Vec<sovd2uds::download::flash_transfer::get::DataTransferMetaData>;
+        type SovdType =
+            Vec<sovd2uds::download::flash_transfer::get::DataTransferMetaData<VendorErrorCode>>;
 
         fn into_sovd(self) -> Self::SovdType {
             self.into_iter()
@@ -801,5 +865,93 @@ mod tests {
             super::transferexit::parse_body(b"{not json"),
             Err(ApiError::BadRequest(_))
         ));
+    }
+
+    fn transfer_error_json(
+        error: cda_interfaces::datatypes::DataTransferError,
+    ) -> serde_json::Value {
+        serde_json::to_value(crate::sovd::IntoSovd::into_sovd(error))
+            .expect("Transfer error must serialize")
+    }
+
+    #[test]
+    fn transfer_error_negative_response_is_generic_error_response() {
+        let json = transfer_error_json(cda_interfaces::datatypes::DataTransferError {
+            message: "ECU rejected block 0x03 with NRC 0x71 (transferDataSuspended)".to_owned(),
+            cause: cda_interfaces::datatypes::DataTransferErrorCause::NegativeResponse {
+                sid: Some(0x36),
+                nrc: Some(0x71),
+                description: Some("transferDataSuspended".to_owned()),
+            },
+            block_sequence_counter: Some(3),
+        });
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "text": "ECU rejected block 0x03 with NRC 0x71 (transferDataSuspended)",
+                "message": "ECU rejected block 0x03 with NRC 0x71 (transferDataSuspended)",
+                "error_code": "error-response",
+                "parameters": {"BlockSequenceCounter": 3, "NRC": 0x71, "SID": 0x36},
+                "x-errorsource": "ECU"
+            })
+        );
+    }
+
+    #[test]
+    fn transfer_error_timeout_is_not_responding() {
+        let json = transfer_error_json(cda_interfaces::datatypes::DataTransferError {
+            message: "Failed to read data: block 0x05: timeout".to_owned(),
+            cause: cda_interfaces::datatypes::DataTransferErrorCause::Communication(
+                cda_interfaces::DiagServiceError::Timeout,
+            ),
+            block_sequence_counter: Some(5),
+        });
+        assert_eq!(
+            json.get("error_code"),
+            Some(&serde_json::json!("not-responding"))
+        );
+        assert_eq!(
+            json.get("parameters"),
+            Some(&serde_json::json!({"BlockSequenceCounter": 5}))
+        );
+        assert_eq!(json.get("text"), json.get("message"));
+        assert!(json.get("x-errorsource").is_none());
+    }
+
+    #[test]
+    fn transfer_error_internal_is_vendor_specific_without_block() {
+        let json = transfer_error_json(cda_interfaces::datatypes::DataTransferError {
+            message: "Failed to read data: Remaining bytes overflowed usize".to_owned(),
+            cause: cda_interfaces::datatypes::DataTransferErrorCause::Internal,
+            block_sequence_counter: None,
+        });
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "text": "Failed to read data: Remaining bytes overflowed usize",
+                "message": "Failed to read data: Remaining bytes overflowed usize",
+                "error_code": "vendor-specific",
+                "vendor_code": "data-transfer-failed"
+            })
+        );
+    }
+
+    #[test]
+    fn transfer_error_failed_send_is_vendor_specific() {
+        let json = transfer_error_json(cda_interfaces::datatypes::DataTransferError {
+            message: "Failed to read data: block 0x02: connection closed".to_owned(),
+            cause: cda_interfaces::datatypes::DataTransferErrorCause::Communication(
+                cda_interfaces::DiagServiceError::ConnectionClosed("closed".to_owned()),
+            ),
+            block_sequence_counter: Some(2),
+        });
+        assert_eq!(
+            json.get("error_code"),
+            Some(&serde_json::json!("vendor-specific"))
+        );
+        assert_eq!(
+            json.get("vendor_code"),
+            Some(&serde_json::json!("data-transfer-failed"))
+        );
     }
 }

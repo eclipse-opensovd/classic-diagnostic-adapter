@@ -20,9 +20,9 @@ plugins {
 dependencyResolutionManagement {
     versionCatalogs {
         create("libs") {
-            // must match the kotlin-stdlib 2.3.x pulled in by doip-sim-ecu-dsl
-            version("kotlinVersion", "2.3.21")
-            version("ktorVersion", "3.2.3")
+            // must match the kotlin-stdlib 2.4.x pulled in by doip-sim-ecu-dsl
+            version("kotlinVersion", "2.4.21")
+            version("ktorVersion", "3.6.0")
             version("shadow", "8.1.1")
             version("ktlint", "14.0.1")
 
@@ -42,7 +42,7 @@ dependencyResolutionManagement {
 
             library(
                 "doip-sim-dsl",
-                "io.github.doip-sim-ecu:doip-sim-ecu-dsl:0.23.2-beta",
+                "io.github.doip-sim-ecu:doip-sim-ecu-dsl:0.25.0",
             )
             library("logback-classic", "ch.qos.logback:logback-classic:1.5.18")
             library("auth0-jwt", "com.auth0:java-jwt:4.5.0")

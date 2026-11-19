@@ -348,13 +348,30 @@ pub(crate) async fn set_interceptor(
     request: &str,
     response: &str,
 ) -> Result<(), TestingError> {
-    let url = sim_url(sim, &["interceptor", ecu, "inbound", name])?;
+    set_interceptor_config(
+        sim,
+        ecu,
+        name,
+        &serde_json::json!({
+            "request": request,
+            "response": response
+        }),
+    )
+    .await
+}
 
-    let body = serde_json::json!({
-        "request": request,
-        "response": response
-    })
-    .to_string();
+/// Install a named inbound interceptor with a full configuration, see `SimpleInterceptorDto`
+/// in the ECU simulator for the supported fields (e.g. `removeAfterNRequest`,
+/// `pendingResponses`, `pendingIntervalMs`, `"response": null` to forward the request to the
+/// regular ECU handler).
+pub(crate) async fn set_interceptor_config(
+    sim: &EcuSim,
+    ecu: &str,
+    name: &str,
+    config: &serde_json::Value,
+) -> Result<(), TestingError> {
+    let url = sim_url(sim, &["interceptor", ecu, "inbound", name])?;
+    let body = config.to_string();
 
     crate::util::http::send_request(
         StatusCode::ACCEPTED,

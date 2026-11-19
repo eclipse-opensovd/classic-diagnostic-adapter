@@ -407,11 +407,11 @@ pub mod x {
                 pub mod get {
                     use serde::Serialize;
 
-                    use crate::Items;
+                    use crate::{Items, error::ApiErrorResponse};
 
                     #[derive(Serialize, Clone, schemars::JsonSchema)]
                     #[serde(rename_all = "camelCase")]
-                    pub struct DataTransferMetaData {
+                    pub struct DataTransferMetaData<T> {
                         pub acknowledged_bytes: u64,
                         pub blocksize: usize,
                         pub next_block_sequence_counter: u8,
@@ -419,15 +419,20 @@ pub mod x {
                         pub file_id: String,
                         pub status: DataTransferStatus,
                         #[serde(skip_serializing_if = "Option::is_none")]
-                        pub error: Option<Vec<DataTransferError>>,
+                        pub error: Option<Vec<DataTransferError<T>>>,
                         #[schemars(skip)]
                         #[serde(skip_serializing_if = "Option::is_none")]
                         pub schema: Option<schemars::Schema>,
                     }
 
+                    /// Reason why a transfer was aborted, a SOVD `GenericError`.
                     #[derive(Serialize, Clone, schemars::JsonSchema)]
-                    pub struct DataTransferError {
+                    pub struct DataTransferError<T> {
+                        /// Same as `message`. Kept for clients reading the error text of
+                        /// earlier versions.
                         pub text: String,
+                        #[serde(flatten)]
+                        pub error: ApiErrorResponse<T>,
                     }
 
                     #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -445,11 +450,11 @@ pub mod x {
                         Queued,
                     }
 
-                    pub type Response = Items<DataTransferMetaData>;
+                    pub type Response<T> = Items<DataTransferMetaData<T>>;
 
                     pub mod id {
                         use super::DataTransferMetaData;
-                        pub type Response = DataTransferMetaData;
+                        pub type Response<T> = DataTransferMetaData<T>;
                     }
                 }
             }
