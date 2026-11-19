@@ -198,6 +198,13 @@ pub(super) fn take_cleanups(
         .collect()
 }
 
+pub(super) async fn release_ecu<T: UdsEcu>(uds: &T, ecu_name: &str, owner: &str, context: &str) {
+    // Abort first, so no TransferData block of the released owner reaches the ECU
+    // after its session and security access were reset.
+    uds.ecu_flash_transfer_abort(ecu_name, owner).await;
+    reset_ecu_session_and_security(uds, ecu_name, context).await;
+}
+
 pub(super) async fn reset_ecu_session_and_security<T: UdsEcu>(
     uds: &T,
     ecu_name: &str,

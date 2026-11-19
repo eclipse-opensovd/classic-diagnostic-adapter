@@ -385,6 +385,7 @@ pub(crate) mod flash_transfer {
                 };
 
                 let id = Uuid::new_v4().to_string();
+                let owner = security_plugin.as_auth_plugin().claims().sub().to_owned();
                 let transfer = cda_interfaces::datatypes::DataTransferMetaData {
                     acknowledged_bytes: 0,
                     blocksize: body.blocksize,
@@ -411,6 +412,7 @@ pub(crate) mod flash_transfer {
                                 .to_string_lossy(),
                             offset: body.offset,
                             length: body.length,
+                            owner: &owner,
                             transfer_meta_data: transfer,
                         },
                     )
@@ -595,7 +597,11 @@ pub(crate) mod flash_transfer {
             }): State<WebserverEcuState<T, U>>,
         ) -> Response {
             require_ecu_access!(write, security_plugin, &ecu_name, &locks, false);
-            match uds.ecu_flash_transfer_exit(&ecu_name, &id).await {
+            let claims = security_plugin.as_auth_plugin().claims();
+            match uds
+                .ecu_flash_transfer_exit(&ecu_name, &id, claims.sub())
+                .await
+            {
                 Ok(()) => StatusCode::NO_CONTENT.into_response(),
                 Err(e) => ErrorWrapper {
                     error: e.into(),
@@ -608,7 +614,7 @@ pub(crate) mod flash_transfer {
         pub(crate) fn docs_delete(op: TransformOperation) -> TransformOperation {
             op.description(
                 "Remove an aborted or finished flashtransfer to allow new flashtransfers to be \
-                 started.",
+                 started. Only the client that started the transfer can remove it.",
             )
             .response_with::<204, (), _>(|res| res)
             .with(openapi::error_not_found)
