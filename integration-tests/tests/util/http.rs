@@ -136,6 +136,16 @@ where
     }
 }
 
+/// The URL of `path` below the root of the CDA configured by `config`, e.g.
+/// `version-info`.
+pub(crate) fn server_url(config: &Configuration, path: &str) -> String {
+    format!(
+        "http://{}:{}/{path}",
+        config.server.transport.address(),
+        config.server.transport.port()
+    )
+}
+
 /// The URL of `endpoint` below `/vehicle/v15/` of the CDA configured by
 /// `config`, e.g. `components/flxc1000/data`.
 pub(crate) fn vehicle_url(config: &Configuration, endpoint: &str) -> String {

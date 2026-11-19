@@ -645,33 +645,53 @@ async fn init_webserver(
 
 async fn register_version_endpoints(dynamic_router: &cda_sovd::dynamic_router::DynamicRouter) {
     // [[ dimpl~sovd-api-version-endpoint, Register Version Endpoint ]]
-    let serde_json::Value::Object(version_info) = serde_json::json!({
-        "id": "version",
-        "data": {
-            "name": "Eclipse OpenSOVD Classic Diagnostic Adapter",
-            "api": {
-                "version": "1.1"
+    use cda_sovd::version_info::{
+        ApiVersion, DataVersion, ImplementationVersion, SovdInfo, VendorInfo, VersionData,
+        VersionInfo,
+    };
+
+    const NAME: &str = "Eclipse OpenSOVD Classic Diagnostic Adapter";
+    const SOVD_API_VERSION: &str = "1.1.0";
+
+    let version_info = VersionInfo {
+        sovd_info: vec![SovdInfo {
+            version: SOVD_API_VERSION.to_owned(),
+            base_uri: "/vehicle/v15".to_owned(),
+            vendor_info: VendorInfo {
+                name: NAME.to_owned(),
+                version: cda_version().to_owned(),
+                commit: env!("GIT_COMMIT_HASH").to_owned(),
+                build_date: env!("BUILD_DATE").to_owned(),
             },
-            "implementation": {
-                "version": cda_version(),
-                "commit": env!("GIT_COMMIT_HASH").to_owned(),
-                "build_date": env!("BUILD_DATE").to_owned(),
-            }
-        }
-    }) else {
-        tracing::error!("Failed to build version information");
-        return;
+        }],
+    };
+    cda_sovd::add_static_data_endpoint(dynamic_router, version_info, "/version-info", "identData")
+        .await;
+
+    let data_version = DataVersion {
+        id: "version".to_owned(),
+        data: VersionData {
+            name: NAME.to_owned(),
+            api: ApiVersion {
+                version: SOVD_API_VERSION.to_owned(),
+            },
+            implementation: ImplementationVersion {
+                version: cda_version().to_owned(),
+                commit: env!("GIT_COMMIT_HASH").to_owned(),
+                build_date: env!("BUILD_DATE").to_owned(),
+            },
+        },
     };
     cda_sovd::add_static_data_endpoint(
         dynamic_router,
-        version_info.clone(),
+        data_version.clone(),
         "/vehicle/v15/apps/sovd2uds/data/version",
         "identData",
     )
     .await;
     cda_sovd::add_static_data_endpoint(
         dynamic_router,
-        version_info,
+        data_version,
         "/vehicle/v15/data/version",
         "identData",
     )

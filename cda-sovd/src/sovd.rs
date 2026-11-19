@@ -1429,35 +1429,45 @@ pub(crate) mod static_data {
         extract::{Query, State},
         response::{IntoResponse, Response},
     };
+    use axum_extra::extract::WithRejection;
     use http::StatusCode;
+    use serde::Serialize;
 
     use crate::{dynamic_router::DynamicRouter, sovd::error::ApiError};
 
-    /// Add an endpoint serving static data.
-    /// For example it can be used, to serve version information.
-    /// The standard defines these routes for version data:
-    /// * `/vehicle/v15/apps/sovd2uds/data/version`.
-    /// * `/vehicle/v15/data/version`
-    ///
+    /// Data of a static endpoint together with its optional schema.
+    #[derive(Serialize)]
+    struct WithSchema<T> {
+        #[serde(flatten)]
+        data: T,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        schema: Option<schemars::Schema>,
+    }
+
+    /// Adds an endpoint serving static data, e.g. the version endpoints.
+    /// With `include-schema=true` the response also contains the schema of `T`.
     /// The endpoint is listed in its `/data` collection with the given category.
+    ///
     /// # Arguments
     /// * `dynamic_router` - The dynamic router to add the endpoint to.
-    /// * `data` - The version data to return.
+    /// * `data` - The data to return. It must serialize to a JSON object.
     /// * `path` - The path to serve the data from.
     ///   There is no processing of this, it will be returned as is in the response.
     /// * `category` - The data category the collection lists the endpoint with,
     ///   e.g. `identData` (ISO 17978-3 Table 70).
-    pub async fn add_static_data_endpoint(
+    pub async fn add_static_data_endpoint<T>(
         dynamic_router: &DynamicRouter,
-        data: serde_json::Map<String, serde_json::Value>,
+        data: T,
         path: &str,
         category: &str,
-    ) {
+    ) where
+        T: Serialize + schemars::JsonSchema + Clone + Send + Sync + 'static,
+    {
         let data_docs = data.clone();
         let router = ApiRouter::new()
             .api_route(
                 path,
-                routing::get_with(get, move |transformation| {
+                routing::get_with(get::<T>, move |transformation| {
                     docs_get(transformation, data_docs.clone())
                 }),
             )
@@ -1466,39 +1476,95 @@ pub(crate) mod static_data {
         dynamic_router.add_routes(router).await;
     }
 
-    pub(crate) async fn get(
-        State(state): State<serde_json::Map<String, serde_json::Value>>,
-        Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
-    ) -> Response {
-        let mut response_map = state.clone();
-        if query.include_schema {
-            let schema = match serde_json::to_value(
-                create_schema!(serde_json::Map<String, serde_json::Value>),
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    return ApiError::InternalServerError(Some(format!(
-                        "Failed to build static data with schema: {e}"
-                    )))
-                    .into_response();
-                }
-            };
-
-            response_map.insert("schema".to_string(), schema);
-        }
-        (StatusCode::OK, Json(response_map)).into_response()
+    async fn get<T>(
+        State(data): State<T>,
+        WithRejection(Query(query), _): WithRejection<
+            Query<sovd_interfaces::IncludeSchemaQuery>,
+            ApiError,
+        >,
+    ) -> Response
+    where
+        T: Serialize + schemars::JsonSchema + Clone + Send + Sync + 'static,
+    {
+        let schema = query.include_schema.then(|| create_schema!(T));
+        (StatusCode::OK, Json(WithSchema { data, schema })).into_response()
     }
 
-    pub(crate) fn docs_get(
-        op: TransformOperation,
-        data: serde_json::Map<String, serde_json::Value>,
-    ) -> TransformOperation {
+    fn docs_get<T>(op: TransformOperation, data: T) -> TransformOperation
+    where
+        T: Serialize + schemars::JsonSchema,
+    {
         op.description("Get static information")
-            .response_with::<200, Json<serde_json::Map<String, serde_json::Value>>, _>(|res| {
-                let mut example = data;
-                example.insert("schema".to_string(), serde_json::Value::Null);
-                res.description("Successful response").example(example)
+            .response_with::<200, Json<T>, _>(|res| {
+                res.description("Successful response").example(data)
             })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use axum::body::Body;
+        use serde_json::{Value, json};
+        use sovd_interfaces::version_info::{SovdInfo, VendorInfo, VersionInfo};
+        use tower::ServiceExt;
+
+        use super::*;
+
+        fn version_info() -> VersionInfo {
+            VersionInfo {
+                sovd_info: vec![SovdInfo {
+                    version: "1.1.0".to_owned(),
+                    base_uri: "/vehicle/v15".to_owned(),
+                    vendor_info: VendorInfo {
+                        name: "CDA".to_owned(),
+                        version: "0.1.0".to_owned(),
+                        commit: "abc123".to_owned(),
+                        build_date: "2026-11-19".to_owned(),
+                    },
+                }],
+            }
+        }
+
+        async fn get_json(router: &DynamicRouter, uri: &str) -> (StatusCode, Value) {
+            let request = http::Request::builder()
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let response = router.get_router().await.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+        }
+
+        #[tokio::test]
+        async fn returns_the_data_without_schema_by_default() {
+            let router = DynamicRouter::new();
+            add_static_data_endpoint(&router, version_info(), "/version-info", "identData").await;
+
+            let (status, value) = get_json(&router, "/version-info").await;
+
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(value, serde_json::to_value(version_info()).unwrap());
+        }
+
+        #[tokio::test]
+        async fn returns_the_schema_of_the_data_type() {
+            let router = DynamicRouter::new();
+            add_static_data_endpoint(&router, version_info(), "/version-info", "identData").await;
+
+            let (status, value) = get_json(&router, "/version-info?include-schema=true").await;
+
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                value.get("schema"),
+                Some(&serde_json::to_value(create_schema!(VersionInfo)).unwrap())
+            );
+            assert_eq!(
+                value.pointer("/schema/properties/sovd_info/items/properties/base_uri/type"),
+                Some(&json!("string"))
+            );
+        }
     }
 }
 
