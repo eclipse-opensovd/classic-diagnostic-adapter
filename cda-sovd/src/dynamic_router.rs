@@ -28,37 +28,144 @@ use crate::{create_trace_layer, sovd};
 
 type RouteFinalizer = Arc<dyn Fn(axum::Router) -> axum::Router + Send + Sync>;
 
-/// The resources served under a collection, so the collection can list them.
-///
-/// Maps the collection path (e.g. `/vehicle/v15/data`) to the id of each resource in it
-/// and one value per resource, in registration order.
-#[derive(Clone)]
-struct Catalog<V>(Arc<RwLock<IndexMap<String, IndexMap<String, V>>>>);
+/// What a collection lists about one of its resources.
+#[derive(Clone, Debug)]
+enum ListingKind {
+    /// A resource of a `/data` collection, with its data category.
+    Data(String),
+    /// An operation of an `operations` collection, with whether its execution is
+    /// asynchronous.
+    Operation(bool),
+    /// A category of a `bulk-data` collection.
+    BulkData,
+}
 
-impl<V> Default for Catalog<V> {
-    fn default() -> Self {
-        Self(Arc::default())
+/// A resource listed by its collection, declared together with the routes serving it.
+#[derive(Clone, Debug)]
+struct Listing {
+    collection: String,
+    id: String,
+    kind: ListingKind,
+}
+
+/// A route group to register with a [`DynamicRouter`], together with the resources it
+/// lists in the `/data`, `operations` and `bulk-data` collections.
+///
+/// The listings share the lifecycle of the route group: they are listed while the group
+/// is registered, and replaced or removed together with it. Any [`ApiRouter`] converts
+/// into [`Routes`] without listings.
+pub struct Routes {
+    router: ApiRouter,
+    listings: Vec<Listing>,
+}
+
+impl Routes {
+    /// Creates a route group from `router`, without listings.
+    #[must_use]
+    pub fn new(router: ApiRouter) -> Self {
+        Self {
+            router,
+            listings: Vec::new(),
+        }
+    }
+
+    /// Lists a resource in its `/data` collection with the given data category
+    /// (ISO 17978-3 Table 70, e.g. `identData`).
+    ///
+    /// `path` is the full path of the resource, e.g. `/vehicle/v15/data/version`; its
+    /// parent is the collection, its last segment the id.
+    #[must_use]
+    pub fn data(self, path: &str, category: &str) -> Self {
+        self.listed(path, ListingKind::Data(category.to_owned()))
+    }
+
+    /// Lists an operation in its `operations` collection.
+    ///
+    /// `path` is the full path of the operation, e.g.
+    /// `/vehicle/v15/apps/sovd2uds/operations/runtimefilesupdate`; its parent is the
+    /// collection, its last segment the id. `asynchronous` tells whether its execution is
+    /// asynchronous.
+    #[must_use]
+    pub fn operation(self, path: &str, asynchronous: bool) -> Self {
+        self.listed(path, ListingKind::Operation(asynchronous))
+    }
+
+    /// Lists a category in its `bulk-data` collection. `path` is the full path of the
+    /// category, e.g. `/vehicle/v15/apps/sovd2uds/bulk-data/flashfiles`.
+    #[must_use]
+    pub fn bulk_data(self, path: &str) -> Self {
+        self.listed(path, ListingKind::BulkData)
+    }
+
+    fn listed(mut self, path: &str, kind: ListingKind) -> Self {
+        match path.trim_end_matches('/').rsplit_once('/') {
+            Some((collection, id)) if !id.is_empty() => self.listings.push(Listing {
+                collection: collection.to_owned(),
+                id: id.to_owned(),
+                kind,
+            }),
+            _ => tracing::warn!(path, "Resource path has no collection, not listed"),
+        }
+        self
     }
 }
 
-impl<V: Clone> Catalog<V> {
-    async fn register(&self, path: &str, value: V) {
-        let Some((collection, id)) = path.trim_end_matches('/').rsplit_once('/') else {
-            tracing::warn!(path, "Resource path has no collection, not listed");
-            return;
-        };
-        self.0
-            .write()
-            .await
-            .entry(collection.to_owned())
-            .or_default()
-            .insert(id.to_owned(), value);
+/// A route group without routes, to list resources that another group serves.
+impl Default for Routes {
+    fn default() -> Self {
+        Self::new(ApiRouter::new())
+    }
+}
+
+impl From<ApiRouter> for Routes {
+    fn from(router: ApiRouter) -> Self {
+        Self::new(router)
+    }
+}
+
+/// Maps the collection path (e.g. `/vehicle/v15/data`) to the id of each resource in it
+/// and one value per resource, in registration order.
+type Collections<V> = IndexMap<String, IndexMap<String, V>>;
+
+/// The resources listed by the collections of all registered route groups.
+///
+/// Rebuilt from the listings of the route groups on every recomposition, so it always
+/// matches the registered routes. Handlers read it as a request extension.
+#[derive(Default)]
+pub(crate) struct ResourceCatalog {
+    data: Collections<String>,
+    operations: Collections<bool>,
+    bulk_data: Collections<()>,
+}
+
+impl ResourceCatalog {
+    /// Builds the catalog from listings in route group order. A later group's listing of
+    /// the same resource overrides an earlier one, like its routes do.
+    fn from_listings<'a>(listings: impl Iterator<Item = &'a Listing>) -> Self {
+        fn insert<V>(collections: &mut Collections<V>, listing: &Listing, value: V) {
+            collections
+                .entry(listing.collection.clone())
+                .or_default()
+                .insert(listing.id.clone(), value);
+        }
+
+        let mut catalog = Self::default();
+        for listing in listings {
+            match &listing.kind {
+                ListingKind::Data(category) => {
+                    insert(&mut catalog.data, listing, category.clone());
+                }
+                ListingKind::Operation(asynchronous) => {
+                    insert(&mut catalog.operations, listing, *asynchronous);
+                }
+                ListingKind::BulkData => insert(&mut catalog.bulk_data, listing, ()),
+            }
+        }
+        catalog
     }
 
-    async fn list(&self, collection: &str) -> Vec<(String, V)> {
-        self.0
-            .read()
-            .await
+    fn entries<V: Clone>(collections: &Collections<V>, collection: &str) -> Vec<(String, V)> {
+        collections
             .get(collection)
             .map(|resources| {
                 resources
@@ -68,53 +175,33 @@ impl<V: Clone> Catalog<V> {
             })
             .unwrap_or_default()
     }
-}
 
-/// The resources served under each `/data` collection, with their data category.
-/// Handlers read it as a request extension.
-#[derive(Clone, Default)]
-pub(crate) struct DataResources(Catalog<String>);
-
-impl DataResources {
-    /// Returns `(id, category)` of each resource registered in `collection`.
-    pub(crate) async fn list(&self, collection: &str) -> Vec<(String, String)> {
-        self.0.list(collection).await
+    /// Returns `(id, category)` of each resource listed in the `/data` collection
+    /// `collection`.
+    pub(crate) fn data(&self, collection: &str) -> Vec<(String, String)> {
+        Self::entries(&self.data, collection)
     }
-}
 
-/// The operations served under each `operations` collection, with whether their execution
-/// is asynchronous. Handlers read it as a request extension.
-#[derive(Clone, Default)]
-pub(crate) struct OperationResources(Catalog<bool>);
-
-impl OperationResources {
-    /// Returns `(id, asynchronous)` of each operation registered in `collection`.
-    pub(crate) async fn list(&self, collection: &str) -> Vec<(String, bool)> {
-        self.0.list(collection).await
+    /// Returns `(id, asynchronous)` of each operation listed in the `operations`
+    /// collection `collection`.
+    pub(crate) fn operations(&self, collection: &str) -> Vec<(String, bool)> {
+        Self::entries(&self.operations, collection)
     }
-}
 
-/// The categories served under each `bulk-data` collection. Handlers read it as a
-/// request extension.
-#[derive(Clone, Default)]
-pub(crate) struct BulkDataCategories(Catalog<()>);
-
-impl BulkDataCategories {
-    /// Returns the id of each category registered in `collection`.
-    pub(crate) async fn list(&self, collection: &str) -> Vec<String> {
-        self.0
-            .list(collection)
-            .await
-            .into_iter()
-            .map(|(id, ())| id)
-            .collect()
+    /// Returns the id of each category listed in the `bulk-data` collection `collection`.
+    pub(crate) fn bulk_data(&self, collection: &str) -> Vec<String> {
+        self.bulk_data
+            .get(collection)
+            .map(|categories| categories.keys().cloned().collect())
+            .unwrap_or_default()
     }
 }
 
 /// Insertion order determines override precedence in the fallback chain.
 type RouteGroups = Arc<RwLock<IndexMap<u64, RouteGroup>>>;
 
-/// A route group split into its request-handling router and its `OpenAPI` paths.
+/// A route group split into its request-handling router, its `OpenAPI` paths and the
+/// resources its collections list.
 ///
 /// The [`ApiRouter`] is split once on registration, so recompositions only clone the
 /// cheap axum router instead of the whole [`ApiRouter`] including its documentation.
@@ -123,6 +210,7 @@ type RouteGroups = Arc<RwLock<IndexMap<u64, RouteGroup>>>;
 struct RouteGroup {
     router: axum::Router,
     paths_json: Option<Box<[u8]>>,
+    listings: Vec<Listing>,
 }
 
 impl RouteGroup {
@@ -134,17 +222,21 @@ impl RouteGroup {
     }
 }
 
-impl From<ApiRouter> for RouteGroup {
-    fn from(routes: ApiRouter) -> Self {
+impl From<Routes> for RouteGroup {
+    fn from(Routes { router, listings }: Routes) -> Self {
         let mut api = OpenApi::default();
-        let router = routes.finish_api(&mut api);
+        let router = router.finish_api(&mut api);
         let paths_json = api.paths.and_then(|paths| {
             serde_json::to_vec(&paths)
                 .inspect_err(|e| tracing::error!(error = %e, "Failed to serialize OpenAPI paths"))
                 .ok()
                 .map(Vec::into_boxed_slice)
         });
-        Self { router, paths_json }
+        Self {
+            router,
+            paths_json,
+            listings,
+        }
     }
 }
 
@@ -185,15 +277,15 @@ pub struct RouteGroupNotFound {
 ///
 /// Handles are returned on registration and must be stored by the caller if the routes need
 /// to be replaced or removed later (e.g., during a runtime database reload).
+///
+/// The resources a group lists in the `/data`, `operations` and `bulk-data` collections
+/// (see [`Routes`]) are added, replaced and removed together with the group.
 #[derive(Clone)]
 pub struct DynamicRouter {
     route_groups: RouteGroups,
     finalizers: Arc<RwLock<Vec<RouteFinalizer>>>,
     router: Arc<RwLock<axum::Router>>,
     next_id: Arc<AtomicU64>,
-    data_resources: DataResources,
-    operation_resources: OperationResources,
-    bulk_data_categories: BulkDataCategories,
 }
 
 impl DynamicRouter {
@@ -213,59 +305,31 @@ impl DynamicRouter {
         let route_groups = Arc::new(RwLock::new(IndexMap::new()));
         let finalizers: Arc<RwLock<Vec<RouteFinalizer>>> = Arc::new(RwLock::new(Vec::new()));
 
-        let data_resources = DataResources::default();
-        let operation_resources = OperationResources::default();
-        let bulk_data_categories = BulkDataCategories::default();
-        let initial_router = Self::apply_base_layers(
-            axum::Router::new(),
-            &data_resources,
-            &operation_resources,
-            &bulk_data_categories,
-        );
+        let initial_router = Self::apply_base_layers(axum::Router::new(), Arc::default());
 
         Self {
             route_groups,
             finalizers,
             router: Arc::new(RwLock::new(initial_router)),
             next_id: Arc::new(AtomicU64::new(0)),
-            data_resources,
-            operation_resources,
-            bulk_data_categories,
         }
     }
 
-    /// Registers a resource served under a `/data` collection, so that the collection
-    /// lists it with the given data category (ISO 17978-3 Table 70, e.g. `identData`).
-    ///
-    /// `path` is the full path of the resource, e.g. `/vehicle/v15/data/version`; its
-    /// parent is the collection, its last segment the id. Registering the same path
-    /// again replaces the category.
+    /// Lists a resource of a `/data` collection in a route group without routes.
     pub async fn register_data_resource(&self, path: &str, category: &str) {
-        self.data_resources
-            .0
-            .register(path, category.to_owned())
+        self.add_routes(Routes::default().data(path, category))
             .await;
     }
 
-    /// Registers an operation served under an `operations` collection, so that the
-    /// collection lists it.
-    ///
-    /// `path` is the full path of the operation, e.g.
-    /// `/vehicle/v15/apps/sovd2uds/operations/runtimefilesupdate`; its parent is the
-    /// collection, its last segment the id. `asynchronous` tells whether its execution is
-    /// asynchronous. Registering the same path again replaces the flag.
+    /// Lists an operation of an `operations` collection in a route group without routes.
     pub async fn register_operation(&self, path: &str, asynchronous: bool) {
-        self.operation_resources
-            .0
-            .register(path, asynchronous)
+        self.add_routes(Routes::default().operation(path, asynchronous))
             .await;
     }
 
-    /// Registers a category served under a `bulk-data` collection, so that the collection
-    /// lists it. `path` is the full path of the category, e.g.
-    /// `/vehicle/v15/apps/sovd2uds/bulk-data/flashfiles`.
+    /// Lists a category of a `bulk-data` collection in a route group without routes.
     pub async fn register_bulk_data_category(&self, path: &str) {
-        self.bulk_data_categories.0.register(path, ()).await;
+        self.add_routes(Routes::default().bulk_data(path)).await;
     }
 
     /// Returns a clone of the current composed router.
@@ -307,11 +371,14 @@ impl DynamicRouter {
     ///
     /// Retain the returned handle if you will need to hot-swap these routes at runtime
     /// (e.g., replacing vehicle routes after an MDD database reload).
-    pub async fn add_routes(&self, routes: ApiRouter) -> RouteHandle {
+    ///
+    /// `routes` is an [`ApiRouter`], or [`Routes`] to also list resources of the group in
+    /// their collections.
+    pub async fn add_routes(&self, routes: impl Into<Routes>) -> RouteHandle {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         {
             let mut groups = self.route_groups.write().await;
-            groups.insert(id, routes.into());
+            groups.insert(id, routes.into().into());
         }
         self.recompose().await;
         RouteHandle { id }
@@ -322,7 +389,8 @@ impl DynamicRouter {
     /// This is the primary mechanism for hot-reloading routes at runtime: the caller retains
     /// the [`RouteHandle`] from the initial [`add_routes`](Self::add_routes) call and passes it
     /// here to atomically swap the old routes with new ones (e.g., after rebuilding vehicle
-    /// routes from freshly loaded MDD databases).
+    /// routes from freshly loaded MDD databases). The listings of the old group are replaced
+    /// by those of `routes`.
     ///
     /// # Errors
     ///
@@ -330,13 +398,13 @@ impl DynamicRouter {
     pub async fn replace_routes(
         &self,
         handle: &RouteHandle,
-        routes: ApiRouter,
+        routes: impl Into<Routes>,
     ) -> Result<(), RouteGroupNotFound> {
         {
             let mut groups = self.route_groups.write().await;
             match groups.entry(handle.id) {
                 indexmap::map::Entry::Occupied(mut entry) => {
-                    let _ = entry.insert(routes.into());
+                    let _ = entry.insert(routes.into().into());
                 }
                 indexmap::map::Entry::Vacant(_) => {
                     return Err(RouteGroupNotFound { id: handle.id });
@@ -347,7 +415,8 @@ impl DynamicRouter {
         Ok(())
     }
 
-    /// Removes the route group identified by `handle` and recomposes the router.
+    /// Removes the route group identified by `handle`, together with its listings, and
+    /// recomposes the router.
     ///
     /// No-op if the handle refers to a group that does not exist
     pub async fn remove_routes(&self, handle: &RouteHandle) {
@@ -381,12 +450,9 @@ impl DynamicRouter {
             |acc, (_id, group)| group.router.clone().fallback_service(acc),
         );
 
-        let composed = Self::apply_base_layers(
-            composed,
-            &self.data_resources,
-            &self.operation_resources,
-            &self.bulk_data_categories,
-        );
+        let catalog =
+            ResourceCatalog::from_listings(groups.values().flat_map(|group| group.listings.iter()));
+        let composed = Self::apply_base_layers(composed, Arc::new(catalog));
 
         let composed = finalizers.iter().fold(composed, |acc, f| f(acc));
 
@@ -394,25 +460,15 @@ impl DynamicRouter {
         *router = composed;
     }
 
-    fn apply_base_layers(
-        router: axum::Router,
-        data_resources: &DataResources,
-        operation_resources: &OperationResources,
-        bulk_data_categories: &BulkDataCategories,
-    ) -> axum::Router {
-        create_trace_layer(
-            router
-                .layer(axum::Extension(data_resources.clone()))
-                .layer(axum::Extension(operation_resources.clone()))
-                .layer(axum::Extension(bulk_data_categories.clone())),
-        )
-        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
-            http::StatusCode::REQUEST_TIMEOUT,
-            std::time::Duration::from_secs(30),
-        ))
-        .layer(middleware::from_fn(
-            sovd::error::sovd_method_not_allowed_handler,
-        ))
+    fn apply_base_layers(router: axum::Router, catalog: Arc<ResourceCatalog>) -> axum::Router {
+        create_trace_layer(router.layer(axum::Extension(catalog)))
+            .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+                http::StatusCode::REQUEST_TIMEOUT,
+                std::time::Duration::from_secs(30),
+            ))
+            .layer(middleware::from_fn(
+                sovd::error::sovd_method_not_allowed_handler,
+            ))
     }
 }
 
@@ -451,34 +507,64 @@ mod tests {
         }
     }
 
+    async fn get_json(dr: &DynamicRouter, path: &str) -> serde_json::Value {
+        let request = http::Request::builder()
+            .uri(path)
+            .header("host", "localhost:20002")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = dr.get_router().await.oneshot(request).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap()
+    }
+
+    /// Adds the route of the vehicle `/data` collection.
+    async fn add_vehicle_data_collection(dr: &DynamicRouter) {
+        dr.add_routes(ApiRouter::new().route(
+            sovd::vehicle::DATA_PATH,
+            axum::routing::get(sovd::vehicle::data_get),
+        ))
+        .await;
+    }
+
+    /// Returns `(id, category)` of each item of the vehicle `/data` collection.
+    async fn vehicle_data_items(dr: &DynamicRouter) -> Vec<(String, String)> {
+        let body = get_json(dr, sovd::vehicle::DATA_PATH).await;
+        body.get("items")
+            .and_then(serde_json::Value::as_array)
+            .unwrap()
+            .iter()
+            .map(|item| {
+                let field = |name: &str| item.get(name).and_then(|v| v.as_str()).unwrap();
+                (field("id").to_owned(), field("category").to_owned())
+            })
+            .collect()
+    }
+
+    fn item(id: &str, category: &str) -> (String, String) {
+        (id.to_owned(), category.to_owned())
+    }
+
     #[tokio::test]
     async fn operations_collection_lists_registered_operations() {
         let dr = DynamicRouter::new();
         let operations = crate::sovd::apps::sovd2uds::OPERATIONS_PATH;
         dr.add_routes(ApiRouter::new().route(
-            crate::sovd::apps::sovd2uds::OPERATIONS_PATH,
+            operations,
             axum::routing::get(crate::sovd::apps::sovd2uds::operations_get),
         ))
         .await;
-        dr.register_operation(&format!("{operations}/update"), true)
-            .await;
-        dr.register_operation(&format!("{operations}/connect"), false)
-            .await;
-        // Resources of other collections are not listed.
-        dr.register_bulk_data_category("/vehicle/v15/apps/sovd2uds/bulk-data/flashfiles")
-            .await;
+        dr.add_routes(
+            Routes::default()
+                .operation(&format!("{operations}/update"), true)
+                .operation(&format!("{operations}/connect"), false)
+                // Resources of other collections are not listed.
+                .bulk_data("/vehicle/v15/apps/sovd2uds/bulk-data/flashfiles"),
+        )
+        .await;
 
-        let resp = dr
-            .get_router()
-            .await
-            .oneshot(request("GET", operations))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body: serde_json::Value =
-            serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
         assert_eq!(
-            body,
+            get_json(&dr, operations).await,
             serde_json::json!({ "items": [
                 {
                     "id": "update",
@@ -499,63 +585,49 @@ mod tests {
     #[tokio::test]
     async fn app_links_operations_only_if_one_is_registered() {
         let dr = DynamicRouter::new();
-        dr.add_routes(ApiRouter::new().route(
-            "/vehicle/v15/apps/sovd2uds",
-            axum::routing::get(crate::sovd::apps::sovd2uds::get),
-        ))
+        let app = "/vehicle/v15/apps/sovd2uds";
+        dr.add_routes(
+            ApiRouter::new().route(app, axum::routing::get(crate::sovd::apps::sovd2uds::get)),
+        )
         .await;
-        let get = |dr: DynamicRouter| async move {
-            let request = http::Request::builder()
-                .uri("/vehicle/v15/apps/sovd2uds")
-                .header("host", "localhost:20002")
-                .body(axum::body::Body::empty())
-                .unwrap();
-            let resp = dr.get_router().await.oneshot(request).await.unwrap();
-            serde_json::from_str::<serde_json::Value>(&body_to_string(resp.into_body()).await)
-                .unwrap()
-        };
 
-        assert!(get(dr.clone()).await.get("operations").is_none());
+        assert!(get_json(&dr, app).await.get("operations").is_none());
 
-        dr.register_operation("/vehicle/v15/apps/sovd2uds/operations/update", true)
+        let handle = dr
+            .add_routes(Routes::default().operation(&format!("{app}/operations/update"), true))
             .await;
         assert_eq!(
-            get(dr).await.get("operations").and_then(|v| v.as_str()),
+            get_json(&dr, app)
+                .await
+                .get("operations")
+                .and_then(|v| v.as_str()),
             Some("http://localhost:20002/vehicle/v15/apps/sovd2uds/operations")
         );
+
+        dr.remove_routes(&handle).await;
+        assert!(get_json(&dr, app).await.get("operations").is_none());
     }
 
     #[tokio::test]
     async fn data_collection_lists_registered_resources_with_category() {
         let dr = DynamicRouter::new();
-        dr.add_routes(ApiRouter::new().route(
-            sovd::vehicle::DATA_PATH,
-            axum::routing::get(sovd::vehicle::data_get),
-        ))
-        .await;
+        add_vehicle_data_collection(&dr).await;
         crate::VersionRegistrar::new("CDA", "0.1.0", "abc123", "2026-11-19")
             .register_data(&dr, "/vehicle/v15/data/version")
             .await;
-        dr.register_data_resource("/vehicle/v15/data/x-vendor-info", "sysInfo")
-            .await;
-        // Resources of other collections are not listed.
-        dr.register_data_resource(
-            "/vehicle/v15/apps/sovd2uds/data/networkstructure",
-            "sysInfo",
+        dr.add_routes(
+            Routes::default()
+                .data("/vehicle/v15/data/x-vendor-info", "sysInfo")
+                // Resources of other collections are not listed.
+                .data(
+                    "/vehicle/v15/apps/sovd2uds/data/networkstructure",
+                    "sysInfo",
+                ),
         )
         .await;
 
-        let resp = dr
-            .get_router()
-            .await
-            .oneshot(request("GET", sovd::vehicle::DATA_PATH))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body: serde_json::Value =
-            serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
         assert_eq!(
-            body,
+            get_json(&dr, sovd::vehicle::DATA_PATH).await,
             serde_json::json!({ "items": [
                 { "id": "version", "name": "version", "category": "identData" },
                 { "id": "x-vendor-info", "name": "x-vendor-info", "category": "sysInfo" },
@@ -569,6 +641,84 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn removing_a_group_removes_its_listings() {
+        let dr = DynamicRouter::new();
+        add_vehicle_data_collection(&dr).await;
+        dr.add_routes(Routes::default().data("/vehicle/v15/data/kept", "sysInfo"))
+            .await;
+        let handle = dr
+            .add_routes(Routes::default().data("/vehicle/v15/data/removed", "sysInfo"))
+            .await;
+        assert_eq!(
+            vehicle_data_items(&dr).await,
+            [item("kept", "sysInfo"), item("removed", "sysInfo")]
+        );
+
+        dr.remove_routes(&handle).await;
+        assert_eq!(vehicle_data_items(&dr).await, [item("kept", "sysInfo")]);
+    }
+
+    #[tokio::test]
+    async fn replacing_a_group_replaces_its_listings() {
+        let dr = DynamicRouter::new();
+        add_vehicle_data_collection(&dr).await;
+        let handle = dr
+            .add_routes(
+                Routes::default()
+                    .data("/vehicle/v15/data/old", "sysInfo")
+                    .data("/vehicle/v15/data/changed", "sysInfo"),
+            )
+            .await;
+        dr.add_routes(Routes::default().data("/vehicle/v15/data/other", "sysInfo"))
+            .await;
+
+        dr.replace_routes(
+            &handle,
+            Routes::default()
+                .data("/vehicle/v15/data/changed", "identData")
+                .data("/vehicle/v15/data/new", "sysInfo"),
+        )
+        .await
+        .unwrap();
+        // The replaced group keeps its position, so its listings stay before those of
+        // later groups.
+        assert_eq!(
+            vehicle_data_items(&dr).await,
+            [
+                item("changed", "identData"),
+                item("new", "sysInfo"),
+                item("other", "sysInfo"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_an_overriding_group_restores_the_overridden_listing() {
+        let dr = DynamicRouter::new();
+        add_vehicle_data_collection(&dr).await;
+        dr.add_routes(Routes::default().data("/vehicle/v15/data/version", "identData"))
+            .await;
+        let handle = dr
+            .add_routes(Routes::default().data("/vehicle/v15/data/version", "sysInfo"))
+            .await;
+        assert_eq!(vehicle_data_items(&dr).await, [item("version", "sysInfo")]);
+
+        dr.remove_routes(&handle).await;
+        assert_eq!(
+            vehicle_data_items(&dr).await,
+            [item("version", "identData")]
+        );
+    }
+
+    #[test]
+    fn listing_without_collection_is_ignored() {
+        let routes = Routes::default()
+            .data("version", "identData")
+            .bulk_data("/");
+        assert!(routes.listings.is_empty());
     }
 
     #[tokio::test]
