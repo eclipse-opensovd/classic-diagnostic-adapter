@@ -14,6 +14,10 @@
 
 version: 'v0.0.3'
 workflows:
+    '.github/workflows/advisories.yml':
+        - 'actions-rust-lang/setup-rust-toolchain@v1.17.0'
+        - 'actions/checkout@v6.1.0'
+        - 'actions/github-script@v7.1.0'
     '.github/workflows/build.yml':
         - 'actions-rust-lang/setup-rust-toolchain@v1.17.0'
         - 'actions/checkout@v6.1.0'
@@ -44,7 +48,6 @@ workflows:
         - 'docker/build-push-action@v5.4.0'
         - 'docker/setup-buildx-action@v3.12.0'
     '.github/workflows/nightly.yml':
-        - 'actions-rust-lang/setup-rust-toolchain@v1'
         - 'actions/checkout@v6.1.0'
         - 'arduino/setup-protoc@v3.0.0'
         - 'eclipse-opensovd/cicd-workflows@main'
