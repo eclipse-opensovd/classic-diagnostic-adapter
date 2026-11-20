@@ -15,7 +15,7 @@ Diagnostic Tester
 
 .. testset:: Deferred Communication Startup
     :id: testset~deferred-communication-startup
-    :links: test~deferred-communication-config, test~deferred-startup-policy, test~deferred-doip-passive-construction, itest~deferred-on-demand-pending, itest~deferred-on-demand-uds-silence, itest~deferred-disabled-uds-silence
+    :links: test~deferred-communication-config, test~deferred-startup-policy, test~deferred-doip-passive-construction, itest~deferred-on-demand-pending, itest~deferred-on-demand-uds-silence, itest~deferred-disabled-uds-silence, itest~deferred-on-demand-all-gateways, itest~deferred-on-demand-one-vir
     :status: draft
 
     Verifies that communication is only activated at startup when configured and that
