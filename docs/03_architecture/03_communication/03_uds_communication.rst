@@ -58,6 +58,28 @@ Communication Parameters
          - 2
          - Only applies to application layer messages
 
+    **Request Serialization Parameters**
+
+    .. list-table::
+       :header-rows: 1
+       :widths: 25 40 15 20
+
+       * - Name
+         - Function
+         - Default value
+         - Comment
+       * - CP_RequestPermitTimeout
+         - Maximum time a request waits for the per-ECU semaphore before it fails with a
+           timeout error (in uS)
+         - Holder deadline
+         - CDA specific, not part of ISO 14229-5. Can be set in the diagnostic database or
+           in the CDA configuration; precedence follows the regular com param handling.
+           When set, it replaces the holder deadline, see :need:`arch~uds-request-response`.
+
+    In addition, the CDA configuration provides a maximum total wait for the permit and a
+    grace margin added to the holder deadline.
+
+
     **NRC Handling Parameters**
 
     .. list-table::
@@ -165,6 +187,7 @@ Request-Response Flow
 
 .. arch:: UDS Request-Response Flow
     :id: arch~uds-request-response
+    :links: testset~uds-request-permit-timeout
     :status: draft
 
     The UDS application layer implements the request-response flow using per-ECU
@@ -179,6 +202,86 @@ Request-Response Flow
     before the request is sent and held for the entire send-and-receive cycle, including
     any NRC-driven waiting or retransmission. It is released only after the final response
     is received or an error occurs.
+
+    **Permit Acquisition Timeout**
+
+    Waiting for the semaphore is bounded. If the wait ends without a permit, the request
+    fails with a timeout error and nothing is transmitted to the ECU. The bound is resolved
+    as follows:
+
+    1. **Explicit timeout**: If ``CP_RequestPermitTimeout`` is provided for the target ECU
+       by the diagnostic database or the CDA configuration (the regular com param
+       precedence, ``ComParamPrecedence``, decides between both), it is used as a fixed
+       timeout starting when the request starts waiting. The holder deadline is ignored.
+    2. **Holder deadline** (default): Otherwise the request waits until the deadline of the
+       request currently holding the semaphore, plus a configurable grace margin.
+
+    **Holder Deadline**
+
+    Each semaphore stores the deadline of its current holder, i.e. the latest point in time
+    the in-flight request can still occupy the ECU. The holder computes it from *its own*
+    communication parameters (physical or functional link) and request options:
+
+    .. code-block:: text
+
+       on permit acquired:
+         deadline = now + (CP_RepeatReqCountApp + 1) * T_response
+         T_response = caller supplied response timeout, otherwise CP_P6Max
+
+       on entering NRC handling (first NRC of the kind):
+         deadline += CP_RC21CompletionTimeout   (NRC 0x21, handling = until timeout)
+         deadline += CP_RC78CompletionTimeout   (NRC 0x78, handling = until timeout)
+         deadline += CP_RC94CompletionTimeout   (NRC 0x94, handling = until timeout)
+         deadline  = unbounded                  (handling = unlimited)
+
+    The holder deadline is used rather than a value derived from the waiting request,
+    because how long the ECU stays occupied depends on the in-flight request: its caller
+    supplied timeout, its link (a functional request uses the functional com params and
+    waits for multiple ECUs), and, before variant detection, the com params of another ECU
+    description sharing the same logical address.
+
+    A waiting request re-evaluates its wait whenever the holder deadline is extended or the
+    permit is handed to the next request. If several requests are queued, the wait thus
+    follows each holder in turn. The total wait is capped by the configured maximum, which
+    also bounds waits behind holders with unlimited NRC handling or a misbehaving holder.
+
+    For requests that need permits of multiple ECUs (e.g. functional group communication),
+    the wait is bounded by the latest holder deadline of the involved ECUs. With an explicit
+    ``CP_RequestPermitTimeout``, the largest value of the involved ECUs is used.
+
+    .. uml::
+        :caption: Permit acquisition with holder deadline
+
+        @startuml
+        skinparam backgroundColor #FFFFFF
+        participant "Request A\n(holder)" as A
+        participant "Per-ECU\nsemaphore" as S
+        participant "Request B\n(waiting)" as B
+        participant "ECU" as ECU
+
+        A -> S: acquire permit
+        S -> S: deadline = now + (RepeatReqCountApp + 1) * T_response
+        A -> ECU: request
+        B -> S: acquire permit
+        note right of B: No CP_RequestPermitTimeout:\nwait until deadline + grace\n(capped by maximum)
+        ECU --> A: NRC 0x78
+        A -> S: deadline += CP_RC78CompletionTimeout
+        S --> B: deadline changed, re-evaluate wait
+        ECU --> A: final response
+        A -> S: release permit
+        S --> B: permit granted
+        B -> S: set own deadline
+        B -> ECU: request
+        @enduml
+
+    .. note::
+
+       No ISO 14229-5 communication parameter describes this waiting time, so a CDA
+       specific parameter is used. ``CP_P3Phys`` / ``CP_P3Func`` define a *minimum* delay
+       between requests without response, ``CP_P6Max`` / ``CP_P6Star`` bound the wait for a
+       response *after* transmission, and the ``CP_RCxxCompletionTimeout`` parameters bound
+       the NRC handling of the request that currently holds the ECU. These parameters are
+       only used as inputs for the holder deadline.
 
     **Request Transmission**
 
@@ -287,7 +390,7 @@ Request-Response Flow
         activate UDS
 
         UDS -> UDS: Acquire per-ECU\nsemaphore (by logical addr)
-        note right: 10s timeout\nfor acquisition
+        note right: Timeout: CP_RequestPermitTimeout\n(or holder deadline)
 
         UDS -> UDS: Extract request prefix\nfor response matching\n(length varies by SID)
 

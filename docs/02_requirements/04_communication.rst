@@ -643,6 +643,14 @@ Communication parameters
          - Enhanced timeout after receiving a NRC 0x78 to wait for the complete reception of the response message (in µS)
          - 1000000
          -
+       * - CP_RequestPermitTimeout
+         - Maximum time a request waits for exclusive access to the target ECU (per-ECU
+           serialization) before it fails with a timeout error, without being sent (in µS)
+         - Holder deadline
+         - CDA specific parameter, not defined by ISO 14229-5. If set, it is a fixed limit
+           for the wait. If neither the diagnostic database nor the configuration provides a
+           value, the request waits until the deadline of the request currently holding the
+           ECU (see :need:`req~uds-request-response`).
 
 
 Request-Response Flow
@@ -660,8 +668,32 @@ Request-Response Flow
 
     - The CDA shall serialize all UDS requests to the same ECU so that only one request
       is outstanding per ECU at any time.
-    - If access to a serialized ECU cannot be obtained within a configurable period (default 10s),
-      the request shall fail with a timeout error.
+    - If access to a serialized ECU cannot be obtained within the request permit timeout,
+      the request shall fail with a timeout error. A request failing this way shall not be
+      transmitted to the ECU.
+    - The request permit timeout shall be determined in the following order:
+
+      1. If ``CP_RequestPermitTimeout`` is provided for the target ECU by the diagnostic
+         database or the CDA configuration (following the regular communication parameter
+         precedence), it shall be used as a fixed limit for the wait.
+      2. Otherwise, the request shall wait until the *holder deadline* of the request
+         currently holding the ECU, plus a configurable grace margin.
+    - The request holding the ECU shall maintain its holder deadline as the latest point in
+      time it can still occupy the ECU, based on its own communication parameters and
+      request options:
+
+      - When access is obtained: all application-layer attempts
+        (``CP_RepeatReqCountApp`` + 1) times its response timeout (the caller supplied
+        timeout, otherwise ``CP_P6Max``).
+      - When entering NRC handling for 0x21, 0x78 or 0x94, the deadline shall be extended
+        by the corresponding completion timeout (``CP_RC21CompletionTimeout``,
+        ``CP_RC78CompletionTimeout``, ``CP_RC94CompletionTimeout``).
+    - When the holder deadline is extended or another request becomes the holder, waiting
+      requests shall re-evaluate their wait against the new deadline.
+    - The total wait for access shall be capped at a configurable maximum. This also bounds
+      the wait behind requests with unlimited NRC handling.
+    - When a request requires access to multiple ECUs (e.g. functional group communication),
+      it shall wait until the latest holder deadline of the involved ECUs.
 
     **Response Matching**
 
