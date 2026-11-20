@@ -69,6 +69,14 @@ pub trait DiagServiceResponse: Sized + Send + Sync + 'static + Clone {
     /// together with [`response_type`](Self::response_type) being `Positive`, to
     /// render a `204 No Content` result in either case.
     fn is_empty(&self) -> bool;
+    /// Returns whether a positive response contains data intended for the client,
+    /// excluding protocol fields such as echoed request parameters.
+    ///
+    /// Implementations that cannot distinguish protocol fields from service data
+    /// conservatively treat any non-empty payload as client data.
+    fn has_application_data(&self) -> bool {
+        !self.is_empty()
+    }
     fn service_name(&self) -> String;
     fn response_type(&self) -> DiagServiceResponseType;
     fn get_raw(&self) -> &[u8];
@@ -135,6 +143,7 @@ pub mod mock {
         impl diagservices::DiagServiceResponse for DiagServiceResponse {
             fn empty_positive(service: crate::DiagComm) -> Self;
             fn is_empty(&self) -> bool;
+            fn has_application_data(&self) -> bool;
             fn service_name(&self) -> String;
             fn get_raw(&self) -> &[u8];
             fn into_json(

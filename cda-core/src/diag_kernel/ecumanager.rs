@@ -1042,6 +1042,7 @@ mod tests {
                 errors: vec![],
             }),
             response_type: DiagServiceResponseType::Positive,
+            has_application_data: true,
         }
     }
 
