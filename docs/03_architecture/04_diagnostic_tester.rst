@@ -172,7 +172,8 @@ Startup Sequence
         opt Immediate communication initialization
             Main -> HTTP: add_vehicle_routes()
         end
-        Main -> HTTP: add_static_data_endpoint() (version)
+        Main -> HTTP: VersionRegistrar.register_version_info()
+        Main -> HTTP: VersionRegistrar.register_data() (each data path)
         Main -> HTTP: add_openapi_routes()
 
         opt Health feature enabled
