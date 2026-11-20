@@ -448,7 +448,10 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             let mut schema = serde_json::Map::new();
 
             for (key, value) in param_properties {
-                if value.is_array() || value.get("type").is_some_and(|t| t == "integer") {
+                if value
+                    .get("type")
+                    .is_some_and(|t| t == "array" || t == "integer")
+                {
                     schema.insert(key.clone(), value.clone());
                 }
             }
