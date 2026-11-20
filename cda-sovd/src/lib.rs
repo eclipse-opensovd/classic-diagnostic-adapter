@@ -29,7 +29,7 @@ use cda_interfaces::{
 };
 use cda_plugin_security::SecurityPluginLoader;
 use dynamic_router::DynamicRouter;
-pub use dynamic_router::{RouteGroupNotFound, RouteHandle};
+pub use dynamic_router::{RouteGroupNotFound, RouteHandle, Routes};
 pub use http::Method;
 use opensovd_axum_extra::ExtractHost;
 use sovd::apps::sovd2uds::bulk_data::runtimefiles::RuntimeUpdateRouteState;
@@ -212,35 +212,16 @@ where
     M: FileManager + Send + Sync + 'static,
     S: SecurityPluginLoader,
 {
-    #[cfg(feature = "doip-direct-connect")]
-    let doip_connect_enabled = resources.doip_connect.is_some();
-    let vehicle_router = build_vehicle_routes::<T, M, S>(config, resources).await;
-
-    dynamic_router
-        .register_bulk_data_category(sovd::apps::sovd2uds::bulk_data::FLASHFILES_PATH)
-        .await;
-    #[cfg(feature = "doip-direct-connect")]
-    if doip_connect_enabled {
-        dynamic_router
-            .register_operation(
-                sovd::apps::sovd2uds::operations::doip_connect_ecu::PATH,
-                false,
-            )
-            .await;
-    }
-
-    dynamic_router
-        .register_data_resource(
-            sovd::apps::sovd2uds::data::NETWORKSTRUCTURE_PATH,
-            sovd::apps::sovd2uds::data::NETWORKSTRUCTURE_CATEGORY,
-        )
-        .await;
-    let handle = dynamic_router.add_routes(vehicle_router).await;
+    let vehicle_routes = build_vehicle_routes::<T, M, S>(config, resources).await;
+    let handle = dynamic_router.add_routes(vehicle_routes).await;
 
     tracing::info!("Vehicle routes added to webserver");
     Ok(handle)
 }
 
+/// Builds the vehicle routes together with the resources they list in the `sovd2uds`
+/// collections, so that replacing them (e.g. on a runtime database reload) also replaces
+/// their listings.
 #[allow(
     clippy::implicit_hasher,
     reason = "Type alias doesn't allow specifying hasher"
@@ -248,7 +229,7 @@ where
 pub async fn build_vehicle_routes<T, M, S>(
     config: VehicleConfig,
     resources: VehicleResources<T, M>,
-) -> aide::axum::ApiRouter
+) -> Routes
 where
     T: UdsEcu + SchemaProvider + Clone + Send + Sync + 'static,
     M: FileManager + Send + Sync + 'static,
@@ -296,19 +277,17 @@ where
     );
     let operations_router =
         sovd::apps::sovd2uds::operations::runtimefilesupdate::routes::<S, P, L>(route_state);
-    let router = bulk_data_router.merge(operations_router);
-    let handle = dynamic_router
-        .add_routes(aide::axum::ApiRouter::from(router))
-        .await;
-    for path in sovd::apps::sovd2uds::bulk_data::runtimefiles::CATEGORY_PATHS {
-        dynamic_router.register_bulk_data_category(path).await;
-    }
-    dynamic_router
-        .register_operation(
+    let routes = sovd::apps::sovd2uds::bulk_data::runtimefiles::CATEGORY_PATHS
+        .into_iter()
+        .fold(
+            Routes::new(bulk_data_router.merge(operations_router).into()),
+            Routes::bulk_data,
+        )
+        .operation(
             sovd::apps::sovd2uds::operations::runtimefilesupdate::PATH,
             true,
-        )
-        .await;
+        );
+    let handle = dynamic_router.add_routes(routes).await;
     tracing::info!("Runtime update routes added to webserver");
     handle
 }

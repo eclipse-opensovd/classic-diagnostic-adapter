@@ -64,6 +64,7 @@ use uuid::Uuid;
 
 use crate::{
     VendorErrorCode,
+    dynamic_router::Routes,
     sovd::components::ecu::{
         configurations, data, data_categories, faults, genericservice, modes, operations,
         x_single_ecu_jobs, x_sovd2uds_bulk_data, x_sovd2uds_download,
@@ -785,7 +786,9 @@ pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: Securi
     locks: Arc<Locks>,
     communication_access: Arc<dyn CommunicationAccess>,
     doip_connect: Option<Arc<dyn DoipConnect>>,
-) -> Router {
+) -> Routes {
+    #[cfg(feature = "doip-direct-connect")]
+    let doip_connect_enabled = doip_connect.is_some();
     let flash_data = Arc::new(RwLock::new(sovd_interfaces::sovd2uds::FileList {
         files: Vec::new(),
         path: Some(PathBuf::from(flash_config.files_path)),
@@ -803,10 +806,24 @@ pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: Securi
 
     let router = components_route::<T, U>(state.clone(), &mut file_manager).await;
 
-    vehicle_route::<T, S>(state, router, functional_group_config)
+    let router = vehicle_route::<T, S>(state, router, functional_group_config)
         .await
         .layer(middleware::from_fn(security_plugin_middleware::<S>))
-        .with_state(uds.clone())
+        .with_state(uds.clone());
+
+    let routes = Routes::new(router)
+        .bulk_data(apps::sovd2uds::bulk_data::FLASHFILES_PATH)
+        .data(
+            apps::sovd2uds::data::NETWORKSTRUCTURE_PATH,
+            apps::sovd2uds::data::NETWORKSTRUCTURE_CATEGORY,
+        );
+    #[cfg(feature = "doip-direct-connect")]
+    let routes = if doip_connect_enabled {
+        routes.operation(apps::sovd2uds::operations::doip_connect_ecu::PATH, false)
+    } else {
+        routes
+    };
+    routes
 }
 
 async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoader>(
@@ -1431,7 +1448,10 @@ pub(crate) mod static_data {
     };
     use http::StatusCode;
 
-    use crate::{dynamic_router::DynamicRouter, sovd::error::ApiError};
+    use crate::{
+        dynamic_router::{DynamicRouter, Routes},
+        sovd::error::ApiError,
+    };
 
     /// Add an endpoint serving static data.
     /// For example it can be used, to serve version information.
@@ -1462,8 +1482,9 @@ pub(crate) mod static_data {
                 }),
             )
             .with_state(data);
-        dynamic_router.register_data_resource(path, category).await;
-        dynamic_router.add_routes(router).await;
+        dynamic_router
+            .add_routes(Routes::new(router).data(path, category))
+            .await;
     }
 
     pub(crate) async fn get(

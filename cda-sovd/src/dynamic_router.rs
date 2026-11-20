@@ -315,23 +315,6 @@ impl DynamicRouter {
         }
     }
 
-    /// Lists a resource of a `/data` collection in a route group without routes.
-    pub async fn register_data_resource(&self, path: &str, category: &str) {
-        self.add_routes(Routes::default().data(path, category))
-            .await;
-    }
-
-    /// Lists an operation of an `operations` collection in a route group without routes.
-    pub async fn register_operation(&self, path: &str, asynchronous: bool) {
-        self.add_routes(Routes::default().operation(path, asynchronous))
-            .await;
-    }
-
-    /// Lists a category of a `bulk-data` collection in a route group without routes.
-    pub async fn register_bulk_data_category(&self, path: &str) {
-        self.add_routes(Routes::default().bulk_data(path)).await;
-    }
-
     /// Returns a clone of the current composed router.
     pub async fn get_router(&self) -> axum::Router {
         let router = self.router.read().await;
