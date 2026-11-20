@@ -42,7 +42,7 @@ dependencyResolutionManagement {
 
             library(
                 "doip-sim-dsl",
-                "io.github.doip-sim-ecu:doip-sim-ecu-dsl:0.25.0",
+                "io.github.doip-sim-ecu:doip-sim-ecu-dsl:0.25.1",
             )
             library("logback-classic", "ch.qos.logback:logback-classic:1.5.18")
             library("auth0-jwt", "com.auth0:java-jwt:4.5.0")
