@@ -1435,35 +1435,53 @@ pub(crate) mod static_data {
 
     use crate::{dynamic_router::DynamicRouter, sovd::error::ApiError};
 
-    /// Data of a static endpoint together with its optional schema.
-    #[derive(Serialize)]
-    struct WithSchema<T> {
-        #[serde(flatten)]
-        data: T,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        schema: Option<schemars::Schema>,
+    /// A response served by a static data endpoint.
+    ///
+    /// Implemented by response types that carry their own optional `schema` field, like the
+    /// other SOVD response types. This keeps the response a plain struct, so no shape
+    /// requirement on the data has to be checked at runtime.
+    ///
+    /// The schema is built once by the caller and stored in the data; it is only sent with
+    /// `include-schema=true`.
+    pub(crate) trait StaticData:
+        Serialize + schemars::JsonSchema + Clone + Send + Sync + 'static
+    {
+        /// Returns the data with `schema` set to the given value.
+        #[must_use]
+        fn with_schema(self, schema: Option<schemars::Schema>) -> Self;
+    }
+
+    impl StaticData for sovd_interfaces::version_info::VersionInfo {
+        fn with_schema(self, schema: Option<schemars::Schema>) -> Self {
+            Self { schema, ..self }
+        }
+    }
+
+    impl StaticData for sovd_interfaces::version_info::DataVersion {
+        fn with_schema(self, schema: Option<schemars::Schema>) -> Self {
+            Self { schema, ..self }
+        }
     }
 
     /// Adds an endpoint serving static data, e.g. the version endpoints.
-    /// With `include-schema=true` the response also contains the schema of `T`.
+    /// With `include-schema=true` the response also contains the schema stored in `data`.
     /// The endpoint is listed in its `/data` collection with the given category.
     ///
     /// # Arguments
     /// * `dynamic_router` - The dynamic router to add the endpoint to.
-    /// * `data` - The data to return. It must serialize to a JSON object.
+    /// * `data` - The data to return, with its schema set.
     /// * `path` - The path to serve the data from.
     ///   There is no processing of this, it will be returned as is in the response.
     /// * `category` - The data category the collection lists the endpoint with,
     ///   e.g. `identData` (ISO 17978-3 Table 70).
-    pub async fn add_static_data_endpoint<T>(
+    pub async fn add_static_data_endpoint<T: StaticData>(
         dynamic_router: &DynamicRouter,
         data: T,
         path: &str,
         category: &str,
-    ) where
-        T: Serialize + schemars::JsonSchema + Clone + Send + Sync + 'static,
-    {
-        let data_docs = data.clone();
+    ) {
+        // The schema is not part of the documented example.
+        let data_docs = data.clone().with_schema(None);
         let router = ApiRouter::new()
             .api_route(
                 path,
@@ -1476,18 +1494,19 @@ pub(crate) mod static_data {
         dynamic_router.add_routes(router).await;
     }
 
-    async fn get<T>(
+    async fn get<T: StaticData>(
         State(data): State<T>,
         WithRejection(Query(query), _): WithRejection<
             Query<sovd_interfaces::IncludeSchemaQuery>,
             ApiError,
         >,
-    ) -> Response
-    where
-        T: Serialize + schemars::JsonSchema + Clone + Send + Sync + 'static,
-    {
-        let schema = query.include_schema.then(|| create_schema!(T));
-        (StatusCode::OK, Json(WithSchema { data, schema })).into_response()
+    ) -> Response {
+        let data = if query.include_schema {
+            data
+        } else {
+            data.with_schema(None)
+        };
+        (StatusCode::OK, Json(data)).into_response()
     }
 
     fn docs_get<T>(op: TransformOperation, data: T) -> TransformOperation
@@ -1504,7 +1523,7 @@ pub(crate) mod static_data {
     mod tests {
         use axum::body::Body;
         use serde_json::{Value, json};
-        use sovd_interfaces::version_info::{SovdInfo, VendorInfo, VersionInfo};
+        use sovd_interfaces::version_info::{DataVersion, SovdInfo, VendorInfo, VersionInfo};
         use tower::ServiceExt;
 
         use super::*;
@@ -1521,7 +1540,12 @@ pub(crate) mod static_data {
                         build_date: "2026-11-19".to_owned(),
                     },
                 }],
+                schema: None,
             }
+        }
+
+        fn version_info_with_schema() -> VersionInfo {
+            version_info().with_schema(Some(create_schema!(VersionInfo)))
         }
 
         async fn get_json(router: &DynamicRouter, uri: &str) -> (StatusCode, Value) {
@@ -1540,7 +1564,13 @@ pub(crate) mod static_data {
         #[tokio::test]
         async fn returns_the_data_without_schema_by_default() {
             let router = DynamicRouter::new();
-            add_static_data_endpoint(&router, version_info(), "/version-info", "identData").await;
+            add_static_data_endpoint(
+                &router,
+                version_info_with_schema(),
+                "/version-info",
+                "identData",
+            )
+            .await;
 
             let (status, value) = get_json(&router, "/version-info").await;
 
@@ -1551,7 +1581,13 @@ pub(crate) mod static_data {
         #[tokio::test]
         async fn returns_the_schema_of_the_data_type() {
             let router = DynamicRouter::new();
-            add_static_data_endpoint(&router, version_info(), "/version-info", "identData").await;
+            add_static_data_endpoint(
+                &router,
+                version_info_with_schema(),
+                "/version-info",
+                "identData",
+            )
+            .await;
 
             let (status, value) = get_json(&router, "/version-info?include-schema=true").await;
 
@@ -1594,6 +1630,18 @@ pub(crate) mod static_data {
                 let (status, value) = get_json(&router, path).await;
                 assert_eq!(status, StatusCode::OK);
                 assert_eq!(value, expected);
+            }
+            for (path, schema) in [
+                ("/version-info", create_schema!(VersionInfo)),
+                ("/custom/version", create_schema!(DataVersion)),
+            ] {
+                let (status, value) =
+                    get_json(&router, &format!("{path}?include-schema=true")).await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(
+                    value.get("schema"),
+                    Some(&serde_json::to_value(schema).unwrap())
+                );
             }
             let (status, _) = get_json(&router, "/vehicle/v15/data/version").await;
             assert_eq!(status, StatusCode::NOT_FOUND);
