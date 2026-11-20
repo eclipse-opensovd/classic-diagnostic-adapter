@@ -11,6 +11,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::sync::Arc;
+
 use aide::UseApi;
 use axum::{
     Extension, Json,
@@ -23,7 +25,7 @@ use opensovd_axum_extra::ExtractHost;
 use sovd_interfaces::components::ecu::operations::OperationCollectionItem;
 
 use crate::{
-    dynamic_router::{DataResources, OperationResources},
+    dynamic_router::ResourceCatalog,
     sovd::{create_schema, data_list_response, error::ApiError},
 };
 
@@ -33,7 +35,7 @@ pub(crate) mod operations;
 
 pub(crate) async fn get(
     UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
-    Extension(operations): Extension<OperationResources>,
+    Extension(catalog): Extension<Arc<ResourceCatalog>>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::IncludeSchemaQuery>,
         ApiError,
@@ -54,7 +56,7 @@ pub(crate) async fn get(
             name: "sovd2uds".to_owned(),
             bulk_data: format!("{base_path}/bulk-data"),
             data: format!("{base_path}/data"),
-            operations: (!operations.list(OPERATIONS_PATH).await.is_empty())
+            operations: (!catalog.operations(OPERATIONS_PATH).is_empty())
                 .then(|| format!("{base_path}/operations")),
             schema,
         }),
@@ -67,13 +69,13 @@ pub(crate) const DATA_PATH: &str = "/vehicle/v15/apps/sovd2uds/data";
 
 /// Lists the data resources registered in [`DATA_PATH`].
 pub(crate) async fn data_get(
-    Extension(data_resources): Extension<DataResources>,
+    Extension(catalog): Extension<Arc<ResourceCatalog>>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::IncludeSchemaQuery>,
         ApiError,
     >,
 ) -> Response {
-    data_list_response(data_resources.list(DATA_PATH).await, query.include_schema)
+    data_list_response(catalog.data(DATA_PATH), query.include_schema)
 }
 
 /// The bulk-data collection of the `sovd2uds` app.
@@ -84,15 +86,14 @@ pub(crate) const OPERATIONS_PATH: &str = "/vehicle/v15/apps/sovd2uds/operations"
 
 /// Lists the operations registered in [`OPERATIONS_PATH`].
 pub(crate) async fn operations_get(
-    Extension(operations): Extension<OperationResources>,
+    Extension(catalog): Extension<Arc<ResourceCatalog>>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::IncludeSchemaQuery>,
         ApiError,
     >,
 ) -> Response {
-    let items = operations
-        .list(OPERATIONS_PATH)
-        .await
+    let items = catalog
+        .operations(OPERATIONS_PATH)
         .into_iter()
         .map(|(id, asynchronous)| OperationCollectionItem {
             name: id.clone(),

@@ -11,6 +11,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::sync::Arc;
+
 use aide::UseApi;
 use axum::{
     Extension, Json,
@@ -22,7 +24,7 @@ use axum_extra::extract::WithRejection;
 use opensovd_axum_extra::ExtractHost;
 
 use crate::{
-    dynamic_router::DataResources,
+    dynamic_router::ResourceCatalog,
     sovd::{create_schema, data_list_response, error::ApiError},
 };
 
@@ -60,11 +62,11 @@ pub(crate) const DATA_PATH: &str = "/vehicle/v15/data";
 
 /// Lists the data resources registered in [`DATA_PATH`].
 pub(crate) async fn data_get(
-    Extension(data_resources): Extension<DataResources>,
+    Extension(catalog): Extension<Arc<ResourceCatalog>>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::IncludeSchemaQuery>,
         ApiError,
     >,
 ) -> Response {
-    data_list_response(data_resources.list(DATA_PATH).await, query.include_schema)
+    data_list_response(catalog.data(DATA_PATH), query.include_schema)
 }
