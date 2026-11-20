@@ -111,12 +111,41 @@ impl<S: SecurityPlugin> ComponentInfos for EcuManager<S> {
                     .map(|dc| (service, datatypes::DiagComm(dc)))
             })
             .filter(|(_, dc)| {
-                dc.funct_class().is_some_and(|fc| {
-                    fc.iter().any(|fc| {
-                        fc.short_name()
-                            .is_some_and(|n| configuration_func_class_short_names.contains(n))
+                let mapping = &self
+                    .database_naming_convention
+                    .component_resource_mapping
+                    .configurations;
+
+                if mapping.is_empty() {
+                    dc.funct_class().is_some_and(|fc| {
+                        fc.iter().any(|fc| {
+                            fc.short_name().is_some_and(|name| {
+                                configuration_func_class_short_names.contains(name)
+                            })
+                        })
+                    })
+                } else {
+                    let convention = &self.database_naming_convention;
+
+                    match convention.component_resource_mapping.key_type {
+                    cda_interfaces::datatypes::ComponentResourceMappingKeyType::Semantic => {
+                    dc.semantic().is_some_and(|semantic| {
+                    convention
+                        .component_resource_category(semantic, mapping)
+                        .is_some()
+                   })
+              }
+              cda_interfaces::datatypes::ComponentResourceMappingKeyType::FunctionalClass => {
+                dc.funct_class().is_some_and(|functional_classes| {
+                    functional_classes.iter().any(|fc| {
+                        fc.short_name().is_some_and(|name| {
+                            convention.component_resource_category(name, mapping).is_some()
+                        })
                     })
                 })
+            }
+         }
+                }
             })
             .for_each(|(service, diag_comm)| {
                 // trim short names so write and read services are grouped together
@@ -596,10 +625,39 @@ impl<S: SecurityPlugin> ComponentInfos for EcuManager<S> {
 }
 
 impl<S: SecurityPlugin> EcuManager<S> {
-    /// Resolves the `/data` category for a 0x22/0x2E `DiagComm` by looking at its functional
-    /// classes and matching them against the configured `category_mapping`. Falls back to
-    /// `default_category` if none of the service's functional classes have a mapping entry.
+    /// Resolves the `/data` category for a `DiagComm` using the configured component resource mapping.
+    /// Uses the semantic or functional class according to the configured mapping key type.
+    /// Falls back to the default category when the mapping is empty.
     fn category_for_diag_comm(&self, diag_comm: &datatypes::DiagComm<'_>) -> String {
+        let convention = &self.database_naming_convention;
+        let mapping = &convention.component_resource_mapping.data;
+
+        if !mapping.is_empty() {
+            match convention.component_resource_mapping.key_type {
+                cda_interfaces::datatypes::ComponentResourceMappingKeyType::Semantic => {
+                    if let Some(semantic) = diag_comm.semantic()
+                        && let Some(category) =
+                            convention.component_resource_category(semantic, mapping)
+                    {
+                        return category;
+                    }
+                }
+                cda_interfaces::datatypes::ComponentResourceMappingKeyType::FunctionalClass => {
+                    if let Some(functional_classes) = diag_comm.funct_class() {
+                        for functional_class in functional_classes {
+                            if let Some(name) = functional_class.short_name()
+                                && let Some(category) =
+                                    convention.component_resource_category(name, mapping)
+                            {
+                                return category;
+                            }
+                        }
+                    }
+                }
+            }
+
+            return convention.default_category.clone();
+        }
         diag_comm
             .funct_class()
             .and_then(|fc_vec| {
@@ -607,14 +665,14 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     .iter()
                     .filter_map(|fc| fc.short_name())
                     .find_map(|name| {
-                        self.database_naming_convention
+                        convention
                             .category_mapping
                             .iter()
-                            .find(|mapping| mapping.functional_class.eq_ignore_ascii_case(name))
-                            .map(|mapping| mapping.category.clone())
+                            .find(|entry| entry.functional_class.eq_ignore_ascii_case(name))
+                            .map(|entry| entry.category.clone())
                     })
             })
-            .unwrap_or_else(|| self.database_naming_convention.default_category.clone())
+            .unwrap_or_else(|| convention.default_category.clone())
     }
 
     fn diag_comm_to_component_data_info(
@@ -1681,6 +1739,7 @@ mod tests {
     /// `funct_class_name`.
     fn build_ecu_manager_with_rdbi_service_and_funct_class(
         service_name: &str,
+        semantic: Option<&str>,
         funct_class_name: Option<&str>,
         naming_convention: DatabaseNamingConvention,
     ) -> super::super::ecumanager::EcuManager<DefaultSecurityPluginData> {
@@ -1692,6 +1751,7 @@ mod tests {
         let funct_class = funct_class_name.map(|name| vec![db_builder.create_funct_class(name)]);
         let diag_comm = db_builder.create_diag_comm(DiagCommParams {
             short_name: service_name,
+            semantic,
             diag_class_type: DiagClassType::START_COMM,
             protocols: Some(vec![protocol]),
             funct_class,
@@ -1745,6 +1805,7 @@ mod tests {
         };
         let ecu_manager = build_ecu_manager_with_rdbi_service_and_funct_class(
             "EngineTemp",
+            None, // semantic
             Some("sensors"),
             naming_convention,
         );
@@ -1754,6 +1815,133 @@ mod tests {
         assert_eq!(
             result.first().expect("Expected one data item").category,
             "identData"
+        );
+    }
+
+    #[test]
+    fn test_get_components_data_info_resolves_semantic_mapping() {
+        use cda_interfaces::datatypes::{
+            ComponentResourceMapping, ComponentResourceMappingKeyType,
+        };
+
+        let naming_convention = DatabaseNamingConvention {
+            component_resource_mapping: ComponentResourceMapping {
+                key_type: ComponentResourceMappingKeyType::Semantic,
+                data: [("IDENTIFICATION".to_owned(), "identData".to_owned())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+            default_category: "x-sovd2uds-unmapped".to_owned(),
+            ..Default::default()
+        };
+
+        let ecu_manager = build_ecu_manager_with_rdbi_service_and_funct_class(
+            "EngineTemp",
+            Some("identification"),
+            None,
+            naming_convention,
+        );
+
+        let result = ecu_manager.get_components_data_info(&skip_sec_plugin!());
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result
+                .first()
+                .expect("Expected at least one data item")
+                .category,
+            "identData"
+        );
+    }
+
+    #[test]
+    fn test_get_components_data_info_resolves_functional_class_mapping() {
+        use cda_interfaces::datatypes::{
+            ComponentResourceMapping, ComponentResourceMappingKeyType,
+        };
+
+        let naming_convention = DatabaseNamingConvention {
+            component_resource_mapping: ComponentResourceMapping {
+                key_type: ComponentResourceMappingKeyType::FunctionalClass,
+                data: [
+                    ("varcoding".to_owned(), "storedData".to_owned()),
+                    ("Ident".to_owned(), "identData".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+                configurations: [
+                    ("varcoding".to_owned(), "storedData".to_owned()),
+                    ("Ident".to_owned(), "identData".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            default_category: "x-sovd2uds-unmapped".to_owned(),
+            ..Default::default()
+        };
+
+        let ecu_manager = build_ecu_manager_with_rdbi_service_and_funct_class(
+            "EngineTemp",
+            None,
+            Some("Ident"),
+            naming_convention,
+        );
+
+        let result = ecu_manager.get_components_data_info(&skip_sec_plugin!());
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result
+                .first()
+                .expect("Expected at least one data item")
+                .category,
+            "identData"
+        );
+    }
+
+    #[test]
+    fn test_get_components_data_info_resolves_varcoding_functional_class_mapping() {
+        use cda_interfaces::datatypes::{
+            ComponentResourceMapping, ComponentResourceMappingKeyType,
+        };
+
+        let naming_convention = DatabaseNamingConvention {
+            component_resource_mapping: ComponentResourceMapping {
+                key_type: ComponentResourceMappingKeyType::FunctionalClass,
+                data: [
+                    ("varcoding".to_owned(), "storedData".to_owned()),
+                    ("Ident".to_owned(), "identData".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+                configurations: [
+                    ("varcoding".to_owned(), "storedData".to_owned()),
+                    ("Ident".to_owned(), "identData".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            default_category: "x-sovd2uds-unmapped".to_owned(),
+            ..Default::default()
+        };
+
+        let ecu_manager = build_ecu_manager_with_rdbi_service_and_funct_class(
+            "VarCodingService",
+            None,
+            Some("varcoding"),
+            naming_convention,
+        );
+
+        let result = ecu_manager.get_components_data_info(&skip_sec_plugin!());
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result
+                .first()
+                .expect("Expected at least one data item")
+                .category,
+            "storedData"
         );
     }
 
@@ -1769,6 +1957,7 @@ mod tests {
         };
         let ecu_manager = build_ecu_manager_with_rdbi_service_and_funct_class(
             "EngineTemp",
+            None, // semantic
             Some("unrelated_class"),
             naming_convention,
         );
@@ -1793,6 +1982,7 @@ mod tests {
         };
         let ecu_manager = build_ecu_manager_with_rdbi_service_and_funct_class(
             "EngineTemp",
+            None,
             None,
             naming_convention,
         );
@@ -1936,5 +2126,92 @@ mod tests {
             "Service whose functional class is not in configuration_functional_classes must not \
              be routed to /configurations"
         );
+    }
+
+    #[test]
+    fn test_get_components_configurations_info_uses_resource_mapping() {
+        use cda_interfaces::datatypes::{
+            ComponentResourceMapping, ComponentResourceMappingKeyType,
+        };
+
+        let naming_convention = DatabaseNamingConvention {
+            component_resource_mapping: ComponentResourceMapping {
+                key_type: ComponentResourceMappingKeyType::FunctionalClass,
+                configurations: [("CALIBRATION".to_owned(), "storedData".to_owned())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let ecu_manager = build_ecu_manager_with_configuration_service(
+            "Calibration1",
+            "calibration",
+            naming_convention,
+        );
+
+        let result = ecu_manager
+            .get_components_configurations_info(&skip_sec_plugin!())
+            .expect("should return Ok");
+
+        assert_eq!(
+            result.len(),
+            1,
+            "A service matching the configured configurations mapping should be included"
+        );
+        assert_eq!(
+            result
+                .first()
+                .expect("Expected at least one configuration item")
+                .id,
+            "Calibration1"
+        );
+    }
+
+    #[test]
+    fn test_get_components_configurations_info_maps_varcoding_and_ident() {
+        use cda_interfaces::datatypes::{
+            ComponentResourceMapping, ComponentResourceMappingKeyType,
+        };
+
+        let naming_convention = DatabaseNamingConvention {
+            component_resource_mapping: ComponentResourceMapping {
+                key_type: ComponentResourceMappingKeyType::FunctionalClass,
+                data: [
+                    ("varcoding".to_owned(), "storedData".to_owned()),
+                    ("Ident".to_owned(), "identData".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+                configurations: [
+                    ("varcoding".to_owned(), "storedData".to_owned()),
+                    ("Ident".to_owned(), "identData".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            ..Default::default()
+        };
+
+        for (service_name, funct_class) in
+            [("VarCoding1", "varcoding"), ("Identification1", "Ident")]
+        {
+            let ecu_manager = build_ecu_manager_with_configuration_service(
+                service_name,
+                funct_class,
+                naming_convention.clone(),
+            );
+
+            let result = ecu_manager
+                .get_components_configurations_info(&skip_sec_plugin!())
+                .expect("should return Ok");
+
+            assert!(
+                result.iter().any(|item| item.id == service_name),
+                "Service {service_name} with functional class {funct_class} should be included in \
+                 /configurations"
+            );
+        }
     }
 }
