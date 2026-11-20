@@ -33,6 +33,7 @@ pub use dynamic_router::{RouteGroupNotFound, RouteHandle};
 pub use http::Method;
 use opensovd_axum_extra::ExtractHost;
 use sovd::apps::sovd2uds::bulk_data::runtimefiles::RuntimeUpdateRouteState;
+pub use sovd_interfaces::version_info;
 use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::UnixListener;
@@ -42,7 +43,7 @@ use tower_http::{normalize_path::NormalizePathLayer, trace::TraceLayer};
 /// Public API surface re-exported from the crate-internal `sovd` module.
 pub use crate::sovd::{
     SovdLockStateProvider, error::VendorErrorCode, locks::Locks,
-    request_guard::install_http_restriction_guard, static_data::add_static_data_endpoint,
+    request_guard::install_http_restriction_guard,
 };
 pub mod dynamic_router;
 mod openapi;
@@ -317,6 +318,85 @@ pub fn routes_accessible_during_update() -> Vec<HttpRouteMatcher> {
     sovd::apps::sovd2uds::operations::runtimefilesupdate::routes_accessible_during_update()
 }
 
+/// SOVD API version served under `/vehicle/v15`.
+pub const SOVD_API_VERSION: &str = "1.1.0";
+
+/// Registers version endpoints using consistent implementation and API version information.
+pub struct VersionRegistrar {
+    vendor_name: String,
+    implementation_version: String,
+    commit: String,
+    build_date: String,
+}
+
+impl VersionRegistrar {
+    /// Creates a registrar with the server implementation's version and build information.
+    #[must_use]
+    pub fn new(
+        vendor_name: &str,
+        implementation_version: &str,
+        commit: &str,
+        build_date: &str,
+    ) -> Self {
+        Self {
+            vendor_name: vendor_name.to_owned(),
+            implementation_version: implementation_version.to_owned(),
+            commit: commit.to_owned(),
+            build_date: build_date.to_owned(),
+        }
+    }
+
+    /// Registers the standard `/version-info` endpoint.
+    pub async fn register_version_info(&self, dynamic_router: &DynamicRouter) {
+        const BASE_URI: &str = "/vehicle/v15";
+
+        let version_info = version_info::VersionInfo {
+            sovd_info: vec![version_info::SovdInfo {
+                version: SOVD_API_VERSION.to_owned(),
+                base_uri: BASE_URI.to_owned(),
+                vendor_info: version_info::VendorInfo {
+                    name: self.vendor_name.clone(),
+                    version: self.implementation_version.clone(),
+                    commit: self.commit.clone(),
+                    build_date: self.build_date.clone(),
+                },
+            }],
+            schema: Some(sovd::create_schema!(version_info::VersionInfo)),
+        };
+        sovd::static_data::add_static_data_endpoint(
+            dynamic_router,
+            version_info,
+            "/version-info",
+            "identData",
+        )
+        .await;
+    }
+
+    /// Registers a vendor-specific version data endpoint at `path`.
+    ///
+    /// Custom paths must be configured separately if they should remain accessible during
+    /// global HTTP protections such as runtime updates.
+    pub async fn register_data(&self, dynamic_router: &DynamicRouter, path: &str) {
+        let version = version_info::DataVersion {
+            id: "version".to_owned(),
+            data: version_info::VersionData {
+                name: self.vendor_name.clone(),
+                api: version_info::ApiVersion {
+                    version: SOVD_API_VERSION.to_owned(),
+                },
+                implementation: version_info::ImplementationVersion {
+                    version: self.implementation_version.clone(),
+                    commit: self.commit.clone(),
+                    build_date: self.build_date.clone(),
+                },
+            },
+            schema: Some(sovd::create_schema!(version_info::DataVersion)),
+        };
+        sovd::static_data::add_static_data_endpoint(dynamic_router, version, path, "identData")
+            .await;
+    }
+}
+
 /// `OpenAPI` spec regenerates on every recomposition, reflecting current routes.
 ///
 /// The server URL embedded in `openapi.json` is derived dynamically from each
@@ -534,6 +614,14 @@ mod uri_rewrite_tests {
         assert!(query.suppress_service);
         assert!(delete_query.suppress_service);
     }
+
+    #[tokio::test]
+    async fn rewrite_request_uri_preserves_version_segment() {
+        let uri = rewrite_uri("/Vehicle/V1/components/ECU?include-schema=true").await;
+
+        assert_eq!(uri.path(), "/vehicle/v1/components/ecu");
+        assert_eq!(uri.query(), Some("include-schema=true"));
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -624,6 +712,35 @@ mod webserver_bind_tests {
         .await
         .expect("failed to launch webserver on unix socket");
 
+        assert_reachable_then_shutdown(&socket_path, shutdown_tx, webserver_task).await;
+    }
+
+    #[tokio::test]
+    async fn launch_webserver_does_not_alias_version_segments() {
+        let (_dir, socket_path, config) = temp_socket_config();
+        let (shutdown_tx, shutdown_signal) = shutdown_channel();
+        let (dynamic_router, webserver_task) = launch_webserver(
+            config,
+            cda_interfaces::BinaryEncoding::default(),
+            shutdown_signal,
+        )
+        .await
+        .expect("failed to launch webserver on unix socket");
+        dynamic_router
+            .add_routes(aide::axum::ApiRouter::new().route(
+                "/vehicle/v15/example",
+                aide::axum::routing::get(|| async { http::StatusCode::OK }),
+            ))
+            .await;
+
+        assert_eq!(
+            get_over_unix_socket(&socket_path, "/vehicle/v15/example").await,
+            http::StatusCode::OK
+        );
+        assert_eq!(
+            get_over_unix_socket(&socket_path, "/vehicle/v1/example").await,
+            http::StatusCode::NOT_FOUND
+        );
         assert_reachable_then_shutdown(&socket_path, shutdown_tx, webserver_task).await;
     }
 

@@ -533,13 +533,9 @@ mod tests {
             axum::routing::get(sovd::vehicle::data_get),
         ))
         .await;
-        crate::add_static_data_endpoint(
-            &dr,
-            serde_json::Map::new(),
-            "/vehicle/v15/data/version",
-            "identData",
-        )
-        .await;
+        crate::VersionRegistrar::new("CDA", "0.1.0", "abc123", "2026-11-19")
+            .register_data(&dr, "/vehicle/v15/data/version")
+            .await;
         dr.register_data_resource("/vehicle/v15/data/x-vendor-info", "sysInfo")
             .await;
         // Resources of other collections are not listed.

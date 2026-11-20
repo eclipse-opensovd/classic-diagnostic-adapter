@@ -14,10 +14,11 @@
 use axum::http::StatusCode;
 use opensovd_cda_lib::cda_version;
 use reqwest::Method;
+use sovd_interfaces::version_info::VersionInfo;
 
 use crate::util::{
     endpoints::APPS_SOVD2UDS_DATA_VERSION,
-    http::{extract_field_from_json, response_to_json},
+    http::{extract_field_from_json, response_to_json, response_to_t},
     test_env::TestEnv,
 };
 
@@ -34,7 +35,7 @@ fn assert_version_response(json: &serde_json::Value) {
         extract_field_from_json::<serde_json::Value>(&data, "api").expect("Missing 'data.api'");
     let api_version =
         extract_field_from_json::<String>(&api, "version").expect("Missing 'data.api.version'");
-    assert_eq!(api_version, "1.1");
+    assert_eq!(api_version, "1.1.0");
 
     let implementation = extract_field_from_json::<serde_json::Value>(&data, "implementation")
         .expect("Missing 'data.implementation'");
@@ -63,11 +64,66 @@ async fn test_version_endpoint() {
     let global_url =
         reqwest::Url::parse(&test_env.vehicle_url("data/version")).expect("Invalid URL");
 
-    let response =
-        crate::util::http::send_request(StatusCode::OK, Method::GET, None, None, global_url)
-            .await
-            .expect("GET global version endpoint failed");
+    let response = crate::util::http::send_request(
+        StatusCode::OK,
+        Method::GET,
+        None,
+        None,
+        global_url.clone(),
+    )
+    .await
+    .expect("GET global version endpoint failed");
 
     let json = response_to_json(&response).expect("Failed to parse version response");
     assert_version_response(&json);
+
+    let mut schema_url = global_url;
+    schema_url.set_query(Some("include-schema=true"));
+    let response =
+        crate::util::http::send_request(StatusCode::OK, Method::GET, None, None, schema_url)
+            .await
+            .expect("GET global version endpoint with schema failed");
+    let json = response_to_json(&response).expect("Failed to parse version response");
+    assert!(
+        json.pointer("/schema/properties/data/properties/implementation")
+            .is_some(),
+        "Expected the schema of the version response, got {json}"
+    );
+}
+
+/// [[ itest~sovd-api-version-info-endpoint, Version Info Endpoint Integration Test, itest ]]
+#[tokio::test]
+async fn test_version_info_endpoint() {
+    let test_env = TestEnv::builder().await.unwrap();
+    let url = reqwest::Url::parse(&test_env.server_url("version-info")).expect("Invalid URL");
+
+    // No authorization header: clients read the resource to discover the API before authorizing.
+    let response =
+        crate::util::http::send_request(StatusCode::OK, Method::GET, None, None, url.clone())
+            .await
+            .expect("GET version-info failed");
+    let version_info: VersionInfo =
+        response_to_t(&response).expect("Failed to parse version-info response");
+    let [sovd_info] = version_info.sovd_info.as_slice() else {
+        panic!("Expected exactly one sovd_info entry: {version_info:?}");
+    };
+    assert_eq!(sovd_info.version, "1.1.0");
+    assert_eq!(sovd_info.base_uri, "/vehicle/v15");
+    assert_eq!(
+        sovd_info.vendor_info.name,
+        "Eclipse OpenSOVD Classic Diagnostic Adapter"
+    );
+    assert_eq!(sovd_info.vendor_info.version, cda_version());
+
+    let mut schema_url = url;
+    schema_url.set_query(Some("include-schema=true"));
+    let response =
+        crate::util::http::send_request(StatusCode::OK, Method::GET, None, None, schema_url)
+            .await
+            .expect("GET version-info with schema failed");
+    let json = response_to_json(&response).expect("Failed to parse version-info response");
+    assert!(
+        json.pointer("/schema/properties/sovd_info").is_some(),
+        "Expected the schema of the version-info response, got {json}"
+    );
 }
