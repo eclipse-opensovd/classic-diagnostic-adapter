@@ -17,10 +17,13 @@
 use serde::{Deserialize, Serialize};
 
 /// Response of `GET {host}[/{manufacturer}]/version-info` (Table 36).
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, schemars::JsonSchema)]
 pub struct VersionInfo {
     /// One entry per SOVD API version offered by the server.
     pub sovd_info: Vec<SovdInfo>,
+    #[schemars(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<schemars::Schema>,
 }
 
 /// A single SOVD API version (Table 37).
@@ -49,12 +52,15 @@ pub struct VendorInfo {
 }
 
 /// Response of the vendor-specific `GET .../data/version` resources.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, schemars::JsonSchema)]
 pub struct DataVersion {
     /// Identifier of the data resource, `version`.
     pub id: String,
     /// The version data.
     pub data: VersionData,
+    #[schemars(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<schemars::Schema>,
 }
 
 /// Version data of the server implementation.

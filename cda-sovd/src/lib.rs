@@ -361,6 +361,7 @@ impl VersionRegistrar {
                     build_date: self.build_date.clone(),
                 },
             }],
+            schema: Some(sovd::create_schema!(version_info::VersionInfo)),
         };
         sovd::static_data::add_static_data_endpoint(
             dynamic_router,
@@ -389,6 +390,7 @@ impl VersionRegistrar {
                     build_date: self.build_date.clone(),
                 },
             },
+            schema: Some(sovd::create_schema!(version_info::DataVersion)),
         };
         sovd::static_data::add_static_data_endpoint(dynamic_router, version, path, "identData")
             .await;
