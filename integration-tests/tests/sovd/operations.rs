@@ -29,7 +29,10 @@ struct AsyncPostBody {
 }
 
 use crate::{
-    sovd::{COMPONENTS_FLXC1000_BASE, ECU_FLXC1000, FUNCTIONS_FUNCTIONALGROUPS_DOIP_BASE},
+    sovd::{
+        COMPONENTS_FLXC1000_BASE, ECU_FLXC1000, FUNCTIONS_FUNCTIONALGROUPS_DOIP_BASE,
+        ecu::switch_session,
+    },
     util::{
         http::{
             QueryParams, extract_field_from_json, response_to_json, response_to_t,
@@ -184,6 +187,17 @@ async fn test_sync_operation() {
     let test_env = TestEnv::builder().await.unwrap();
 
     let _lock = Lock::acquire(&test_env, locks::COMPONENTS_FLXC1000_LOCKS, LOCK_EXPIRATION).await;
+
+    // SelfTest requires the extended diagnostic session.
+    switch_session(
+        "extended",
+        &test_env,
+        COMPONENTS_FLXC1000_BASE,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
 
     send_authenticated_cda_request(
         &test_env,
@@ -393,6 +407,17 @@ async fn test_sync_operation_sends_correct_uds_frame() {
     let test_env = TestEnv::builder().await.unwrap();
 
     let _lock = Lock::acquire(&test_env, locks::COMPONENTS_FLXC1000_LOCKS, LOCK_EXPIRATION).await;
+
+    // SelfTest requires the extended diagnostic session.
+    switch_session(
+        "extended",
+        &test_env,
+        COMPONENTS_FLXC1000_BASE,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
 
     let recorder = test_env
         .record(ECU_FLXC1000)
