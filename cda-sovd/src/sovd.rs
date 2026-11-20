@@ -1565,6 +1565,39 @@ pub(crate) mod static_data {
                 Some(&json!("string"))
             );
         }
+
+        /// [[ test~sovd-api-version-registrar, Version Registrar Consistency, test ]]
+        #[tokio::test]
+        async fn version_registration_uses_consistent_values_at_each_supplied_path() {
+            let router = DynamicRouter::new();
+            let versions = crate::VersionRegistrar::new("CDA", "0.1.0", "abc123", "2026-11-19");
+            versions.register_version_info(&router).await;
+            versions.register_data(&router, "/custom/version").await;
+            versions.register_data(&router, "/other/version").await;
+
+            let (status, value) = get_json(&router, "/version-info").await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(value, serde_json::to_value(version_info()).unwrap());
+            let expected = json!({
+                "id": "version",
+                "data": {
+                    "name": "CDA",
+                    "api": { "version": "1.1.0" },
+                    "implementation": {
+                        "version": "0.1.0",
+                        "commit": "abc123",
+                        "build_date": "2026-11-19"
+                    }
+                }
+            });
+            for path in ["/custom/version", "/other/version"] {
+                let (status, value) = get_json(&router, path).await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(value, expected);
+            }
+            let (status, _) = get_json(&router, "/vehicle/v15/data/version").await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        }
     }
 }
 

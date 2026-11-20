@@ -1606,18 +1606,19 @@ Version Endpoint
     :links: dimpl~sovd-api-version-endpoint, testset~sovd-api-version-endpoint
     :status: draft
 
-    The CDA provides a version registration function that sets up version-related endpoints during
-    initialization.
+    The CDA provides a registrar for version-related endpoints during initialization.
 
     **Registration Function**
 
-    The function accepts the following parameters: ``vendor_name``, ``implementation_version``, ``commit``,
+    The registrar accepts the following parameters: ``vendor_name``, ``implementation_version``, ``commit``,
     ``build_date``.
 
-    It always registers the standard ``/version-info`` endpoint, and optionally registers the default
-    ``/data/version`` and ``/apps/sovd2uds/data/version`` endpoints.
+    A method registers the standard ``/version-info`` endpoint. A separate method registers a version
+    data endpoint at a caller-supplied path. Applications can call it for each optional
+    vendor-specific endpoint, including ``/data/version`` and ``/apps/sovd2uds/data/version``.
+    Both response formats are derived from the same registrar values.
 
-    The fields ``base_uri`` and ``api_version`` are determined by the function.
+    The fields ``base_uri`` and ``api_version`` are determined by the registrar.
 
     **Standard Endpoint: /version-info**
 
@@ -1667,8 +1668,9 @@ Version Endpoint
             }
         }
 
-    All version endpoints are available immediately after the HTTP server starts, do not require
-    any ECU communication, and stay accessible while a runtime update is running.
+    The default version endpoints are available immediately after the HTTP server starts, do not
+    require any ECU communication, and stay accessible while a runtime update is running. Custom
+    data paths must be configured separately to remain accessible during global HTTP protections.
 
     The vendor-specific endpoints are registered as static data endpoints with the data category
     ``identData``. Registering a static data endpoint also lists it in its ``data`` collection

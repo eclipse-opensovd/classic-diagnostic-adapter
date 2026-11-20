@@ -475,8 +475,8 @@ Version Info Endpoint
     static data format (``id`` + ``data`` object containing ``name``, ``api.version``, and
     ``implementation.version``/``commit``/``build_date``).
 
-    These endpoints are registered by the same registration function that provides the standard
-    ``/version-info`` endpoint. Each is listed in its ``data`` collection with the category ``identData``.
+    Each endpoint is registered by calling the version registrar with its path and is listed in
+    its ``data`` collection with the category ``identData``.
 
     **Rationale**
 
@@ -489,24 +489,23 @@ Version Info Endpoint
     :links: arch~sovd-api-version-registration-function
     :status: draft
 
-    A single registration function shall accept the following parameters:
+    A version registrar shall accept the following parameters:
 
     - ``vendor_name``: the implementation/vendor name of the SOVD server
-    - ``api_version``: the supported SOVD API version string
     - ``implementation_version``: the software version of the implementation
     - ``commit``: the Git commit hash of the build
     - ``build_date``: the date the binary was built
-    - ``base_uri``: the version-specific base URI
 
-    The function shall always register the ``/version-info`` endpoint.
+    The registrar shall provide a method to register the ``/version-info`` endpoint.
 
-    The function shall optionally register the ``/data/version`` and ``/apps/sovd2uds/data/version``
-    endpoints serving vendor-specific implementation data.
+    A separate method shall register a vendor-specific version data endpoint using a supplied
+    path. Applications can call it for each optional data endpoint they provide. Both methods
+    shall derive their version information from the same registrar values.
 
     **Rationale**
 
-    Centralizes version endpoint registration into a single callable unit, ensuring consistency
-    between the standard version-info response and optional vendor-specific endpoints.
+    Provides reusable registration for the standard version-info response and optional
+    vendor-specific endpoints with consistent version information.
 
 
 Health Endpoint

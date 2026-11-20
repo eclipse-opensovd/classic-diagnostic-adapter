@@ -10,13 +10,14 @@
 ' SPDX-License-Identifier: Apache-2.0
 
 @startuml
-title Version Registration Function
+title Version Registrar
 
 participant "Application\nStartup" as APP
-participant "Version\nRegistration\nFunction" as VREG
+participant "Version\nRegistrar" as VREG
 participant "HTTP Server\n(Axum)" as HTTP
 
-APP -> VREG : register_version_endpoints(\nvendor_name, implementation_version,\ncommit, build_date)
+APP -> VREG : new(vendor_name, implementation_version,\ncommit, build_date)
+APP -> VREG : register_version_info()
 activate VREG
 
 VREG -> VREG : determine base_uri\nand api_version
@@ -26,20 +27,19 @@ activate HTTP
 HTTP -> VREG : registered
 deactivate HTTP
 
-alt optional vendor-specific endpoints enabled
-    VREG -> HTTP : register GET /data/version
-    activate HTTP
-    HTTP -> VREG : registered
-    deactivate HTTP
-
-    VREG -> HTTP : register GET /apps/sovd2uds/data/version
-    activate HTTP
-    HTTP -> VREG : registered
-    deactivate HTTP
-end
-
 VREG -> APP : registration complete
 deactivate VREG
+
+loop each optional version data endpoint
+    APP -> VREG : register_data(path)
+    activate VREG
+    VREG -> HTTP : register GET at path
+    activate HTTP
+    HTTP -> VREG : registered
+    deactivate HTTP
+    VREG -> APP : registration complete
+    deactivate VREG
+end
 
 == Runtime: Client requests version info ==
 
