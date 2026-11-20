@@ -16,6 +16,8 @@
 //! The contract lives here rather than in the communication plugin, so that
 //! consumers needing exclusive transport ownership depend only on this crate.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 
 use crate::communication_control::{CommunicationOperationFailure, CommunicationState};
@@ -29,12 +31,41 @@ pub enum DisableReason {
     Custom(String),
 }
 
+/// What was still holding communication when a disable gave up waiting.
+///
+/// Only work that blocks a disable is counted. Preemptible work, such as the
+/// tester present loop, is cut off by the disable and therefore not reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CommunicationInUse {
+    /// Diagnostic requests still holding a communication guard.
+    pub requests_in_flight: usize,
+    /// Whether a whole-vehicle variant detection was still running.
+    pub detection_in_flight: bool,
+    /// How long the disable waited for the work above to finish.
+    pub waited: Duration,
+}
+
+impl std::fmt::Display for CommunicationInUse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "communication still in use after {} ms: {} request(s) in flight",
+            self.waited.as_millis(),
+            self.requests_in_flight
+        )?;
+        if self.detection_in_flight {
+            write!(f, ", variant detection running")?;
+        }
+        Ok(())
+    }
+}
+
 /// Failure to acquire the exclusive disable lease.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DisableError {
-    /// Diagnostics are currently using communication.
-    #[error("Communication is in use")]
-    InUse,
+    /// Diagnostics are still using communication after the configured wait.
+    #[error("Communication is in use ({0})")]
+    InUse(CommunicationInUse),
     /// Disabling is unavailable in the current lifecycle state.
     #[error("Cannot disable in the current lifecycle state")]
     Conflict,

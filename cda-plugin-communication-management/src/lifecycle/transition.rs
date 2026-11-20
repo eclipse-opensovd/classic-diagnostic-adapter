@@ -74,8 +74,13 @@ pub(crate) enum LifecycleDecision {
     /// [`Detect`](CommunicationOperation::Detect) to detect.
     AlreadyEnabled,
     /// Claim `Disabling` and grant the lease. `resumes_transport` records
-    /// whether releasing the lease must restore the transport.
-    ClaimDisable { resumes_transport: bool },
+    /// whether releasing the lease must restore the transport. `drain` is set
+    /// when request guards or a detection are still in flight, so the disable
+    /// has to wait for them before touching the transport.
+    ClaimDisable {
+        resumes_transport: bool,
+        drain: bool,
+    },
     /// The released lease displaced no transport, so settle straight back to
     /// `Disabled` without activating anything.
     SettleDisabled,
@@ -108,11 +113,14 @@ pub(crate) fn decide(
         return LifecycleDecision::ShuttingDown;
     }
 
+    // Only request guards count. Preemptible guards never block a transition.
     let guards_held = !state.active_guards.is_empty();
 
-    // Guards and in-flight detection prevent disable from every state.
-    if request == LifecycleRequest::Disable && (guards_held || state.detection_in_flight.is_some())
-    {
+    // Request guards and in-flight detection prevent disable from every state,
+    // except that an enabled runtime may wait for them to finish.
+    let may_drain =
+        state.state == CommunicationState::Enabled && !state.disable_drain_timeout.is_zero();
+    if request == LifecycleRequest::Disable && state.blocks_disable() && !may_drain {
         return LifecycleDecision::GuardsHeld;
     }
 
@@ -208,13 +216,16 @@ pub(crate) fn decide(
 /// The `Disable` cell shared by `Enabled` and `Disabled`, which differ only in
 /// what releasing the resulting lease means.
 ///
-/// [`decide`] has already rejected held guards, so only exclusivity is left to
-/// check.
+/// [`decide`] has already rejected held guards it cannot wait for, so only
+/// exclusivity is left to check.
 fn claim_disable(state: &CommunicationStateData, resumes_transport: bool) -> LifecycleDecision {
     if state.disable_owner.is_some() {
         LifecycleDecision::Conflict
     } else {
-        LifecycleDecision::ClaimDisable { resumes_transport }
+        LifecycleDecision::ClaimDisable {
+            resumes_transport,
+            drain: state.blocks_disable(),
+        }
     }
 }
 
@@ -236,6 +247,20 @@ pub(crate) fn guard_admission(state: &CommunicationState) -> Result<(), Communic
     }
 }
 
+/// Whether a preemptible guard may be acquired right now.
+///
+/// Admitted while `Enabled` and while a disable still waits for in-flight
+/// requests, so background work such as tester present keeps the ECUs in their
+/// sessions if that wait times out. Refused once the disable proceeds.
+pub(crate) fn preemptible_guard_admission(
+    state: &CommunicationStateData,
+) -> Result<(), CommunicationError> {
+    match (&state.state, state.disable_owner) {
+        (CommunicationState::Disabling, Some(owner)) if owner.draining => Ok(()),
+        (current, _) => guard_admission(current),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use cda_interfaces::{
@@ -253,6 +278,9 @@ mod tests {
             disable_owner: None,
             enabling_result: None,
             detection_in_flight: None,
+            preemptible_guards: HashSet::default(),
+            disable_drain_timeout: std::time::Duration::ZERO,
+            idle: std::sync::Arc::new(tokio::sync::Notify::new()),
             configured_variant_detection: VariantDetectionMode::Always,
             variant_detector: None,
             variant_detection: VariantDetectionMode::Never,
@@ -354,6 +382,93 @@ mod tests {
             decide(&sweeping, false, LifecycleRequest::Disable),
             LifecycleDecision::GuardsHeld,
             "but a lease must not tear the transport down underneath one"
+        );
+    }
+
+    /// With a wait configured, an enabled runtime claims the disable and
+    /// drains instead of refusing. Other states still refuse.
+    #[test]
+    fn enabled_disable_drains_held_guards_when_a_wait_is_configured() {
+        let mut held = data(CommunicationState::Enabled);
+        held.disable_drain_timeout = std::time::Duration::from_secs(5);
+        assert_eq!(
+            decide(&held, false, LifecycleRequest::Disable),
+            LifecycleDecision::ClaimDisable {
+                resumes_transport: true,
+                drain: false
+            }
+        );
+        held.active_guards
+            .insert(CommunicationGuardId(uuid::Uuid::new_v4()));
+        assert_eq!(
+            decide(&held, false, LifecycleRequest::Disable),
+            LifecycleDecision::ClaimDisable {
+                resumes_transport: true,
+                drain: true
+            }
+        );
+
+        held.state = CommunicationState::Disabled;
+        assert_eq!(
+            decide(&held, false, LifecycleRequest::Disable),
+            LifecycleDecision::GuardsHeld
+        );
+    }
+
+    /// Preemptible guards block neither a disable nor a detection.
+    #[test]
+    fn preemptible_guards_block_nothing() {
+        let mut held = data(CommunicationState::Enabled);
+        held.preemptible_guards
+            .insert(CommunicationGuardId(uuid::Uuid::new_v4()));
+        assert_eq!(
+            decide(&held, false, LifecycleRequest::Disable),
+            LifecycleDecision::ClaimDisable {
+                resumes_transport: true,
+                drain: false
+            }
+        );
+        assert_eq!(
+            decide(&held, false, LifecycleRequest::Detect),
+            LifecycleDecision::ClaimDetection
+        );
+    }
+
+    /// Preemptible work is admitted while enabled and while a disable drains,
+    /// and refused once the disable proceeds.
+    #[test]
+    fn preemptible_admission_follows_the_drain_phase() {
+        use super::super::disable::{DisableLeaseId, DisableOwner};
+
+        let enabled = data(CommunicationState::Enabled);
+        assert_eq!(preemptible_guard_admission(&enabled), Ok(()));
+
+        let mut disabling = data(CommunicationState::Disabling);
+        let owner = DisableOwner {
+            id: DisableLeaseId::new(),
+            resumes_transport: true,
+            resume_detects: false,
+            draining: true,
+        };
+        disabling.disable_owner = Some(owner);
+        assert_eq!(preemptible_guard_admission(&disabling), Ok(()));
+        assert_eq!(
+            guard_admission(&disabling.state),
+            Err(CommunicationError::Disabling),
+            "request guards are refused while draining"
+        );
+
+        disabling.disable_owner = Some(DisableOwner {
+            draining: false,
+            ..owner
+        });
+        assert_eq!(
+            preemptible_guard_admission(&disabling),
+            Err(CommunicationError::Disabling)
+        );
+        assert_eq!(
+            preemptible_guard_admission(&data(CommunicationState::DisabledExclusive)),
+            Err(CommunicationError::DisabledExclusive)
         );
     }
 }

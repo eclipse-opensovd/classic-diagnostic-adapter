@@ -36,6 +36,15 @@ Diagnostic Tester
     Verifies that communication stays disabled after a database update apply or rollback
     until it is reactivated.
 
+.. testset:: Exclusive Disable Waits for In-Flight Requests
+    :id: testset~communication-disable-drain
+    :links: test~communication-disable-drain-success, test~communication-disable-drain-timeout, test~communication-disable-drain-admission, test~communication-disable-drain-detection, test~communication-disable-drain-abandoned, test~communication-disable-drain-shutdown, test~communication-disable-drain-zero-timeout, test~communication-preemptible-guard-never-blocks, test~communication-preemptible-no-activation
+    :status: draft
+
+    Verifies that an exclusive disable waits for in-flight requests and detection up to the
+    configured timeout, refuses new requests while waiting, always leaves a consistent state,
+    and that preemptible guards (tester present) never block it.
+
 .. testset:: Explicit Variant Detection
     :id: testset~variant-detection-explicit
     :links: itest~variant-detection-explicit

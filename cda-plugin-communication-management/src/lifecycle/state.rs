@@ -13,7 +13,7 @@
 
 //! Authoritative lifecycle state tracking for the communication framework.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
     HashSet,
@@ -68,6 +68,17 @@ pub(crate) struct CommunicationStateData {
     /// separate from `enabling_result`, so that a `Detect` cannot observe an
     /// enabling operation's outcome as its own.
     pub(crate) detection_in_flight: Option<EnablingResultReceiver>,
+    /// Guards held by preemptible background work such as tester present.
+    ///
+    /// Unlike `active_guards`, they block neither a disable nor a new
+    /// detection. A disable cuts their holders off during deinitialization.
+    pub(crate) preemptible_guards: HashSet<CommunicationGuardId>,
+    /// How long a disable waits for `active_guards` and `detection_in_flight`
+    /// to clear before refusing. Zero refuses immediately.
+    pub(crate) disable_drain_timeout: Duration,
+    /// Signalled whenever the last request guard is released, detection
+    /// finishes or shutdown begins, so a waiting disable re-checks.
+    pub(crate) idle: Arc<tokio::sync::Notify>,
     /// The configured detection policy, fixed for the process lifetime.
     pub(crate) configured_variant_detection: VariantDetectionMode,
     /// The registered whole-vehicle variant detector. While it is `None`, no
@@ -100,6 +111,18 @@ pub(crate) struct CommunicationStateData {
 }
 
 impl CommunicationStateData {
+    /// Clears the in-flight detection slot and wakes a waiting disable.
+    pub(crate) fn clear_detection_in_flight(&mut self) {
+        if self.detection_in_flight.take().is_some() {
+            self.idle.notify_waiters();
+        }
+    }
+
+    /// Whether request guards or a detection still block a disable.
+    pub(crate) fn blocks_disable(&self) -> bool {
+        !self.active_guards.is_empty() || self.detection_in_flight.is_some()
+    }
+
     /// Whether an *automatic* activation for `operation` runs the detection
     /// stage: the operation's own shape, gated by the configured policy.
     ///
@@ -168,6 +191,9 @@ impl CommunicationStateStore {
                 disable_owner: None,
                 enabling_result: None,
                 detection_in_flight: None,
+                preemptible_guards: HashSet::default(),
+                disable_drain_timeout: Duration::ZERO,
+                idle: Arc::new(tokio::sync::Notify::new()),
                 configured_variant_detection,
                 variant_detector: None,
                 variant_detection: VariantDetectionMode::Never,

@@ -131,8 +131,16 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                     if let Ok(result) =
                         tokio::time::timeout(interval, uds.send_tester_present(&control_msg)).await
                     {
-                        if let Err(error) = result {
-                            tracing::error!(%error, "Failed to send tester present");
+                        match result {
+                            Ok(()) => {}
+                            // Expected while a disable proceeds, right before
+                            // this loop is suspended.
+                            Err(error @ DiagServiceError::CommunicationNotReady { .. }) => {
+                                tracing::debug!(%error, "Tester present skipped, communication not ready");
+                            }
+                            Err(error) => {
+                                tracing::error!(%error, "Failed to send tester present");
+                            }
                         }
                     } else {
                         tracing::error!(
@@ -281,7 +289,9 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuSecurity> UdsManager<S, 
                 payload,
                 None,
                 expect_response,
-                CommunicationReadiness::Enforce,
+                // Tester present must not keep a disable from proceeding. The
+                // disable stops this loop during deinitialization instead.
+                CommunicationReadiness::Preemptible,
             )
             .await
         {

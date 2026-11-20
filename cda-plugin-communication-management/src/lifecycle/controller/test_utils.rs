@@ -125,6 +125,15 @@ pub fn enabled_communication_for_test()
             self.0.acquire()
         }
 
+        fn acquire_preemptible(
+            &self,
+        ) -> Result<
+            cda_interfaces::communication_control::PreemptibleCommunicationGuard,
+            CommunicationError,
+        > {
+            self.0.acquire_preemptible()
+        }
+
         fn request_activate(
             &self,
             _cause: cda_interfaces::communication_control::ActivationCause,

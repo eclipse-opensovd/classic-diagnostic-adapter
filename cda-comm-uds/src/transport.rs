@@ -20,6 +20,7 @@ use cda_interfaces::{
     Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuSecurity,
     EcuState, PayloadDecoder, PendingNrc, ServicePayload, TransmissionParameters,
     TransportResponse, UdsTransport, VariantDetection, VariantState,
+    communication_control::{CommunicationGuard, PreemptibleCommunicationGuard},
     datatypes::RetryPolicy,
     diagservices::{DiagServiceResponse, UdsPayloadData},
     dlt_ctx,
@@ -50,6 +51,19 @@ pub(crate) enum CommunicationReadiness {
     Enforce,
     /// Send without checking communication readiness.
     AssumeReady,
+    /// Send as preemptible background work that does not block a disable and
+    /// may be aborted by one (see `CommunicationAccess::acquire_preemptible`).
+    ///
+    /// Only for work that a `deinitialize` hook stops, such as tester present.
+    Preemptible,
+}
+
+/// Keeps whichever communication guard a send holds alive for its duration.
+enum HeldCommunication {
+    #[expect(dead_code, reason = "held only for its drop")]
+    Request(CommunicationGuard),
+    #[expect(dead_code, reason = "held only for its drop")]
+    Preemptible(PreemptibleCommunicationGuard),
 }
 
 struct SupervisedGatewayTask {
@@ -335,7 +349,12 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuSecurity> UdsManager<S, 
         communication_readiness: CommunicationReadiness,
     ) -> Result<Option<ServicePayload>, DiagServiceError> {
         let _communication_guard = match communication_readiness {
-            CommunicationReadiness::Enforce => Some(self.require_communication_ready()?),
+            CommunicationReadiness::Enforce => Some(HeldCommunication::Request(
+                self.require_communication_ready()?,
+            )),
+            CommunicationReadiness::Preemptible => Some(HeldCommunication::Preemptible(
+                self.require_preemptible_communication()?,
+            )),
             CommunicationReadiness::AssumeReady => None,
         };
 
@@ -3037,6 +3056,28 @@ pub(crate) mod send_tests {
         ));
         assert_eq!(access.activate_call_count(), 1);
         assert_eq!(access.state(), CommunicationState::Disabled);
+    }
+
+    /// Preemptible background work must never bring communication up, so a
+    /// refusal does not request activation.
+    ///
+    /// [[ test~communication-preemptible-no-activation, Preemptible communication never requests activation, test ]]
+    #[tokio::test]
+    async fn require_preemptible_communication_never_requests_activation() {
+        let access = FakeCommunicationAccess::new(false, true);
+        let manager = make_manager_with_access(make_gateway(), Arc::clone(&access) as _);
+
+        let result = manager.require_preemptible_communication();
+
+        assert!(matches!(
+            result,
+            Err(DiagServiceError::CommunicationNotReady { .. })
+        ));
+        assert_eq!(access.activate_call_count(), 0);
+        assert_eq!(access.state(), CommunicationState::Disabled);
+
+        access.set_phase(CommunicationPhase::Enabled);
+        assert!(manager.require_preemptible_communication().is_ok());
     }
 
     #[tokio::test]
