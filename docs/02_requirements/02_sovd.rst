@@ -148,7 +148,7 @@ Paths
          -
        * - 28
          - /modes/commctrl
-         -
+         - only if the ECU has 28\ :sub:`16` services, see below
        * - 29
          - /modes/authentication
          - see :need:`req~sovd-api-authentication-modes`
@@ -168,7 +168,12 @@ Paths
          - handled internally by CDA
        * - 85
          - /modes/dtcsetting
-         -
+         - only if the ECU has 85\ :sub:`16` services, see below
+
+    Modes that depend on an optional UDS service (marked above) must only be provided for ECUs whose
+    diagnostic description contains at least one service with that SID. For other ECUs they must not
+    be listed in ``/modes`` nor documented, and requests to them must be answered with
+    ``404 Not Found``.
 
     NOTE: The mapping in ISO standard is inconsistent w.r.t. ``/modes/security`` and ``/modes/authentication``.
     The CDA maps SID 27\ :sub:`16` and 29\ :sub:`16` to separate modes, see :doc:`/04_adr/07_uds_authentication_mode`.
@@ -1291,6 +1296,9 @@ Authentication (UDS 29\ :sub:`16`)
     * Negative responses of the ECU (including NRC 34\ :sub:`16` and
       50\ :sub:`16` -- 5D\ :sub:`16`) must be reported to the client, including the NRC.
     * The endpoint is not provided for functional groups.
+    * The endpoint is only provided for ECUs whose diagnostic database contains at least one
+      Authentication service. For other ECUs it must not be listed in ``/modes`` nor
+      documented, and requests to it must be answered with ``404 Not Found``.
 
     **Rationale**
 

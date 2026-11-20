@@ -16,7 +16,7 @@ use std::fmt::Write as _;
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, HashMapExtensions,
-    UdsFunctionalGroup, UdsQuery, UdsTransport,
+    UdsFunctionalGroup, UdsQuery, UdsTransport, VariantLookupMode,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
         ComponentOperationsInfo, Ecu, FunctionalGroup, Gateway, NetworkStructure,
@@ -347,6 +347,21 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
             .ok_or(DiagServiceError::NotFound(format!(
                 "Service state for service ID {service:02X} not found in ECU {ecu_name}"
             )))
+    }
+
+    async fn has_services_for_sid(
+        &self,
+        ecu_name: &str,
+        service_id: u8,
+        mode: VariantLookupMode,
+    ) -> bool {
+        let Ok(ecu) = self.uds_ecu_variant_lookup(ecu_name, mode).await else {
+            return false;
+        };
+        ecu.read()
+            .await
+            .lookup_diagcomms_by_request_prefix(&[service_id])
+            .is_ok()
     }
 
     async fn ecu_exec_service_from_function_class(

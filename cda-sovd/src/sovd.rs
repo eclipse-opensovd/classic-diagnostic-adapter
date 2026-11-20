@@ -771,6 +771,59 @@ pub struct FlashConfig {
     pub functional_class_default: String,
 }
 
+const COMPONENTS_PATH: &str = "/vehicle/v15/components";
+
+/// Returns the ECU name and mode id if `path` is the path of a single ECU mode,
+/// i.e. `/vehicle/v15/components/{ecu}/modes/{mode}`.
+fn ecu_mode_path(path: &str) -> Option<(&str, &str)> {
+    let rest = path.strip_prefix(COMPONENTS_PATH)?.strip_prefix('/')?;
+    let (ecu, mode) = rest.split_once("/modes/")?;
+    (!ecu.is_empty() && !ecu.contains('/') && !mode.is_empty() && !mode.contains('/'))
+        .then_some((ecu, mode))
+}
+
+/// `OpenAPI` filter for the vehicle routes that hides the paths of ECU modes the ECU
+/// does not support.
+///
+/// The ECU routes are registered before variant detection, so all ECUs get all mode
+/// routes. Modes that depend on optional UDS services are removed from the documentation
+/// of ECUs whose detected variant lacks these services, consistent with the `/modes`
+/// listing (see [`components::ecu::modes::is_mode_available`]).
+///
+/// The lookup is passive: building the documentation must not activate the vehicle
+/// communication or start variant detection. ECUs whose variant has not been detected
+/// yet are documented without their optional modes.
+pub(crate) fn vehicle_openapi_paths_filter<T: UdsEcu + Clone + Send + Sync + 'static>(
+    uds: T,
+) -> crate::OpenApiPathsFilter {
+    Arc::new(move |mut paths: aide::openapi::Paths| {
+        let uds = uds.clone();
+        Box::pin(async move {
+            let mode_paths: Vec<(String, String, String)> = paths
+                .paths
+                .keys()
+                .filter_map(|path| {
+                    ecu_mode_path(path)
+                        .map(|(ecu, mode)| (path.clone(), ecu.to_owned(), mode.to_owned()))
+                })
+                .collect();
+            for (path, ecu, mode) in mode_paths {
+                if !components::ecu::modes::is_mode_available(
+                    &uds,
+                    &ecu,
+                    &mode,
+                    cda_interfaces::VariantLookupMode::Passive,
+                )
+                .await
+                {
+                    paths.paths.shift_remove(&path);
+                }
+            }
+            paths
+        })
+    })
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "Combining parameters into a struct is not preferred here, to keep route setup \
@@ -959,10 +1012,8 @@ async fn components_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + '
     state: WebserverState<T>,
     file_manager: &mut HashMap<String, U>,
 ) -> Router<WebserverState<T>> {
-    let mut router = Router::new().api_route(
-        "/vehicle/v15/components",
-        get_with(get_components, docs_components),
-    );
+    let mut router =
+        Router::new().api_route(COMPONENTS_PATH, get_with(get_components, docs_components));
     let mut ecus = state.uds.get_physical_ecus().await;
     for ecu_name in ecus.drain(0..) {
         match ecu_route::<T, U>(&ecu_name, &state, file_manager) {
@@ -1002,7 +1053,7 @@ fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
             ))
         })?),
     };
-    let ecu_path = format!("/vehicle/v15/components/{ecu_lower}");
+    let ecu_path = format!("{COMPONENTS_PATH}/{ecu_lower}");
 
     let router = Router::new()
         .api_route(
@@ -1954,6 +2005,77 @@ pub(crate) mod tests {
             sovd_ecu::State::NoVariantDetected
         );
         assert_eq!(assumed(VariantState::Duplicate), sovd_ecu::State::Duplicate);
+    }
+
+    #[test]
+    fn ecu_mode_path_matches_only_single_ecu_modes() {
+        assert_eq!(
+            ecu_mode_path("/vehicle/v15/components/ecu1/modes/authentication"),
+            Some(("ecu1", "authentication"))
+        );
+        assert_eq!(
+            ecu_mode_path("/vehicle/v15/components/ecu1/modes/commctrl"),
+            Some(("ecu1", "commctrl"))
+        );
+        assert_eq!(ecu_mode_path("/vehicle/v15/components/ecu1/modes"), None);
+        assert_eq!(ecu_mode_path("/vehicle/v15/components/ecu1/modes/"), None);
+        assert_eq!(
+            ecu_mode_path("/vehicle/v15/components//modes/authentication"),
+            None
+        );
+        assert_eq!(
+            ecu_mode_path("/vehicle/v15/components/a/b/modes/authentication"),
+            None
+        );
+        assert_eq!(
+            ecu_mode_path("/vehicle/v15/functions/fg/modes/commctrl"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn openapi_filter_hides_unsupported_ecu_modes() {
+        // The filter clones the UDS handle for every `openapi.json` request.
+        // ECU "full" has all optional mode services, ECU "minimal" none of them.
+        let mut uds = cda_interfaces::mock::MockUdsEcu::new();
+        uds.expect_clone().returning(|| {
+            let mut clone = cda_interfaces::mock::MockUdsEcu::new();
+            // The documentation must never activate the vehicle communication.
+            clone
+                .expect_has_authentication_services()
+                .withf(|_, mode| *mode == cda_interfaces::VariantLookupMode::Passive)
+                .returning(|ecu, _| ecu == "full");
+            clone
+                .expect_has_services_for_sid()
+                .withf(|_, _, mode| *mode == cda_interfaces::VariantLookupMode::Passive)
+                .returning(|ecu, _, _| ecu == "full");
+            clone
+        });
+        let filter = vehicle_openapi_paths_filter(uds);
+
+        let modes = ["authentication", "commctrl", "dtcsetting", "security"];
+        let mut input = aide::openapi::Paths::default();
+        for ecu in ["full", "minimal"] {
+            for mode in modes {
+                input.paths.insert(
+                    format!("/vehicle/v15/components/{ecu}/modes/{mode}"),
+                    aide::openapi::ReferenceOr::Item(aide::openapi::PathItem::default()),
+                );
+            }
+        }
+
+        let output = filter(input).await;
+        let remaining: Vec<&str> = output.paths.keys().map(String::as_str).collect();
+        assert_eq!(
+            remaining,
+            vec![
+                "/vehicle/v15/components/full/modes/authentication",
+                "/vehicle/v15/components/full/modes/commctrl",
+                "/vehicle/v15/components/full/modes/dtcsetting",
+                "/vehicle/v15/components/full/modes/security",
+                "/vehicle/v15/components/minimal/modes/security",
+            ]
+        );
     }
 
     pub fn create_test_webserver_state<T: UdsEcu + Clone, U: FileManager>(
