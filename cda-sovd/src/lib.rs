@@ -297,7 +297,9 @@ where
     let operations_router =
         sovd::apps::sovd2uds::operations::runtimefilesupdate::routes::<S, P, L>(route_state);
     let router = bulk_data_router.merge(operations_router);
-    let handle = dynamic_router.add_routes(router.into()).await;
+    let handle = dynamic_router
+        .add_routes(aide::axum::ApiRouter::from(router))
+        .await;
     for path in sovd::apps::sovd2uds::bulk_data::runtimefiles::CATEGORY_PATHS {
         dynamic_router.register_bulk_data_category(path).await;
     }
