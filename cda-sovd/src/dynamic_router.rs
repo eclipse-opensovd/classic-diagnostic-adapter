@@ -17,7 +17,7 @@ use std::sync::{
 };
 
 use aide::{
-    axum::ApiRouter,
+    axum::{ApiRouter, routing::ApiMethodRouter},
     openapi::{OpenApi, Paths},
 };
 use axum::middleware;
@@ -38,6 +38,10 @@ enum ListingKind {
     Operation(bool),
     /// A category of a `bulk-data` collection.
     BulkData,
+    /// An entity listed by its entity collection, with its display name.
+    Entity(String),
+    /// A mode, with its display name.
+    Mode(String),
 }
 
 /// A resource listed by its collection, declared together with the routes serving it.
@@ -48,53 +52,139 @@ struct Listing {
     kind: ListingKind,
 }
 
-/// A route group to register with a [`DynamicRouter`], together with the resources it
-/// lists in the `/data`, `operations` and `bulk-data` collections.
+/// A route group to register with a [`DynamicRouter`]. Its resource methods install
+/// handlers and declare their collection entries together.
 ///
 /// The listings share the lifecycle of the route group: they are listed while the group
 /// is registered, and replaced or removed together with it. Any [`ApiRouter`] converts
-/// into [`Routes`] without listings.
-pub struct Routes {
-    router: ApiRouter,
+/// into [`Routes`] without listings. Resources determined dynamically, such as ECU
+/// services, are still discovered by their collection handlers.
+pub struct Routes<S = ()> {
+    router: ApiRouter<S>,
     listings: Vec<Listing>,
 }
 
-impl Routes {
+impl<S: Clone + Send + Sync + 'static> Routes<S> {
     /// Creates a route group from `router`, without listings.
     #[must_use]
-    pub fn new(router: ApiRouter) -> Self {
+    pub fn new(router: ApiRouter<S>) -> Self {
         Self {
             router,
             listings: Vec::new(),
         }
     }
 
-    /// Lists a resource in its `/data` collection with the given data category
+    /// Transforms the router while retaining this group's listings.
+    ///
+    /// This can be used to add routes or middleware to a group returned by
+    /// [`crate::build_vehicle_routes`]. The caller must keep the listings consistent
+    /// with any routes changed by the transformation. Routes added here are not
+    /// automatically listed; use the resource methods instead for discoverable resources.
+    #[must_use]
+    pub fn map_router(self, transform: impl FnOnce(ApiRouter<S>) -> ApiRouter<S>) -> Self {
+        Self {
+            router: transform(self.router),
+            listings: self.listings,
+        }
+    }
+
+    /// Adds a resource and lists it in its `/data` collection with the given data category
     /// (ISO 17978-3 Table 70, e.g. `identData`).
     ///
     /// `path` is the full path of the resource, e.g. `/vehicle/v15/data/version`; its
     /// parent is the collection, its last segment the id.
     #[must_use]
-    pub fn data(self, path: &str, category: &str) -> Self {
+    pub fn data(
+        mut self,
+        path: &str,
+        category: &str,
+        handler: impl Into<ApiMethodRouter<S>>,
+    ) -> Self {
+        self.router = self.router.api_route(path, handler.into());
         self.listed(path, ListingKind::Data(category.to_owned()))
     }
 
-    /// Lists an operation in its `operations` collection.
+    /// Adds an operation's execution route and lists the operation in its collection.
     ///
     /// `path` is the full path of the operation, e.g.
     /// `/vehicle/v15/apps/sovd2uds/operations/runtimefilesupdate`; its parent is the
     /// collection, its last segment the id. `asynchronous` tells whether its execution is
     /// asynchronous.
     #[must_use]
-    pub fn operation(self, path: &str, asynchronous: bool) -> Self {
+    pub fn operation(
+        mut self,
+        path: &str,
+        asynchronous: bool,
+        handler: impl Into<ApiMethodRouter<S>>,
+    ) -> Self {
+        self.router = self
+            .router
+            .api_route(&format!("{path}/executions"), handler.into());
         self.listed(path, ListingKind::Operation(asynchronous))
     }
 
-    /// Lists a category in its `bulk-data` collection. `path` is the full path of the
+    /// Adds a category and lists it in its `bulk-data` collection. `path` is the full path of the
     /// category, e.g. `/vehicle/v15/apps/sovd2uds/bulk-data/flashfiles`.
     #[must_use]
-    pub fn bulk_data(self, path: &str) -> Self {
+    pub fn bulk_data(mut self, path: &str, handler: impl Into<ApiMethodRouter<S>>) -> Self {
+        self.router = self.router.api_route(path, handler.into());
         self.listed(path, ListingKind::BulkData)
+    }
+
+    /// Adds an entity and lists it in its parent entity collection.
+    #[must_use]
+    pub fn entity(mut self, path: &str, handler: impl Into<ApiMethodRouter<S>>) -> Self {
+        self.router = self.router.api_route(path, handler.into());
+        let name = path
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or_default();
+        self.listed(path, ListingKind::Entity(name.to_owned()))
+    }
+
+    /// Adds a mode and lists it in its parent `modes` collection.
+    #[must_use]
+    pub fn mode(mut self, path: &str, name: &str, handler: impl Into<ApiMethodRouter<S>>) -> Self {
+        self.router = self.router.api_route(path, handler.into());
+        self.listed(path, ListingKind::Mode(name.to_owned()))
+    }
+
+    /// Supplies router state while retaining the group's resource listings.
+    #[must_use]
+    pub fn with_state<S2: Clone + Send + Sync + 'static>(self, state: S) -> Routes<S2> {
+        Routes {
+            router: self.router.with_state(state),
+            listings: self.listings,
+        }
+    }
+
+    /// Merges two route groups and their resource listings.
+    #[must_use]
+    pub fn merge(mut self, other: Self) -> Self {
+        self.router = self.router.merge(other.router);
+        self.listings.extend(other.listings);
+        self
+    }
+
+    /// Nests a state-bound route group, retaining and prefixing its listings.
+    #[must_use]
+    pub fn nest(mut self, prefix: &str, nested: Routes) -> Self {
+        self.router = self.router.nest_api_service(prefix, nested.router);
+        self.listings
+            .extend(nested.listings.into_iter().map(|mut listing| {
+                listing.collection =
+                    format!("{}{}", prefix.trim_end_matches('/'), listing.collection);
+                listing
+            }));
+        self
+    }
+
+    /// Nests an entity's routes and lists the entity in its parent collection.
+    #[must_use]
+    pub fn nest_entity(self, prefix: &str, name: &str, nested: Routes) -> Self {
+        self.nest(prefix, nested)
+            .listed(prefix, ListingKind::Entity(name.to_owned()))
     }
 
     fn listed(mut self, path: &str, kind: ListingKind) -> Self {
@@ -110,7 +200,6 @@ impl Routes {
     }
 }
 
-/// A route group without routes, to list resources that another group serves.
 impl Default for Routes {
     fn default() -> Self {
         Self::new(ApiRouter::new())
@@ -129,13 +218,15 @@ type Collections<V> = IndexMap<String, IndexMap<String, V>>;
 
 /// The resources listed by the collections of all registered route groups.
 ///
-/// Rebuilt from the listings of the route groups on every recomposition, so it always
-/// matches the registered routes. Handlers read it as a request extension.
+/// Rebuilt from the resource declarations of the route groups on every recomposition.
+/// Handlers read it as a request extension.
 #[derive(Default)]
 pub(crate) struct ResourceCatalog {
     data: Collections<String>,
     operations: Collections<bool>,
     bulk_data: Collections<()>,
+    entities: Collections<String>,
+    modes: Collections<String>,
 }
 
 impl ResourceCatalog {
@@ -159,6 +250,8 @@ impl ResourceCatalog {
                     insert(&mut catalog.operations, listing, *asynchronous);
                 }
                 ListingKind::BulkData => insert(&mut catalog.bulk_data, listing, ()),
+                ListingKind::Entity(name) => insert(&mut catalog.entities, listing, name.clone()),
+                ListingKind::Mode(name) => insert(&mut catalog.modes, listing, name.clone()),
             }
         }
         catalog
@@ -194,6 +287,16 @@ impl ResourceCatalog {
             .get(collection)
             .map(|categories| categories.keys().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Returns entity IDs and names listed in `collection`.
+    pub(crate) fn entities(&self, collection: &str) -> Vec<(String, String)> {
+        Self::entries(&self.entities, collection)
+    }
+
+    /// Returns mode IDs and names listed in `collection`.
+    pub(crate) fn modes(&self, collection: &str) -> Vec<(String, String)> {
+        Self::entries(&self.modes, collection)
     }
 }
 
@@ -278,8 +381,8 @@ pub struct RouteGroupNotFound {
 /// Handles are returned on registration and must be stored by the caller if the routes need
 /// to be replaced or removed later (e.g., during a runtime database reload).
 ///
-/// The resources a group lists in the `/data`, `operations` and `bulk-data` collections
-/// (see [`Routes`]) are added, replaced and removed together with the group.
+/// Resource and entity listings created by [`Routes`] are added, replaced and removed
+/// together with the group.
 #[derive(Clone)]
 pub struct DynamicRouter {
     route_groups: RouteGroups,
@@ -313,23 +416,6 @@ impl DynamicRouter {
             router: Arc::new(RwLock::new(initial_router)),
             next_id: Arc::new(AtomicU64::new(0)),
         }
-    }
-
-    /// Lists a resource of a `/data` collection in a route group without routes.
-    pub async fn register_data_resource(&self, path: &str, category: &str) {
-        self.add_routes(Routes::default().data(path, category))
-            .await;
-    }
-
-    /// Lists an operation of an `operations` collection in a route group without routes.
-    pub async fn register_operation(&self, path: &str, asynchronous: bool) {
-        self.add_routes(Routes::default().operation(path, asynchronous))
-            .await;
-    }
-
-    /// Lists a category of a `bulk-data` collection in a route group without routes.
-    pub async fn register_bulk_data_category(&self, path: &str) {
-        self.add_routes(Routes::default().bulk_data(path)).await;
     }
 
     /// Returns a clone of the current composed router.
@@ -546,6 +632,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transforming_router_preserves_listings_and_adds_routes() {
+        let dr = DynamicRouter::new();
+        add_vehicle_data_collection(&dr).await;
+        let routes = Routes::default()
+            .data(
+                "/vehicle/v15/data/version",
+                "identData",
+                routing::get(|| async { "version" }),
+            )
+            .map_router(|router| {
+                router
+                        .route(
+                            "/custom",
+                            routing::get(
+                                |axum::Extension(value): axum::Extension<&'static str>| async move {
+                                    value
+                                },
+                            ),
+                        )
+                        .layer(axum::Extension("custom"))
+            });
+        let handle = dr.add_routes(routes).await;
+
+        assert_eq!(
+            vehicle_data_items(&dr).await,
+            [item("version", "identData")]
+        );
+        for (path, expected) in [
+            ("/vehicle/v15/data/version", "version"),
+            ("/custom", "custom"),
+        ] {
+            let response = dr
+                .get_router()
+                .await
+                .oneshot(request("GET", path))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(body_to_string(response.into_body()).await, expected);
+        }
+
+        dr.remove_routes(&handle).await;
+        assert!(vehicle_data_items(&dr).await.is_empty());
+        let response = dr
+            .get_router()
+            .await
+            .oneshot(request("GET", "/custom"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn operations_collection_lists_registered_operations() {
         let dr = DynamicRouter::new();
         let operations = crate::sovd::apps::sovd2uds::OPERATIONS_PATH;
@@ -556,10 +695,21 @@ mod tests {
         .await;
         dr.add_routes(
             Routes::default()
-                .operation(&format!("{operations}/update"), true)
-                .operation(&format!("{operations}/connect"), false)
+                .operation(
+                    &format!("{operations}/update"),
+                    true,
+                    routing::get(|| async {}),
+                )
+                .operation(
+                    &format!("{operations}/connect"),
+                    false,
+                    routing::get(|| async {}),
+                )
                 // Resources of other collections are not listed.
-                .bulk_data("/vehicle/v15/apps/sovd2uds/bulk-data/flashfiles"),
+                .bulk_data(
+                    "/vehicle/v15/apps/sovd2uds/bulk-data/flashfiles",
+                    routing::get(|| async {}),
+                ),
         )
         .await;
 
@@ -583,6 +733,264 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn entity_collection_tracks_registered_routes() {
+        let dr = DynamicRouter::new();
+        let collection = "/vehicle/v15/apps";
+        dr.add_routes(ApiRouter::new().route(collection, axum::routing::get(sovd::apps::get)))
+            .await;
+        let handle = dr
+            .add_routes(Routes::default().entity(
+                "/vehicle/v15/apps/example",
+                routing::get(|| async { "example" }),
+            ))
+            .await;
+        let body = get_json(&dr, collection).await;
+        assert_eq!(
+            body.get("items")
+                .and_then(|v| v.get(0))
+                .and_then(|v| v.get("id"))
+                .and_then(serde_json::Value::as_str),
+            Some("example")
+        );
+        let response = dr
+            .get_router()
+            .await
+            .oneshot(request("GET", "/vehicle/v15/apps/example"))
+            .await
+            .unwrap();
+        assert_eq!(body_to_string(response.into_body()).await, "example");
+        dr.remove_routes(&handle).await;
+        assert_eq!(
+            get_json(&dr, collection).await.get("items"),
+            Some(&serde_json::json!([]))
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_entity_is_listed_with_display_name() {
+        let dr = DynamicRouter::new();
+        dr.add_routes(ApiRouter::new().route(
+            "/vehicle/v15/components",
+            axum::routing::get(
+                |axum::Extension(catalog): axum::Extension<Arc<ResourceCatalog>>| async move {
+                    axum::Json(catalog.entities("/vehicle/v15/components"))
+                },
+            ),
+        ))
+        .await;
+        let entity =
+            Routes::new(ApiRouter::new().route("/", routing::get(|| async { "component" })));
+        let handle = dr
+            .add_routes(Routes::default().nest_entity("/vehicle/v15/components/ecu", "ECU", entity))
+            .await;
+        assert_eq!(
+            get_json(&dr, "/vehicle/v15/components").await,
+            serde_json::json!([["ecu", "ECU"]])
+        );
+        dr.remove_routes(&handle).await;
+        assert_eq!(
+            get_json(&dr, "/vehicle/v15/components").await,
+            serde_json::json!([])
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_bulk_data_is_listed_with_its_full_path() {
+        let dr = DynamicRouter::new();
+        let collection = "/vehicle/v15/components/example/bulk-data";
+        let nested = Routes::default()
+            .map_router(|router| {
+                router.route(
+                    "/bulk-data",
+                    axum::routing::get(sovd::components::ecu::x_sovd2uds_bulk_data::get),
+                )
+            })
+            .bulk_data("/bulk-data/files", routing::get(|| async { "files" }));
+        let handle = dr
+            .add_routes(Routes::default().nest("/vehicle/v15/components/example", nested))
+            .await;
+        assert_eq!(
+            get_json(&dr, collection)
+                .await
+                .get("items")
+                .and_then(|v| v.get(0))
+                .and_then(|v| v.get("id"))
+                .and_then(serde_json::Value::as_str),
+            Some("files")
+        );
+        let response = dr
+            .get_router()
+            .await
+            .oneshot(request(
+                "GET",
+                "/vehicle/v15/components/example/bulk-data/files",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(body_to_string(response.into_body()).await, "files");
+        dr.remove_routes(&handle).await;
+        let response = dr
+            .get_router()
+            .await
+            .oneshot(request("GET", collection))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn nested_mode_routes_and_metadata_share_lifecycle() {
+        let dr = DynamicRouter::new();
+        let collection = "/entity/modes";
+        let nested = Routes::default()
+            .map_router(|router| {
+                router.route("/modes", axum::routing::get(
+                |axum::Extension(catalog): axum::Extension<Arc<ResourceCatalog>>| async move {
+                    axum::Json(catalog.modes("/entity/modes"))
+                },
+            ))
+            })
+            .mode(
+                "/modes/drive",
+                "Drive mode",
+                routing::get(|| async { "drive" }),
+            );
+        let handle = dr
+            .add_routes(Routes::default().nest("/entity", nested))
+            .await;
+        assert_eq!(
+            get_json(&dr, collection).await,
+            serde_json::json!([["drive", "Drive mode"]])
+        );
+        let response = dr
+            .get_router()
+            .await
+            .oneshot(request("GET", "/entity/modes/drive"))
+            .await
+            .unwrap();
+        assert_eq!(body_to_string(response.into_body()).await, "drive");
+        dr.remove_routes(&handle).await;
+        let response = dr
+            .get_router()
+            .await
+            .oneshot(request("GET", collection))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn functional_group_modes_handler_reads_registered_modes() {
+        use aide::UseApi;
+        use axum::{
+            Extension,
+            extract::{OriginalUri, Query, State},
+        };
+        use axum_extra::extract::WithRejection;
+        use cda_interfaces::mock::MockUdsEcu;
+        use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
+
+        let routes = Routes::default().mode(
+            "/vehicle/v15/functions/functionalgroups/group/modes/custom",
+            "Custom mode",
+            routing::get(|| async {}),
+        );
+        let catalog = Arc::new(ResourceCatalog::from_listings(routes.listings.iter()));
+        let state = sovd::functions::functional_groups::tests::create_test_fg_state(
+            MockUdsEcu::new(),
+            "group".to_owned(),
+        );
+        let response = sovd::functions::functional_groups::modes::get(
+            Extension(catalog),
+            OriginalUri(
+                "/vehicle/v15/functions/functionalgroups/group/modes"
+                    .parse()
+                    .unwrap(),
+            ),
+            UseApi(
+                Secured(Box::new(TestSecurityPlugin)),
+                std::marker::PhantomData,
+            ),
+            WithRejection(
+                Query(sovd_interfaces::IncludeSchemaQuery {
+                    include_schema: false,
+                }),
+                std::marker::PhantomData,
+            ),
+            State(state),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_str(&body_to_string(response.into_body()).await).unwrap();
+        assert_eq!(
+            body.get("items"),
+            Some(&serde_json::json!([{ "id": "custom", "name": "Custom mode" }]))
+        );
+    }
+
+    #[tokio::test]
+    async fn ecu_modes_handler_filters_authentication_using_live_capability() {
+        use aide::UseApi;
+        use axum::{
+            Extension,
+            extract::{OriginalUri, Query, State},
+        };
+        use axum_extra::extract::WithRejection;
+        use cda_interfaces::{
+            file_manager::mock::MockFileManager,
+            mock::{MockUdsEcu, mock_ecu_state_online_variant_detected},
+        };
+        use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
+
+        let routes = Routes::default()
+            .mode(
+                "/vehicle/v15/components/test/modes/session",
+                "Session",
+                routing::get(|| async {}),
+            )
+            .mode(
+                "/vehicle/v15/components/test/modes/authentication",
+                "Authentication",
+                routing::get(|| async {}),
+            );
+        let catalog = Arc::new(ResourceCatalog::from_listings(routes.listings.iter()));
+        let mut uds = MockUdsEcu::new();
+        uds.expect_get_ecu_state()
+            .returning(|_| Ok(mock_ecu_state_online_variant_detected()));
+        uds.expect_has_authentication_services()
+            .returning(|_| false);
+        let state = sovd::tests::create_test_webserver_state(
+            "test".to_owned(),
+            uds,
+            MockFileManager::new(),
+        );
+        let response = sovd::components::ecu::modes::get(
+            Extension(catalog),
+            OriginalUri("/vehicle/v15/components/test/modes".parse().unwrap()),
+            UseApi(
+                Secured(Box::new(TestSecurityPlugin)),
+                std::marker::PhantomData,
+            ),
+            WithRejection(
+                Query(sovd_interfaces::IncludeSchemaQuery {
+                    include_schema: false,
+                }),
+                std::marker::PhantomData,
+            ),
+            State(state),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_str(&body_to_string(response.into_body()).await).unwrap();
+        assert_eq!(
+            body.get("items"),
+            Some(&serde_json::json!([{ "id": "session", "name": "Session" }]))
+        );
+    }
+
+    #[tokio::test]
     async fn app_links_operations_only_if_one_is_registered() {
         let dr = DynamicRouter::new();
         let app = "/vehicle/v15/apps/sovd2uds";
@@ -594,7 +1002,11 @@ mod tests {
         assert!(get_json(&dr, app).await.get("operations").is_none());
 
         let handle = dr
-            .add_routes(Routes::default().operation(&format!("{app}/operations/update"), true))
+            .add_routes(Routes::default().operation(
+                &format!("{app}/operations/update"),
+                true,
+                routing::get(|| async {}),
+            ))
             .await;
         assert_eq!(
             get_json(&dr, app)
@@ -617,11 +1029,16 @@ mod tests {
             .await;
         dr.add_routes(
             Routes::default()
-                .data("/vehicle/v15/data/x-vendor-info", "sysInfo")
+                .data(
+                    "/vehicle/v15/data/x-vendor-info",
+                    "sysInfo",
+                    routing::get(|| async {}),
+                )
                 // Resources of other collections are not listed.
                 .data(
                     "/vehicle/v15/apps/sovd2uds/data/networkstructure",
                     "sysInfo",
+                    routing::get(|| async {}),
                 ),
         )
         .await;
@@ -647,10 +1064,18 @@ mod tests {
     async fn removing_a_group_removes_its_listings() {
         let dr = DynamicRouter::new();
         add_vehicle_data_collection(&dr).await;
-        dr.add_routes(Routes::default().data("/vehicle/v15/data/kept", "sysInfo"))
-            .await;
+        dr.add_routes(Routes::default().data(
+            "/vehicle/v15/data/kept",
+            "sysInfo",
+            routing::get(|| async {}),
+        ))
+        .await;
         let handle = dr
-            .add_routes(Routes::default().data("/vehicle/v15/data/removed", "sysInfo"))
+            .add_routes(Routes::default().data(
+                "/vehicle/v15/data/removed",
+                "sysInfo",
+                routing::get(|| async {}),
+            ))
             .await;
         assert_eq!(
             vehicle_data_items(&dr).await,
@@ -668,18 +1093,38 @@ mod tests {
         let handle = dr
             .add_routes(
                 Routes::default()
-                    .data("/vehicle/v15/data/old", "sysInfo")
-                    .data("/vehicle/v15/data/changed", "sysInfo"),
+                    .data(
+                        "/vehicle/v15/data/old",
+                        "sysInfo",
+                        routing::get(|| async {}),
+                    )
+                    .data(
+                        "/vehicle/v15/data/changed",
+                        "sysInfo",
+                        routing::get(|| async {}),
+                    ),
             )
             .await;
-        dr.add_routes(Routes::default().data("/vehicle/v15/data/other", "sysInfo"))
-            .await;
+        dr.add_routes(Routes::default().data(
+            "/vehicle/v15/data/other",
+            "sysInfo",
+            routing::get(|| async {}),
+        ))
+        .await;
 
         dr.replace_routes(
             &handle,
             Routes::default()
-                .data("/vehicle/v15/data/changed", "identData")
-                .data("/vehicle/v15/data/new", "sysInfo"),
+                .data(
+                    "/vehicle/v15/data/changed",
+                    "identData",
+                    routing::get(|| async {}),
+                )
+                .data(
+                    "/vehicle/v15/data/new",
+                    "sysInfo",
+                    routing::get(|| async {}),
+                ),
         )
         .await
         .unwrap();
@@ -699,10 +1144,18 @@ mod tests {
     async fn removing_an_overriding_group_restores_the_overridden_listing() {
         let dr = DynamicRouter::new();
         add_vehicle_data_collection(&dr).await;
-        dr.add_routes(Routes::default().data("/vehicle/v15/data/version", "identData"))
-            .await;
+        dr.add_routes(Routes::default().data(
+            "/vehicle/v15/data/version",
+            "identData",
+            routing::get(|| async {}),
+        ))
+        .await;
         let handle = dr
-            .add_routes(Routes::default().data("/vehicle/v15/data/version", "sysInfo"))
+            .add_routes(Routes::default().data(
+                "/vehicle/v15/data/version",
+                "sysInfo",
+                routing::get(|| async {}),
+            ))
             .await;
         assert_eq!(vehicle_data_items(&dr).await, [item("version", "sysInfo")]);
 
@@ -716,8 +1169,8 @@ mod tests {
     #[test]
     fn listing_without_collection_is_ignored() {
         let routes = Routes::default()
-            .data("version", "identData")
-            .bulk_data("/");
+            .listed("version", ListingKind::Data("identData".to_owned()))
+            .listed("/", ListingKind::BulkData);
         assert!(routes.listings.is_empty());
     }
 

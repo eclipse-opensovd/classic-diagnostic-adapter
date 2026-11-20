@@ -11,27 +11,43 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::sync::Arc;
+
 use aide::UseApi;
 use axum::{
+    Extension,
     extract::{OriginalUri, Query},
     response::Response,
 };
 use axum_extra::extract::WithRejection;
 use opensovd_axum_extra::ExtractHost;
 
-use crate::sovd::{IntoSovd, error::ApiError, resource_response};
+use crate::{
+    dynamic_router::ResourceCatalog,
+    sovd::{IntoSovd, error::ApiError, resource_response},
+};
 
 pub(crate) mod sovd2uds;
 
 pub(crate) async fn get(
     UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
+    Extension(catalog): Extension<Arc<ResourceCatalog>>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::IncludeSchemaQuery>,
         ApiError,
     >,
     OriginalUri(uri): OriginalUri,
 ) -> Response {
-    resource_response(&host, &uri, vec![("sovd2uds", None)], query.include_schema)
+    let entities = catalog.entities("/vehicle/v15/apps");
+    resource_response(
+        &host,
+        &uri,
+        entities
+            .iter()
+            .map(|(id, name)| (name.as_str(), Some(id.as_str())))
+            .collect(),
+        query.include_schema,
+    )
 }
 
 impl IntoSovd for cda_interfaces::datatypes::NetworkStructure {

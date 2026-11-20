@@ -11,12 +11,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use aide::{UseApi, transform::TransformOperation};
 use axum::{
-    Json,
-    extract::{Query, State},
+    Extension, Json,
+    extract::{OriginalUri, Query, State},
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
@@ -24,15 +24,13 @@ use cda_interfaces::{DiagServiceError, HashMap, UdsEcu, diagservices::DiagServic
 use http::StatusCode;
 use serde::Serialize;
 use sovd_interfaces::{
-    common::modes::{
-        COMM_CONTROL_ID, COMM_CONTROL_NAME, DTC_SETTING_ID, DTC_SETTING_NAME, SESSION_ID,
-        SESSION_NAME,
-    },
+    common::modes::{COMM_CONTROL_ID, COMM_CONTROL_NAME, SESSION_ID, SESSION_NAME},
     functions::functional_groups::modes::get::{Response as ModesResponse, ResponseItem},
 };
 
 use crate::{
     create_schema,
+    dynamic_router::ResourceCatalog,
     sovd::{
         error::{ApiError, ErrorWrapper, VendorErrorCode, nrc_to_api_error_response},
         functions::functional_groups::WebserverFgState,
@@ -41,6 +39,8 @@ use crate::{
 };
 
 pub(crate) async fn get<T: UdsEcu + Clone>(
+    Extension(catalog): Extension<Arc<ResourceCatalog>>,
+    OriginalUri(uri): OriginalUri,
     UseApi(cda_plugin_security::Secured(security_plugin), _): UseApi<
         cda_plugin_security::Secured,
         (),
@@ -70,23 +70,15 @@ pub(crate) async fn get<T: UdsEcu + Clone>(
     (
         StatusCode::OK,
         Json(ModesResponse {
-            items: vec![
-                ResponseItem {
-                    id: COMM_CONTROL_ID.to_owned(),
-                    name: Some(COMM_CONTROL_NAME.to_owned()),
+            items: catalog
+                .modes(uri.path())
+                .into_iter()
+                .map(|(id, name)| ResponseItem {
+                    id,
+                    name: Some(name),
                     translation_id: None,
-                },
-                ResponseItem {
-                    id: DTC_SETTING_ID.to_owned(),
-                    name: Some(DTC_SETTING_NAME.to_owned()),
-                    translation_id: None,
-                },
-                ResponseItem {
-                    id: SESSION_ID.to_owned(),
-                    name: Some(SESSION_NAME.to_owned()),
-                    translation_id: None,
-                },
-            ],
+                })
+                .collect(),
             schema,
         }),
     )
