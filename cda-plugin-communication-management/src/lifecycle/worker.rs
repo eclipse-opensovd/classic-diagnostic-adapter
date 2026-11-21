@@ -44,7 +44,10 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use super::{
     disable::{DisableLeaseId, DisableOwner, DisableReason},
-    state::{CommunicationStateStore, detection_mode},
+    state::{
+        ActivationKind, CommunicationStateStore, DetectionStage, LifecyclePhase,
+        OperationResultReceiver, detection_mode,
+    },
     transition::{self, LifecycleDecision, LifecycleRequest},
 };
 
@@ -61,13 +64,15 @@ pub(crate) enum LifecycleCommand {
     /// initializers in registration order, then publish the result and, on
     /// success, call every hook's `on_enabled()` before replying.
     Activate {
-        operation: CommunicationOperation,
+        kind: ActivationKind,
+        attempt: OperationResultReceiver,
         /// Optional detector to run after initialization.
         detector: Option<Arc<dyn CommunicationVariantDetection>>,
         reply: ActivationReply,
     },
     /// Runs the registered variant detector.
     Redetect {
+        attempt: OperationResultReceiver,
         /// `None` is a successful no-op.
         detector: Option<Arc<dyn CommunicationVariantDetection>>,
         reply: ActivationReply,
@@ -78,9 +83,12 @@ pub(crate) enum LifecycleCommand {
         reason: DisableReason,
         reply: oneshot::Sender<Result<(), CommunicationOperationFailure>>,
     },
-    /// Releases an exclusive disable lease.
+    /// Releases an exclusive disable lease: [`LifecycleRequest::Resume`] restores
+    /// what it displaced, [`LifecycleRequest::ResumeAndDetect`] hands it over to a
+    /// full activation with variant detection.
     ReleaseDisableLease {
         id: DisableLeaseId,
+        request: LifecycleRequest,
         reply: ActivationReply,
     },
     /// Finishes an exclusive disable lease without activating: consumes the
@@ -126,21 +134,19 @@ async fn deinitialize_all(initializers: &[Arc<dyn CommunicationLifecycle>]) {
 /// Calls `on_enabled()` on every registered hook, in registration order.
 ///
 /// Only called once the lifecycle state has actually been published as
-/// `Enabled` (see [`LifecycleWorker::handle_command`] and
-/// [`LifecycleWorker::execute_release`]), so every hook's `on_enabled`
-/// observes a settled `Enabled` state.
+/// `Enabled` (see [`LifecycleWorker::run_activation`]), so every hook's
+/// `on_enabled` observes a settled `Enabled` state.
 async fn on_enabled_all(initializers: &[Arc<dyn CommunicationLifecycle>]) {
     for initializer in initializers {
         initializer.on_enabled().await;
     }
 }
 
-/// Enables transport, initializes hooks, then optionally runs detection.
-async fn run_activation(
+/// Enables transport and initializes hooks, rolling back on failure.
+async fn bring_up(
     resources: &WorkerResources,
     operation: CommunicationOperation,
-    detector: Option<Arc<dyn CommunicationVariantDetection>>,
-) -> Result<CommunicationState, CommunicationOperationFailure> {
+) -> Result<(), CommunicationOperationFailure> {
     if let Err(error) = resources.transport_control.enable().await {
         return Err(CommunicationOperationFailure::TransportFailure {
             operation,
@@ -166,27 +172,31 @@ async fn run_activation(
             return Err(failure);
         }
     }
+    Ok(())
+}
 
-    if let Some(detector) = &detector
-        && let Err(error) = detector.detect(DetectionPhase::Activation).await
-    {
-        // The detector failed, so tear down everything already initialized.
-        deinitialize_all(&resources.initializers).await;
-        let failure = match resources.transport_control.disable().await {
-            Ok(()) => CommunicationOperationFailure::DetectionFailure {
-                detector: detector.name().to_owned(),
-                error: error.to_string(),
-            },
-            Err(cleanup_error) => CommunicationOperationFailure::DetectionCleanupFailure {
-                detector: detector.name().to_owned(),
-                detection_error: error.to_string(),
-                cleanup_error: cleanup_error.to_string(),
-            },
-        };
-        return Err(failure);
-    }
-
-    Ok(CommunicationState::Enabled)
+/// Runs the detection stage of an activation, tearing down hooks and transport
+/// when it fails.
+async fn detect_or_tear_down(
+    resources: &WorkerResources,
+    detector: &Arc<dyn CommunicationVariantDetection>,
+) -> Result<CommunicationState, CommunicationOperationFailure> {
+    let Err(error) = detector.detect(DetectionPhase::Activation).await else {
+        return Ok(CommunicationState::Enabled);
+    };
+    deinitialize_all(&resources.initializers).await;
+    let failure = match resources.transport_control.disable().await {
+        Ok(()) => CommunicationOperationFailure::DetectionFailure {
+            detector: detector.name().to_owned(),
+            error: error.to_string(),
+        },
+        Err(cleanup_error) => CommunicationOperationFailure::DetectionCleanupFailure {
+            detector: detector.name().to_owned(),
+            detection_error: error.to_string(),
+            cleanup_error: cleanup_error.to_string(),
+        },
+    };
+    Err(failure)
 }
 
 /// Runs the registered variant detector. No detector is a successful no-op.
@@ -328,18 +338,35 @@ impl LifecycleWorker {
     async fn handle_command(&mut self, command: LifecycleCommand) {
         match command {
             LifecycleCommand::Activate {
-                operation,
+                kind,
+                attempt,
                 detector,
                 reply,
             } => {
-                let result = run_activation(&self.resources, operation, detector).await;
-                let result = self.finish_enabling(result, operation);
-                if matches!(result, Ok(CommunicationState::Enabled)) {
-                    on_enabled_all(&self.resources.initializers).await;
+                if let Err(failure) = self
+                    .state
+                    .lock()
+                    .validate_attempt(kind.operation(), &attempt)
+                {
+                    let _ = reply.send(Err(failure));
+                    return;
                 }
+                let result = self.run_activation(kind, &attempt, detector).await;
                 let _ = reply.send(result);
             }
-            LifecycleCommand::Redetect { detector, reply } => {
+            LifecycleCommand::Redetect {
+                detector,
+                attempt,
+                reply,
+            } => {
+                if let Err(failure) = self
+                    .state
+                    .lock()
+                    .validate_attempt(CommunicationOperation::Detect, &attempt)
+                {
+                    let _ = reply.send(Err(failure));
+                    return;
+                }
                 let result = run_redetection(detector).await;
                 let _ = reply.send(result);
             }
@@ -348,8 +375,8 @@ impl LifecycleWorker {
                 let result = self.execute_disable(id).await;
                 let _ = reply.send(result);
             }
-            LifecycleCommand::ReleaseDisableLease { id, reply } => {
-                let result = self.execute_release(id).await;
+            LifecycleCommand::ReleaseDisableLease { id, request, reply } => {
+                let result = self.execute_release(id, request).await;
                 let _ = reply.send(result);
             }
             LifecycleCommand::FinishDisableLease { id, reply } => {
@@ -373,13 +400,73 @@ impl LifecycleWorker {
         }
     }
 
+    /// Brings transport and hooks up, runs the detection stage the attempt
+    /// requires by then, and publishes the result. On success, calls every
+    /// hook's `on_enabled()` after publishing.
+    async fn run_activation(
+        &self,
+        kind: ActivationKind,
+        attempt: &OperationResultReceiver,
+        detector: Option<Arc<dyn CommunicationVariantDetection>>,
+    ) -> Result<CommunicationState, CommunicationOperationFailure> {
+        let result = if let Err(failure) = bring_up(&self.resources, kind.operation()).await {
+            self.finish_enabling(Err(failure), kind, attempt)
+        } else {
+            // Decided only now, so an explicit detection request that joined
+            // while transport and hooks came up is still honored.
+            let stage = self
+                .state
+                .lock()
+                .enter_detection_stage(kind, attempt, detector);
+            let (result, physically_up) = match stage {
+                DetectionStage::Settled(result) => (result, true),
+                DetectionStage::Run(detector) => {
+                    let physical = detect_or_tear_down(&self.resources, &detector).await;
+                    let physically_up = physical.is_ok();
+                    (self.finish_enabling(physical, kind, attempt), physically_up)
+                }
+            };
+            match result {
+                // The attempt was failed closed or replaced while the worker
+                // brought communication up, so the published state does not
+                // claim it. Tear down to match it; shutdown tears down itself.
+                Err(ref failure)
+                    if physically_up
+                        && !matches!(
+                            failure,
+                            CommunicationOperationFailure::ShuttingDown { .. }
+                        ) =>
+                {
+                    tracing::warn!(
+                        ?kind,
+                        %failure,
+                        "Activation completed for a stale attempt, tearing it down"
+                    );
+                    deinitialize_all(&self.resources.initializers).await;
+                    if let Err(error) = self.resources.transport_control.disable().await {
+                        tracing::error!(%error, "Tearing down a stale activation failed");
+                    }
+                    result
+                }
+                result => result,
+            }
+        };
+        if matches!(result, Ok(CommunicationState::Enabled)) {
+            on_enabled_all(&self.resources.initializers).await;
+        }
+        result
+    }
+
     /// Publishes the result of an enabling operation.
     fn finish_enabling(
         &self,
         result: Result<CommunicationState, CommunicationOperationFailure>,
-        operation: CommunicationOperation,
+        kind: ActivationKind,
+        attempt: &OperationResultReceiver,
     ) -> Result<CommunicationState, CommunicationOperationFailure> {
-        self.state.lock().publish_enabling_result(result, operation)
+        self.state
+            .lock()
+            .publish_enabling_result(result, kind, attempt)
     }
 
     /// Disables the transport for the current lease owner.
@@ -387,95 +474,85 @@ impl LifecycleWorker {
         &self,
         id: DisableLeaseId,
     ) -> Result<(), CommunicationOperationFailure> {
-        let was_enabled = {
+        let tears_down = {
             let state = self.state.lock();
-            let Some(owner) = state.disable_owner.filter(|owner| owner.id == id) else {
-                tracing::debug!("Disable rejected: unknown or conflicting owner");
-                return Err(CommunicationOperationFailure::TransitionFailure {
-                    operation: CommunicationOperation::Disable,
-                });
-            };
-            if !matches!(state.state, CommunicationState::Disabling) {
-                tracing::debug!("Disable rejected: state is no longer Disabling");
-                return Err(CommunicationOperationFailure::TransitionFailure {
-                    operation: CommunicationOperation::Disable,
-                });
+            match state.phase() {
+                LifecyclePhase::Disabling(owner) if owner.id == id => owner.tears_down,
+                _ => {
+                    tracing::debug!("Disable rejected: unknown or conflicting owner");
+                    return Err(CommunicationOperationFailure::TransitionFailure {
+                        operation: CommunicationOperation::Disable,
+                    });
+                }
             }
-            owner.resumes_transport
         };
 
-        if !was_enabled {
-            let mut state = self.state.lock();
-            state.state = CommunicationState::DisabledExclusive;
-            return Ok(());
+        if !tears_down {
+            return self.state.lock().publish_disable_result(id, Ok(()));
         }
 
         deinitialize_all(&self.resources.initializers).await;
 
         match self.resources.transport_control.disable().await {
-            Ok(()) => {
-                let mut state = self.state.lock();
-                state.state = CommunicationState::DisabledExclusive;
-                Ok(())
-            }
+            Ok(()) => self.state.lock().publish_disable_result(id, Ok(())),
             Err(error) => {
                 let failure = CommunicationOperationFailure::TransportFailure {
                     operation: CommunicationOperation::Disable,
                     error: error.to_string(),
                 };
-                self.finish_failed_disable(id, &failure);
-                Err(failure)
+                self.state.lock().publish_disable_result(id, Err(failure))
             }
         }
     }
 
-    fn finish_failed_disable(&self, id: DisableLeaseId, failure: &CommunicationOperationFailure) {
-        let mut state = self.state.lock();
-        if DisableOwner::owns(state.disable_owner, id) {
-            state.disable_owner = None;
-            state.state = CommunicationState::Error(failure.clone());
-        }
-    }
-
-    /// Releases a queued disable lease and restores its recorded state.
+    /// Releases a queued disable lease. [`LifecycleRequest::Resume`] restores the
+    /// state it displaced; [`LifecycleRequest::ResumeAndDetect`] hands it over to a
+    /// full activation with variant detection, whatever it displaced and also when
+    /// automatic detection is `Never`, like an explicit detection request.
+    ///
+    /// Checking ownership and claiming the activation happen in one lock hold, so
+    /// nothing else can bring communication up in between.
     #[tracing::instrument(skip_all, fields(dlt_context = dlt_ctx!("COMM")))]
     async fn execute_release(
         &self,
         id: DisableLeaseId,
+        request: LifecycleRequest,
     ) -> Result<CommunicationState, CommunicationOperationFailure> {
         let (result_tx, result_rx) = watch::channel(None);
-        let detector = {
+        let (kind, detector) = {
             let mut state = self.state.lock();
-            let Some(owner) = state.disable_owner.filter(|owner| owner.id == id) else {
-                tracing::debug!("Release rejected: unknown or conflicting lease");
-                return Err(super::disable::stale_resume_failure());
+            let Some(owner) = state.disable_owner().filter(|owner| owner.id == id) else {
+                tracing::debug!(?request, "Release rejected: unknown or conflicting lease");
+                return Err(super::disable::stale_release_failure(request));
             };
 
-            match transition::decide(&state, false, LifecycleRequest::Resume) {
-                LifecycleDecision::Claim(CommunicationOperation::Resume) => {
-                    let detector = if owner.resume_detects {
+            match transition::decide(&state, false, request) {
+                LifecycleDecision::Claim(kind) => {
+                    let detects =
+                        request == LifecycleRequest::ResumeAndDetect || owner.resume_detects;
+                    let detector = if detects {
                         state.variant_detector()
                     } else {
                         None
                     };
-                    state.disable_owner = None;
-                    state.state = CommunicationState::Enabling(CommunicationOperation::Resume);
-                    state.enabling_result = Some(result_rx);
-                    state.variant_detection = detection_mode(detector.as_ref());
-                    detector
+                    state.claim_activation_for(
+                        request,
+                        kind,
+                        result_rx.clone(),
+                        detection_mode(detector.as_ref()),
+                    )?;
+                    (kind, detector)
                 }
                 LifecycleDecision::SettleDisabled => {
-                    state.disable_owner = None;
-                    state.state = CommunicationState::Disabled;
+                    state.settle_disabled(id);
                     return Ok(CommunicationState::Disabled);
                 }
                 LifecycleDecision::ShuttingDown => {
                     return Err(CommunicationOperationFailure::ShuttingDown {
-                        operation: CommunicationOperation::Resume,
+                        operation: request.operation(),
                     });
                 }
                 LifecycleDecision::Conflict
-                | LifecycleDecision::Claim(_)
                 | LifecycleDecision::ClaimDetection
                 | LifecycleDecision::Join(_)
                 | LifecycleDecision::JoinDetection
@@ -484,23 +561,16 @@ impl LifecycleWorker {
                 | LifecycleDecision::GuardsHeld
                 | LifecycleDecision::LeaseHeld(_)
                 | LifecycleDecision::NotEnabled => {
-                    tracing::debug!("Release rejected: state no longer matches this lease");
-                    return Err(super::disable::stale_resume_failure());
+                    tracing::debug!(
+                        ?request,
+                        "Release rejected: state no longer matches this lease"
+                    );
+                    return Err(super::disable::stale_release_failure(request));
                 }
             }
         };
 
-        let result =
-            run_activation(&self.resources, CommunicationOperation::Resume, detector).await;
-        let result = self.finish_enabling(result, CommunicationOperation::Resume);
-        if matches!(result, Ok(CommunicationState::Enabled)) {
-            on_enabled_all(&self.resources.initializers).await;
-        }
-        // A resume that fails leaves the transport in an unknown state; the next
-        // operation must not simply retry over it.
-        if let Err(failure) = &result {
-            self.state.lock().state = CommunicationState::RecoveryRequired(failure.clone());
-        }
+        let result = self.run_activation(kind, &result_rx, detector).await;
         let _ = result_tx.send(Some(result.clone()));
         result
     }
@@ -515,12 +585,16 @@ impl LifecycleWorker {
         // One lock hold: checking ownership and consuming the lease must be
         // atomic, or a concurrent caller could take the lease in between.
         let mut state = self.state.lock();
-        if !DisableOwner::owns(state.disable_owner, id) {
+        if state.shutting_down {
+            return Err(CommunicationOperationFailure::ShuttingDown {
+                operation: CommunicationOperation::FinishDisableLease,
+            });
+        }
+        if !DisableOwner::owns(state.disable_owner(), id) {
             tracing::debug!("Finish rejected: unknown or conflicting lease");
             return Err(super::disable::stale_finish_failure());
         }
-        state.disable_owner = None;
-        state.state = CommunicationState::Disabled;
+        state.settle_disabled(id);
         Ok(())
     }
 
@@ -539,28 +613,20 @@ impl LifecycleWorker {
         }
 
         let mut state = self.state.lock();
-        state.state = match disable_result {
-            Ok(()) => CommunicationState::Disabled,
-            Err(error) => {
-                CommunicationState::Error(CommunicationOperationFailure::TransportFailure {
-                    operation: CommunicationOperation::Disable,
-                    error: error.to_string(),
-                })
+        state.publish_shutdown(disable_result.map_err(|error| {
+            CommunicationOperationFailure::TransportFailure {
+                operation: CommunicationOperation::Disable,
+                error: error.to_string(),
             }
-        };
-        state.disable_owner = None;
-        state.enabling_result = None;
-        state.detection_in_flight = None;
+        }));
         drop(state);
     }
 
     fn fail_queued_command(command: LifecycleCommand) {
         match command {
-            LifecycleCommand::Activate {
-                operation, reply, ..
-            } => {
+            LifecycleCommand::Activate { kind, reply, .. } => {
                 let _ = reply.send(Err(CommunicationOperationFailure::ShuttingDown {
-                    operation,
+                    operation: kind.operation(),
                 }));
             }
             LifecycleCommand::Redetect { reply, .. } => {
@@ -578,9 +644,9 @@ impl LifecycleWorker {
                     operation: CommunicationOperation::Disable,
                 }));
             }
-            LifecycleCommand::ReleaseDisableLease { reply, .. } => {
+            LifecycleCommand::ReleaseDisableLease { request, reply, .. } => {
                 let _ = reply.send(Err(CommunicationOperationFailure::ShuttingDown {
-                    operation: CommunicationOperation::Resume,
+                    operation: request.operation(),
                 }));
             }
             LifecycleCommand::FinishDisableLease { reply, .. } => {

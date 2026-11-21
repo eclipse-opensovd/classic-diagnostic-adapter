@@ -15,8 +15,9 @@
 
 use std::{sync::Arc, time::Duration};
 
-use cda_interfaces::request_authorization::{
-    RequestLockContext, RequestLockProvider, UdsRequestTarget,
+use cda_interfaces::{
+    request_authorization::{RequestLockContext, RequestLockProvider, UdsRequestTarget},
+    runtime_update_api::LockStateProvider,
 };
 use serde_json::{Map, Value, json};
 
@@ -126,4 +127,43 @@ async fn provider_reads_the_current_locks_through_the_trait() {
         snapshot.map(|lock| lock.holder),
         Some("holder-sub".to_owned())
     );
+}
+
+/// The provider reports the owner of any unexpired vehicle lock. A lock past its
+/// expiration that the expiration task has not removed yet grants nothing.
+#[tokio::test]
+async fn vehicle_lock_provider_ignores_expired_locks() {
+    let locks = Arc::new(Locks::new());
+    let provider = SovdLockStateProvider::new(Arc::clone(&locks));
+    assert_eq!(provider.vehicle_lock_owner_sub().await, None);
+
+    locks
+        .test_insert_active(
+            test_lock("vehicle")
+                .vehicle()
+                .owner("owner")
+                .exclusive(false)
+                .build(),
+        )
+        .await;
+    assert_eq!(
+        provider.vehicle_lock_owner_sub().await,
+        Some("owner".to_owned())
+    );
+
+    locks
+        .test_mutate_store(|store| {
+            store.state.delete("vehicle").expect("lock exists");
+        })
+        .await;
+    locks
+        .test_insert_active(
+            test_lock("vehicle")
+                .vehicle()
+                .owner("owner")
+                .expires_at(SystemTime::now() - Duration::from_secs(1))
+                .build(),
+        )
+        .await;
+    assert_eq!(provider.vehicle_lock_owner_sub().await, None);
 }

@@ -205,7 +205,7 @@ pub mod service {
 pub use crate::common::operations::{OperationDeleteQuery, OperationQuery};
 
 /// Status of a service execution.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ExecutionStatus {
     Running,

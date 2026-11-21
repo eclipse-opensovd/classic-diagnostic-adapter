@@ -180,6 +180,23 @@ impl<S: Storage + 'static> EcuTopologyStore for PersistentEcuTopologyStore<S> {
         .await
     }
 
+    async fn clear(&self) -> Result<(), TopologyStoreError> {
+        self.spawn_locked_write(move |storage| async move {
+            // Listed, not read: an entry that cannot be decoded goes as well.
+            let keys = match storage.get_collection(&CollectionName::EcuTopology).await {
+                Ok(collection) => collection.list().await?,
+                Err(StorageError::CollectionNotFound(_)) => return Ok(()),
+                Err(e) => return Err(e.into()),
+            };
+            let op: WriteOp = keys.into_iter().map(|key| (key, None)).collect();
+            if !op.is_empty() {
+                write(storage.as_ref(), op).await?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
     async fn merge_last_seen(
         &self,
         last_seen: &HashMap<String, SystemTime>,
@@ -572,6 +589,69 @@ mod tests {
         ) -> impl Future<Output = Result<(), StorageError>> + Send {
             self.inner.copy_collection(tx, source, dest)
         }
+    }
+
+    /// A clear also removes the entries a load skips.
+    #[tokio::test]
+    async fn clear_removes_unreadable_entries() {
+        let fixture = Fixture::new();
+        fixture
+            .store
+            .persist_gateways(&[gateway(0x1000, "FLXC1000")])
+            .await
+            .unwrap();
+        fixture.write_raw("0x2000", b"not json").await;
+
+        fixture.store.clear().await.unwrap();
+
+        let collection = fixture
+            .storage
+            .get_or_create_collection(&CollectionName::EcuTopology)
+            .await
+            .unwrap();
+        assert!(collection.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_without_a_collection_succeeds() {
+        Fixture::new().store.clear().await.unwrap();
+    }
+
+    /// [[ test~ecu-topology-store-serialized, A clear waits for a merge that is between its read and its commit, test ]]
+    #[tokio::test]
+    async fn clear_waits_for_merge_last_seen() {
+        let dir = tempfile::tempdir().expect("storage dir");
+        let storage = HoldingStorage::new(&dir);
+        let store = Arc::new(PersistentEcuTopologyStore::new(Arc::clone(&storage)));
+        store
+            .persist_gateways(&[gateway(0x1000, "FLXC1000")])
+            .await
+            .unwrap();
+
+        storage.hold_next_write();
+        let merge = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                let mut last_seen = HashMap::new();
+                last_seen.insert("flxc1000".to_owned(), SystemTime::now());
+                store.merge_last_seen(&last_seen).await
+            })
+        };
+        storage.wait_entered().await;
+        let clear = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move { store.clear().await })
+        };
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(100)).await;
+        assert!(!clear.is_finished(), "clear must wait for the merge");
+
+        storage.release();
+        merge.await.unwrap().unwrap();
+        clear.await.unwrap().unwrap();
+        assert!(
+            store.load().await.unwrap().gateways.is_empty(),
+            "clear ran last"
+        );
     }
 
     /// [[ test~ecu-topology-store-cancelled-call-keeps-lock, A write whose caller is dropped keeps the lock until its commit, test ]]

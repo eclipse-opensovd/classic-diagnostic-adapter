@@ -13,11 +13,7 @@
 
 use std::{option::Option, time::SystemTime};
 
-use cda_interfaces::{
-    UdsEcu,
-    lock_config::LockAcquisitionPolicy,
-    lock_priority_api::{LockId, LockScope},
-};
+use cda_interfaces::{UdsEcu, lock_config::LockAcquisitionPolicy, lock_priority_api::LockId};
 use cda_plugin_security::Claims;
 
 use super::{ActiveLock, ApiError, ErrorWrapper, LockCoverage, LockState, Locks, ScopeKey};
@@ -116,7 +112,7 @@ async fn validate_ecu_access(
             validate_active_locks(
                 claims.sub(),
                 state.active().filter(|lock| {
-                    active_lock_is_effective(state, lock, now)
+                    state.is_effective(lock, now)
                         && (lock.scope == ScopeKey::Vehicle
                             || lock.scope == target_scope
                             || lock.coverage.contains_ecu(ecu_name))
@@ -223,7 +219,7 @@ async fn validate_fg_access<T: UdsEcu>(
             validate_active_locks(
                 claims.sub(),
                 state.active().filter(|lock| {
-                    active_lock_is_effective(state, lock, now)
+                    state.is_effective(lock, now)
                         && (lock.scope == ScopeKey::Vehicle
                             || lock.scope == target_scope
                             || lock.coverage.overlaps(&target_coverage))
@@ -236,18 +232,6 @@ async fn validate_fg_access<T: UdsEcu>(
             })
         })
         .await
-}
-
-fn active_lock_is_effective(state: &LockState, lock: &ActiveLock, now: SystemTime) -> bool {
-    lock.expires_at > now
-        && lock
-            .parent_vehicle_lock_id
-            .as_deref()
-            .is_none_or(|parent_id| {
-                state
-                    .active_by_id(parent_id)
-                    .is_some_and(|parent| parent.expires_at > now)
-            })
 }
 
 pub(super) fn validate_active_locks<'a>(
@@ -289,19 +273,39 @@ pub(super) fn validate_claim(
     Ok(())
 }
 
+/// Which vehicle lock a vehicle-wide write requires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VehicleLockRequirement {
+    /// An exclusive or non-exclusive vehicle lock of the caller.
+    #[cfg_attr(
+        not(any(test, feature = "doip-direct-connect")),
+        expect(
+            dead_code,
+            reason = "Used only by the doip-connect-ecu route, which exists only with the \
+                      doip-direct-connect feature"
+        )
+    )]
+    Any,
+    /// An exclusive vehicle lock of the caller.
+    Exclusive,
+}
+
 /// Requires the caller to hold the effective vehicle lock.
 ///
 /// Used by operations that change the vehicle topology and therefore must not run
-/// while any other client works on the vehicle. Fails with `LockRequired` if no
-/// vehicle lock is held, `Locked` if another client holds it and `LockBroken` if
-/// the caller's vehicle lock was preempted.
-#[cfg(feature = "doip-direct-connect")]
+/// while any other client works on the vehicle. Fails with `LockBroken` (409) if the
+/// caller's vehicle lock was preempted, `Locked` (423) if another client holds an
+/// effective vehicle lock, and `LockRequired` (409) if the caller holds no vehicle lock,
+/// its vehicle lock has expired or, for [`VehicleLockRequirement::Exclusive`], it is not
+/// exclusive.
 pub(crate) async fn validate_vehicle_write(
     claims: &impl Claims,
     locks: &Locks,
     include_schema: bool,
+    requirement: VehicleLockRequirement,
 ) -> Result<(), ErrorWrapper> {
     let now = SystemTime::now();
+    let exclusive = requirement == VehicleLockRequirement::Exclusive;
     locks
         .core
         .read_store(|store| {
@@ -316,24 +320,40 @@ pub(crate) async fn validate_vehicle_write(
                 .cloned()
             {
                 let current_holder = state.current_holder(&lock).to_owned();
-                return Err(ErrorWrapper {
-                    error: lock.broken_error(&current_holder),
-                    include_schema,
-                });
+                return Err(lock.broken_error(&current_holder));
             }
-            validate_active_locks(
-                claims.sub(),
-                state.active().filter(|lock| {
-                    active_lock_is_effective(state, lock, now) && lock.scope == ScopeKey::Vehicle
-                }),
-                true,
-            )
-            .map_err(|error| ErrorWrapper {
-                error,
-                include_schema,
-            })
+            match state.active_for_scope(&ScopeKey::Vehicle) {
+                Some(lock)
+                    if lock.principal.subject != claims.sub() && state.is_effective(lock, now) =>
+                {
+                    Err(ApiError::Locked(
+                        "Vehicle lock is held by another client".to_owned(),
+                    ))
+                }
+                Some(lock)
+                    if lock.principal.subject == claims.sub() && !state.is_effective(lock, now) =>
+                {
+                    Err(ApiError::LockRequired("Vehicle lock expired".to_owned()))
+                }
+                Some(lock)
+                    if lock.principal.subject == claims.sub() && exclusive && !lock.exclusive =>
+                {
+                    Err(ApiError::LockRequired(
+                        "Exclusive vehicle lock required".to_owned(),
+                    ))
+                }
+                Some(lock) if lock.principal.subject == claims.sub() => Ok(()),
+                _ if exclusive => Err(ApiError::LockRequired(
+                    "Exclusive vehicle lock required".to_owned(),
+                )),
+                _ => Err(ApiError::LockRequired("Vehicle lock required".to_owned())),
+            }
         })
         .await
+        .map_err(|error| ErrorWrapper {
+            error,
+            include_schema,
+        })
 }
 
 /// Validates that an ECU or functional-group lock may be acquired with respect to the
@@ -344,17 +364,29 @@ pub(crate) async fn validate_vehicle_owner(
     locks: &Locks,
     claims: &impl Claims,
 ) -> Result<(), ApiError> {
-    match locks.active_for_scope(&LockScope::Vehicle).await {
-        None if locks.config.lock_acquisition_policy
-            == LockAcquisitionPolicy::VehicleLockRequired =>
-        {
-            Err(ApiError::Conflict(
-                "An active vehicle lock is required to acquire this lock".to_owned(),
-            ))
-        }
-        Some(owned) if owned.principal.subject != claims.sub() => Err(ApiError::Conflict(
-            "Vehicle lock is held by another client".to_owned(),
-        )),
-        _ => Ok(()),
-    }
+    let now = SystemTime::now();
+    locks
+        .core
+        .read_store(|store| {
+            let state = &store.state;
+            match state.active_for_scope(&ScopeKey::Vehicle) {
+                // A foreign lock blocks until it is removed, also once it has expired.
+                Some(owned) if owned.principal.subject != claims.sub() => Err(ApiError::Conflict(
+                    "Vehicle lock is held by another client".to_owned(),
+                )),
+                // An expired own lock grants nothing, also before the expiration task
+                // removed it.
+                owned
+                    if locks.config.lock_acquisition_policy
+                        == LockAcquisitionPolicy::VehicleLockRequired
+                        && owned.is_none_or(|owned| !state.is_effective(owned, now)) =>
+                {
+                    Err(ApiError::Conflict(
+                        "An active vehicle lock is required to acquire this lock".to_owned(),
+                    ))
+                }
+                _ => Ok(()),
+            }
+        })
+        .await
 }

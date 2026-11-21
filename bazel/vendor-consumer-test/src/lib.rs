@@ -23,7 +23,7 @@ use cda_interfaces::{
     communication_control::{
         CommunicationInitMode, CommunicationLifecycle, CommunicationOperationFailure,
         CommunicationState, CommunicationVariantDetection,
-        operation::{ActivationCause, DetectionCause},
+        operation::ActivationCause,
     },
     runtime_update_api::{
         BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider, ReloadError,
@@ -142,6 +142,13 @@ impl TopologyPlugin for FancyTopology {
     ) -> Option<Arc<dyn CommunicationLifecycle>> {
         self.inner.create_lifecycle_hook(source)
     }
+
+    fn reset_handle(
+        &self,
+        source: Arc<dyn TopologySource>,
+    ) -> Arc<dyn cda_interfaces::topology::NetworkReset> {
+        self.inner.reset_handle(source)
+    }
 }
 
 pub struct FancyCommunication {
@@ -181,15 +188,20 @@ impl CommunicationPlugin for FancyCommunication {
         self.handle.request_enable_and_detect()
     }
 
-    async fn trigger_detection(
-        &self,
-        _cause: DetectionCause,
-    ) -> Result<CommunicationState, CommunicationOperationFailure> {
+    async fn trigger_detection(&self) -> Result<CommunicationState, CommunicationOperationFailure> {
         self.handle.redetect().await
     }
 
     async fn disable(&self, reason: DisableReason) -> Result<DisableLease, DisableError> {
         self.handle.disable(reason).await
+    }
+
+    // A downstream plugin applies its policy to the rediscovery bring-up here.
+    async fn release_with_detection(
+        &self,
+        lease: DisableLease,
+    ) -> Result<CommunicationState, CommunicationOperationFailure> {
+        lease.release_with_detection().await
     }
 
     async fn register_lifecycle_hook(

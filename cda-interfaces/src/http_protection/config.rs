@@ -58,6 +58,8 @@ pub enum HttpProtectionReason {
     CommunicationNotReady,
     /// A runtime update is currently in progress.
     UpdateInProgress,
+    /// A network reset is currently in progress.
+    NetworkResetInProgress,
     /// A caller-defined restriction reason.
     Custom(String),
 }
@@ -67,6 +69,7 @@ impl std::fmt::Display for HttpProtectionReason {
         match self {
             Self::CommunicationNotReady => write!(f, "CommunicationNotReady"),
             Self::UpdateInProgress => write!(f, "UpdateInProgress"),
+            Self::NetworkResetInProgress => write!(f, "NetworkResetInProgress"),
             Self::Custom(reason) => write!(f, "{reason}"),
         }
     }
@@ -209,6 +212,14 @@ mod tests {
         assert_eq!(
             HttpProtectionReason::Custom("maintenance window".to_owned()).to_string(),
             "maintenance window"
+        );
+    }
+
+    #[test]
+    fn network_reset_reason_has_a_stable_display_value() {
+        assert_eq!(
+            HttpProtectionReason::NetworkResetInProgress.to_string(),
+            "NetworkResetInProgress"
         );
     }
 

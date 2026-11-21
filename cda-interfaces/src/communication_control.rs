@@ -31,8 +31,7 @@ pub use disable::{DisableCommunication, DisableError, DisableGuard, DisableReaso
 pub use doip_connect::{DoipConnect, DoipEndpoint};
 pub use error::CommControlError;
 pub use operation::{
-    ActivationCause, CommunicationOperation, CommunicationOperationFailure, DetectionCause,
-    DetectionPhase,
+    ActivationCause, CommunicationOperation, CommunicationOperationFailure, DetectionPhase,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
@@ -219,6 +218,9 @@ pub enum VamHandlingMode {
 /// Default retry hint for requests deferred while communication starts.
 pub const DEFAULT_DEFERRED_RETRY_AFTER: Duration = Duration::from_secs(30);
 
+/// Default upper bound for each `networkreset` rediscovery wait.
+pub const DEFAULT_NETWORK_RESET_REDISCOVERY_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Persistence of the detected ECU/gateway topology across restarts.
 #[derive(
     Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema,
@@ -261,8 +263,9 @@ pub struct CommunicationSettings {
     /// - "OnDemand": HTTP/SOVD starts first. The first qualifying ECU diagnostic
     ///   request, or an explicit `activate()` call, triggers initialization.
     /// - "Disabled": HTTP/SOVD starts first. The default communication plugin
-    ///   provides no activation path, and `trigger_detection()` needs an
-    ///   already-enabled transport.
+    ///   provides no activation path. Only an explicit detection request
+    ///   (`trigger_detection()`) or a `networkreset` rediscovery brings the
+    ///   transport up.
     pub init_mode: CommunicationInitMode,
     /// Controls whether enabling communication also runs whole-vehicle variant
     /// detection:
@@ -282,6 +285,10 @@ pub struct CommunicationSettings {
     /// The value (in seconds) for the HTTP `Retry-After` header returned when a
     /// diagnostic request arrives while initialization is still pending.
     pub deferred_retry_after_seconds: u64,
+    /// Upper bound in seconds of each `networkreset` wait, must be greater than 0: first for
+    /// the bring-up of the rediscovery, including its variant detection, then for the
+    /// resulting rediscovery to settle (and be persisted, if enabled).
+    pub network_reset_rediscovery_timeout_seconds: u64,
     /// Topology plugin settings (`ecu_list_persistence`, `vam_handling_mode`).
     #[serde(flatten)]
     pub topology: TopologySettings,
@@ -294,6 +301,8 @@ impl Default for CommunicationSettings {
             variant_detection: VariantDetectionMode::default(),
             post_update_mode: PostUpdateCommunicationMode::default(),
             deferred_retry_after_seconds: DEFAULT_DEFERRED_RETRY_AFTER.as_secs(),
+            network_reset_rediscovery_timeout_seconds: DEFAULT_NETWORK_RESET_REDISCOVERY_TIMEOUT
+                .as_secs(),
             topology: TopologySettings::default(),
         }
     }

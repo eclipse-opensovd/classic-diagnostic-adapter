@@ -19,19 +19,19 @@
 //!
 //! Required mode semantics:
 //!
-//! | Mode               | `activate()`                   | first ECU request               | `trigger_detection()`   |
-//! |--------------------|--------------------------------|---------------------------------|-------------------------|
-//! | `Always`           | joins or repeats current state | requests use current readiness  | detect while enabled    |
-//! | `WhenNotPersisted` | joins or repeats current state | requests use current readiness  | detect while enabled    |
-//! | `OnDemand`         | initializes the whole vehicle  | returns pending, triggers once  | detect while enabled    |
-//! | `Disabled`         | rejected, no network activity  | returns pending, never triggers | detect while enabled    |
+//! | Mode               | `activate()`                   | first ECU request               | `trigger_detection()`     |
+//! |--------------------|--------------------------------|---------------------------------|---------------------------|
+//! | `Always`           | joins or repeats current state | requests use current readiness  | enables if needed, detect |
+//! | `WhenNotPersisted` | joins or repeats current state | requests use current readiness  | enables if needed, detect |
+//! | `OnDemand`         | initializes the whole vehicle  | returns pending, triggers once  | enables if needed, detect |
+//! | `Disabled`         | rejected, no network activity  | returns pending, never triggers | enables if needed, detect |
 //!
 //! `WhenNotPersisted` differs from `Always` only in how the transport discovers
 //! gateways, which is not a plugin concern.
 //!
 //! Only the first two columns vary by mode. `trigger_detection()` never
-//! consults `init_mode`, so under `Disabled` communication has to be enabled out
-//! of band before anything can detect.
+//! consults `init_mode`: an explicit detection request enables a down transport
+//! with a full initialization in every mode, including `Disabled`.
 //!
 //! Other plugins can be substituted via `Setup::with_communication_plugin`.
 
@@ -41,7 +41,7 @@ use async_trait::async_trait;
 use cda_interfaces::communication_control::{
     ActivationCause, CommunicationError, CommunicationGuard, CommunicationInitMode,
     CommunicationLifecycle, CommunicationOperation, CommunicationOperationFailure,
-    CommunicationState, CommunicationVariantDetection, DetectionCause, VariantDetectionMode,
+    CommunicationState, CommunicationVariantDetection, VariantDetectionMode,
 };
 
 use super::{CommunicationPlugin, CommunicationPluginBuilder};
@@ -114,15 +114,12 @@ impl CommunicationPlugin for DefaultCommunicationPlugin {
         }
     }
 
-    async fn trigger_detection(
-        &self,
-        cause: DetectionCause,
-    ) -> Result<CommunicationState, CommunicationOperationFailure> {
-        // TODO: topology rediscovery (#490).
-
-        tracing::debug!(?cause, mode = ?self.mode, "Triggering whole-vehicle detection");
-
-        self.handle.redetect().await
+    async fn trigger_detection(&self) -> Result<CommunicationState, CommunicationOperationFailure> {
+        // The request is an explicit authorization to communicate, so a stopped
+        // transport is brought up in every `init_mode`.
+        // [[ dimpl~communication-explicit-detection-enables, Explicit detection brings a stopped transport up, dimpl ]]
+        tracing::debug!(mode = ?self.mode, "Triggering whole-vehicle detection");
+        self.handle.ensure_detected().await
     }
 
     async fn disable(&self, reason: DisableReason) -> Result<DisableLease, DisableError> {
@@ -182,7 +179,12 @@ mod tests {
     };
 
     use super::*;
-    use crate::lifecycle::controller::test_utils::communication_handle_new;
+    use crate::lifecycle::{
+        controller::test_utils::{
+            communication_handle_new, communication_handle_with_detection_mode,
+        },
+        disable::{CommunicationDisableView, DisableCommunication},
+    };
 
     struct RecordingControl {
         enable_count: AtomicUsize,
@@ -310,40 +312,107 @@ mod tests {
         assert_eq!(control.enable_count.load(Ordering::Relaxed), 0);
     }
 
-    /// `trigger_detection()` never brings a transport up, so `Disabled` mode is
-    /// inert on every path this plugin exposes: widening a detection request
-    /// into an activation would produce exactly the unauthorized network traffic
-    /// the mode exists to prevent.
+    /// Counts the detections.
+    #[derive(Default)]
+    struct CountingDetector(AtomicUsize);
+
+    impl CountingDetector {
+        fn runs(&self) -> usize {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl CommunicationVariantDetection for CountingDetector {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+
+        async fn detect(
+            &self,
+            _phase: cda_interfaces::communication_control::DetectionPhase,
+        ) -> Result<(), CommControlError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    /// An explicit detection request brings a stopped transport
+    /// up with a full initialization in every `init_mode`.
+    /// [[ test~communication-explicit-detection-enables, Explicit detection brings a stopped transport up, test ]]
     #[tokio::test]
-    async fn disabled_mode_is_inert_on_every_path_including_detection() {
-        let (plugin, control, handle) = plugin_with_mode(CommunicationInitMode::Disabled);
+    async fn explicit_detection_enables_a_stopped_transport() {
+        for mode in [
+            CommunicationInitMode::Always,
+            CommunicationInitMode::WhenNotPersisted,
+            CommunicationInitMode::OnDemand,
+            CommunicationInitMode::Disabled,
+        ] {
+            let (plugin, control, _handle) = plugin_with_mode(mode);
+            let detector = Arc::new(CountingDetector::default());
+            plugin
+                .register_variant_detection(Arc::clone(&detector) as _)
+                .await
+                .unwrap();
+            assert_eq!(plugin.state(), CommunicationState::Disabled);
+            assert_eq!(
+                plugin.trigger_detection().await,
+                Ok(CommunicationState::Enabled),
+                "{mode:?}"
+            );
+            assert_eq!(
+                detector.runs(),
+                1,
+                "{mode:?}: the registered detector must have run"
+            );
+            assert_eq!(
+                control.enable_count.load(Ordering::Relaxed),
+                1,
+                "{mode:?}: the transport must have been enabled once"
+            );
+            assert_eq!(plugin.state(), CommunicationState::Enabled);
 
-        // Ordinary activation is inert.
-        assert!(plugin.activate(ActivationCause::Explicit).await.is_err());
-        assert_eq!(control.enable_count.load(Ordering::Relaxed), 0);
-        assert_eq!(plugin.state(), CommunicationState::Disabled);
+            // Enabled now: a second request re-detects without re-enabling.
+            assert_eq!(
+                plugin.trigger_detection().await,
+                Ok(CommunicationState::Enabled),
+                "{mode:?}"
+            );
+            assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
+            assert_eq!(detector.runs(), 2, "{mode:?}: re-detected");
+        }
+    }
 
-        // So is detection: refused without touching the transport.
-        assert_eq!(
-            plugin.trigger_detection(DetectionCause::Explicit).await,
-            Err(CommunicationOperationFailure::TransitionFailure {
-                operation: CommunicationOperation::Detect
-            })
+    /// [[ test~communication-explicit-detection-never, Explicit detection overrides automatic detection policy, test ]]
+    #[tokio::test]
+    async fn explicit_detection_overrides_never_policy() {
+        let control = Arc::new(RecordingControl {
+            enable_count: AtomicUsize::new(0),
+            disable_count: AtomicUsize::new(0),
+            fail_enable: AtomicBool::new(false),
+        });
+        let handle = communication_handle_with_detection_mode(
+            Arc::clone(&control) as _,
+            VariantDetectionMode::Never,
         );
+        let plugin = DefaultCommunicationPlugin::new(handle, CommunicationInitMode::Disabled);
+        let detector = Arc::new(CountingDetector::default());
+        plugin
+            .register_variant_detection(Arc::clone(&detector) as _)
+            .await
+            .expect("detector registration");
         assert_eq!(
-            control.enable_count.load(Ordering::Relaxed),
-            0,
-            "a detection request must never enable the transport"
-        );
-        assert_eq!(plugin.state(), CommunicationState::Disabled);
-
-        // Once something else enables communication, detection is served.
-        assert_eq!(handle.enable().await, Ok(CommunicationState::Enabled));
-        assert_eq!(
-            plugin.trigger_detection(DetectionCause::Explicit).await,
+            plugin.trigger_detection().await,
             Ok(CommunicationState::Enabled)
         );
+        assert_eq!(detector.runs(), 1);
+        assert_eq!(plugin.variant_detection(), VariantDetectionMode::Always);
         assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            plugin.trigger_detection().await,
+            Ok(CommunicationState::Enabled)
+        );
+        assert_eq!(detector.runs(), 2);
     }
 
     /// From `Enabled`, `trigger_detection` detects without touching the
@@ -365,7 +434,7 @@ mod tests {
             assert_eq!(control.enable_count.load(Ordering::Relaxed), 1, "{mode:?}");
 
             assert_eq!(
-                plugin.trigger_detection(DetectionCause::Explicit).await,
+                plugin.trigger_detection().await,
                 Ok(CommunicationState::Enabled),
                 "{mode:?}: detection must be allowed while already enabled"
             );
@@ -378,10 +447,10 @@ mod tests {
         }
     }
 
-    /// `Error(_)` is a downed transport too, so detection is refused there as
-    /// well. Recovery is an activation, which only `activate()` performs.
+    /// `Error(_)` is a stopped transport too: an explicit detection request
+    /// recovers it, in every `init_mode`.
     #[tokio::test]
-    async fn trigger_detection_refused_from_error_in_every_init_mode() {
+    async fn explicit_detection_recovers_from_error_in_every_init_mode() {
         for mode in [
             CommunicationInitMode::Always,
             CommunicationInitMode::OnDemand,
@@ -394,17 +463,11 @@ mod tests {
 
             control.fail_enable.store(false, Ordering::Relaxed);
             assert_eq!(
-                plugin.trigger_detection(DetectionCause::Explicit).await,
-                Err(CommunicationOperationFailure::TransitionFailure {
-                    operation: CommunicationOperation::Detect
-                }),
-                "{mode:?}: detection must not recover a broken transport"
+                plugin.trigger_detection().await,
+                Ok(CommunicationState::Enabled),
+                "{mode:?}"
             );
-            assert_eq!(
-                control.enable_count.load(Ordering::Relaxed),
-                0,
-                "{mode:?}: no successful enable may have happened"
-            );
+            assert_eq!(control.enable_count.load(Ordering::Relaxed), 1, "{mode:?}");
         }
     }
 
@@ -420,9 +483,9 @@ mod tests {
         let lease = plugin.disable(DisableReason::RuntimeUpdate).await.unwrap();
 
         assert_eq!(
-            plugin.trigger_detection(DetectionCause::Explicit).await,
+            plugin.trigger_detection().await,
             Err(CommunicationOperationFailure::DisableLeaseHeld {
-                operation: CommunicationOperation::Detect
+                operation: CommunicationOperation::EnableAndDetect
             })
         );
         assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
@@ -443,14 +506,133 @@ mod tests {
         let plugin = Arc::new(plugin);
         let a = {
             let plugin = Arc::clone(&plugin);
-            tokio::spawn(async move { plugin.trigger_detection(DetectionCause::Explicit).await })
+            tokio::spawn(async move { plugin.trigger_detection().await })
         };
         let b = {
             let plugin = Arc::clone(&plugin);
-            tokio::spawn(async move { plugin.trigger_detection(DetectionCause::Explicit).await })
+            tokio::spawn(async move { plugin.trigger_detection().await })
         };
         assert_eq!(a.await.unwrap(), Ok(CommunicationState::Enabled));
         assert_eq!(b.await.unwrap(), Ok(CommunicationState::Enabled));
         assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
+    }
+
+    /// Wraps the default plugin and refuses the hand-over with detection
+    /// through the hook, the way a downstream plugin may apply its policy.
+    struct RefusingHandOver {
+        inner: DefaultCommunicationPlugin,
+        hand_overs: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl cda_interfaces::Shutdown for RefusingHandOver {
+        async fn shutdown(&self) {
+            self.inner.shutdown().await;
+        }
+    }
+
+    #[async_trait]
+    impl CommunicationPlugin for RefusingHandOver {
+        fn state(&self) -> CommunicationState {
+            self.inner.state()
+        }
+        fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+            self.inner.acquire()
+        }
+        async fn activate(
+            &self,
+            cause: ActivationCause,
+        ) -> Result<CommunicationState, CommunicationOperationFailure> {
+            self.inner.activate(cause).await
+        }
+        fn request_activate(&self, cause: ActivationCause) -> CommunicationState {
+            self.inner.request_activate(cause)
+        }
+        async fn trigger_detection(
+            &self,
+        ) -> Result<CommunicationState, CommunicationOperationFailure> {
+            self.inner.trigger_detection().await
+        }
+        async fn disable(&self, reason: DisableReason) -> Result<DisableLease, DisableError> {
+            self.inner.disable(reason).await
+        }
+        async fn release_with_detection(
+            &self,
+            lease: DisableLease,
+        ) -> Result<CommunicationState, CommunicationOperationFailure> {
+            self.hand_overs.fetch_add(1, Ordering::Relaxed);
+            lease.finish().await?;
+            Err(CommunicationOperationFailure::PermissionFailure {
+                operation: CommunicationOperation::EnableAndDetect,
+            })
+        }
+        async fn register_lifecycle_hook(
+            &self,
+            initializer: Arc<dyn CommunicationLifecycle>,
+        ) -> Result<(), CommunicationOperationFailure> {
+            self.inner.register_lifecycle_hook(initializer).await
+        }
+        async fn register_variant_detection(
+            &self,
+            detector: Arc<dyn CommunicationVariantDetection>,
+        ) -> Result<(), CommunicationOperationFailure> {
+            self.inner.register_variant_detection(detector).await
+        }
+        fn variant_detection(&self) -> VariantDetectionMode {
+            self.inner.variant_detection()
+        }
+    }
+
+    /// A lease granted through the disable view hands over through the
+    /// plugin's hook: the default forwards it, an override can refuse it.
+    /// [[ test~communication-release-with-detection-plugin-hook, The hand-over with detection goes through the communication plugin's hook, test ]]
+    #[tokio::test]
+    async fn release_with_detection_goes_through_the_plugin_hook() {
+        let (plugin, control, _handle) = plugin_with_mode(CommunicationInitMode::Disabled);
+        let detector = Arc::new(CountingDetector::default());
+        plugin
+            .register_variant_detection(Arc::clone(&detector) as _)
+            .await
+            .unwrap();
+        let view = CommunicationDisableView::new(Arc::new(plugin));
+        let lease = view
+            .disable(DisableReason::Custom("networkreset".to_owned()))
+            .await
+            .unwrap();
+        assert_eq!(
+            lease.release_with_detection().await,
+            Ok(CommunicationState::Enabled)
+        );
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 1);
+        assert_eq!(detector.runs(), 1);
+
+        let (inner, control, _handle) = plugin_with_mode(CommunicationInitMode::Disabled);
+        let refusing = Arc::new(RefusingHandOver {
+            inner,
+            hand_overs: AtomicUsize::new(0),
+        });
+        let view = CommunicationDisableView::new(Arc::clone(&refusing) as _);
+        let lease = view
+            .disable(DisableReason::Custom("networkreset".to_owned()))
+            .await
+            .unwrap();
+        assert_eq!(
+            lease.release_with_detection().await,
+            Err(CommunicationOperationFailure::PermissionFailure {
+                operation: CommunicationOperation::EnableAndDetect,
+            })
+        );
+        assert_eq!(refusing.hand_overs.load(Ordering::Relaxed), 1);
+        assert_eq!(control.enable_count.load(Ordering::Relaxed), 0);
+        assert_eq!(refusing.state(), CommunicationState::Disabled);
+
+        // The refusal ended exclusivity, and only the hand-over goes through the
+        // hook: a plain release of the next lease does not.
+        let lease = view
+            .disable(DisableReason::Custom("networkreset".to_owned()))
+            .await
+            .expect("the refusal must have ended exclusivity");
+        assert_eq!(lease.release().await, Ok(CommunicationState::Disabled));
+        assert_eq!(refusing.hand_overs.load(Ordering::Relaxed), 1);
     }
 }

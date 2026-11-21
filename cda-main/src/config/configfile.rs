@@ -11,6 +11,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::time::Duration;
+
 // `CanConfig` is always available: the `config` module of cda-comm-can is not
 // gated on the `can` feature, only the SocketCAN transport code is. This keeps
 // the configuration schema (and all public function signatures that mention
@@ -357,6 +359,16 @@ impl Default for Configuration {
 }
 
 impl Configuration {
+    /// The retry hint of requests refused while communication is deferred.
+    pub(crate) fn deferred_retry_after(&self) -> Duration {
+        Duration::from_secs(self.communication.deferred_retry_after_seconds)
+    }
+
+    /// The upper bound of each `networkreset` rediscovery wait.
+    pub(crate) fn network_reset_rediscovery_timeout(&self) -> Duration {
+        Duration::from_secs(self.communication.network_reset_rediscovery_timeout_seconds)
+    }
+
     /// A CDA without any transport cannot talk to a single ECU; refuse to
     /// start instead of serving a healthy-looking API that can do nothing.
     fn validate_transport_presence(&self) -> Result<(), ConfigSanityError> {
@@ -469,6 +481,29 @@ impl Configuration {
         Ok(())
     }
 
+    /// A zero bound would fail every `networkreset` rediscovery before it could
+    /// bring communication up. A bound that cannot be added to the current time
+    /// cannot be turned into a deadline, so the rediscovery would fail at once.
+    fn validate_network_reset_rediscovery_timeout(&self) -> Result<(), ConfigSanityError> {
+        let field = "communication.network_reset_rediscovery_timeout_seconds";
+        match self.communication.network_reset_rediscovery_timeout_seconds {
+            0 => Err(ConfigSanityError::InvalidValue {
+                field: field.to_owned(),
+                reason: "must be greater than 0".to_owned(),
+            }),
+            _ if std::time::Instant::now()
+                .checked_add(self.network_reset_rediscovery_timeout())
+                .is_none() =>
+            {
+                Err(ConfigSanityError::InvalidValue {
+                    field: field.to_owned(),
+                    reason: "is too large".to_owned(),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Logs topology settings that are valid but have no effect in
     /// combination with the rest of the configuration. Never fails.
     fn validate_topology(&self) {
@@ -506,6 +541,7 @@ impl ConfigSanity for Configuration {
         self.validate_transport_overrides()?;
         self.locks.validate_sanity()?;
         self.validate_flash_functional_class_default()?;
+        self.validate_network_reset_rediscovery_timeout()?;
         self.validate_topology();
         // Add more checks for Configuration fields here if needed
         Ok(())
@@ -542,6 +578,38 @@ mod tests {
                     if field == "flash_functional_class_default"
             ));
         }
+    }
+
+    #[test]
+    fn zero_network_reset_rediscovery_timeout_is_rejected() {
+        assert!(
+            Configuration::default()
+                .validate_network_reset_rediscovery_timeout()
+                .is_ok()
+        );
+        let mut config = Configuration::default();
+        config
+            .communication
+            .network_reset_rediscovery_timeout_seconds = 0;
+        assert!(matches!(
+            config.validate_sanity(),
+            Err(ConfigSanityError::InvalidValue { field, .. })
+                if field == "communication.network_reset_rediscovery_timeout_seconds"
+        ));
+    }
+
+    #[test]
+    fn unrepresentable_network_reset_rediscovery_timeout_is_rejected() {
+        let mut config = Configuration::default();
+        config
+            .communication
+            .network_reset_rediscovery_timeout_seconds = u64::MAX;
+        assert!(matches!(
+            config.validate_sanity(),
+            Err(ConfigSanityError::InvalidValue { field, reason })
+                if field == "communication.network_reset_rediscovery_timeout_seconds"
+                    && reason == "is too large"
+        ));
     }
 
     #[tokio::test]
@@ -1152,11 +1220,18 @@ parameter_validation = true
             !defaults.communication.topology.ecu_list_persistence.enabled,
             "ECU list persistence must be disabled by default"
         );
+        assert_eq!(
+            defaults
+                .communication
+                .network_reset_rediscovery_timeout_seconds,
+            60
+        );
 
         for init_mode in ["OnDemand", "Disabled"] {
             let config_str = format!(
                 "[communication]\ninit_mode = \"{init_mode}\"\npost_update_mode = \
-                 \"Deferred\"\ndeferred_retry_after_seconds = 7\n"
+                 \"Deferred\"\ndeferred_retry_after_seconds = \
+                 7\nnetwork_reset_rediscovery_timeout_seconds = 42\n"
             );
             let config: Configuration =
                 Figment::from(Serialized::defaults(Configuration::default()))
@@ -1175,6 +1250,12 @@ parameter_validation = true
                 PostUpdateCommunicationMode::Deferred
             );
             assert_eq!(config.communication.deferred_retry_after_seconds, 7);
+            assert_eq!(
+                config
+                    .communication
+                    .network_reset_rediscovery_timeout_seconds,
+                42
+            );
         }
     }
 }

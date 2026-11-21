@@ -21,7 +21,10 @@ use cda_interfaces::{
     VariantDetection as _,
     component_slot::ComponentSlot,
     storage_api::Storage,
-    topology::{DisabledTopologyStore, EcuTopologyEntry, EcuTopologyStore, PersistedVariant},
+    topology::{
+        DisabledTopologyStore, EcuStateResetScope, EcuTopologyEntry, EcuTopologyStore,
+        PersistedVariant,
+    },
 };
 use cda_plugin_security::SecurityPlugin;
 use cda_plugin_topology::{
@@ -58,6 +61,8 @@ pub fn topology_plugin_input(config: &Configuration) -> TopologyPolicy {
         settings,
         init_mode: config.communication.init_mode,
         ecus_pinned_to_can_transport,
+        doip_enabled: config.doip.enabled,
+        network_reset_rediscovery_timeout: config.network_reset_rediscovery_timeout(),
     }
 }
 
@@ -155,6 +160,10 @@ impl<SP: SecurityPlugin> TopologySource for UdsTopologySource<SP> {
 
     async fn detection_activity(&self) -> cda_interfaces::VariantDetectionActivity {
         self.uds_manager.read().await.detection_activity().clone()
+    }
+
+    async fn reset_ecu_states(&self, scope: EcuStateResetScope) {
+        self.uds_manager.read().await.reset_ecu_states(scope).await;
     }
 }
 

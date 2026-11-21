@@ -639,18 +639,9 @@ async fn lock_when_ecu_offline() -> Result<(), TestingError> {
 
     // An ECU hard reset closes the connection before the listening socket, and
     // a CDA that reconnects in between is left with a connection nobody serves.
-    test_env.stop_gateway(&gateway).await?;
-    // The gateway is gone without a FIN reaching the CDA: only a send tells.
-    send_authenticated_cda_request(
-        &test_env,
-        sovd::COMPONENTS_FLXC1000_BASE,
-        StatusCode::GATEWAY_TIMEOUT,
-        Method::PUT,
-        None,
-        None,
-    )
-    .await?;
-    wait_for_ecu_offline(&test_env.config, "FLXC1000").await?;
+    test_env
+        .stop_gateway_until_offline(&gateway, "FLXC1000", sovd::COMPONENTS_FLXC1000_BASE)
+        .await?;
 
     let response = create_lock(
         Duration::from_secs(30),

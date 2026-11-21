@@ -733,4 +733,55 @@ mod tests {
 
         assert!(requests.is_empty());
     }
+
+    #[tokio::test]
+    async fn reconnect_retries_when_gateway_accepts_but_does_not_activate_routing() {
+        let fake = FakeGateway::start().await;
+        let handler = Arc::new(FixedReport {
+            report: GatewayConnectReport {
+                brought_online: vec!["ecu_a".to_owned()],
+                needs_detection: vec!["ecu_a".to_owned()],
+            },
+            connected: std::sync::Mutex::new(Vec::new()),
+            disconnected: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let (detection_tx, mut detection_rx) = mpsc::channel(8);
+        let mut gateway = setup(
+            &fake,
+            Arc::clone(&handler) as _,
+            VariantDetectionSender::new(detection_tx),
+        );
+        gateway.connection.ecu_timeouts.routing_activation = Duration::from_millis(200);
+        gateway.connection.ecu_timeouts.max_retry_attempts = 10;
+        let connection = Arc::new(
+            establish_ecu_connection(&gateway.connection)
+                .await
+                .expect("connect to the fake gateway"),
+        );
+
+        // Reconnects accept TCP but get no routing activation answer until released.
+        fake.block_connects();
+        let (reset_tx, reset_rx) = mpsc::channel::<ConnectionResetReason>(1);
+        let task = spawn_connection_reset_task(gateway, reset_rx, connection);
+        reset_tx.send("gateway reboot".to_owned()).await.unwrap();
+        wait_until("a retry after routing activation timed out", || async {
+            fake.connects() >= 3
+        })
+        .await;
+        assert!(handler.connected.lock().unwrap().is_empty());
+
+        // The next attempt can activate routing without another reset request.
+        fake.release_connects();
+        wait_until("the gateway to reconnect", || async {
+            !handler.connected.lock().unwrap().is_empty()
+        })
+        .await;
+        let request = tokio::time::timeout(Duration::from_secs(2), detection_rx.recv())
+            .await
+            .expect("variant detection should be requested")
+            .expect("variant detection channel should remain open");
+        assert_eq!(request.into_ecus(), vec!["ecu_a".to_owned()]);
+        task.abort();
+        let _ = task.await;
+    }
 }

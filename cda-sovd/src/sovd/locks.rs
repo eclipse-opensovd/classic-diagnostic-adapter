@@ -54,17 +54,16 @@ use lifecycle::{LifecycleDelivery, enqueue_lock_event};
 pub(super) use policy::EvaluatedMetadata;
 pub(crate) use policy::rollback_preemption;
 use policy::{AcquisitionGuard, PendingPreemption, active_snapshot};
-#[cfg(all(test, feature = "doip-direct-connect"))]
-pub(crate) use tests::insert_test_vehicle_lock;
 #[cfg(test)]
-pub(crate) use tests::{insert_test_ecu_lock, insert_test_fg_lock};
-#[cfg(feature = "doip-direct-connect")]
-pub(crate) use validation::validate_vehicle_write;
-use validation::{validate_claim, validate_vehicle_children};
-pub(crate) use validation::{
-    validate_ecu_read, validate_ecu_write, validate_fg_read, validate_fg_write,
-    validate_vehicle_owner,
+pub(crate) use tests::{
+    break_test_vehicle_lock, insert_test_ecu_lock, insert_test_fg_lock, insert_test_vehicle_lock,
+    insert_test_vehicle_lock_with, remove_test_vehicle_lock,
 };
+pub(crate) use validation::{
+    VehicleLockRequirement, validate_ecu_read, validate_ecu_write, validate_fg_read,
+    validate_fg_write, validate_vehicle_owner, validate_vehicle_write,
+};
+use validation::{validate_claim, validate_vehicle_children};
 
 macro_rules! require_ecu_access {
     (read, $plugin:expr, $ecu_name:expr, $locks:expr, $include_schema:expr $(,)?) => {
@@ -333,12 +332,18 @@ impl Locks {
         Ok(())
     }
 
+    /// The owner of the vehicle lock, if it is held and not expired. A lock past its
+    /// expiration that the expiration task has not removed yet grants nothing, as in
+    /// `request_lock_for`. Checks that refuse because of a lock still count it until it
+    /// is removed.
     pub(crate) async fn vehicle_lock_owner_sub(&self) -> Option<String> {
+        let now = std::time::SystemTime::now();
         self.core
             .read_store(|store| {
                 store
                     .state
                     .active_for_scope(&ScopeKey::Vehicle)
+                    .filter(|lock| store.state.is_effective(lock, now))
                     .map(|lock| lock.principal.subject.clone())
             })
             .await
