@@ -824,9 +824,11 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
                 odx_id=derived_id(dlr, "DTC.Code3"),
                 short_name="Code3",
                 trouble_code=0x01E241,  # 123457
+                display_trouble_code="P123457",
                 text=Text(
                     text="DTC Code 3",
                 ),
+                level=3,
             ),
             DiagnosticTroubleCode(
                 odx_id=derived_id(dlr, "DTC.Code4"),
