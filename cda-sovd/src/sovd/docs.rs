@@ -19,6 +19,7 @@
 //! self-contained `OpenAPI` specification returned by `GET .../docs`.
 
 pub mod data;
+pub mod faults;
 pub mod operations;
 
 use aide::openapi::{
@@ -32,6 +33,7 @@ use schemars::Schema;
 ///
 /// `title` - used as `info.title` (e.g. `"Operation: CalibrateSensors"`).
 /// `paths` - the set of path items that describe the resource's API surface.
+#[must_use]
 pub fn build_openapi_doc(title: &str, paths: IndexMap<String, PathItem>) -> OpenApi {
     OpenApi {
         info: Info {
@@ -51,6 +53,7 @@ pub fn build_openapi_doc(title: &str, paths: IndexMap<String, PathItem>) -> Open
 }
 
 /// Wrap a [`schemars::Schema`] into an aide [`SchemaObject`].
+#[must_use]
 pub fn schema_object(schema: Schema) -> SchemaObject {
     SchemaObject {
         json_schema: schema,
@@ -60,6 +63,7 @@ pub fn schema_object(schema: Schema) -> SchemaObject {
 }
 
 /// Build a JSON media type entry from a [`schemars::Schema`].
+#[must_use]
 pub fn json_media_type(schema: Schema) -> MediaType {
     MediaType {
         schema: Some(schema_object(schema)),
@@ -68,6 +72,7 @@ pub fn json_media_type(schema: Schema) -> MediaType {
 }
 
 /// Create a JSON request body from a [`schemars::Schema`].
+#[must_use]
 pub fn json_request_body(schema: Schema) -> ReferenceOr<RequestBody> {
     ReferenceOr::Item(RequestBody {
         content: IndexMap::from([("application/json".to_owned(), json_media_type(schema))]),
@@ -76,6 +81,7 @@ pub fn json_request_body(schema: Schema) -> ReferenceOr<RequestBody> {
 }
 
 /// Create a response entry with a JSON body.
+#[must_use]
 pub fn json_response(description: &str, schema: Schema) -> ReferenceOr<Response> {
     ReferenceOr::Item(Response {
         description: description.to_owned(),
@@ -85,6 +91,7 @@ pub fn json_response(description: &str, schema: Schema) -> ReferenceOr<Response>
 }
 
 /// Create a response entry without a body.
+#[must_use]
 pub fn empty_response(description: &str) -> ReferenceOr<Response> {
     ReferenceOr::Item(Response {
         description: description.to_owned(),
@@ -93,6 +100,7 @@ pub fn empty_response(description: &str) -> ReferenceOr<Response> {
 }
 
 /// Build a [`Responses`] map from `(status_code, response)` pairs.
+#[must_use]
 pub fn responses(entries: Vec<(u16, ReferenceOr<Response>)>) -> Responses {
     Responses {
         responses: entries
@@ -104,6 +112,7 @@ pub fn responses(entries: Vec<(u16, ReferenceOr<Response>)>) -> Responses {
 }
 
 /// Build an [`Operation`] with optional SOVD extension properties.
+#[must_use]
 pub fn operation_with_extensions(
     summary: &str,
     extensions: IndexMap<String, serde_json::Value>,
@@ -116,6 +125,7 @@ pub fn operation_with_extensions(
 }
 
 /// Minimal SOVD error response schema (spec 5.8).
+#[must_use]
 pub fn error_schema() -> Schema {
     schemars::json_schema!({
         "type": "object",

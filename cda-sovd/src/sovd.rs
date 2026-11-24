@@ -73,7 +73,7 @@ use crate::{
 pub(crate) mod apps;
 pub(crate) mod binary_encoding;
 pub(crate) mod components;
-pub(crate) mod docs;
+pub mod docs;
 pub(crate) mod error;
 pub(crate) mod functions;
 mod lock_state;
