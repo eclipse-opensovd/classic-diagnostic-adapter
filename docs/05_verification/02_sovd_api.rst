@@ -23,10 +23,11 @@ SOVD-API
 
 .. testset:: Version Endpoint
     :id: testset~sovd-api-version-endpoint
-    :links: itest~sovd-api-version-endpoint
+    :links: test~sovd-api-version-registrar, itest~sovd-api-version-endpoint, itest~sovd-api-version-info-endpoint
     :status: draft
 
-    Verifies the version endpoint registered by the version registration function.
+    Verifies the ``version-info`` and ``data/version`` endpoints registered by the version
+    registrar, including consistency between endpoints using the same registrar.
 
 .. testset:: Component SDG/SDs
     :id: testset~sovd-api-component-sdgsd
@@ -56,6 +57,15 @@ SOVD-API
     :status: draft
 
     Verifies that the component details report the ``last_seen`` timestamp of an ECU.
+
+.. testset:: Generic Service
+    :id: testset~sovd-api-generic-service
+    :links: test~sovd-api-generic-service-format, test~sovd-api-generic-service-hex-style, itest~sovd-api-generic-service, itest~sovd-api-generic-service-nrc
+    :status: draft
+
+    Verifies the ``/genericservice`` passthrough in JSON form (with base64 and hex binary encoding) and in
+    ``application/octet-stream`` form, the selection of the format via ``Content-Type`` and ``Accept``, the
+    mirrored hex notation, the passthrough of negative ECU responses and the rejection of invalid requests.
 
 .. testset:: Binary Encoding
     :id: testset~sovd-api-binary-encoding

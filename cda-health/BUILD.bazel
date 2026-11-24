@@ -17,7 +17,6 @@ workspace_rust_library(
     crate_deps = [
         "aide",
         "axum",
-        "chrono",
         "futures",
         "schemars",
         "serde",

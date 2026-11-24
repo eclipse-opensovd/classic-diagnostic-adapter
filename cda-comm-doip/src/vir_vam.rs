@@ -120,6 +120,51 @@ where
     Ok(gateways)
 }
 
+/// Selects the socket spontaneous VAMs are received on. VAMs are sent to the
+/// discovery port (ISO 13400-2 REQ 4.DoIP-009/010), so the VIR socket is only
+/// reused if it is bound to the unspecified address and the discovery port.
+/// Otherwise a shared socket on `0.0.0.0:<gateway_port>` is bound.
+///
+/// `vir_port` is `None` if no VIR socket is bound. Returns `None` if no socket
+/// is available to receive VAMs on; a failed bind never fails the caller.
+pub(crate) fn vam_listener_socket(
+    transport_config: &DoipTransportConfig,
+    vir_port: Option<u16>,
+    vir_socket: &Arc<Mutex<Option<DoIPUdpSocket>>>,
+) -> Option<Arc<Mutex<Option<DoIPUdpSocket>>>> {
+    let broadcast_ip = "0.0.0.0";
+    let vir_on_discovery_port = vir_port == Some(transport_config.port);
+    if vir_on_discovery_port && transport_config.tester_ip == broadcast_ip {
+        return Some(Arc::clone(vir_socket));
+    }
+    match crate::create_udp_vir_socket(broadcast_ip, transport_config.port) {
+        Ok(sock) => Some(Arc::new(Mutex::new(Some(sock)))),
+        Err(e) if vir_on_discovery_port => {
+            tracing::warn!(
+                broadcast_ip = %broadcast_ip,
+                tester_ip = %transport_config.tester_ip,
+                gateway_port = %transport_config.port,
+                error = ?e,
+                "Failed to bind broadcast socket, falling back to the VIR socket, \
+                 this can lead to missed VAMs"
+            );
+            Some(Arc::clone(vir_socket))
+        }
+        Err(e) => {
+            // The VIR socket (if any) is not bound to the discovery port and
+            // would never receive spontaneous VAMs.
+            tracing::error!(
+                broadcast_ip = %broadcast_ip,
+                gateway_port = %transport_config.port,
+                error = ?e,
+                "Failed to bind the VAM listener socket on the discovery port, spontaneous VAMs \
+                 are ignored"
+            );
+            None
+        }
+    }
+}
+
 /// Handles the announcement of a configured gateway: refreshes its variant
 /// detection if it is connected, and otherwise connects it, see
 /// [`connect_announced`].
@@ -133,6 +178,15 @@ pub(crate) async fn handle_announcement<T: EcuAddresses + DoipComParams>(
     let logical_address = doip_target.logical_address;
     if state.has_connection(logical_address).await {
         warn_if_other_address(state, &doip_target).await;
+        // Repeated announcements and VIR responses received on both UDP
+        // sockets must not trigger variant detection again.
+        if !session.try_mark_variant_detection(logical_address) {
+            tracing::debug!(
+                ecu_name = %doip_target.ecu_name,
+                "Variant detection was triggered recently, ignoring repeated VAM"
+            );
+            return;
+        }
         // sending variant detection, will update the ECU state
         // (i.e. disconnected -> connected)
         send_variant_detection(gateway_ecu_name_map, variant_detection, logical_address).await;
@@ -254,8 +308,8 @@ async fn send_variant_detection(
 }
 
 pub(crate) async fn listen_for_vams<T, F>(
-    transport_config: DoipTransportConfig,
     state: DoipGatewayState<T>,
+    vam_socket: Arc<Mutex<Option<DoIPUdpSocket>>>,
     session: Arc<GatewaySession>,
     variant_detection: VariantDetectionSender,
     mut shutdown_signal: futures::future::Shared<F>,
@@ -324,30 +378,14 @@ where
     cda_interfaces::spawn_named!(
         "vam-listen",
         Box::pin(async move {
-            let broadcast_ip = "0.0.0.0";
-            let broadcast_socket = if transport_config.tester_ip == broadcast_ip {
-                Arc::clone(&state.socket)
-            } else {
-                match crate::create_udp_vir_socket(broadcast_ip, transport_config.port) {
-                    Ok(sock) => Arc::new(Mutex::new(Some(sock))),
-                    Err(e) => {
-                        tracing::warn!(
-                            broadcast_ip = %broadcast_ip,
-                            tester_ip = %transport_config.tester_ip,
-                            gateway_port = %transport_config.port,
-                            error = ?e,
-                            "Failed to bind broadcast socket, falling back to tester IP,\
-                             this can lead to missed VAMs"
-                        );
-                        Arc::clone(&state.socket)
-                    }
-                }
-            };
+            let broadcast_socket = vam_socket;
 
             loop {
                 let mut socket_guard = broadcast_socket.lock().await;
-                // `start()` binds `state.socket` before spawning this task, so
-                // this is unreachable. Log and stop rather than panic.
+                // `start()` only spawns this task with a bound VAM listener socket
+                // (its own or the VIR socket on the discovery port), and `stop()`
+                // ends this task before unbinding the VIR socket, so this is
+                // unreachable. Log and stop rather than panic.
                 let Some(socket) = socket_guard.as_mut() else {
                     tracing::error!("Broadcast socket unexpectedly unbound; stopping vam listener");
                     break;

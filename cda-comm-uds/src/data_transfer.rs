@@ -17,8 +17,10 @@ use async_trait::async_trait;
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, FlashTransferStartParams,
     HashMap, ServicePayload, UdsDataTransfer, UdsTransport,
-    datatypes::{DataTransferError, DataTransferMetaData, DataTransferStatus},
-    diagservices::UdsPayloadData,
+    datatypes::{
+        DataTransferError, DataTransferErrorCause, DataTransferMetaData, DataTransferStatus,
+    },
+    diagservices::{DiagServiceResponse, DiagServiceResponseType, MappedNRC, UdsPayloadData},
     dlt_ctx, service_ids, spawn_named,
 };
 use tokio::{
@@ -46,21 +48,6 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         status_sender: watch::Sender<bool>,
         mut reader: BufReader<File>,
     ) {
-        async fn set_transfer_aborted(
-            ecu_name: &str,
-            transfers: &Arc<Mutex<HashMap<String, EcuDataTransfer>>>,
-            reason: String,
-            sender: &watch::Sender<bool>,
-        ) {
-            if let Some(dt) = transfers.lock().await.get_mut(ecu_name) {
-                dt.meta_data.status = DataTransferStatus::Aborted;
-                dt.meta_data.error = Some(vec![DataTransferError { text: reason }]);
-            }
-            if let Err(e) = sender.send(true) {
-                tracing::error!(error = ?e, "Failed to send data transfer aborted signal");
-            }
-        }
-
         let (mut buffer, mut remaining_bytes, block_size, mut next_block_sequence_counter) = {
             let mut lock = self.data_transfers.lock().await;
             let Some(transfer) = lock.get_mut(ecu_name) else {
@@ -84,7 +71,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 set_transfer_aborted(
                     ecu_name,
                     &self.data_transfers,
-                    "Remaining bytes overflowed usize".to_owned(),
+                    internal_error(None, "Remaining bytes overflowed usize"),
                     &status_sender,
                 )
                 .await;
@@ -97,7 +84,10 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 set_transfer_aborted(
                     ecu_name,
                     &self.data_transfers,
-                    "Buffer slice out of bounds".to_owned(),
+                    internal_error(
+                        Some(next_block_sequence_counter),
+                        "Buffer slice out of bounds",
+                    ),
                     &status_sender,
                 )
                 .await;
@@ -108,7 +98,10 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 set_transfer_aborted(
                     ecu_name,
                     &self.data_transfers,
-                    format!("Failed to read data: {e:?}"),
+                    internal_error(
+                        Some(next_block_sequence_counter),
+                        &format!("Failed to read the flash file: {e}"),
+                    ),
                     &status_sender,
                 )
                 .await;
@@ -124,7 +117,10 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 set_transfer_aborted(
                     ecu_name,
                     &self.data_transfers,
-                    "Buffer slice out of bounds".to_owned(),
+                    internal_error(
+                        Some(next_block_sequence_counter),
+                        "Buffer slice out of bounds",
+                    ),
                     &status_sender,
                 )
                 .await;
@@ -139,17 +135,29 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                     request.clone(),
                     &void_plugin,
                     Some(uds_payload),
-                    true,
+                    // the positive response only echoes the block sequence counter, mapping
+                    // its parameters to JSON for every block is wasted time
+                    false,
                 )
                 .await;
-            if let Err(e) = result {
-                set_transfer_aborted(
-                    ecu_name,
-                    &self.data_transfers,
-                    format!("Failed to read data: {e:?}"),
-                    &status_sender,
-                )
-                .await;
+            // NRC 0x78 (responsePending), 0x21 (busyRepeatRequest) and 0x94
+            // (temporarilyNotAvailable) never reach this point: the transport keeps waiting or
+            // resends the same block (same block sequence counter) within their com param
+            // limits. A positive response echoing a different block sequence counter is
+            // discarded by the transport as not belonging to this request. Every other
+            // negative response means the ECU rejected the block.
+            if let Some(abort_error) = match result {
+                Err(e) => Some(communication_error(next_block_sequence_counter, e)),
+                Ok(response) if response.response_type() == DiagServiceResponseType::Negative => {
+                    Some(negative_response_error(
+                        next_block_sequence_counter,
+                        &response,
+                    ))
+                }
+                Ok(_) => None,
+            } {
+                set_transfer_aborted(ecu_name, &self.data_transfers, abort_error, &status_sender)
+                    .await;
                 break;
             }
 
@@ -179,6 +187,94 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 }
             }
         }
+    }
+}
+
+/// Marks the transfer of `ecu_name` as aborted with `error` and signals its end.
+async fn set_transfer_aborted(
+    ecu_name: &str,
+    transfers: &Arc<Mutex<HashMap<String, EcuDataTransfer>>>,
+    error: DataTransferError,
+    sender: &watch::Sender<bool>,
+) {
+    tracing::warn!(ecu_name, reason = %error.message, "Aborting data transfer");
+    if let Some(dt) = transfers.lock().await.get_mut(ecu_name) {
+        dt.meta_data.status = DataTransferStatus::Aborted;
+        dt.meta_data.error = Some(vec![error]);
+    }
+    if let Err(e) = sender.send(true) {
+        tracing::error!(error = ?e, "Failed to send data transfer aborted signal");
+    }
+}
+
+// Messages of errors that are not a negative response start with "Failed to read data: ",
+// which clients use to tell them apart from an ECU rejecting a block, e.g. to retry the
+// transfer from the last acknowledged block.
+const FAILED_TO_READ_DATA: &str = "Failed to read data";
+
+fn block_prefix(block_sequence_counter: Option<u8>) -> String {
+    block_sequence_counter
+        .map(|bsc| format!("block {bsc:#04X}: "))
+        .unwrap_or_default()
+}
+
+/// Error for a failure of the CDA itself, e.g. reading the flash file.
+fn internal_error(block_sequence_counter: Option<u8>, reason: &str) -> DataTransferError {
+    DataTransferError {
+        message: format!(
+            "{FAILED_TO_READ_DATA}: {}{reason}",
+            block_prefix(block_sequence_counter)
+        ),
+        cause: DataTransferErrorCause::Internal,
+        block_sequence_counter,
+    }
+}
+
+/// Error for a block whose request or response failed, e.g. with a timeout.
+fn communication_error(block_sequence_counter: u8, error: DiagServiceError) -> DataTransferError {
+    DataTransferError {
+        message: format!(
+            "{FAILED_TO_READ_DATA}: {}{error}",
+            block_prefix(Some(block_sequence_counter))
+        ),
+        cause: DataTransferErrorCause::Communication(error),
+        block_sequence_counter: Some(block_sequence_counter),
+    }
+}
+
+/// Error for a block the ECU answered with a negative response.
+fn negative_response_error<R: DiagServiceResponse>(
+    block_sequence_counter: u8,
+    response: &R,
+) -> DataTransferError {
+    let (sid, nrc, description) = match response.as_nrc() {
+        Ok(MappedNRC {
+            code,
+            description,
+            sid,
+        }) => (sid, code, description),
+        Err(_) => (None, None, None),
+    };
+    let message = match (nrc, &description) {
+        (Some(nrc), Some(description)) => format!(
+            "ECU rejected block {block_sequence_counter:#04X} with NRC {nrc:#04X} ({description})"
+        ),
+        (Some(nrc), None) => {
+            format!("ECU rejected block {block_sequence_counter:#04X} with NRC {nrc:#04X}")
+        }
+        (None, _) => format!(
+            "ECU rejected block {block_sequence_counter:#04X} with negative response {:02X?}",
+            response.get_raw()
+        ),
+    };
+    DataTransferError {
+        message,
+        cause: DataTransferErrorCause::NegativeResponse {
+            sid,
+            nrc,
+            description,
+        },
+        block_sequence_counter: Some(block_sequence_counter),
     }
 }
 
@@ -216,6 +312,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
             file_path,
             offset,
             length,
+            owner,
             transfer_meta_data,
         } = parameters;
 
@@ -303,6 +400,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
 
         entry.insert(EcuDataTransfer {
             meta_data: transfer_meta_data,
+            owner: owner.to_owned(),
             status_receiver: receiver,
             task: transfer_task,
             _communication_guard: communication_guard,
@@ -314,11 +412,19 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
         &self,
         ecu_name: &str,
         id: &str,
+        owner: &str,
     ) -> Result<(), DiagServiceError> {
         let mut lock = self.data_transfers.lock().await;
-        let transfer = lock.get(ecu_name).ok_or_else(|| {
-            DiagServiceError::NotFound(format!("Data transfer for ECU {ecu_name} not found"))
-        })?;
+        // A transfer of another owner is reported like a missing one, so callers cannot
+        // probe or remove transfers they did not start.
+        let transfer = match lock.get(ecu_name) {
+            Some(transfer) if transfer.meta_data.id == id && transfer.owner == owner => transfer,
+            _ => {
+                return Err(DiagServiceError::NotFound(format!(
+                    "Data transfer with id {id} not found for ECU {ecu_name}"
+                )));
+            }
+        };
 
         if !matches!(
             transfer.meta_data.status,
@@ -350,6 +456,31 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
             DiagServiceError::InvalidRequest(format!("Failed to await data transfer task: {e:?}"))
         })?;
         Ok(())
+    }
+
+    async fn ecu_flash_transfer_abort(&self, ecu_name: &str, owner: &str) {
+        let task = {
+            let mut transfers = self.data_transfers.lock().await;
+            let transfer = match transfers.entry(ecu_name.to_owned()) {
+                std::collections::hash_map::Entry::Occupied(entry)
+                    if entry.get().owner == owner =>
+                {
+                    entry.remove()
+                }
+                _ => return,
+            };
+            // Abort while the map is still locked, so the task cannot pick up a transfer
+            // started for this ECU right after the removal.
+            transfer.task.abort();
+            transfer.task
+        };
+        // Wait for the task to stop, so no TransferData block is sent after this returns.
+        if let Err(e) = task.await
+            && !e.is_cancelled()
+        {
+            tracing::warn!(error = ?e, "Data transfer task for ECU {ecu_name} failed");
+        }
+        tracing::info!("Aborted data transfer for ECU {ecu_name}");
     }
 
     async fn ecu_flash_transfer_status(
@@ -388,7 +519,61 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
 
 #[cfg(test)]
 mod tests {
+    use cda_interfaces::datatypes::FaultConfig;
+    use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
+    use tokio::task::{AbortHandle, JoinHandle};
+
     use super::*;
+    use crate::test_helpers::{TestEcuDb, TestGateway};
+
+    const ECU: &str = "TestECU";
+    const TRANSFER_ID: &str = "transfer-id";
+    const OWNER: &str = "owner";
+
+    fn make_manager() -> UdsManager<TestGateway, TestEcuDb> {
+        UdsManager::new_for_raw_payload_tests(
+            TestGateway {
+                send_fn: Arc::new(|_, _| Ok(())),
+            },
+            Arc::new(HashMap::default()),
+            FaultConfig::default(),
+            enabled_communication_access_for_test(),
+        )
+    }
+
+    /// Registers a transfer owned by [`OWNER`] whose completion signal was already sent,
+    /// as the transfer task does on finish or abort.
+    async fn insert_transfer(
+        manager: &UdsManager<TestGateway, TestEcuDb>,
+        status: DataTransferStatus,
+        task: JoinHandle<()>,
+    ) -> AbortHandle {
+        let (sender, receiver) = watch::channel(false);
+        sender.send(true).expect("Receiver is alive");
+        let abort_handle = task.abort_handle();
+        manager.data_transfers.lock().await.insert(
+            ECU.to_owned(),
+            EcuDataTransfer {
+                meta_data: DataTransferMetaData {
+                    acknowledged_bytes: 0,
+                    blocksize: 1,
+                    next_block_sequence_counter: 1,
+                    id: TRANSFER_ID.to_owned(),
+                    file_id: "file-id".to_owned(),
+                    status,
+                    error: None,
+                },
+                owner: OWNER.to_owned(),
+                status_receiver: receiver,
+                task,
+                _communication_guard: manager
+                    .communication_access
+                    .acquire()
+                    .expect("Communication is enabled"),
+            },
+        );
+        abort_handle
+    }
 
     #[test]
     fn probe_is_a_prefix_of_every_transfer_data_block() {
@@ -397,5 +582,125 @@ mod tests {
         assert_eq!(probe.source_address, 0x0E00);
         assert_eq!(probe.target_address, 0x1234);
         assert!(probe.new_session.is_none() && probe.new_security.is_none());
+    }
+
+    #[tokio::test]
+    async fn transfer_exit_rejects_foreign_owner_and_unknown_id() {
+        let manager = make_manager();
+        insert_transfer(
+            &manager,
+            DataTransferStatus::Finished,
+            tokio::spawn(async {}),
+        )
+        .await;
+
+        for (id, owner) in [(TRANSFER_ID, "other-owner"), ("other-id", OWNER)] {
+            assert!(matches!(
+                manager.ecu_flash_transfer_exit(ECU, id, owner).await,
+                Err(DiagServiceError::NotFound(_))
+            ));
+        }
+        assert!(manager.data_transfers.lock().await.contains_key(ECU));
+    }
+
+    #[tokio::test]
+    async fn transfer_exit_removes_finished_transfer_of_owner() {
+        let manager = make_manager();
+        insert_transfer(
+            &manager,
+            DataTransferStatus::Finished,
+            tokio::spawn(async {}),
+        )
+        .await;
+
+        manager
+            .ecu_flash_transfer_exit(ECU, TRANSFER_ID, OWNER)
+            .await
+            .expect("Owner can exit its finished transfer");
+        assert!(!manager.data_transfers.lock().await.contains_key(ECU));
+    }
+
+    #[tokio::test]
+    async fn transfer_exit_rejects_running_transfer() {
+        let manager = make_manager();
+        insert_transfer(
+            &manager,
+            DataTransferStatus::Running,
+            tokio::spawn(std::future::pending()),
+        )
+        .await;
+
+        assert!(matches!(
+            manager
+                .ecu_flash_transfer_exit(ECU, TRANSFER_ID, OWNER)
+                .await,
+            Err(DiagServiceError::InvalidRequest(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn transfer_abort_ignores_transfer_of_other_owner() {
+        let manager = make_manager();
+        let task = insert_transfer(
+            &manager,
+            DataTransferStatus::Running,
+            tokio::spawn(std::future::pending()),
+        )
+        .await;
+
+        manager.ecu_flash_transfer_abort(ECU, "other-owner").await;
+
+        assert!(manager.data_transfers.lock().await.contains_key(ECU));
+        assert!(!task.is_finished());
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn transfer_abort_stops_and_removes_running_transfer_of_owner() {
+        let manager = make_manager();
+        let task = insert_transfer(
+            &manager,
+            DataTransferStatus::Running,
+            tokio::spawn(std::future::pending()),
+        )
+        .await;
+
+        manager.ecu_flash_transfer_abort(ECU, OWNER).await;
+
+        assert!(!manager.data_transfers.lock().await.contains_key(ECU));
+        assert!(task.is_finished());
+    }
+
+    #[test]
+    fn communication_error_names_the_block_and_keeps_the_cause() {
+        let error = communication_error(0x05, DiagServiceError::Timeout);
+        assert_eq!(error.message, "Failed to read data: block 0x05: Timeout");
+        assert_eq!(error.block_sequence_counter, Some(0x05));
+        assert!(matches!(
+            error.cause,
+            DataTransferErrorCause::Communication(DiagServiceError::Timeout)
+        ));
+    }
+
+    #[test]
+    fn internal_error_with_block() {
+        let error = internal_error(Some(0x2A), "Failed to read the flash file: eof");
+        assert_eq!(
+            error.message,
+            "Failed to read data: block 0x2A: Failed to read the flash file: eof"
+        );
+        assert_eq!(error.block_sequence_counter, Some(0x2A));
+        assert!(matches!(error.cause, DataTransferErrorCause::Internal));
+    }
+
+    #[test]
+    fn internal_error_without_block() {
+        let error = internal_error(None, "Remaining bytes overflowed usize");
+        assert_eq!(
+            error.message,
+            "Failed to read data: Remaining bytes overflowed usize"
+        );
+        assert_eq!(error.block_sequence_counter, None);
+        assert!(matches!(error.cause, DataTransferErrorCause::Internal));
     }
 }

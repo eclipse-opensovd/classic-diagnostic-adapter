@@ -645,30 +645,18 @@ async fn init_webserver(
 
 async fn register_version_endpoints(dynamic_router: &cda_sovd::dynamic_router::DynamicRouter) {
     // [[ dimpl~sovd-api-version-endpoint, Register Version Endpoint ]]
-    let serde_json::Value::Object(version_info) = serde_json::json!({
-        "id": "version",
-        "data": {
-            "name": "Eclipse OpenSOVD Classic Diagnostic Adapter",
-            "api": {
-                "version": "1.1"
-            },
-            "implementation": {
-                "version": cda_version(),
-                "commit": env!("GIT_COMMIT_HASH").to_owned(),
-                "build_date": env!("BUILD_DATE").to_owned(),
-            }
-        }
-    }) else {
-        tracing::error!("Failed to build version information");
-        return;
-    };
-    cda_sovd::add_static_data_endpoint(
-        dynamic_router,
-        version_info.clone(),
-        "/vehicle/v15/apps/sovd2uds/data/version",
-    )
-    .await;
-    cda_sovd::add_static_data_endpoint(dynamic_router, version_info, "/vehicle/v15/data/version")
+    let versions = cda_sovd::VersionRegistrar::new(
+        "Eclipse OpenSOVD Classic Diagnostic Adapter",
+        cda_version(),
+        env!("GIT_COMMIT_HASH"),
+        env!("BUILD_DATE"),
+    );
+    versions.register_version_info(dynamic_router).await;
+    versions
+        .register_data(dynamic_router, "/vehicle/v15/apps/sovd2uds/data/version")
+        .await;
+    versions
+        .register_data(dynamic_router, "/vehicle/v15/data/version")
         .await;
 }
 
@@ -743,7 +731,7 @@ pub struct TracingGuards {
 pub fn setup_tracing(config: &Configuration) -> Result<TracingGuards, TracingSetupError> {
     let tracing = cda_tracing::new();
     let mut layers = vec![];
-    layers.push(cda_tracing::new_term_subscriber(&config.logging));
+    layers.push(cda_tracing::new_term_subscriber(&config.logging)?);
     #[cfg(feature = "tokio-tracing")]
     layers.push(cda_tracing::new_tokio_tracing(
         &config.logging.tokio_tracing,

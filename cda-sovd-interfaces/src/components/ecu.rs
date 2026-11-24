@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Items;
 
+pub mod genericservice;
 pub mod modes;
 pub mod operations;
 
@@ -55,7 +56,14 @@ pub struct Ecu {
     pub sdgs: Option<Vec<SdSdg>>,
     #[serde(rename = "x-single-ecu-jobs")]
     pub single_ecu_jobs: String,
+    #[serde(rename = "bulk-data")]
+    pub bulk_data: String,
+    #[serde(rename = "x-sovd2uds-bulk-data")]
+    pub x_sovd2uds_bulk_data: String,
+    #[serde(rename = "x-sovd2uds-download")]
+    pub x_sovd2uds_download: String,
     pub faults: String,
+    pub genericservice: String,
     pub modes: String,
     #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -406,11 +414,11 @@ pub mod x {
                 pub mod get {
                     use serde::Serialize;
 
-                    use crate::Items;
+                    use crate::{Items, error::ApiErrorResponse};
 
                     #[derive(Serialize, Clone, schemars::JsonSchema)]
                     #[serde(rename_all = "camelCase")]
-                    pub struct DataTransferMetaData {
+                    pub struct DataTransferMetaData<T> {
                         pub acknowledged_bytes: u64,
                         pub blocksize: usize,
                         pub next_block_sequence_counter: u8,
@@ -418,15 +426,20 @@ pub mod x {
                         pub file_id: String,
                         pub status: DataTransferStatus,
                         #[serde(skip_serializing_if = "Option::is_none")]
-                        pub error: Option<Vec<DataTransferError>>,
+                        pub error: Option<Vec<DataTransferError<T>>>,
                         #[schemars(skip)]
                         #[serde(skip_serializing_if = "Option::is_none")]
                         pub schema: Option<schemars::Schema>,
                     }
 
+                    /// Reason why a transfer was aborted, a SOVD `GenericError`.
                     #[derive(Serialize, Clone, schemars::JsonSchema)]
-                    pub struct DataTransferError {
+                    pub struct DataTransferError<T> {
+                        /// Same as `message`. Kept for clients reading the error text of
+                        /// earlier versions.
                         pub text: String,
+                        #[serde(flatten)]
+                        pub error: ApiErrorResponse<T>,
                     }
 
                     #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -444,11 +457,11 @@ pub mod x {
                         Queued,
                     }
 
-                    pub type Response = Items<DataTransferMetaData>;
+                    pub type Response<T> = Items<DataTransferMetaData<T>>;
 
                     pub mod id {
                         use super::DataTransferMetaData;
-                        pub type Response = DataTransferMetaData;
+                        pub type Response<T> = DataTransferMetaData<T>;
                     }
                 }
             }
@@ -635,11 +648,12 @@ pub mod faults {
         /// Query parameters for filtering DTC by the given fields.
         #[serde(rename_all = "camelCase")]
         pub struct FaultQuery {
-            /// Filters the elements based on a status, if the value ia a full match.
-            /// To allow multiple values the parameter is repeated. (0..*), they are 'OR' combined.
-            /// Currently supported  (case-insensitive) keys are:
+            /// Filters the elements based on their status. Each key selects a status bit,
+            /// all selected bits are 'OR' combined into the UDS status mask, so a fault is
+            /// returned if any of the selected bits is set.
+            /// Currently supported (case-insensitive) keys are:
             /// * confirmedDtc
-            /// * mask
+            /// * mask (raw status mask as hex, e.g. `29` or `0x29`)
             /// * pendingDtc
             /// * testFailed
             /// * testFailedSinceLastClear
@@ -648,8 +662,9 @@ pub mod faults {
             /// * testNotCompletedThisOperationCycle
             /// * warningIndicatorRequested
             ///
-            /// Additional keys are not read from the database at this time.
-            /// The value can be allowed values for these keys are 0|1 or true|false.
+            /// Other keys are ignored. For the bit keys the allowed values are 0|1 or
+            /// true|false. If no bit is selected, all faults are returned.
+            /// A mask of 0 is treated like no filter.
             ///
             /// Example:
             ///
@@ -719,35 +734,39 @@ pub mod faults {
             }
 
             #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-            pub struct ExtendedSnapshots<T> {
+            pub struct ExtendedSnapshots {
                 #[serde(skip_serializing_if = "Option::is_none")]
                 pub data: Option<HashMap<String, Snapshot>>,
-                #[serde(skip_serializing_if = "Option::is_none")]
-                pub errors: Option<Vec<DataError<T>>>,
             }
 
             #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-            pub struct ExtendedDataRecords<T> {
+            pub struct ExtendedDataRecords {
                 #[serde(skip_serializing_if = "Option::is_none")]
                 pub data: Option<HashMap<String, serde_json::Value>>,
-                #[serde(skip_serializing_if = "Option::is_none")]
-                pub errors: Option<Vec<DataError<T>>>,
             }
 
             #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-            pub struct EnvironmentData<T> {
+            pub struct EnvironmentData {
                 #[serde(skip_serializing_if = "Option::is_none")]
-                pub extended_data_records: Option<ExtendedDataRecords<T>>,
+                pub extended_data_records: Option<ExtendedDataRecords>,
 
                 #[serde(skip_serializing_if = "Option::is_none")]
-                pub snapshots: Option<ExtendedSnapshots<T>>,
+                pub snapshots: Option<ExtendedSnapshots>,
             }
 
+            /// Spec Table 65: errors of the whole response are reported in the
+            /// top-level `errors` list, each pointing at the failing element via a
+            /// JSON pointer (Table 17).
             #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
             pub struct ExtendedFault<T> {
                 pub item: Fault,
                 #[serde(skip_serializing_if = "Option::is_none")]
-                pub environment_data: Option<EnvironmentData<T>>,
+                pub environment_data: Option<EnvironmentData>,
+                #[serde(
+                    default = "Vec::<DataError<T>>::new",
+                    skip_serializing_if = "Vec::is_empty"
+                )]
+                pub errors: Vec<DataError<T>>,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 pub schema: Option<schemars::Schema>,
             }
@@ -773,6 +792,30 @@ mod tests {
         assert!(query_with_schema.include_extended_data);
         assert!(!query_with_schema.include_snapshot_data);
         assert!(query_with_schema.include_schema);
+    }
+
+    #[test]
+    fn test_deserialize_fault_status_query() {
+        for query_str in [
+            "status[confirmedDtc]=true&status[MASK]=0x29",
+            "status%5BconfirmedDtc%5D=true&status%5BMASK%5D=0x29",
+        ] {
+            let query: super::faults::get::FaultQuery = serde_qs::Config::new()
+                .use_form_encoding(true)
+                .deserialize_str(query_str)
+                .expect("Query should deserialize");
+            let status = query.status.expect("Status should be present");
+            assert_eq!(
+                status.get("confirmedDtc"),
+                Some(&serde_json::json!("true")),
+                "query {query_str}"
+            );
+            assert_eq!(
+                status.get("MASK"),
+                Some(&serde_json::json!("0x29")),
+                "query {query_str}"
+            );
+        }
     }
 
     mod flash_requests {

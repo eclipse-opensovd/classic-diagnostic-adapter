@@ -580,7 +580,8 @@ impl ServicePayload {
             // RoutineControl: 1-byte subfunction + 2-byte RoutineIdentifier
             service_ids::ROUTINE_CONTROL => 3,
             // Authentication: 1-byte authenticationTask (sub-function, Table 75 ff.)
-            service_ids::AUTHENTICATION => 1,
+            // TransferData: 1-byte blockSequenceCounter (ISO 14229-1 clause 14.5)
+            service_ids::AUTHENTICATION | service_ids::TRANSFER_DATA => 1,
             _ => 0,
         }
     }
@@ -1289,6 +1290,35 @@ mod tests {
     fn authentication_suppress_bit_is_masked() {
         let request = vec![0x29, 0x88];
         let response = make_payload(vec![0x69, 0x08, 0x02]);
+        assert!(response.has_matching_echo_bytes(&request));
+    }
+
+    #[test]
+    fn transfer_data_matching_block_sequence_counter_returns_true() {
+        let request = vec![0x36, 0x05, 0xAA, 0xBB];
+        let response = make_payload(vec![0x76, 0x05]);
+        assert!(response.has_matching_echo_bytes(&request));
+    }
+
+    #[test]
+    fn transfer_data_mismatched_block_sequence_counter_returns_false() {
+        // late answer to the previous block
+        let request = vec![0x36, 0x05, 0xAA, 0xBB];
+        let response = make_payload(vec![0x76, 0x04]);
+        assert!(!response.has_matching_echo_bytes(&request));
+    }
+
+    #[test]
+    fn transfer_data_missing_block_sequence_counter_returns_false() {
+        let request = vec![0x36, 0x05, 0xAA];
+        let response = make_payload(vec![0x76]);
+        assert!(!response.has_matching_echo_bytes(&request));
+    }
+
+    #[test]
+    fn transfer_data_negative_response_is_not_echo_checked() {
+        let request = vec![0x36, 0x05, 0xAA];
+        let response = make_payload(vec![0x7F, 0x36, 0x71]);
         assert!(response.has_matching_echo_bytes(&request));
     }
 

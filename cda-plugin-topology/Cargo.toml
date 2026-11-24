@@ -28,7 +28,6 @@ path = "src/lib.rs"
 [dependencies]
 cda-interfaces = { workspace = true }
 async-trait = { workspace = true }
-chrono = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }

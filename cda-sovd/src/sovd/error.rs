@@ -286,6 +286,9 @@ pub enum VendorErrorCode {
     /// ECU communication is not currently available. Retry after the interval
     /// given in the `Retry-After` header.
     CommunicationNotReady,
+    /// A flash transfer was aborted for a reason other than a negative response or a
+    /// missing response of the ECU, e.g. a failed request or reading the flash file.
+    DataTransferFailed,
     /// Indicates that something went terribly wrong and safe operation cannot be guaranteed at
     /// this point. The application still tries to serve requests in the best effort,
     /// but correctness may be affected by this error.

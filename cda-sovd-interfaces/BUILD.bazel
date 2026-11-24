@@ -15,7 +15,6 @@ workspace_rust_library(
     name = "sovd_interfaces",
     srcs = glob(["src/**/*.rs"]),
     crate_deps = [
-        "chrono",
         "schemars",
         "serde",
         "serde_json",

@@ -160,7 +160,7 @@ Entities
     - A ``last_seen`` timestamp of the last reply of the ECU (see :need:`arch~dt-ecu-states`), if the ECU has
       ever been contacted (either in the current session, or, when loaded from a persisted ECU list, in a
       previous session). It is formatted as RFC 3339 in UTC with second precision and omitted if the ECU was never contacted.
-    - URI references to the standardized resource collection endpoints: data, operations, configurations, faults, modes, locks, and extension endpoints
+    - URI references to the standardized resource collection endpoints: data, operations, configurations, faults, modes, locks, bulk-data, and extension endpoints
 
     The connectivity state of an ECU reflects its current diagnostic reachability and variant detection status:
 
@@ -1140,7 +1140,11 @@ Faults -- SID 14\ :sub:`16` & 19\ :sub:`16`
     All values are either boolean values (true/false), or a bit value (0/1).
 
     Additionally, a special key called ``mask`` is available, which takes a hexadecimal mask as a value
-    to allow filtering by the complete status byte. Using other keys together with ``mask`` is not supported.
+    to allow filtering by the complete status byte (e.g. ``29`` or ``0x29``).
+
+    Keys are matched case-insensitively. All selected bits, including the bits of ``mask``, are OR combined
+    into one status mask, so a DTC is returned if any of the selected bits is set. Unknown keys are ignored.
+    If no bit is selected (including a ``mask`` of 0), no filter is applied and all faults are returned.
 
     .. uml:: images/fault_read.puml
 
@@ -1499,19 +1503,97 @@ Generic Service
 
 .. arch:: Generic Service Endpoint
     :id: arch~sovd-api-generic-service
+    :links: dimpl~sovd-api-generic-service, testset~sovd-api-generic-service
     :status: draft
 
     The ``/genericservice`` endpoint provides raw UDS passthrough functionality, allowing clients to send
     arbitrary UDS requests to an ECU without relying on diagnostic description (MDD) service resolution
-    or parameter encoding.
+    or parameter encoding. ISO 17978-3 defines no such resource, it is a vendor extension.
 
-    The client sends a hex-encoded UDS request in the JSON body, and receives the raw hex-encoded UDS
-    response from the ECU.
+    **Body formats**
+
+    Like every other diagnostic exchange of the SOVD-API (ISO 17978-3 §5.10, Clause 7), request and response
+    are JSON by default. The UDS bytes are a string in the binary encoding selected by the configuration and
+    the ``x-sovd2uds-binary-encoding`` query parameter (see :need:`arch~sovd-api-binary-encoding`):
+
+    .. code-block:: text
+
+       PUT /components/{ecu}/genericservice?x-sovd2uds-binary-encoding=hex
+       Content-Type: application/json
+
+       { "data": "0x22 0xF1 0x90" }
+
+       200 OK
+       Content-Type: application/json
+
+       { "id": "genericservice", "data": "0x62 0xF1 0x90 ..." }
+
+    ISO 17978-3 defines no contract for a raw UDS exchange. The bodies therefore follow the data resources:
+    the bytes are in the field ``data``, like in the request body of writing a data resource, and the
+    response carries the resource ``id`` like ``ReadValue``. ``request`` and ``send`` are accepted as aliases
+    of ``data`` in the request. With the ``hex`` encoding, the response
+    uses the notation of the request. Spaces and commas between the bytes are accepted in the request but
+    not repeated in the response; mixed notations are answered in the default notation:
+
+    .. list-table:: Hex notation
+       :header-rows: 1
+
+       * - Request
+         - Notation
+         - Response
+       * - ``0x22F190``, ``0x22 F1 90``
+         - One leading ``0x``
+         - ``0x62F190...``
+       * - ``22F190``, ``22 F1 90``
+         - No prefix
+         - ``62F190...``
+       * - ``0x22 0xF1 0x90``, raw request with JSON response
+         - ``0x`` per byte (default)
+         - ``0x62 0xF1 0x90 ...``
+
+    To transfer and handle the data efficiently, without encoding and decoding, ``application/octet-stream``
+    can be selected instead to exchange the raw bytes, independently for the request and the response. The
+    headers are evaluated like for the other endpoints supporting both formats (e.g. ``/data``):
+
+    .. list-table:: Format selection
+       :header-rows: 1
+
+       * - Header
+         - Value
+         - Format
+       * - ``Content-Type``
+         - ``application/json`` or missing
+         - JSON request
+       * - ``Content-Type``
+         - ``application/octet-stream``
+         - Raw request bytes
+       * - ``Accept``
+         - missing or ``*/*``
+         - Same format as the request
+       * - ``Accept``
+         - ``application/json`` / ``application/octet-stream``
+         - JSON / raw response
+
+    **Status codes**
+
+    Every ECU response is passed through with ``200 OK``: positive responses, suppressed positive responses
+    (empty) and negative responses (``7F <SID> <NRC>``), i.e. as raw bytes or as
+    ``{ "id": "genericservice", "data": "7F2231" }``.
+    The passthrough does not interpret the response; ``502 Bad Gateway`` would require a SOVD error object
+    describing the NRC. Errors of the CDA itself (e.g. no response, communication failure) are reported as
+    SOVD errors as for the other endpoints.
+
+    Any other ``Content-Type`` or ``Accept``, an invalid or empty request and an undecodable binary value are
+    rejected with ``400 Bad Request`` before anything is sent to the ECU. The binary form is no deviation from
+    ISO 17978-3, since the standard neither defines this resource nor the content types of custom resources.
+
+    **Security**
 
     Permissions for generic service calls can be checked and enforced through the security plugin. Since
     generic service requests bypass the structured service resolution, the security plugin receives the
     raw UDS request payload (e.g. ``22 F1 90``) and is responsible for evaluating whether the authenticated
-    client is authorized to send that specific UDS command to the target ECU.
+    client is authorized to send that specific UDS command to the target ECU. The payload is decoded from
+    the body before, so the plugin is independent of the body format and binary encoding.
 
     .. uml:: images/generic_service.puml
 
@@ -1524,18 +1606,19 @@ Version Endpoint
     :links: dimpl~sovd-api-version-endpoint, testset~sovd-api-version-endpoint
     :status: draft
 
-    The CDA provides a version registration function that sets up version-related endpoints during
-    initialization.
+    The CDA provides a registrar for version-related endpoints during initialization.
 
     **Registration Function**
 
-    The function accepts the following parameters: ``vendor_name``, ``implementation_version``, ``commit``,
+    The registrar accepts the following parameters: ``vendor_name``, ``implementation_version``, ``commit``,
     ``build_date``.
 
-    It always registers the standard ``/version-info`` endpoint, and optionally registers the default
-    ``/data/version`` and ``/apps/sovd2uds/data/version`` endpoints.
+    A method registers the standard ``/version-info`` endpoint. A separate method registers a version
+    data endpoint at a caller-supplied path. Applications can call it for each optional
+    vendor-specific endpoint, including ``/data/version`` and ``/apps/sovd2uds/data/version``.
+    Both response formats are derived from the same registrar values.
 
-    The fields ``base_uri`` and ``api_version`` are determined by the function.
+    The fields ``base_uri`` and ``api_version`` are determined by the registrar.
 
     **Standard Endpoint: /version-info**
 
@@ -1558,6 +1641,12 @@ Version Endpoint
             ]
         }
 
+    **Version segments**
+
+    The SOVD routes are currently mounted under ``/vehicle/v15``, which is reported in ``sovd_info``
+    with ``version`` ``1.1.0``. The standard's ``v1`` version identifier and configurable base URI
+    are tracked in `issue #181 <https://github.com/eclipse-opensovd/classic-diagnostic-adapter/issues/181>`_.
+
     **Optional Vendor-Specific Endpoints: /data/version, /apps/sovd2uds/data/version**
 
     When enabled, these endpoints are registered as static data endpoints returning:
@@ -1579,12 +1668,17 @@ Version Endpoint
             }
         }
 
-    Both endpoint types are available immediately after the HTTP server starts and do not require
-    any ECU communication.
+    The default version endpoints are available immediately after the HTTP server starts, do not
+    require any ECU communication, and stay accessible while a runtime update is running. Custom
+    data paths must be configured separately to remain accessible during global HTTP protections.
+
+    The vendor-specific endpoints are registered as static data endpoints with the data category
+    ``identData``. Registering a static data endpoint also lists it in its ``data`` collection
+    (``/data`` or ``/apps/sovd2uds/data``), so endpoints added at runtime, e.g. by an embedding
+    application, are listed as well. Resources served by other routes, like
+    ``/apps/sovd2uds/data/networkstructure`` (``sysInfo``), are registered for listing separately.
 
     .. uml:: images/version_registration.puml
-
-    .. note:: The current implementation only registers ``/data/version`` and ``/apps/sovd2uds/data/version``
 
 Error Codes & Messages
 ----------------------

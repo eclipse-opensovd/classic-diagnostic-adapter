@@ -34,7 +34,7 @@ endif
 
 .PHONY: build release check test integration-test integration-test-can integration-test-mixed \
 	build-all-features build-mbedtls build-minimal build-minimal-cda \
-	bazel-build bazel-check bazel-update-lockfile \
+	bazel-build bazel-check bazel-update-lockfile actions-update-lockfile \
 	lint lint-all-features lint-nightly lint-nightly-all-features fmt fmt-check \
 	precommit precommit-all-features \
 	coverage coverage-can integration-coverage deny \
@@ -98,6 +98,10 @@ bazel-update-lockfile:
 	bazel mod deps --lockfile_mode=update
 	cd bazel/vendor-consumer-test && bazel mod deps --lockfile_mode=update
 
+actions-update-lockfile:
+	# Install with: gh extension install github/gh-actions-lock
+	gh actions-lock
+
 lint:
 	cargo +$(STABLE) clippy --all-targets $(ARGS) -- --deny=warnings
 
@@ -132,7 +136,7 @@ integration-coverage:
 	CDA_INTEGRATION_TEST_COVERAGE=true cargo +$(STABLE) llvm-cov --features integration-tests --lcov --output-path lcov.info
 
 deny:
-	cargo +$(STABLE) deny check $(ARGS)
+	cargo +$(STABLE) deny $(if $(FORMAT),--format $(FORMAT)) check $(ARGS)
 
 generate-config:
 	cargo +$(STABLE) run --locked --all-features -- generate-config --output $(or $(OUTPUT),opensovd-cda.toml)
@@ -260,6 +264,7 @@ help:
 		'bazel-build                  Build platform-supported primary and vendor targets' \
 		'bazel-check                  Validate the Bazel configuration and target graph' \
 		'bazel-update-lockfile        Update crate and module Bazel lockfiles' \
+		'actions-update-lockfile      Regenerate .github/workflows/actions.lock' \
 		'lint ARGS="..."              Run stable Clippy' \
 		'lint-all-features            Run stable Clippy with all features' \
 		'lint-nightly ARGS="..."      Run pinned-nightly Clippy' \
@@ -271,7 +276,7 @@ help:
 		'coverage                     Generate unit-test LCOV coverage' \
 		'coverage-can                 Generate CAN unit-test LCOV coverage' \
 		'integration-coverage         Generate integration-test LCOV coverage' \
-		'deny ARGS="..."              Run all or selected cargo-deny checks' \
+		'deny ARGS="..."              Run all or selected cargo-deny checks (FORMAT=json for JSON)' \
 		'generate-config              Regenerate opensovd-cda.toml' \
 		'generate-test-config         Generate testcontainer/cda-test-config*.toml for docker compose' \
 		'generate-flatbuffers         Regenerate FlatBuffers sources' \

@@ -61,22 +61,22 @@ jobs:
       packages: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.1.0
         with:
           submodules: false
       - name: Lowercase image name
         run: echo "IMAGE=${IMAGE,,}" >> "$GITHUB_ENV"
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v3.12.0
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v5.10.0
         with:
           images: ${{ env.IMAGE }}
       # BuildKit cache mounts (cargo registry, cargo git, sccache) are not
@@ -103,7 +103,7 @@ jobs:
       - name: Restore and save cache mounts (main)
         id: mounts-cache-main
         if: github.ref == 'refs/heads/main'
-        uses: actions/cache@v5
+        uses: actions/cache@v5.1.0
         with:
           path: cache-mounts
           key: ${{ steps.mounts-key.outputs.key }}
@@ -113,7 +113,7 @@ jobs:
       - name: Restore cache mounts
         id: mounts-cache
         if: github.ref != 'refs/heads/main'
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v5.1.0
         with:
           path: cache-mounts
           key: ${{ steps.mounts-key.outputs.key }}
@@ -121,7 +121,7 @@ jobs:
             ${{ steps.mounts-key.outputs.lock-prefix }}
             ${{ steps.mounts-key.outputs.prefix }}-
       - name: Inject cache mounts into BuildKit
-        uses: reproducible-containers/buildkit-cache-dance@v3
+        uses: reproducible-containers/buildkit-cache-dance@v3.4.0
         with:
           cache-map: |
             {
@@ -134,7 +134,7 @@ jobs:
           skip-extraction: ${{ github.ref != 'refs/heads/main' || steps.mounts-cache-main.outputs.cache-hit == 'true' }}
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v6.19.2
         with:
           context: .
           file: testcontainer/cda/Dockerfile
@@ -155,7 +155,7 @@ jobs:
           digest="${{ steps.build.outputs.digest }}"
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
       - name: Upload digest
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: digests-${{ matrix.arch }}
           path: ${{ runner.temp }}/digests/*
@@ -173,22 +173,22 @@ jobs:
       - name: Lowercase image name
         run: echo "IMAGE=${IMAGE,,}" >> "$GITHUB_ENV"
       - name: Download digests
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v7.0.0
         with:
           path: ${{ runner.temp }}/digests
           pattern: digests-*
           merge-multiple: true
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v3.12.0
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v5.10.0
         with:
           images: ${{ env.IMAGE }}
           tags: |

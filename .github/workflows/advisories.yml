@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: Advisories
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # Daily at 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  # GitHub handles (without @, separated by spaces or commas) that are assigned
+  # to and mentioned in advisory issues, so they get notified by email.
+  ADVISORY_RECIPIENTS: "theswiftfox floroks mbfm alexmohr"
+  # Days without any activity on an advisory issue before a reminder is posted.
+  REMINDER_INTERVAL_DAYS: "7"
+
+jobs:
+  versions:
+    uses: ./.github/workflows/tool-versions.yml
+
+  advisories:
+    needs: versions
+    if: github.repository_owner == 'eclipse-opensovd'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.1.0
+        with:
+          submodules: false
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1.17.0
+        with:
+          toolchain: ${{ needs.versions.outputs.stable }}
+          cache: false
+      - name: Cache cargo-deny
+        id: cargo-deny-cache
+        uses: actions/cache@v5.1.0
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: cargo-deny-${{ runner.os }}-${{ runner.arch }}-${{ needs.versions.outputs.cargo_deny }}
+      - name: Install cargo-deny
+        if: steps.cargo-deny-cache.outputs.cache-hit != 'true'
+        run: cargo install --locked --version "${{ needs.versions.outputs.cargo_deny }}" cargo-deny
+      - name: Check advisories
+        id: deny
+        run: |
+          set +e
+          make --no-print-directory deny FORMAT=json ARGS=advisories 2> "$RUNNER_TEMP/deny-advisories.jsonl"
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/deny-advisories.jsonl"
+      - name: Sync advisory issues
+        uses: actions/github-script@v7.1.0
+        env:
+          DENY_REPORT: ${{ runner.temp }}/deny-advisories.jsonl
+          DENY_EXIT_CODE: ${{ steps.deny.outputs.exit_code }}
+        with:
+          script: |
+            const syncAdvisoryIssues = require('./.github/scripts/advisory-issues.js');
+            await syncAdvisoryIssues({ github, context, core });

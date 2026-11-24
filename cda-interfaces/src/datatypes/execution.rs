@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use crate::HashMap;
+use crate::{DiagServiceError, HashMap};
 
 #[derive(Clone, Debug)]
 pub struct Unit {
@@ -56,9 +56,31 @@ pub enum DataTransferStatus {
     Queued,
 }
 
+/// Why a data transfer was aborted.
+#[derive(Debug, Clone)]
+pub enum DataTransferErrorCause {
+    /// The ECU answered a block with a negative response.
+    NegativeResponse {
+        /// Service identifier echoed in the negative response.
+        sid: Option<u8>,
+        /// Negative response code.
+        nrc: Option<u8>,
+        /// Description of the NRC, from the database or ISO 14229-1.
+        description: Option<String>,
+    },
+    /// Sending a block or receiving its response failed, e.g. a timeout.
+    Communication(DiagServiceError),
+    /// The CDA itself failed, e.g. reading the flash file.
+    Internal,
+}
+
 #[derive(Debug, Clone)]
 pub struct DataTransferError {
-    pub text: String,
+    /// Human readable description, including the affected block.
+    pub message: String,
+    pub cause: DataTransferErrorCause,
+    /// Block sequence counter of the block that failed, if a block was involved.
+    pub block_sequence_counter: Option<u8>,
 }
 
 #[derive(Debug, Clone)]
