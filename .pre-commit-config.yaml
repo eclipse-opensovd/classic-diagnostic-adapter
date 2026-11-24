@@ -24,6 +24,12 @@ repos:
         entry: make lint-nightly-all-features
         language: system
         pass_filenames: false
+      - id: deny-unused-ignores
+        name: make deny-unused-ignores
+        entry: make deny-unused-ignores
+        language: system
+        pass_filenames: false
+        files: ^(Cargo\.lock|deny\.toml)$
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
