@@ -13,6 +13,7 @@
 name = "cda-comm-can"
 version = "0.1.0"
 edition.workspace = true
+rust-version.workspace = true
 publish = false
 description = "CAN bus communication layer used in CDA"
 homepage.workspace = true

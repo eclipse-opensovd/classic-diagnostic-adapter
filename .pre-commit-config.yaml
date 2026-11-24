@@ -30,6 +30,12 @@ repos:
         language: system
         pass_filenames: false
         files: ^(Cargo\.lock|deny\.toml)$
+      - id: check-rust-version
+        name: check pinned Rust versions match Cargo.toml rust-version
+        entry: python3 .github/scripts/check_rust_version.py
+        language: system
+        pass_filenames: false
+        files: ^(Cargo\.toml|MODULE\.bazel|bazel/vendor-consumer-test/MODULE\.bazel|testcontainer/cda/Dockerfile|\.github/scripts/check_rust_version\.py)$
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:

@@ -13,6 +13,7 @@
 name = "cda-core"
 version = "0.1.0"
 edition.workspace = true
+rust-version.workspace = true
 publish = false
 description = "Diagnostic Core of CDA"
 homepage.workspace = true

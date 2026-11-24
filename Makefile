@@ -9,7 +9,13 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-STABLE := 1.88.0
+# The pinned stable toolchain is the MSRV, declared once as `rust-version` in Cargo.toml.
+# It is also read by cargo's resolver and Dependabot, so it must be a full version.
+CARGO_TOML := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))Cargo.toml
+STABLE := $(shell sed -n 's/^rust-version = "\([^"]*\)"$$/\1/p' '$(CARGO_TOML)')
+ifeq ($(shell printf '%s' '$(STABLE)' | grep -Ex '[0-9]+\.[0-9]+\.[0-9]+'),)
+$(error rust-version in $(CARGO_TOML) must be a full version like 1.88.0, found "$(STABLE)")
+endif
 NIGHTLY := nightly-2026-07-21
 CARGO_DENY_VERSION := 0.20.2
 CARGO_LLVM_COV_VERSION := 0.9.1

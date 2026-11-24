@@ -196,6 +196,7 @@ fn cda_image_tag() -> &'static str {
 /// checks, see `CHECK_RUSTFLAGS` in `testcontainer/cda/Dockerfile`.
 fn cda_build_options() -> BuildImageOptions {
     let options = BuildImageOptions::new()
+        .with_build_arg("RUST_VERSION", env!("CARGO_PKG_RUST_VERSION"))
         .with_build_arg("SOURCE_DATE_EPOCH", "0")
         .with_build_arg("SOURCE_GIT_SHA", "unknown")
         .with_build_arg("CDA_FEATURES", "can-socketcand");

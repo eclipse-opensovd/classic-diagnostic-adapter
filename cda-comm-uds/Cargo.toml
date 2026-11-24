@@ -13,6 +13,7 @@
 name = "cda-comm-uds"
 version = "0.1.0"
 edition.workspace = true
+rust-version.workspace = true
 publish = false
 description = "UDS communication layer used in CDA"
 homepage.workspace = true

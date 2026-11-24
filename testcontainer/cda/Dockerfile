@@ -9,7 +9,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-ARG RUST_VERSION=1.88
+ARG RUST_VERSION=1.88.0
 ARG SOURCE_DATE_EPOCH
 ARG SOURCE_GIT_SHA
 # The tests run an optimized build with debug assertions and overflow checks
