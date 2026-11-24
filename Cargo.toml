@@ -166,7 +166,7 @@ rustversion = "1.0.22"  # macros for conditional compilation
 linkme = "0.3"
 proc-macro2 = "1"
 quote = "1"
-syn = { version = "2", features = ["full", "visit"] }
+syn = { version = "3", features = ["full", "visit"] }
 
 [workspace.lints.clippy]
 # enable pedantic
