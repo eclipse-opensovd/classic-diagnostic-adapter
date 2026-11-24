@@ -9,11 +9,11 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-name: Weekly Advisories
+name: Advisories
 
 on:
   schedule:
-    - cron: "0 6 * * 1" # Mondays at 06:00 UTC
+    - cron: "0 6 * * *" # Daily at 06:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -27,6 +27,8 @@ env:
   # GitHub handles (without @, separated by spaces or commas) that are assigned
   # to and mentioned in advisory issues, so they get notified by email.
   ADVISORY_RECIPIENTS: "theswiftfox floroks mbfm alexmohr"
+  # Days without any activity on an advisory issue before a reminder is posted.
+  REMINDER_INTERVAL_DAYS: "7"
 
 jobs:
   versions:
@@ -48,7 +50,15 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1.17.0
         with:
           toolchain: ${{ needs.versions.outputs.stable }}
+          cache: false
+      - name: Cache cargo-deny
+        id: cargo-deny-cache
+        uses: actions/cache@v5.1.0
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: cargo-deny-${{ runner.os }}-${{ runner.arch }}-${{ needs.versions.outputs.cargo_deny }}
       - name: Install cargo-deny
+        if: steps.cargo-deny-cache.outputs.cache-hit != 'true'
         run: cargo install --locked --version "${{ needs.versions.outputs.cargo_deny }}" cargo-deny
       - name: Check advisories
         id: deny

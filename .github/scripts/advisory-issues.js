@@ -11,8 +11,9 @@
 
 // Syncs the advisories reported by `cargo deny --format json check advisories`
 // with GitHub issues: one issue per advisory ID, labelled `advisory`.
-// New advisories open an issue, still reported ones get a reminder comment
-// (closed issues are reopened), advisories no longer reported close their issue.
+// New advisories open an issue, still reported ones get a reminder comment once
+// their issue had no activity for REMINDER_INTERVAL_DAYS (closed issues are
+// reopened), advisories no longer reported close their issue.
 // Called from .github/workflows/advisories.yml via actions/github-script.
 
 const fs = require('node:fs');
@@ -22,12 +23,18 @@ const LABEL_COLOR = 'f75c39';
 const EXTRA_LABELS = ['dependencies'];
 const MAX_PATHS = 10;
 const MAX_BODY_LENGTH = 60000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 function parseRecipients(value) {
   return [...new Set((value || '')
     .split(/[\s,]+/)
     .map(handle => handle.replace(/^@/, '').trim())
     .filter(Boolean))];
+}
+
+function parseInterval(value) {
+  const days = Number(value);
+  return Number.isFinite(days) && days >= 0 && String(value).trim() !== '' ? days : null;
 }
 
 function dependencyPaths(node, suffix = [], paths = []) {
@@ -115,7 +122,11 @@ function mentions(recipients) {
   return recipients.length > 0 ? `\n\ncc ${recipients.map(r => `@${r}`).join(' ')}` : '';
 }
 
-function issueBody(item, runUrl, recipients) {
+function normalize(text) {
+  return (text || '').replace(/\r\n/g, '\n').trim();
+}
+
+function issueBody(item, workflowUrl, recipients, intervalDays) {
   const a = item.advisory;
   const rows = [
     ['Advisory', `[${a.id}](https://rustsec.org/advisories/${a.id})`],
@@ -161,10 +172,11 @@ function issueBody(item, runUrl, recipients) {
     '- Update or replace the affected dependency so that `make deny ARGS=advisories` passes, or',
     '- if the advisory does not affect the CDA, add the ID with a reason to `[advisories].ignore` in `deny.toml`.',
     '',
-    'The weekly advisory check comments here while the advisory is still reported, reopens the issue if it',
-    'was closed without resolving it and closes it once the advisory is no longer reported.',
+    `The [advisory check](${workflowUrl}) runs daily. While the advisory is still reported, it posts a`,
+    `reminder after ${intervalDays} day(s) without activity on this issue and reopens the issue if it was closed`,
+    'without resolving it. Once the advisory is no longer reported, the issue is closed.',
     '',
-    `_Reported by ${runUrl}_${mentions(recipients)}`,
+    `_Reported by \`cargo deny check advisories\`_${mentions(recipients)}`,
   ].join('\n');
 
   return body.length > MAX_BODY_LENGTH ? `${body.slice(0, MAX_BODY_LENGTH)}\n\n_(truncated)_` : body;
@@ -215,10 +227,18 @@ async function existingIssues(github, owner, repo) {
 module.exports = async ({ github, context, core }) => {
   const { owner, repo } = context.repo;
   const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+  const workflowUrl = `${context.serverUrl}/${owner}/${repo}/actions/workflows/advisories.yml`;
   const recipients = parseRecipients(process.env.ADVISORY_RECIPIENTS);
+  const intervalDays = parseInterval(process.env.REMINDER_INTERVAL_DAYS);
   const report = fs.readFileSync(process.env.DENY_REPORT, 'utf8');
   const { advisories, otherDiagnostics, summary } = parseReport(report);
 
+  if (intervalDays === null) {
+    core.setFailed(
+      `REMINDER_INTERVAL_DAYS must be a non-negative number, got "${process.env.REMINDER_INTERVAL_DAYS}"`,
+    );
+    return;
+  }
   if (!summary) {
     core.setFailed(
       `cargo-deny exited with ${process.env.DENY_EXIT_CODE} without a summary, see the "Check advisories" step log`,
@@ -232,15 +252,18 @@ module.exports = async ({ github, context, core }) => {
   await ensureLabel(github, owner, repo);
   const issues = await existingIssues(github, owner, repo);
   const results = [];
+  const now = Date.now();
 
   for (const item of advisories.values()) {
     const issue = issues.get(item.id);
+    const title = issueTitle(item);
+    const body = issueBody(item, workflowUrl, recipients, intervalDays);
     if (!issue) {
       const { data: created } = await github.rest.issues.create({
         owner,
         repo,
-        title: issueTitle(item),
-        body: issueBody(item, runUrl, recipients),
+        title,
+        body,
         labels: [LABEL, ...EXTRA_LABELS],
         assignees: recipients,
       });
@@ -249,24 +272,40 @@ module.exports = async ({ github, context, core }) => {
       continue;
     }
 
+    // Any write bumps `updated_at`, which is the activity the reminder interval is based on,
+    // so the issue is only touched when something actually changed or a reminder is due.
     const reopen = issue.state === 'closed';
-    await github.rest.issues.update({
-      owner,
-      repo,
-      issue_number: issue.number,
-      title: issueTitle(item),
-      body: issueBody(item, runUrl, recipients),
-      ...(reopen ? { state: 'open', state_reason: 'reopened' } : {}),
-    });
-    if (recipients.length > 0) {
-      await github.rest.issues.addAssignees({
-        owner, repo, issue_number: issue.number, assignees: recipients,
+    const changed = issue.title !== title || normalize(issue.body) !== normalize(body);
+    const idleDays = (now - Date.parse(issue.updated_at)) / DAY_MS;
+    const remind = !reopen && idleDays >= intervalDays;
+
+    if (changed || reopen) {
+      await github.rest.issues.update({
+        owner,
+        repo,
+        issue_number: issue.number,
+        title,
+        body,
+        ...(reopen ? { state: 'open', state_reason: 'reopened' } : {}),
       });
     }
+    const assigned = new Set((issue.assignees || []).map(a => a.login));
+    const missing = recipients.filter(r => !assigned.has(r));
+    if (missing.length > 0 && (changed || reopen || remind)) {
+      await github.rest.issues.addAssignees({
+        owner, repo, issue_number: issue.number, assignees: missing,
+      });
+    }
+    if (!reopen && !remind) {
+      core.info(`${item.id}: #${issue.number} ${changed ? 'updated' : 'unchanged'}, idle ${idleDays.toFixed(1)} day(s)`);
+      results.push([item, issue, changed ? 'updated' : 'unchanged']);
+      continue;
+    }
+
     const message = reopen
       ? 'Reopened: the advisory is still reported. To accept it, add the ID with a reason to'
         + ' `[advisories].ignore` in `deny.toml`.'
-      : 'Reminder: the advisory is still reported.';
+      : `Reminder: the advisory is still reported and this issue had no activity for ${Math.floor(idleDays)} day(s).`;
     await github.rest.issues.createComment({
       owner,
       repo,
