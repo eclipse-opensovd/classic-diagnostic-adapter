@@ -12,7 +12,10 @@
  */
 
 use super::*;
-use crate::{openapi, sovd::components::IdPathParam};
+use crate::{
+    openapi,
+    sovd::components::{IdPathParam, ecu::operations::parse_exec_uuid},
+};
 
 pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,

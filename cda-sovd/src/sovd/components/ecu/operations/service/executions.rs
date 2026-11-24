@@ -29,7 +29,6 @@ use sovd_interfaces::{
         AsyncPostResponse, OperationQuery, service::executions as sovd_executions,
     },
 };
-use uuid::Uuid;
 
 use crate::{
     openapi,
@@ -37,7 +36,7 @@ use crate::{
         WebserverEcuState,
         binary_encoding::BinaryEncodingParam,
         create_schema,
-        error::{ApiError, ErrorWrapper, VendorErrorCode},
+        error::{ApiError, VendorErrorCode},
         locks::require_ecu_access,
     },
 };
@@ -196,11 +195,4 @@ pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
         .with(openapi::error_conflict)
         .with(openapi::error_internal_server)
         .with(openapi::error_bad_gateway)
-}
-
-fn parse_exec_uuid(id: &str, include_schema: bool) -> Result<Uuid, ErrorWrapper> {
-    Uuid::parse_str(id).map_err(|e| ErrorWrapper {
-        error: ApiError::BadRequest(format!("{e:?}")),
-        include_schema,
-    })
 }

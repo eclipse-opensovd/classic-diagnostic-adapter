@@ -22,6 +22,7 @@ use axum_extra::extract::WithRejection;
 use cda_interfaces::{DynamicPlugin, SchemaProvider, UdsEcu, file_manager::FileManager};
 use cda_plugin_security::Secured;
 use sovd_interfaces::components::ecu::operations::OperationCollectionItem;
+use uuid::Uuid;
 
 use crate::sovd::{
     WebserverEcuState, create_schema,
@@ -97,4 +98,11 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
         .response_with::<200, Json<sovd_interfaces::Items<OperationCollectionItem>>, _>(|res| {
             res.description("List of operations available on this ECU.")
         })
+}
+
+fn parse_exec_uuid(id: &str, include_schema: bool) -> Result<Uuid, ErrorWrapper> {
+    Uuid::parse_str(id).map_err(|e| ErrorWrapper {
+        error: ApiError::BadRequest(format!("{e:?}")),
+        include_schema,
+    })
 }

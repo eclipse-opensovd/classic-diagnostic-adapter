@@ -42,13 +42,6 @@ pub(crate) mod id;
 #[cfg(test)]
 mod tests;
 
-fn parse_exec_uuid(id: &str, include_schema: bool) -> Result<Uuid, ErrorWrapper> {
-    Uuid::parse_str(id).map_err(|e| ErrorWrapper {
-        error: ApiError::BadRequest(format!("{e:?}")),
-        include_schema,
-    })
-}
-
 pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
     WithRejection(Query(query), _): WithRejection<
