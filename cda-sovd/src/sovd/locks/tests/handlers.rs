@@ -28,6 +28,26 @@ fn oversized_lock_expiration_is_rejected_as_bad_request() {
     ));
 }
 
+/// The expiration is reported as RFC 3339 timestamp, so it is limited to year 9999
+/// instead of being clamped.
+#[test]
+fn lock_expiration_is_limited_to_rfc3339_range() {
+    let request = |lock_expiration| sovd_interfaces::locking::Request {
+        lock_expiration,
+        break_lock: false,
+        x_sovd2uds_isexclusive: None,
+        metadata: serde_json::Map::new(),
+    };
+
+    // About 7900 years from now.
+    assert!(validated_expiration(&request(249_305_040_000)).is_ok());
+    // About 8100 years from now.
+    assert!(matches!(
+        validated_expiration(&request(255_616_560_000)),
+        Err(ApiError::BadRequest(_))
+    ));
+}
+
 #[tokio::test]
 async fn child_lock_created_under_owned_vehicle_has_parent() {
     let (mock_uds, ecu_name, locks, _, _) = super::cleanup::setup_ecu_lock_test();

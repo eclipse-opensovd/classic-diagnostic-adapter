@@ -359,6 +359,7 @@ fn session_with_sender(
             ipv6_interface_index: None,
             ipv6_multicast_group: DoipConfig::default().ipv6_multicast_group,
             port: fake.port(),
+            vir_source_port: crate::config::VirSourcePort::default(),
             tls_port: 0,
             send_diagnostic_message_ack: false,
             send_timeout: Duration::from_secs(1),

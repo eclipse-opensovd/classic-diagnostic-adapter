@@ -62,7 +62,7 @@ use crate::util::{
     },
     ecusim::{self, EcuSim, Recorder},
     endpoints::APPS_SOVD2UDS_DATA_NETWORKSTRUCTURE,
-    http::{auth_header, poll_until, response_to_t, send_cda_request, vehicle_url},
+    http::{auth_header, poll_until, response_to_t, send_cda_request, server_url, vehicle_url},
     test_containers::{
         ContainerOwner, ECU_SIM_STARTUP_TIMEOUT, PORT_CONFLICT_ATTEMPTS, PUBLISH_HOST, Service,
         SocketCanEndpoint, cda_container_for, current_test_name, ecu_sim_container_for,
@@ -363,6 +363,13 @@ impl TestEnv {
     /// Returns an error if the CDA does not authorize the client.
     pub(crate) async fn auth_header_for(&self, client_id: &str) -> Result<HeaderMap, TestingError> {
         auth_header(&self.config, Some(client_id)).await
+    }
+
+    /// The URL of `path` below the root of the CDA of this environment, e.g.
+    /// `version-info`. Changes whenever the CDA is replaced, see
+    /// [`Self::replace_cda`].
+    pub(crate) fn server_url(&self, path: &str) -> String {
+        server_url(&self.config, path)
     }
 
     /// The URL of `endpoint` below `/vehicle/v15/` of the CDA of this

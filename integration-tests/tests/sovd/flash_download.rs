@@ -27,7 +27,7 @@ use crate::{
             extract_field_from_json, response_to_json, response_to_t,
             send_authenticated_cda_request,
         },
-        locks::{self, create_lock, lock_operation},
+        locks::{self, Lock, create_lock, lock_operation},
         test_env::TestEnv,
     },
 };
@@ -387,6 +387,14 @@ async fn test_flash_download_transfer_sequence() {
     assert!(
         last_transfer.checksum.is_some(),
         "Expected a checksum after transfer completion"
+    );
+    assert_eq!(
+        last_transfer.bytes_received, file_size,
+        "ECU sim must have received the whole file"
+    );
+    assert_eq!(
+        last_transfer.repeated_blocks, 0,
+        "No block should have been sent twice"
     );
 
     // Cleanup: delete lock
@@ -803,6 +811,8 @@ struct SimDataTransferDownload {
     is_active: bool,
     data_transfer_count: i32,
     checksum: Option<String>,
+    bytes_received: u64,
+    repeated_blocks: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1187,7 +1197,100 @@ async fn test_flash_download_functional_class_selection() {
     .await;
 }
 
-/// Verify that attempting a flash transfer with no body is rejected with a bad request error
+/// A flash transfer belongs to the client that started it. Releasing that client's lock
+/// aborts and removes the transfer, so the next lock holder neither inherits it nor is
+/// blocked by it.
+#[tokio::test]
+async fn test_flash_transfer_removed_when_owner_releases_lock() {
+    let test_env = TestEnv::builder().await.unwrap();
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
+    let flash_transfer_url = format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer");
+
+    let lock_id = prepare_flxc1000_for_flashing(&test_env).await;
+    let (file_id, file_size) = find_test_flash_file(&test_env).await;
+
+    let request_download_body = serde_json::json!({
+        "requestdownload": {
+            "DataFormatIdentifier": 0,
+            "AddressAndLengthFormatIdentifier": 0x44,
+            "MemoryAddress": "0x00 0x00 0x00 0x00",
+            "MemorySize": format!("0x{:02x} 0x{:02x} 0x{:02x} 0x{:02x}",
+                (file_size >> 24) & 0xFF,
+                (file_size >> 16) & 0xFF,
+                (file_size >> 8) & 0xFF,
+                file_size & 0xFF
+            )
+        }
+    });
+    send_authenticated_cda_request(
+        &test_env,
+        &format!("{ecu_endpoint}/x-sovd2uds-download/requestdownload"),
+        StatusCode::OK,
+        Method::PUT,
+        Some(&request_download_body.to_string()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let flash_transfer_response = send_authenticated_cda_request(
+        &test_env,
+        &flash_transfer_url,
+        StatusCode::OK,
+        Method::POST,
+        Some(
+            &serde_json::json!({
+                "blocksequencecounter": 1,
+                "blocksize": 128,
+                "offset": 0,
+                "length": file_size,
+                "id": file_id
+            })
+            .to_string(),
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+    let transfer_id = response_to_json(&flash_transfer_response)
+        .unwrap()
+        .get("id")
+        .and_then(|v| v.as_str())
+        .expect("Expected 'id' in flash transfer response")
+        .to_owned();
+
+    // Release the lock without removing the transfer
+    lock_operation(
+        locks::COMPONENTS_FLXC1000_LOCKS,
+        Some(&lock_id),
+        &test_env,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    // Another client locks the ECU and finds no transfer of the previous owner
+    let auth_other = test_env.auth_header_for("flash-takeover").await.unwrap();
+    let other = test_env.with_headers(&auth_other);
+    let other_lock = Lock::acquire(
+        &other,
+        locks::COMPONENTS_FLXC1000_LOCKS,
+        Duration::from_secs(120),
+    )
+    .await;
+    for (method, url) in [
+        (Method::GET, flash_transfer_url.clone()),
+        (
+            Method::DELETE,
+            format!("{flash_transfer_url}/{transfer_id}"),
+        ),
+    ] {
+        send_authenticated_cda_request(&other, &url, StatusCode::NOT_FOUND, method, None, None)
+            .await
+            .unwrap();
+    }
+    other_lock.release(&other).await;
+}
 /// and a JSON error message.
 #[tokio::test]
 async fn test_flash_transfer_with_no_body_rejected_with_json_error_message() {
@@ -1324,4 +1427,386 @@ async fn test_request_download_with_no_body_rejected_with_json_error_message() {
             "Expected the rejection response to contain {field} as {expected}"
         );
     }
+}
+
+const FLASH_TRANSFER_BLOCK_SIZE: u64 = 32;
+
+/// Sends `RequestDownload` for the whole test flash file and starts the flash transfer with
+/// [`FLASH_TRANSFER_BLOCK_SIZE`], so that the transfer consists of several blocks.
+/// Returns the transfer id.
+async fn start_flash_transfer(test_env: &TestEnv, file_id: &str, file_size: u64) -> String {
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
+    let request_download_body = serde_json::json!({
+        "requestdownload": {
+            "DataFormatIdentifier": 0,
+            "AddressAndLengthFormatIdentifier": 0x44,
+            "MemoryAddress": "0x00 0x00 0x00 0x00",
+            "MemorySize": format!("0x{:02x} 0x{:02x} 0x{:02x} 0x{:02x}",
+                (file_size >> 24) & 0xFF,
+                (file_size >> 16) & 0xFF,
+                (file_size >> 8) & 0xFF,
+                file_size & 0xFF
+            )
+        }
+    });
+    send_authenticated_cda_request(
+        test_env,
+        &format!("{ecu_endpoint}/x-sovd2uds-download/requestdownload"),
+        StatusCode::OK,
+        Method::PUT,
+        Some(&request_download_body.to_string()),
+        None,
+    )
+    .await
+    .expect("RequestDownload failed");
+
+    let flash_transfer_body = serde_json::json!({
+        "blocksequencecounter": 1,
+        "blocksize": FLASH_TRANSFER_BLOCK_SIZE,
+        "offset": 0,
+        "length": file_size,
+        "id": file_id
+    });
+    let flash_transfer_response = send_authenticated_cda_request(
+        test_env,
+        &format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer"),
+        StatusCode::OK,
+        Method::POST,
+        Some(&flash_transfer_body.to_string()),
+        None,
+    )
+    .await
+    .expect("Starting the flash transfer failed");
+    response_to_json(&flash_transfer_response)
+        .expect("Flash transfer response is not JSON")
+        .get("id")
+        .and_then(|v| v.as_str())
+        .expect("Expected 'id' in flash transfer response")
+        .to_owned()
+}
+
+/// Polls the flash transfer until it is `finished` or `aborted` and returns its status JSON.
+async fn wait_for_flash_transfer_end(test_env: &TestEnv, transfer_id: &str) -> serde_json::Value {
+    let url = format!(
+        "{}/x-sovd2uds-download/flashtransfer/{transfer_id}",
+        sovd::COMPONENTS_FLXC1000_BASE
+    );
+    for _ in 0..60 {
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(250)).await;
+        let status_response =
+            send_authenticated_cda_request(test_env, &url, StatusCode::OK, Method::GET, None, None)
+                .await
+                .expect("Reading the flash transfer status failed");
+        let status_json =
+            response_to_json(&status_response).expect("Flash transfer status is not JSON");
+        if matches!(
+            status_json.get("status").and_then(|v| v.as_str()),
+            Some("finished" | "aborted")
+        ) {
+            return status_json;
+        }
+    }
+    panic!("Flash transfer {transfer_id} did not end within the timeout");
+}
+
+/// Removes an ended flash transfer from the CDA.
+async fn delete_flash_transfer(test_env: &TestEnv, transfer_id: &str) {
+    send_authenticated_cda_request(
+        test_env,
+        &format!(
+            "{}/x-sovd2uds-download/flashtransfer/{transfer_id}",
+            sovd::COMPONENTS_FLXC1000_BASE
+        ),
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        None,
+        None,
+    )
+    .await
+    .expect("Deleting the flash transfer failed");
+}
+
+/// A negative response to `TransferData` must abort the flash transfer: the CDA must neither
+/// send further blocks nor report the transfer as finished.
+#[tokio::test]
+async fn test_flash_transfer_aborted_on_negative_transfer_data_response() {
+    const INTERCEPTOR: &str = "transfer_data_suspended";
+    let test_env = TestEnv::builder().await.unwrap();
+
+    let lock_id = prepare_flxc1000_for_flashing(&test_env).await;
+    let (file_id, file_size) = find_test_flash_file(&test_env).await;
+    assert!(
+        file_size > 3 * FLASH_TRANSFER_BLOCK_SIZE,
+        "Test flash file must have more than 3 blocks"
+    );
+
+    // Block 3 is answered with NRC 0x71 (transferDataSuspended)
+    ecusim::set_interceptor_config(
+        &test_env.ecu_sim,
+        ECU_FLXC1000,
+        INTERCEPTOR,
+        &serde_json::json!({"request": "3603[]", "response": "7F3671"}),
+    )
+    .await
+    .expect("Failed to install interceptor");
+
+    let transfer_id = start_flash_transfer(&test_env, &file_id, file_size).await;
+    let status_json = wait_for_flash_transfer_end(&test_env, &transfer_id).await;
+
+    ecusim::clear_interceptor(&test_env.ecu_sim, ECU_FLXC1000, INTERCEPTOR)
+        .await
+        .expect("Failed to remove interceptor");
+
+    assert_eq!(
+        status_json.get("status").and_then(|v| v.as_str()),
+        Some("aborted"),
+        "Transfer must be aborted on a negative TransferData response: {status_json:#?}"
+    );
+    assert_eq!(
+        status_json
+            .get("acknowledgedBytes")
+            .and_then(serde_json::Value::as_u64),
+        Some(2 * FLASH_TRANSFER_BLOCK_SIZE),
+        "Only the blocks before the rejected one count as acknowledged: {status_json:#?}"
+    );
+    let errors = status_json
+        .get("error")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("Expected an error array: {status_json:#?}"));
+    assert_eq!(errors.len(), 1, "Expected one error: {status_json:#?}");
+    let error = errors.first().unwrap();
+    assert_eq!(
+        error.get("error_code").and_then(|v| v.as_str()),
+        Some("error-response")
+    );
+    assert_eq!(
+        error.get("x-errorsource").and_then(|v| v.as_str()),
+        Some("ECU")
+    );
+    assert_eq!(
+        error.get("parameters"),
+        Some(&serde_json::json!({"BlockSequenceCounter": 3, "NRC": 0x71, "SID": 0x36})),
+        "Unexpected error parameters: {status_json:#?}"
+    );
+    let message = error.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.starts_with("ECU rejected block 0x03 with NRC 0x71"),
+        "Message must name the block and the NRC: {status_json:#?}"
+    );
+    assert_eq!(
+        error.get("text").and_then(|v| v.as_str()),
+        Some(message),
+        "text must repeat the message for older clients"
+    );
+
+    let sim_transfers = get_sim_data_transfers(&test_env.ecu_sim, ECU_FLXC1000)
+        .await
+        .expect("Failed to get data transfers from ECU sim");
+    let last_transfer = sim_transfers.transfers.last().unwrap();
+    assert_eq!(
+        last_transfer.bytes_received,
+        2 * FLASH_TRANSFER_BLOCK_SIZE,
+        "No block after the rejected one may be sent"
+    );
+
+    delete_flash_transfer(&test_env, &transfer_id).await;
+    lock_operation(
+        locks::COMPONENTS_FLXC1000_LOCKS,
+        Some(&lock_id),
+        &test_env,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+}
+
+/// NRC 0x78 (responsePending), 0x21 (busyRepeatRequest) and 0x94 (temporarilyNotAvailable)
+/// to `TransferData` must not abort the flash transfer: 0x78 waits for the final response,
+/// 0x21 and 0x94 repeat the same block.
+#[tokio::test]
+async fn test_flash_transfer_continues_on_pending_and_busy_nrcs() {
+    const INTERCEPTORS: [&str; 3] = ["td_response_pending", "td_busy_repeat", "td_not_available"];
+    let test_env = TestEnv::builder().await.unwrap();
+
+    let lock_id = prepare_flxc1000_for_flashing(&test_env).await;
+    let (file_id, file_size) = find_test_flash_file(&test_env).await;
+    assert!(
+        file_size > 4 * FLASH_TRANSFER_BLOCK_SIZE,
+        "Test flash file must have more than 4 blocks"
+    );
+
+    // The recorder must be installed before the NRC interceptors: the first interceptor that
+    // answers a request ends the chain, so a later recorder would miss the intercepted frames.
+    let recorder = test_env
+        .record(ECU_FLXC1000)
+        .await
+        .expect("Failed to start ECU sim recording");
+    for (name, config) in INTERCEPTORS.into_iter().zip([
+        // block 2: two response pending, then forwarded to the regular handler
+        serde_json::json!({
+            "request": "3602[]",
+            "response": null,
+            "pendingResponses": 2,
+            "pendingIntervalMs": 100,
+            "removeAfterNRequest": 1
+        }),
+        // block 3: busy repeat request once, the repetition is processed regularly
+        serde_json::json!({"request": "3603[]", "response": "7F3621", "removeAfterNRequest": 1}),
+        // block 4: temporarily not available once
+        serde_json::json!({"request": "3604[]", "response": "7F3694", "removeAfterNRequest": 1}),
+    ]) {
+        ecusim::set_interceptor_config(&test_env.ecu_sim, ECU_FLXC1000, name, &config)
+            .await
+            .expect("Failed to install interceptor");
+    }
+
+    let transfer_id = start_flash_transfer(&test_env, &file_id, file_size).await;
+    let status_json = wait_for_flash_transfer_end(&test_env, &transfer_id).await;
+    let recorded_frames = recorder
+        .stop()
+        .await
+        .expect("Failed to stop ECU sim recording");
+
+    for name in INTERCEPTORS {
+        // the interceptors remove themselves after the first match, a missing one is fine
+        let _ = ecusim::clear_interceptor(&test_env.ecu_sim, ECU_FLXC1000, name).await;
+    }
+
+    assert_eq!(
+        status_json.get("status").and_then(|v| v.as_str()),
+        Some("finished"),
+        "Transfer must finish despite NRC 0x78/0x21/0x94: {status_json:#?}"
+    );
+    assert_eq!(
+        status_json
+            .get("acknowledgedBytes")
+            .and_then(serde_json::Value::as_u64),
+        Some(file_size)
+    );
+
+    // Blocks answered with 0x21/0x94 are sent again with the same block sequence counter,
+    // the block answered with 0x78 is sent only once.
+    let count_block = |bsc: &str| {
+        recorded_frames
+            .iter()
+            .filter(|f| f.to_ascii_uppercase().starts_with(&format!("36{bsc}")))
+            .count()
+    };
+    assert_eq!(count_block("02"), 1, "Frames: {recorded_frames:?}");
+    assert_eq!(count_block("03"), 2, "Frames: {recorded_frames:?}");
+    assert_eq!(count_block("04"), 2, "Frames: {recorded_frames:?}");
+
+    let sim_transfers = get_sim_data_transfers(&test_env.ecu_sim, ECU_FLXC1000)
+        .await
+        .expect("Failed to get data transfers from ECU sim");
+    let last_transfer = sim_transfers.transfers.last().unwrap();
+    assert_eq!(last_transfer.bytes_received, file_size);
+    assert_eq!(last_transfer.repeated_blocks, 0);
+
+    delete_flash_transfer(&test_env, &transfer_id).await;
+    lock_operation(
+        locks::COMPONENTS_FLXC1000_LOCKS,
+        Some(&lock_id),
+        &test_env,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+}
+
+/// A block the ECU does not answer aborts the flash transfer as `not-responding`. The message
+/// keeps the `Failed to read data: ` prefix, which clients use to retry the transfer from the
+/// last acknowledged block.
+#[tokio::test]
+async fn test_flash_transfer_aborted_on_transfer_data_timeout() {
+    const INTERCEPTOR: &str = "transfer_data_silent";
+    let test_env = TestEnv::builder().await.unwrap();
+
+    let lock_id = prepare_flxc1000_for_flashing(&test_env).await;
+    let (file_id, file_size) = find_test_flash_file(&test_env).await;
+    assert!(
+        file_size > 3 * FLASH_TRANSFER_BLOCK_SIZE,
+        "Test flash file must have more than 3 blocks"
+    );
+
+    // Block 3 (and every repetition of it) is not answered
+    ecusim::set_interceptor_config(
+        &test_env.ecu_sim,
+        ECU_FLXC1000,
+        INTERCEPTOR,
+        &serde_json::json!({"request": "3603[]", "response": ""}),
+    )
+    .await
+    .expect("Failed to install interceptor");
+
+    let transfer_id = start_flash_transfer(&test_env, &file_id, file_size).await;
+    let status_json = wait_for_flash_transfer_end(&test_env, &transfer_id).await;
+
+    ecusim::clear_interceptor(&test_env.ecu_sim, ECU_FLXC1000, INTERCEPTOR)
+        .await
+        .expect("Failed to remove interceptor");
+
+    assert_eq!(
+        status_json.get("status").and_then(|v| v.as_str()),
+        Some("aborted"),
+        "Transfer must be aborted when the ECU does not answer: {status_json:#?}"
+    );
+    assert_eq!(
+        status_json
+            .get("acknowledgedBytes")
+            .and_then(serde_json::Value::as_u64),
+        Some(2 * FLASH_TRANSFER_BLOCK_SIZE),
+        "Only the blocks before the unanswered one count as acknowledged: {status_json:#?}"
+    );
+    assert_eq!(
+        status_json
+            .get("nextBlockSequenceCounter")
+            .and_then(serde_json::Value::as_u64),
+        Some(3),
+        "The unanswered block is the next one: {status_json:#?}"
+    );
+
+    let errors = status_json
+        .get("error")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("Expected an error array: {status_json:#?}"));
+    assert_eq!(errors.len(), 1, "Expected one error: {status_json:#?}");
+    let error = errors.first().unwrap();
+    assert_eq!(
+        error.get("error_code").and_then(|v| v.as_str()),
+        Some("not-responding"),
+        "Unexpected error code: {status_json:#?}"
+    );
+    assert!(error.get("vendor_code").is_none());
+    assert!(error.get("x-errorsource").is_none());
+    assert_eq!(
+        error.get("parameters"),
+        Some(&serde_json::json!({"BlockSequenceCounter": 3})),
+        "Unexpected error parameters: {status_json:#?}"
+    );
+    let message = error.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.starts_with("Failed to read data: block 0x03: "),
+        "Message must keep the prefix and name the block: {status_json:#?}"
+    );
+    assert_eq!(error.get("text").and_then(|v| v.as_str()), Some(message));
+
+    let sim_transfers = get_sim_data_transfers(&test_env.ecu_sim, ECU_FLXC1000)
+        .await
+        .expect("Failed to get data transfers from ECU sim");
+    assert_eq!(
+        sim_transfers.transfers.last().unwrap().bytes_received,
+        2 * FLASH_TRANSFER_BLOCK_SIZE,
+        "No block after the unanswered one may be sent"
+    );
+
+    delete_flash_transfer(&test_env, &transfer_id).await;
+    lock_operation(
+        locks::COMPONENTS_FLXC1000_LOCKS,
+        Some(&lock_id),
+        &test_env,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
 }

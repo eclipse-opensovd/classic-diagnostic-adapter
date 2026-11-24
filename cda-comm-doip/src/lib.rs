@@ -61,7 +61,7 @@ mod vir_vam;
 pub(crate) mod test_helpers;
 
 use crate::{
-    config::DoipConfig,
+    config::{DoipConfig, VirSourcePort},
     connections::{ConnectControl, EcuError},
     gateway_session::{ConnectFailure, DirectRejection, GatewaySession},
     socket::DoIPUdpSocket,
@@ -398,6 +398,8 @@ pub(crate) struct DoipTransportConfig {
     pub(crate) ipv6_multicast_group: String,
     /// TCP port for `DoIP` communication.
     pub(crate) port: u16,
+    /// Local UDP port (or range) VIRs are sent from, see `DoipConfig::vir_source_port`.
+    pub(crate) vir_source_port: VirSourcePort,
     /// TCP port for `DoIP` over TLS communication.
     pub(crate) tls_port: u16,
     /// Whether to send a `DiagnosticMessageAck` upon receiving a `DiagnosticMessage`.
@@ -557,6 +559,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             ipv6_interface_index: None,
             ipv6_multicast_group: config.ipv6_multicast_group.clone(),
             port: config.gateway_port,
+            vir_source_port: config.vir_source_port,
             tls_port: config.tls_port,
             send_diagnostic_message_ack: config.send_diagnostic_message_ack,
             send_timeout: Duration::from_millis(config.send_timeout_ms),
@@ -577,11 +580,12 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         &self,
         operation: &mut DoipGatewayOperation,
     ) -> Result<(), DoipGatewaySetupError> {
-        let mut socket_guard = self.state.socket.lock().await;
+        // `start` and `stop` are serialized by the operation lock, so the socket
+        // lock is only held briefly and not while binding (which may retry).
         if operation.cancel.is_some()
             || operation.vam_listener.is_some()
             || operation.connection_tasks.is_some()
-            || socket_guard.is_some()
+            || self.state.socket.lock().await.is_some()
         {
             return Err(DoipGatewaySetupError::InvalidState(
                 "DoIP communication is already running".to_string(),
@@ -634,17 +638,29 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         }
 
         let discovery_strategy = self.state.topology.discovery_strategy();
-        // Bound only if used: by the VAM listener started below, or by the
-        // startup VIR broadcast. A reconnect searches from a socket of its own.
         let listens_for_vams = self.state.topology.listens_for_vams();
-        let needs_socket = listens_for_vams
-            || (matches!(discovery_strategy, DiscoveryStrategy::Vir)
-                && config.discovery.sends_vir());
-        if needs_socket {
-            let (socket, _) =
-                create_discovery_socket(&session.transport_config, config.gateway_port)?;
-            *socket_guard = Some(socket);
-        }
+        // The VIR socket is bound only for the startup VIR broadcast, a reconnect
+        // searches from a socket of its own. A failed bind must never fail
+        // enabling the communication (and with it the CDA startup): without a VIR
+        // socket discovery is skipped, VAMs and direct connects still work.
+        let vir_socket = if matches!(discovery_strategy, DiscoveryStrategy::Vir)
+            && config.discovery.sends_vir()
+        {
+            bind_discovery_vir_socket(&session.transport_config).await
+        } else {
+            None
+        };
+        let vir_port = vir_socket.as_ref().map(|(_, port)| *port);
+        let mut socket_guard = self.state.socket.lock().await;
+        *socket_guard = vir_socket.map(|(socket, _)| socket);
+        // Spontaneous VAMs are sent to the discovery port. Bind its socket before
+        // the VIR is sent, so that responses of gateways that wrongly answer to the
+        // discovery port instead of the VIR source port are queued and handled.
+        let vam_socket = if listens_for_vams {
+            vir_vam::vam_listener_socket(&session.transport_config, vir_port, &self.state.socket)
+        } else {
+            None
+        };
         match discovery_strategy {
             DiscoveryStrategy::Vir if !config.discovery.sends_vir() => {
                 drop(socket_guard);
@@ -652,9 +668,14 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                 discovery.finish(false);
             }
             DiscoveryStrategy::Vir => {
-                let socket = socket_guard.as_mut().ok_or_else(|| {
-                    DoipGatewaySetupError::ResourceError("Discovery socket is not bound".to_owned())
-                })?;
+                let Some(socket) = socket_guard.as_mut() else {
+                    // Already logged by `bind_discovery_vir_socket`; no full discovery.
+                    drop(socket_guard);
+                    discovery.finish(false);
+                    return self
+                        .finish_start(operation, listens_for_vams, vam_socket, &session, shutdown)
+                        .await;
+                };
                 let gateways = vir_vam::get_vehicle_identification::<T, _>(
                     socket,
                     self.state.netmask,
@@ -720,34 +741,37 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             }
         }
 
-        self.finish_start(operation, listens_for_vams, &session, shutdown)
+        self.finish_start(operation, listens_for_vams, vam_socket, &session, shutdown)
             .await
     }
 
-    /// Starts the spontaneous VAM listener, unless `vam_handling_mode` disables it.
+    /// Starts the spontaneous VAM listener on `vam_socket`, unless
+    /// `vam_handling_mode` disables it or no VAM socket could be bound.
     async fn finish_start<F>(
         &self,
         operation: &mut DoipGatewayOperation,
         listens_for_vams: bool,
+        vam_socket: Option<Arc<Mutex<Option<DoIPUdpSocket>>>>,
         session: &Arc<GatewaySession>,
         shutdown: futures::future::Shared<F>,
     ) -> Result<(), DoipGatewaySetupError>
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        if listens_for_vams {
+        if !listens_for_vams {
+            tracing::info!("Spontaneous VAM listener not started (vam_handling_mode)");
+        } else if let Some(vam_socket) = vam_socket {
             let listener = vir_vam::listen_for_vams(
-                session.transport_config.clone(),
                 self.state.clone(),
+                vam_socket,
                 Arc::clone(session),
                 self.variant_detection.clone(),
                 shutdown,
             )
             .await;
             operation.vam_listener = Some(listener);
-        } else {
-            tracing::info!("Spontaneous VAM listener not started (vam_handling_mode)");
         }
+        // Otherwise already logged by `vam_listener_socket`.
         Ok(())
     }
 
@@ -1754,7 +1778,60 @@ fn discovery_target(
     }
 }
 
-/// Binds discovery to the requested local port; reconnect uses an ephemeral port.
+// Preserve configured VIR source ports for both IPv4 broadcast and IPv6 multicast.
+fn create_configured_vir_source_socket(
+    config: &DoipTransportConfig,
+) -> Result<(DoIPUdpSocket, u16), DoipGatewaySetupError> {
+    let target = discovery_target(config)?;
+    let std::net::SocketAddr::V6(target) = target else {
+        return create_udp_vir_source_socket(
+            &config.tester_ip,
+            config.vir_source_port,
+            config.port,
+        );
+    };
+    let (start, end) = match config.vir_source_port {
+        VirSourcePort::Port(port) => (port, port),
+        VirSourcePort::Range { start, end } if start == 0 || start > end => {
+            return Err(DoipGatewaySetupError::InvalidConfiguration(format!(
+                "DoipGateway: Invalid VIR source port range {}",
+                config.vir_source_port
+            )));
+        }
+        VirSourcePort::Range { start, end } => (start, end),
+    };
+    let len = u32::from(end)
+        .saturating_sub(u32::from(start))
+        .saturating_add(1);
+    let offset = random_port_offset(len);
+    let mut last_error = None;
+    for step in 0..len {
+        let port = offset
+            .saturating_add(step)
+            .checked_rem(len)
+            .and_then(|delta| u16::try_from(u32::from(start).saturating_add(delta)).ok())
+            .unwrap_or(start);
+        if port == config.port && start != end {
+            continue;
+        }
+        match create_udp_vir_socket_v6(
+            &config.tester_ip,
+            port,
+            *target.ip(),
+            target.scope_id(),
+            port == config.port,
+        ) {
+            Ok(bound) => return Ok(bound),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(DoipGatewaySetupError::PortBindFailed(format!(
+        "DoipGateway: No IPv6 VIR source port in {} could be bound: {last_error:?}",
+        config.vir_source_port
+    )))
+}
+
+/// Binds discovery to the requested local port for spontaneous VAMs.
 fn create_discovery_socket(
     config: &DoipTransportConfig,
     local_port: u16,
@@ -1762,12 +1839,16 @@ fn create_discovery_socket(
     let target = discovery_target(config)?;
     let socket = match target {
         std::net::SocketAddr::V4(_) => create_udp_vir_socket(&config.tester_ip, local_port)?,
-        std::net::SocketAddr::V6(address) => create_udp_vir_socket_v6(
-            &config.tester_ip,
-            local_port,
-            *address.ip(),
-            address.scope_id(),
-        )?,
+        std::net::SocketAddr::V6(address) => {
+            create_udp_vir_socket_v6(
+                &config.tester_ip,
+                local_port,
+                *address.ip(),
+                address.scope_id(),
+                true,
+            )?
+            .0
+        }
     };
     Ok((socket, target))
 }
@@ -1794,7 +1875,151 @@ fn create_netmask(
     }
 }
 
-/// Creates a UDP socket for `DoIP` communication.
+/// Binds the VIR socket for the startup VIR broadcast.
+/// Returns the socket and its local port, `None` if the bind failed. A failed bind is logged and never returned as error, so that it
+/// cannot fail enabling the communication (and with it the CDA startup).
+async fn bind_discovery_vir_socket(config: &DoipTransportConfig) -> Option<(DoIPUdpSocket, u16)> {
+    if let Ok(bound) = bind_vir_socket(config).await {
+        Some(bound)
+    } else {
+        // The bind error itself is logged by `bind_vir_socket`.
+        tracing::error!("No VIR is sent, gateways are only connected by VAMs or directly");
+        None
+    }
+}
+
+/// Number of bind attempts for a single configured VIR source port.
+pub(crate) const VIR_SINGLE_PORT_BIND_ATTEMPTS: u32 = 3;
+/// Delay between bind attempts for a single configured VIR source port.
+pub(crate) const VIR_SINGLE_PORT_BIND_RETRY_DELAY: Duration = Duration::from_millis(200);
+
+/// Binds the VIR socket as configured by `doip.vir_source_port`.
+/// Returns the socket and its local port.
+///
+/// A single port (fixed port or a range of one port) is retried
+/// [`VIR_SINGLE_PORT_BIND_ATTEMPTS`] times, e.g. to bridge a previous instance
+/// that is still releasing it. A range already tries all its ports and `0` lets
+/// the operating system choose, so both are bound once.
+pub(crate) async fn bind_vir_socket(
+    config: &DoipTransportConfig,
+) -> Result<(DoIPUdpSocket, u16), DoipGatewaySetupError> {
+    let tester_ip = config.tester_ip.as_str();
+    let vir_source_port = config.vir_source_port;
+    let gateway_port = config.port;
+    if !vir_source_port.is_in_dynamic_range() {
+        tracing::warn!(
+            %vir_source_port,
+            "doip.vir_source_port is outside the dynamic port range 49152-65535 required by \
+             ISO 13400-2"
+        );
+    }
+    let attempts = match vir_source_port {
+        VirSourcePort::Port(0) => 1,
+        VirSourcePort::Port(_) => VIR_SINGLE_PORT_BIND_ATTEMPTS,
+        VirSourcePort::Range { start, end } if start == end => VIR_SINGLE_PORT_BIND_ATTEMPTS,
+        VirSourcePort::Range { .. } => 1,
+    };
+    let mut attempt = 1;
+    loop {
+        match create_configured_vir_source_socket(config) {
+            Ok((socket, vir_port)) => {
+                tracing::info!(tester_ip, vir_port, gateway_port, "Bound VIR socket");
+                return Ok((socket, vir_port));
+            }
+            Err(error) if attempt < attempts => {
+                tracing::warn!(
+                    %vir_source_port,
+                    attempt,
+                    attempts,
+                    %error,
+                    "Failed to bind VIR socket, retrying"
+                );
+                attempt = attempt.saturating_add(1);
+                tokio_ext::sleep_for(VIR_SINGLE_PORT_BIND_RETRY_DELAY).await;
+            }
+            Err(error) => {
+                tracing::error!(
+                    tester_ip,
+                    %vir_source_port,
+                    attempts,
+                    %error,
+                    "Failed to bind VIR socket"
+                );
+                return Err(error);
+            }
+        }
+    }
+}
+
+/// Maps the loopback tester address to the unspecified address so that
+/// broadcasts are received when testing locally.
+fn udp_bind_ip(tester_ip: &str) -> &str {
+    match tester_ip {
+        "127.0.0.1" => "0.0.0.0",
+        _ => tester_ip,
+    }
+}
+
+/// Creates an unbound, non-blocking UDP socket with `SO_BROADCAST` set.
+/// With `reuse`, `SO_REUSEADDR` (and `SO_REUSEPORT` on Unix) are set as well, so
+/// that several sockets can share the `DoIP` discovery port.
+fn new_udp_socket(reuse: bool) -> Result<socket2::Socket, DoipGatewaySetupError> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )
+    .map_err(|e| {
+        DoipGatewaySetupError::SocketCreationFailed(format!(
+            "DoipGateway: Failed to create socket: {e:?}"
+        ))
+    })?;
+
+    if reuse {
+        socket.set_reuse_address(true).map_err(|e| {
+            DoipGatewaySetupError::InvalidAddress(format!(
+                "DoipGateway: Failed to set reuse address: {e:?}"
+            ))
+        })?;
+        #[cfg(target_family = "unix")]
+        socket.set_reuse_port(true).map_err(|e| {
+            DoipGatewaySetupError::PortBindFailed(format!(
+                "DoipGateway: Failed to set reuse port: {e:?}"
+            ))
+        })?;
+    }
+    socket.set_broadcast(true).map_err(|e| {
+        DoipGatewaySetupError::SocketCreationFailed(format!(
+            "DoipGateway: Failed to set broadcast flag on socket: {e:?}"
+        ))
+    })?;
+    socket.set_nonblocking(true).map_err(|e| {
+        DoipGatewaySetupError::InvalidConfiguration(format!(
+            "DoipGateway: Failed to set non-blocking mode: {e:?}"
+        ))
+    })?;
+    Ok(socket)
+}
+
+fn udp_socket_addr(ip: &str, port: u16) -> Result<std::net::SocketAddr, DoipGatewaySetupError> {
+    format!("{ip}:{port}").parse().map_err(|e| {
+        DoipGatewaySetupError::InvalidAddress(format!(
+            "DoipGateway: Failed to create socket addr {ip}:{port}: {e:?}"
+        ))
+    })
+}
+
+fn into_doip_udp_socket(socket: socket2::Socket) -> Result<DoIPUdpSocket, DoipGatewaySetupError> {
+    let std_sock: std::net::UdpSocket = socket.into();
+    DoIPUdpSocket::new(std_sock, ProtocolVersion::DefaultValue).map_err(|e| {
+        DoipGatewaySetupError::SocketCreationFailed(format!(
+            "DoipGateway: Failed to create DoIP socket from std socket: {e:?}"
+        ))
+    })
+}
+
+/// Creates a UDP socket bound to the `DoIP` discovery port, shared with other
+/// sockets via `SO_REUSEADDR`/`SO_REUSEPORT`. Used to receive spontaneous VAMs.
 ///
 /// # Errors
 /// Returns errors when:
@@ -1816,62 +2041,101 @@ pub fn create_udp_vir_socket(
     tester_ip: &str,
     gateway_port: u16,
 ) -> Result<DoIPUdpSocket, DoipGatewaySetupError> {
-    let tester_ip = match tester_ip {
-        "127.0.0.1" => "0.0.0.0",
-        _ => tester_ip,
-    };
-    let broadcast_addr: std::net::SocketAddr =
-        format!("{tester_ip}:{gateway_port}").parse().map_err(|e| {
-            DoipGatewaySetupError::InvalidAddress(format!(
-                "DoipGateway: Failed to create broadcast addr: {e:?}"
-            ))
-        })?;
-
-    let socket = socket2::Socket::new(
-        socket2::Domain::IPV4,
-        socket2::Type::DGRAM,
-        Some(socket2::Protocol::UDP),
-    )
-    .map_err(|e| {
-        DoipGatewaySetupError::SocketCreationFailed(format!(
-            "DoipGateway: Failed to create socket: {e:?}"
-        ))
-    })?;
-
-    socket.set_reuse_address(true).map_err(|e| {
-        DoipGatewaySetupError::InvalidAddress(format!(
-            "DoipGateway: Failed to set reuse address: {e:?}"
-        ))
-    })?;
-    #[cfg(target_family = "unix")]
-    socket.set_reuse_port(true).map_err(|e| {
-        DoipGatewaySetupError::PortBindFailed(format!(
-            "DoipGateway: Failed to set reuse port: {e:?}"
-        ))
-    })?;
-    socket.set_broadcast(true).map_err(|e| {
-        DoipGatewaySetupError::SocketCreationFailed(format!(
-            "DoipGateway: Failed to set broadcast flag on socket: {e:?}"
-        ))
-    })?;
-    socket.set_nonblocking(true).map_err(|e| {
-        DoipGatewaySetupError::InvalidConfiguration(format!(
-            "DoipGateway: Failed to set non-blocking mode: {e:?}"
-        ))
-    })?;
-
-    socket.bind(&broadcast_addr.into()).map_err(|e| {
+    let tester_ip = udp_bind_ip(tester_ip);
+    let addr = udp_socket_addr(tester_ip, gateway_port)?;
+    let socket = new_udp_socket(true)?;
+    socket.bind(&addr.into()).map_err(|e| {
         DoipGatewaySetupError::SocketCreationFailed(format!(
             "DoipGateway: Failed to bind socket, ip {tester_ip}, port {gateway_port}: {e:?}"
         ))
     })?;
+    into_doip_udp_socket(socket)
+}
 
-    let std_sock: std::net::UdpSocket = socket.into();
-    DoIPUdpSocket::new(std_sock, ProtocolVersion::DefaultValue).map_err(|e| {
-        DoipGatewaySetupError::SocketCreationFailed(format!(
-            "DoipGateway: Failed to create DoIP socket from std socket: {e:?}"
-        ))
-    })
+/// Pseudo random offset into a port range, so that several instances do not
+/// all probe the same ports first. Not suitable for security purposes.
+fn random_port_offset(len: u32) -> u32 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    let random = u32::try_from(hasher.finish() & u64::from(u32::MAX)).unwrap_or_default();
+    random.checked_rem(len).unwrap_or_default()
+}
+
+/// Creates the UDP socket the VIR is sent from and its responses are received on,
+/// bound to `tester_ip` and a local port selected by `source_port`.
+///
+/// If the selected port equals `gateway_port`, the socket shares the discovery
+/// port (legacy behavior) like [`create_udp_vir_socket`]. Otherwise the port is
+/// bound exclusively; for a range, a free port is searched starting at a random
+/// offset.
+///
+/// Returns the socket and its local port.
+///
+/// # Errors
+/// Returns `DoipGatewaySetupError::PortBindFailed` if no port could be bound and
+/// the errors of [`create_udp_vir_socket`] for address and socket failures.
+pub fn create_udp_vir_source_socket(
+    tester_ip: &str,
+    source_port: VirSourcePort,
+    gateway_port: u16,
+) -> Result<(DoIPUdpSocket, u16), DoipGatewaySetupError> {
+    let bind_ip = udp_bind_ip(tester_ip);
+    let (start, end) = match source_port {
+        VirSourcePort::Port(port) if port == gateway_port => {
+            return create_udp_vir_socket(tester_ip, gateway_port).map(|s| (s, gateway_port));
+        }
+        VirSourcePort::Port(port) => (port, port),
+        VirSourcePort::Range { start, end } if start == 0 || start > end => {
+            return Err(DoipGatewaySetupError::InvalidConfiguration(format!(
+                "DoipGateway: Invalid VIR source port range {source_port}"
+            )));
+        }
+        VirSourcePort::Range { start, end } => (start, end),
+    };
+
+    let len = u32::from(end)
+        .saturating_sub(u32::from(start))
+        .saturating_add(1);
+    let offset = random_port_offset(len);
+    let mut last_error = None;
+    for step in 0..len {
+        let port = offset
+            .saturating_add(step)
+            .checked_rem(len)
+            .and_then(|delta| u16::try_from(u32::from(start).saturating_add(delta)).ok())
+            .unwrap_or(start);
+        // Never take the discovery port exclusively from within a range, that
+        // would prevent receiving spontaneous VAMs.
+        if port == gateway_port && start != end {
+            continue;
+        }
+        let socket = new_udp_socket(false)?;
+        match socket.bind(&udp_socket_addr(bind_ip, port)?.into()) {
+            Ok(()) => {
+                let local_port = socket
+                    .local_addr()
+                    .ok()
+                    .and_then(|addr| addr.as_socket())
+                    .map_or(port, |addr| addr.port());
+                return into_doip_udp_socket(socket).map(|s| (s, local_port));
+            }
+            // Any bind failure moves on to the next port of the range.
+            Err(e) => {
+                tracing::debug!(
+                    bind_ip,
+                    port,
+                    error = %e,
+                    "Failed to bind VIR source port, trying next"
+                );
+                last_error = Some(e);
+            }
+        }
+    }
+    Err(DoipGatewaySetupError::PortBindFailed(format!(
+        "DoipGateway: No VIR source port in {source_port} could be bound on ip {bind_ip}: \
+         {last_error:?}"
+    )))
 }
 
 fn create_udp_vir_socket_v6(
@@ -1879,7 +2143,8 @@ fn create_udp_vir_socket_v6(
     gateway_port: u16,
     multicast_group: std::net::Ipv6Addr,
     interface_index: u32,
-) -> Result<DoIPUdpSocket, DoipGatewaySetupError> {
+    reuse: bool,
+) -> Result<(DoIPUdpSocket, u16), DoipGatewaySetupError> {
     let tester_ip = tester_ip.parse::<std::net::Ipv6Addr>().map_err(|e| {
         DoipGatewaySetupError::InvalidAddress(format!(
             "DoipGateway: Failed to parse IPv6 tester address: {e:?}"
@@ -1895,7 +2160,7 @@ fn create_udp_vir_socket_v6(
             "DoipGateway: Failed to create IPv6 discovery socket: {e:?}"
         ))
     })?;
-    socket.set_reuse_address(true).map_err(|e| {
+    socket.set_reuse_address(reuse).map_err(|e| {
         DoipGatewaySetupError::SocketCreationFailed(format!(
             "DoipGateway: Failed to set IPv6 socket reuse address: {e:?}"
         ))
@@ -1926,6 +2191,11 @@ fn create_udp_vir_socket_v6(
             "DoipGateway: Failed to bind IPv6 discovery socket to {bind_addr}: {e:?}"
         ))
     })?;
+    let local_port = socket
+        .local_addr()
+        .ok()
+        .and_then(|addr| addr.as_socket())
+        .map_or(gateway_port, |addr| addr.port());
     let std_socket: std::net::UdpSocket = socket.into();
     let doip_socket =
         DoIPUdpSocket::new(std_socket, ProtocolVersion::DefaultValue).map_err(|e| {
@@ -1940,7 +2210,7 @@ fn create_udp_vir_socket_v6(
                 "DoipGateway: Failed to join IPv6 discovery group {multicast_group}: {e:?}"
             ))
         })?;
-    Ok(doip_socket)
+    Ok((doip_socket, local_port))
 }
 
 impl<T: EcuAddresses + DoipComParams> Clone for DoipDiagGateway<T> {
@@ -2097,6 +2367,7 @@ mod tests {
             tester_ip: "192.0.2.42".to_owned(),
             ipv6_interface_index: None,
             ipv6_multicast_group: "ff14::1515:1515".to_owned(),
+            vir_source_port: crate::config::VirSourcePort::default(),
             port: 13400,
             tls_port: 0,
             send_diagnostic_message_ack: false,
@@ -3004,6 +3275,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vir_source_socket_binds_fixed_os_chosen_and_range_ports() {
+        use crate::{config::VirSourcePort, create_udp_vir_source_socket};
+
+        // Port 0: the operating system picks a port.
+        let (_os, os_port) =
+            create_udp_vir_source_socket("127.0.0.1", VirSourcePort::Port(0), 13400).unwrap();
+        assert_ne!(os_port, 0);
+
+        // A fixed port is bound exclusively, a second bind fails.
+        let free_port = UdpSocket::bind("0.0.0.0:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (_fixed, fixed_port) =
+            create_udp_vir_source_socket("127.0.0.1", VirSourcePort::Port(free_port), 13400)
+                .unwrap();
+        assert_eq!(fixed_port, free_port);
+        assert!(
+            create_udp_vir_source_socket("127.0.0.1", VirSourcePort::Port(free_port), 13400)
+                .is_err()
+        );
+
+        // A range containing the occupied port picks the other one.
+        let (start, end) = match free_port.checked_add(1) {
+            Some(next) => (free_port, next),
+            None => (free_port.saturating_sub(1), free_port),
+        };
+        match create_udp_vir_source_socket("127.0.0.1", VirSourcePort::Range { start, end }, 13400)
+        {
+            Ok((_range, range_port)) => {
+                assert!((start..=end).contains(&range_port));
+                assert_ne!(range_port, free_port);
+            }
+            // The neighbouring port may be in use by another process.
+            Err(error) => assert!(matches!(
+                error,
+                crate::DoipGatewaySetupError::PortBindFailed(_)
+            )),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_vams_do_not_retrigger_variant_detection_within_debounce() {
+        let gateway = DoipDiagGateway::<TestEcu>::new(
+            &DoipConfig::default(),
+            Arc::new(HashMap::new()),
+            VariantDetectionSender::new(mpsc::channel(1).0),
+            Arc::new(RecordingConnectivityHandler::default()),
+        )
+        .await
+        .unwrap();
+        let new_session = || {
+            GatewaySession::new(
+                gateway.transport_config(),
+                Arc::new(ConnectionTasks::new()),
+                CancellationToken::new(),
+                gateway.variant_detection.clone(),
+                Arc::clone(&gateway.connectivity_handler),
+                gateway.config.discovery,
+            )
+        };
+        let session = new_session();
+
+        // Triggered by the initial connection (discovery, VAM or direct connect).
+        session.mark_variant_detection(0x1000);
+        // Repeated announcements within the debounce window are ignored.
+        assert!(!session.try_mark_variant_detection(0x1000));
+        tokio::time::advance(crate::gateway_session::VARIANT_DETECTION_VAM_DEBOUNCE / 2).await;
+        assert!(!session.try_mark_variant_detection(0x1000));
+        // Other gateways are not affected.
+        assert!(session.try_mark_variant_detection(0x2000));
+
+        // The window does not slide with ignored VAMs, later VAMs trigger again.
+        tokio::time::advance(crate::gateway_session::VARIANT_DETECTION_VAM_DEBOUNCE / 2).await;
+        assert!(session.try_mark_variant_detection(0x1000));
+        assert!(!session.try_mark_variant_detection(0x1000));
+
+        // A new start (after disabling communication) forgets the triggers.
+        assert!(new_session().try_mark_variant_detection(0x1000));
+    }
+
+    #[tokio::test]
+    async fn vir_source_socket_on_gateway_port_is_shared() {
+        use crate::{config::VirSourcePort, create_udp_vir_source_socket};
+
+        let gateway_port = UdpSocket::bind("0.0.0.0:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (_vir, vir_port) = create_udp_vir_source_socket(
+            "127.0.0.1",
+            VirSourcePort::Port(gateway_port),
+            gateway_port,
+        )
+        .unwrap();
+        assert_eq!(vir_port, gateway_port);
+        // The VAM listener must still be able to bind the discovery port.
+        assert!(crate::create_udp_vir_socket("0.0.0.0", gateway_port).is_ok());
+    }
+
+    #[tokio::test]
+    async fn occupied_vir_source_port_does_not_fail_enable() {
+        // Hold the fixed VIR source port exclusively.
+        let occupied = UdpSocket::bind("0.0.0.0:0").unwrap();
+        let port = occupied.local_addr().unwrap().port();
+        let gateway = DoipDiagGateway::<TestEcu>::new(
+            &DoipConfig {
+                gateway_port: 0,
+                vir_source_port: crate::config::VirSourcePort::Port(port),
+                ..DoipConfig::default()
+            },
+            Arc::new(HashMap::new()),
+            VariantDetectionSender::new(mpsc::channel(1).0),
+            Arc::new(RecordingConnectivityHandler::default()),
+        )
+        .await
+        .unwrap();
+
+        let start = std::time::Instant::now();
+        cda_interfaces::communication_control::TransportControl::enable(&gateway)
+            .await
+            .unwrap();
+        // The single port is retried before giving up.
+        assert!(
+            start.elapsed()
+                >= crate::VIR_SINGLE_PORT_BIND_RETRY_DELAY
+                    .saturating_mul(crate::VIR_SINGLE_PORT_BIND_ATTEMPTS.saturating_sub(1))
+        );
+        assert_eq!(
+            cda_interfaces::communication_control::TransportControl::state(&gateway).await,
+            TransportState::Enabled
+        );
+        // No VIR socket, but VAMs are still received on the discovery port.
+        assert!(gateway.state.socket.lock().await.is_none());
+        assert!(
+            gateway
+                .lifecycle
+                .operation
+                .lock()
+                .await
+                .vam_listener
+                .is_some()
+        );
+        cda_interfaces::communication_control::TransportControl::disable(&gateway)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn disabled_discovery_starts_without_binding_a_socket() {
         let (gateway, _) = enabled_gateway_with_discovery(DiscoveryMode::Disabled).await;
 
@@ -3026,7 +3448,8 @@ mod tests {
     async fn vam_only_discovery_listens_without_waiting_for_a_vir_round() {
         let (gateway, elapsed) = enabled_gateway_with_discovery(DiscoveryMode::VamOnly).await;
 
-        assert!(gateway.state.socket.lock().await.is_some());
+        // No VIR is sent, so no VIR socket is bound.
+        assert!(gateway.state.socket.lock().await.is_none());
         assert!(
             gateway
                 .lifecycle

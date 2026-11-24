@@ -121,7 +121,11 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
             data: format!("{base_path}/data"),
             sdgs,
             single_ecu_jobs: format!("{base_path}/x-single-ecu-jobs"),
+            bulk_data: format!("{base_path}/bulk-data"),
+            x_sovd2uds_bulk_data: format!("{base_path}/x-sovd2uds-bulk-data"),
+            x_sovd2uds_download: format!("{base_path}/x-sovd2uds-download"),
             faults: format!("{base_path}/faults"),
+            genericservice: format!("{base_path}/genericservice"),
             modes: format!("{base_path}/modes"),
             schema,
         }),
@@ -153,7 +157,18 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
                 single_ecu_jobs:
                     "http://localhost:20002/vehicle/v15/components/my_ecu/x-single-ecu-jobs"
                         .to_string(),
+                bulk_data: "http://localhost:20002/vehicle/v15/components/my_ecu/bulk-data"
+                    .to_string(),
+                x_sovd2uds_bulk_data:
+                    "http://localhost:20002/vehicle/v15/components/my_ecu/x-sovd2uds-bulk-data"
+                        .to_string(),
+                x_sovd2uds_download:
+                    "http://localhost:20002/vehicle/v15/components/my_ecu/x-sovd2uds-download"
+                        .to_string(),
                 faults: "http://localhost:20002/vehicle/v15/components/my_ecu/faults".to_string(),
+                genericservice:
+                    "http://localhost:20002/vehicle/v15/components/my_ecu/genericservice"
+                        .to_string(),
                 modes: "http://localhost:20002/vehicle/v15/components/my_ecu/modes".to_string(),
                 schema: None,
             })
@@ -372,11 +387,8 @@ fn format_data_response<R: cda_interfaces::diagservices::DiagServiceResponse>(
     }
 
     if map_to_json {
+        // Spec Table 85: `data` is `AnyValue`, so scalars and arrays are passed through.
         let (mapped_data, errors) = match response.into_json(binary_encoding) {
-            Ok(DiagServiceJsonResponse {
-                data: serde_json::Value::Object(mapped_data),
-                errors,
-            }) => (mapped_data, errors),
             Ok(DiagServiceJsonResponse {
                 data: serde_json::Value::Null,
                 errors,
@@ -384,18 +396,9 @@ fn format_data_response<R: cda_interfaces::diagservices::DiagServiceResponse>(
                 if errors.is_empty() {
                     return StatusCode::NO_CONTENT.into_response();
                 }
-                (serde_json::Map::new(), errors)
+                (serde_json::Value::Object(serde_json::Map::new()), errors)
             }
-            Ok(v) => {
-                return ErrorWrapper {
-                    error: ApiError::InternalServerError(Some(format!(
-                        "Expected JSON object but got: {}",
-                        v.data
-                    ))),
-                    include_schema,
-                }
-                .into_response();
-            }
+            Ok(DiagServiceJsonResponse { data, errors }) => (data, errors),
             Err(e) => {
                 return ErrorWrapper {
                     error: ApiError::InternalServerError(Some(format!("{e:?}"))),
@@ -600,7 +603,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn map_to_json_non_object_data_returns_500() {
+    async fn map_to_json_non_object_data_returns_200_with_array() {
         let mut mock = MockDiagServiceResponse::new();
         mock.expect_response_type()
             .returning(|| DiagServiceResponseType::Positive);
@@ -615,7 +618,10 @@ mod tests {
         let service = DiagComm::new("ReadRPM", DiagCommType::Data);
         let response = format_data_response(mock, &service, true, false, None, BinaryEncoding::Hex);
 
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_bytes(response).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.get("data"), Some(&serde_json::json!([1, 2, 3])));
     }
 
     #[tokio::test]

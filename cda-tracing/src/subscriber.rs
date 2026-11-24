@@ -16,6 +16,7 @@ use std::{
     path::Path,
 };
 
+use jiff::fmt::{StdFmtWrite, strtime::BrokenDownTime};
 use nu_ansi_term::{Color, Style};
 use tracing::{Event, Level, Subscriber, field::Visit};
 use tracing_subscriber::{
@@ -23,10 +24,12 @@ use tracing_subscriber::{
     fmt::{
         FmtContext, FormattedFields,
         format::{DefaultVisitor, FormatEvent, FormatFields, Writer},
-        time::{ChronoUtc, FormatTime},
+        time::FormatTime,
     },
     registry::LookupSpan,
 };
+
+use crate::TracingSetupError;
 
 macro_rules! write_colored {
         ($writer:expr, $color_support:expr, $style:expr, $($arg:tt)*) => {
@@ -52,10 +55,37 @@ macro_rules! write_colored_fn {
 }
 
 pub struct CdaFormatter {
-    timer: ChronoUtc,
+    timer: UtcTime,
     nested_context_fields: bool,
     colored: bool,
     span_id: bool,
+}
+
+/// Formats log timestamps in UTC with a strftime format string.
+pub struct UtcTime {
+    format: String,
+}
+
+impl UtcTime {
+    /// # Errors
+    /// Returns [`TracingSetupError::ResourceCreationFailed`] if `format` is not a valid
+    /// strftime format string.
+    pub fn new(format: String) -> Result<Self, TracingSetupError> {
+        jiff::fmt::strtime::format(&format, jiff::Timestamp::UNIX_EPOCH).map_err(|e| {
+            TracingSetupError::ResourceCreationFailed(format!(
+                "Invalid timestamp format `{format}`: {e}"
+            ))
+        })?;
+        Ok(Self { format })
+    }
+}
+
+impl FormatTime for UtcTime {
+    fn format_time(&self, writer: &mut Writer<'_>) -> std::fmt::Result {
+        BrokenDownTime::from(jiff::Timestamp::now())
+            .format(&self.format, StdFmtWrite(writer))
+            .map_err(|_| std::fmt::Error)
+    }
 }
 
 impl<S, N> FormatEvent<S, N> for CdaFormatter
@@ -158,7 +188,7 @@ where
 
 impl CdaFormatter {
     #[must_use]
-    pub fn new(timer: ChronoUtc) -> Self {
+    pub fn new(timer: UtcTime) -> Self {
         CdaFormatter {
             timer,
             nested_context_fields: true,
@@ -236,4 +266,34 @@ pub fn file_log_writer(
         .map_err(|e| format!("Failed to open log file: {e:?}"))?;
 
     Ok(strip_ansi_escapes::Writer::new(file))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn format_time(timer: &UtcTime) -> String {
+        let mut out = String::new();
+        timer
+            .format_time(&mut Writer::new(&mut out))
+            .expect("Failed to format time");
+        out
+    }
+
+    #[test]
+    fn utc_time_formats_with_strftime_format() {
+        let out = format_time(&UtcTime::new("%F %T%.3f".to_owned()).expect("Valid format"));
+        let (date, time) = out.split_once(' ').expect("Missing date/time separator");
+        assert_eq!(date.len(), "2026-01-02".len(), "unexpected date: {out}");
+        assert_eq!(time.len(), "03:04:05.678".len(), "unexpected time: {out}");
+        assert_eq!(time.chars().nth(8), Some('.'), "unexpected time: {out}");
+    }
+
+    #[test]
+    fn utc_time_rejects_invalid_format() {
+        assert!(matches!(
+            UtcTime::new("%T%".to_owned()),
+            Err(TracingSetupError::ResourceCreationFailed(_))
+        ));
+    }
 }

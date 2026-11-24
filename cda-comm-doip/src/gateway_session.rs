@@ -70,6 +70,14 @@ struct ReconnectScope {
     deferred: HashSet<u16>,
 }
 
+/// Time after a variant detection trigger in which VAMs of the already connected
+/// gateway do not trigger it again. Covers the repeated vehicle announcements
+/// (ISO 13400-2: up to `A_DoIP_Announce_Wait` 500 ms, then `A_DoIP_Announce_Num` 3
+/// times every `A_DoIP_Announce_Interval` 500 ms) and VIR responses that are
+/// received on the VIR socket and the VAM listener.
+pub(crate) const VARIANT_DETECTION_VAM_DEBOUNCE: std::time::Duration =
+    std::time::Duration::from_secs(3);
+
 /// Gateway connect state of one transport start. Replaced on every start, so
 /// work left over from an earlier start cannot change the current one.
 pub(crate) struct GatewaySession {
@@ -81,6 +89,9 @@ pub(crate) struct GatewaySession {
     pending_announcements: Mutex<HashMap<u16, DiscoveredGateway>>,
     /// The gateways of a persisted reconnect in progress, see [`ReconnectScope`].
     reconnect_scope: Mutex<Option<ReconnectScope>>,
+    /// When variant detection was last triggered per gateway logical address,
+    /// see [`VARIANT_DETECTION_VAM_DEBOUNCE`]. Per start, so a restart forgets it.
+    variant_detection_triggered: Mutex<HashMap<u16, tokio::time::Instant>>,
     /// Awaited, not aborted, by the transport stop: the commits of connects,
     /// which report ECUs connected and revert that themselves if the stop
     /// came first.
@@ -114,6 +125,7 @@ impl GatewaySession {
             connect_mutexes: Mutex::new(HashMap::new()),
             pending_announcements: Mutex::new(HashMap::new()),
             reconnect_scope: Mutex::new(None),
+            variant_detection_triggered: Mutex::new(HashMap::new()),
             commit_tasks: Arc::new(ConnectionTasks::new()),
             transport_config,
             connection_tasks,
@@ -202,5 +214,28 @@ impl GatewaySession {
         &self,
     ) -> std::sync::MutexGuard<'_, HashMap<u16, DiscoveredGateway>> {
         lock_mutex(&self.pending_announcements)
+    }
+
+    /// Records that variant detection was triggered for the given gateway.
+    pub(crate) fn mark_variant_detection(&self, logical_address: u16) {
+        lock_mutex(&self.variant_detection_triggered)
+            .insert(logical_address, tokio::time::Instant::now());
+    }
+
+    /// Records a variant detection trigger for the given gateway unless one was
+    /// already recorded within [`VARIANT_DETECTION_VAM_DEBOUNCE`].
+    /// Returns whether variant detection shall be triggered.
+    pub(crate) fn try_mark_variant_detection(&self, logical_address: u16) -> bool {
+        let now = tokio::time::Instant::now();
+        let mut triggered = lock_mutex(&self.variant_detection_triggered);
+        match triggered.get(&logical_address) {
+            Some(last) if now.saturating_duration_since(*last) < VARIANT_DETECTION_VAM_DEBOUNCE => {
+                false
+            }
+            _ => {
+                triggered.insert(logical_address, now);
+                true
+            }
+        }
     }
 }

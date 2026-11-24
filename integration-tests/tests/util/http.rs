@@ -136,6 +136,16 @@ where
     }
 }
 
+/// The URL of `path` below the root of the CDA configured by `config`, e.g.
+/// `version-info`.
+pub(crate) fn server_url(config: &Configuration, path: &str) -> String {
+    format!(
+        "http://{}:{}/{path}",
+        config.server.transport.address(),
+        config.server.transport.port()
+    )
+}
+
 /// The URL of `endpoint` below `/vehicle/v15/` of the CDA configured by
 /// `config`, e.g. `components/flxc1000/data`.
 pub(crate) fn vehicle_url(config: &Configuration, endpoint: &str) -> String {
@@ -265,7 +275,7 @@ pub(crate) async fn send_request(
 }
 
 /// Sends a request and returns the response whatever its status.
-async fn send_request_any_status(
+pub(crate) async fn send_request_any_status(
     method: Method,
     data: Option<&str>,
     headers: Option<&HeaderMap>,
@@ -409,6 +419,10 @@ impl Response {
 
     pub(crate) fn header(&self, name: http::header::HeaderName) -> Option<&http::HeaderValue> {
         self.header_map.get(name)
+    }
+
+    pub(crate) fn body(&self) -> Option<&str> {
+        self.body.as_deref()
     }
 }
 

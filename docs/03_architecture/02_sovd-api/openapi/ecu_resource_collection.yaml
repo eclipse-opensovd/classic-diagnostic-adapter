@@ -62,11 +62,31 @@ components:
           format: uri-reference
           description: "path to data"
           example: 'http://localhost:1234/components/ecu112/data'
+        operations:
+          type: string
+          format: uri-reference
+          description: "path to operations"
+          example: 'http://localhost:1234/components/ecu112/operations'
         modes:
           type: string
           format: uri-reference
           description: "path to modes"
           example: 'http://localhost:1234/components/ecu112/modes'
+        x-single-ecu-jobs:
+          type: string
+          format: uri-reference
+          description: "path to single ECU jobs"
+          example: 'http://localhost:1234/components/ecu112/x-single-ecu-jobs'
+        bulk-data:
+          type: string
+          format: uri-reference
+          description: "path to bulk data"
+          example: 'http://localhost:1234/components/ecu112/bulk-data'
+        x-sovd2uds-bulk-data:
+          type: string
+          format: uri-reference
+          description: "path to sovd2uds bulk data, same content as bulk-data"
+          example: 'http://localhost:1234/components/ecu112/x-sovd2uds-bulk-data'
         genericservice:
           type: string
           format: uri-reference

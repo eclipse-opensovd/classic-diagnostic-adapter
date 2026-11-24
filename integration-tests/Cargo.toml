@@ -50,7 +50,7 @@ thiserror = { workspace = true }
 # toml serialization
 toml = { workspace = true }
 # time
-chrono = { workspace = true }
+jiff = { workspace = true }
 # future
 futures = { workspace = true }
 # libc

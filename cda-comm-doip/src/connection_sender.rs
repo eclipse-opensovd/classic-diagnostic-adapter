@@ -297,6 +297,7 @@ mod tests {
                     ipv6_interface_index: None,
                     ipv6_multicast_group: crate::DoipConfig::default().ipv6_multicast_group,
                     port: 13400,
+                    vir_source_port: crate::config::VirSourcePort::default(),
                     tls_port: 0,
                     send_diagnostic_message_ack: false,
                     send_timeout: Duration::from_secs(5),

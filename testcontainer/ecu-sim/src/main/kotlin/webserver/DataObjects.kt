@@ -83,6 +83,11 @@ data class DataTransferDownloadDto(
     val isActive: Boolean,
     val dataTransferCount: Int,
     val checksum: String?,
+    val expectedBytes: Long = 0,
+    val bytesReceived: Long = 0,
+    val repeatedBlocks: Int = 0,
+    val maxNumberOfBlockLength: Int = 0,
+    val durationMs: Long? = null,
 )
 
 fun DataTransferDownload.toDto() =
@@ -93,6 +98,11 @@ fun DataTransferDownload.toDto() =
         isActive = this.isActive,
         dataTransferCount = this.dataTransferCount,
         checksum = if (!this.isActive) this.checksum?.toHexString() else null,
+        expectedBytes = this.expectedBytes,
+        bytesReceived = this.bytesReceived,
+        repeatedBlocks = this.repeatedBlocks,
+        maxNumberOfBlockLength = this.maxNumberOfBlockLength,
+        durationMs = this.startedAtMs?.let { start -> this.finishedAtMs?.let { it - start } },
     )
 
 @Serializable

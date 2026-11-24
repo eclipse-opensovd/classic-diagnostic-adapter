@@ -1734,6 +1734,43 @@ impl<'a> EcuDataBuilder<'a> {
         )
     }
 
+    /// Creates an `END-OF-PDU-FIELD` DOP repeating an `ENV-DATA-DESC`.
+    pub fn create_end_of_pdu_field_env_data_desc_dop(
+        &mut self,
+        min_items: u32,
+        max_items: Option<u32>,
+        env_data_desc: WIPOffset<dataformat::DOP<'a>>,
+    ) -> WIPOffset<dataformat::DOP<'a>> {
+        let field = dataformat::Field::create(
+            &mut self.fbb,
+            &dataformat::FieldArgs {
+                basic_structure: None,
+                env_data_desc: Some(env_data_desc),
+                is_visible: true,
+            },
+        );
+        let end_of_pdu_field_specific_data = dataformat::EndOfPduField::create(
+            &mut self.fbb,
+            &dataformat::EndOfPduFieldArgs {
+                min_number_of_items: Some(min_items),
+                max_number_of_items: max_items,
+                field: Some(field),
+            },
+        );
+        self.create_dop(
+            *DopType::END_OF_PDU_FIELD,
+            None,
+            None,
+            *SpecificDOPData::EndOfPduField,
+            Some(
+                dataformat::SpecificDOPData::tag_as_end_of_pdu_field(
+                    end_of_pdu_field_specific_data,
+                )
+                .value_offset(),
+            ),
+        )
+    }
+
     pub fn create_static_field_dop(
         &mut self,
         fixed_number_of_items: u32,

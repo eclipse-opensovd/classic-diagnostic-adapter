@@ -475,8 +475,8 @@ Version Info Endpoint
     static data format (``id`` + ``data`` object containing ``name``, ``api.version``, and
     ``implementation.version``/``commit``/``build_date``).
 
-    These endpoints are registered by the same registration function that provides the standard
-    ``/version-info`` endpoint.
+    Each endpoint is registered by calling the version registrar with its path and is listed in
+    its ``data`` collection with the category ``identData``.
 
     **Rationale**
 
@@ -489,24 +489,23 @@ Version Info Endpoint
     :links: arch~sovd-api-version-registration-function
     :status: draft
 
-    A single registration function shall accept the following parameters:
+    A version registrar shall accept the following parameters:
 
     - ``vendor_name``: the implementation/vendor name of the SOVD server
-    - ``api_version``: the supported SOVD API version string
     - ``implementation_version``: the software version of the implementation
     - ``commit``: the Git commit hash of the build
     - ``build_date``: the date the binary was built
-    - ``base_uri``: the version-specific base URI
 
-    The function shall always register the ``/version-info`` endpoint.
+    The registrar shall provide a method to register the ``/version-info`` endpoint.
 
-    The function shall optionally register the ``/data/version`` and ``/apps/sovd2uds/data/version``
-    endpoints serving vendor-specific implementation data.
+    A separate method shall register a vendor-specific version data endpoint using a supplied
+    path. Applications can call it for each optional data endpoint they provide. Both methods
+    shall derive their version information from the same registrar values.
 
     **Rationale**
 
-    Centralizes version endpoint registration into a single callable unit, ensuring consistency
-    between the standard version-info response and optional vendor-specific endpoints.
+    Provides reusable registration for the standard version-info response and optional
+    vendor-specific endpoints with consistent version information.
 
 
 Health Endpoint
@@ -601,10 +600,37 @@ mdd-files, or to prepare for operations which affect the whole vehicle (e.g. dis
 
        * - Resource
          - Description
+       * - id
+         - Identifier of the entity, empty for the SOVD server
+       * - name
+         - Name of the entity, empty for the SOVD server
+       * - components
+         - The ECUs of the vehicle, see :need:`req~sovd-api-components-entity-collection`
+       * - apps
+         - The apps of the CDA
        * - locks
          - Locks affecting the whole vehicle
        * - functions
          - Functions affecting the whole vehicle (i.e. communication disable/enable)
+       * - data
+         - Data resources of the vehicle, e.g. ``version``
+
+    The ``sovd2uds`` app (``/apps/sovd2uds``) must provide a resource collection with ``id``, ``name``,
+    ``bulk-data`` and ``data``. It must contain ``operations`` only if the app serves at least one operation
+    (ISO 17978-3, Table 53, C1).
+
+    The ``bulk-data`` and ``operations`` collections of the app must list every category and operation that is
+    served beneath them. Resources that depend on a plugin or on the configuration, such as the runtime update
+    categories and operations, are listed only while they are served. Each operation item must contain ``id``,
+    ``name``, ``proximity_proof_required`` and ``asynchronous_execution`` (Table 169).
+
+    The ``data`` collections (``/data`` and ``/apps/sovd2uds/data``) must list every data resource served
+    beneath them, including resources registered at runtime. Each item must contain ``id``, ``name`` and
+    ``category``.
+
+    **Rationale**
+
+    A client must be able to find every resource by following the references, starting from the root.
 
 
 .. _requirements_sovd_api_locks:
@@ -853,7 +879,7 @@ ECU-lock POST requests additionally check stored ECU connectivity as specified i
     **Write endpoints**: ``PUT /data/{id}``, ``PUT /configurations/{id}``,
     ``POST /operations/{op}/executions``, ``GET /operations/{op}/executions/{id}``,
     ``DELETE /operations/{op}/executions/{id}``, ``PUT /modes/*``,
-    ``DELETE /faults``, ``DELETE /faults/{dtc}``, ``POST /genericservice``,
+    ``DELETE /faults``, ``DELETE /faults/{dtc}``, ``PUT /genericservice``,
     download endpoints.
 
     **Read endpoints**: ``GET /data/{id}``, ``GET /configurations/{id}``,
@@ -1220,6 +1246,10 @@ MDD Embedded files
     The CDA must support reading embedded files from the MDD file, and provide them via the
     ``/components/{ecuName}/x-sovd2uds-bulk-data/mdd-embedded-files`` endpoint (listing) and
     ``/components/{ecuName}/x-sovd2uds-bulk-data/mdd-embedded-files/{id}`` endpoint (retrieval).
+
+    The same endpoints must also be available under the standardized ``bulk-data`` collection,
+    ``/components/{ecuName}/bulk-data/mdd-embedded-files`` and
+    ``/components/{ecuName}/bulk-data/mdd-embedded-files/{id}``.
 
     **Rationale**
 

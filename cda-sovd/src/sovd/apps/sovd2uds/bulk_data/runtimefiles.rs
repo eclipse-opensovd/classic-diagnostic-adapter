@@ -668,6 +668,13 @@ const RUNTIMEFILES_NEXTUPDATE_ROUTE: &str =
     "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate";
 const RUNTIMEFILES_BACKUP_ROUTE: &str = "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-backup";
 
+/// The categories served by [`routes`], to be listed by the bulk-data collection.
+pub(crate) const CATEGORY_PATHS: [&str; 3] = [
+    RUNTIMEFILES_CURRENT_ROUTE,
+    RUNTIMEFILES_NEXTUPDATE_ROUTE,
+    RUNTIMEFILES_BACKUP_ROUTE,
+];
+
 pub fn routes<
     S: cda_plugin_security::SecurityPluginLoader,
     P: RuntimeFilesUpdatePlugin,

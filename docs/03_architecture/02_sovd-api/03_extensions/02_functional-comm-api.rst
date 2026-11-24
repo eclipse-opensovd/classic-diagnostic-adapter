@@ -88,6 +88,21 @@ API
     ``/parameters/{ecu-name}/{field}``, or ``/parameters/{ecu-name}`` if the complete response from
     an ECU cannot be decoded.
 
+    **Deviation from ISO 17978-3:** all functional group operation responses report errors in
+    an attribute named ``errors`` of type ``DataError[]``. This applies to:
+
+    - the synchronous execution response (``200 OK``), where ISO 17978-3:2026, Table 183, defines
+      ``error: DataError`` (a single object),
+    - the execution status response (``GET .../executions/{id}``), where ISO 17978-3:2026,
+      Table 189, defines ``error: DataError[]``.
+
+    A functional group targets several ECUs, each of which may fail independently, so a single
+    ``DataError`` cannot represent the result. The attribute is named ``errors`` to make clear
+    that it differs from the standard ``error`` attribute, consistent with the other functional
+    group responses (data, modes) and the asynchronous ``Start`` response. Clients written
+    against the component (ECU) operation endpoints, which use ``error``, must read ``errors``
+    for functional groups.
+
     .. note::
        The content-type ``application/octet-stream`` is only supported for requests.
 

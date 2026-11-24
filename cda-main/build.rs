@@ -35,9 +35,9 @@ fn main() {
         let epoch = source_date_epoch.parse::<i64>().unwrap_or_else(|_| {
             panic!("SOURCE_DATE_EPOCH is not a valid integer: {source_date_epoch}")
         });
-        chrono::DateTime::from_timestamp(epoch, 0)
+        jiff::Timestamp::from_second(epoch)
             .expect("SOURCE_DATE_EPOCH not in range for timestamp")
-            .format(DATE_FORMAT)
+            .strftime(DATE_FORMAT)
             .to_string()
     } else {
         get_git_date()
@@ -80,8 +80,8 @@ fn get_git_date() -> String {
         .trim()
         .to_owned();
 
-    match chrono::DateTime::parse_from_rfc3339(&git_date) {
-        Ok(parsed) => parsed.format(DATE_FORMAT).to_string(),
+    match git_date.parse::<jiff::Timestamp>() {
+        Ok(parsed) => parsed.strftime(DATE_FORMAT).to_string(),
         Err(e) => panic!("Failed to parse RFC3339 date: {e:?}"),
     }
 }

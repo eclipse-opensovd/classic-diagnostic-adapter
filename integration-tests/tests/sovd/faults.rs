@@ -30,7 +30,9 @@ use crate::{
     },
     util::{
         ecusim::{self, DtcExtended, DtcMinimal, ExtDataRecord, SnapshotData, SnapshotRecord},
-        http::{extract_field_from_json, response_to_json, send_authenticated_cda_request},
+        http::{
+            QueryParams, extract_field_from_json, response_to_json, send_authenticated_cda_request,
+        },
         locks,
         test_env::TestEnv,
     },
@@ -91,10 +93,7 @@ async fn test_dtc_setting() {
     assert_eq!(result.value.to_ascii_lowercase(), dtcs_on);
 
     let current_setting = get_dtc_setting(&test_env, ecu_endpoint).await.unwrap();
-    assert_eq!(
-        current_setting.value.as_ref().map(|s| s.to_lowercase()),
-        Some(dtcs_on.to_owned())
-    );
+    assert_eq!(current_setting.value.to_lowercase(), dtcs_on);
 
     // Validate that ECU sim received and stored the DTC setting
     let ecu_state = ecusim::get_ecu_state(&test_env.ecu_sim, ECU_FLXC1000)
@@ -115,10 +114,7 @@ async fn test_dtc_setting() {
     assert_eq!(result.value.to_ascii_lowercase(), dtcs_off);
 
     let current_setting = get_dtc_setting(&test_env, ecu_endpoint).await.unwrap();
-    assert_eq!(
-        current_setting.value.as_ref().map(|s| s.to_lowercase()),
-        Some(dtcs_off.to_owned())
-    );
+    assert_eq!(current_setting.value.to_lowercase(), dtcs_off);
 
     // Validate that ECU sim received and stored the DTC setting
     let ecu_state = ecusim::get_ecu_state(&test_env.ecu_sim, ECU_FLXC1000)
@@ -139,10 +135,7 @@ async fn test_dtc_setting() {
     assert_eq!(result.value.to_ascii_lowercase(), dtcs_time_travel);
 
     let current_setting = get_dtc_setting(&test_env, ecu_endpoint).await.unwrap();
-    assert_eq!(
-        current_setting.value.as_ref().map(|s| s.to_lowercase()),
-        Some(dtcs_time_travel.to_owned())
-    );
+    assert_eq!(current_setting.value.to_lowercase(), dtcs_time_travel);
 
     // Validate that ECU sim received and stored the DTC setting
     let ecu_state = ecusim::get_ecu_state(&test_env.ecu_sim, ECU_FLXC1000)
@@ -718,6 +711,104 @@ async fn test_get_faults_with_different_dtc_masks() {
         Some("80".to_string()),
         "DTC6: mask should be 80"
     );
+
+    // Status filter: keys are case-insensitive, bits are OR combined and the
+    // ECU returns DTCs where (status & mask) != 0.
+    let filter_cases: [StatusFilterCase; 6] = [
+        // confirmedDtc (0x08): DTC1 (0x29), DTC2 (0x0C), DTC3 (0xFF), user mem DTC (0x29)
+        (
+            &[("status[confirmedDtc]", "true")],
+            &["01E240", "039447", "01E241", "01E245"],
+        ),
+        (
+            &[("status[CONFIRMEDDTC]", "1")],
+            &["01E240", "039447", "01E241", "01E245"],
+        ),
+        // warningIndicatorRequested (0x80): DTC3 (0xFF), DTC6 (0x80)
+        (
+            &[("status[warningindicatorrequested]", "true")],
+            &["01E241", "01E244"],
+        ),
+        // pendingDtc | testFailedThisOperationCycle (0x06): DTC2, DTC3, DTC5
+        (
+            &[
+                ("status[pendingDtc]", "1"),
+                ("status[TestFailedThisOperationCycle]", "true"),
+            ],
+            &["039447", "01E241", "01E243"],
+        ),
+        // raw mask 0x80
+        (&[("status[mask]", "80")], &["01E241", "01E244"]),
+        // nothing selected -> all faults
+        (
+            &[("status[confirmedDtc]", "false")],
+            &[
+                "01E240", "039447", "01E241", "01E242", "01E243", "01E244", "01E245",
+            ],
+        ),
+    ];
+    for (params, expected) in filter_cases {
+        let mut codes = get_faults_with_query(&test_env, ecu_endpoint, params)
+            .await
+            .into_iter()
+            .map(|f| f.code)
+            .collect::<Vec<_>>();
+        codes.sort();
+        let mut expected = expected.iter().map(|c| (*c).to_owned()).collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(codes, expected, "Unexpected faults for filter {params:?}");
+    }
+
+    // Invalid status values must be rejected
+    let query = QueryParams(
+        [("status[confirmedDtc]".to_owned(), "yes".to_owned())]
+            .into_iter()
+            .collect(),
+    );
+    send_authenticated_cda_request(
+        &test_env,
+        &format!("{ecu_endpoint}/faults"),
+        StatusCode::BAD_REQUEST,
+        Method::GET,
+        None,
+        Some(&query),
+    )
+    .await
+    .expect("Invalid status value should be rejected");
+}
+
+/// Status query parameters and the fault codes expected for them.
+type StatusFilterCase = (
+    &'static [(&'static str, &'static str)],
+    &'static [&'static str],
+);
+
+async fn get_faults_with_query(
+    test_env: &TestEnv,
+    ecu_endpoint: &str,
+    params: &[(&str, &str)],
+) -> Vec<Fault> {
+    let query = QueryParams(
+        params
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect(),
+    );
+    let response = send_authenticated_cda_request(
+        test_env,
+        &format!("{ecu_endpoint}/faults"),
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(&query),
+    )
+    .await
+    .expect("Failed to get filtered faults");
+    extract_field_from_json::<Vec<Fault>>(
+        &response_to_json(&response).expect("Invalid JSON"),
+        "items",
+    )
+    .expect("Failed to parse faults")
 }
 
 #[tokio::test]
@@ -833,7 +924,7 @@ fn assert_fault_data(sim_dtc: &DtcExtended, result_fault: ExtendedFault<VendorEr
 ///     }
 fn assert_dtc_snapshot_data(
     sim_snapshots: &Vec<SnapshotRecord>,
-    result_snapshots: ExtendedSnapshots<VendorErrorCode>,
+    result_snapshots: ExtendedSnapshots,
 ) {
     let result_snapshots = result_snapshots
         .data
@@ -941,7 +1032,7 @@ fn assert_dtc_snapshot_data(
 ///     }
 fn assert_dtc_extended_data(
     sim_ext_data: &Vec<ExtDataRecord>,
-    result_extended_data: ExtendedDataRecords<VendorErrorCode>,
+    result_extended_data: ExtendedDataRecords,
 ) {
     let result_ext_data = result_extended_data
         .data
@@ -1523,4 +1614,101 @@ async fn test_user_memory_fault_status_uses_status_byte() {
              byte 45"
         );
     }
+}
+
+/// Test that GET /faults returns ECU-reported DTCs with and without ODX references.
+#[tokio::test]
+async fn test_get_faults_with_and_without_odx_reference() {
+    let test_env = TestEnv::builder().await.unwrap();
+    let ecu_endpoint = sovd::COMPONENTS_FLXC1000_BASE;
+    let ecu_name = ECU_FLXC1000;
+    let fault_memory = "Standard";
+
+    // Scenario 1: Add a DTC that has a matching ODX reference.
+    // Status mask 0x29 (binary 0010_1001):
+    // - Bit 0: testFailed = true
+    // - Bit 3: confirmedDTC = true
+    // - Bit 5: testFailedSinceLastClear = true
+    let dtc1 = DtcMinimal {
+        id: "01E241".into(),
+        status_mask: "29".into(),
+        emissions_related: false,
+    };
+
+    ecusim::add_dtc(&test_env.ecu_sim, ecu_name, fault_memory, &dtc1)
+        .await
+        .expect("Failed to add ODX-referenced DTC 0x01E241");
+
+    // Scenario 2: Add an ECU-reported DTC without a matching ODX reference.
+    // Use the same status mask (0x29) to verify that its status is preserved.
+    let dtc2 = DtcMinimal {
+        id: "01E246".into(),
+        status_mask: "29".into(),
+        emissions_related: false,
+    };
+
+    ecusim::add_dtc(&test_env.ecu_sim, ecu_name, fault_memory, &dtc2)
+        .await
+        .expect("Failed to add DTC 0x01E246 without an ODX reference");
+
+    // Test GET /faults - both DTCs should be returned, including the one without an ODX reference.
+    let faults = get_faults(&test_env, ecu_endpoint)
+        .await
+        .expect("Failed to get faults via SOVD");
+
+    // Verify that the DTC with an ODX reference is returned with status mask 0x29.
+    let fault1 = faults
+        .iter()
+        .find(|fault| fault.code == "01E241")
+        .expect("Expected ODX-referenced DTC 0x01E241 to be present");
+
+    assert_eq!(
+        fault1.fault_name, "DTC Code 3",
+        "Expected the ODX fault name for DTC 0x01E241"
+    );
+    assert_eq!(
+        fault1.severity,
+        Some(3),
+        "Expected the ODX severity for DTC 0x01E241"
+    );
+    assert_eq!(
+        fault1.display_code.as_deref(),
+        Some("P123457"),
+        "Expected the ODX display code for DTC 0x01E241"
+    );
+    assert_eq!(
+        fault1
+            .status
+            .as_ref()
+            .and_then(|status| status.mask.clone()),
+        Some("29".to_string()),
+        "Expected DTC 0x01E241 to have status mask 0x29"
+    );
+
+    // Verify that the ECU-reported DTC without an ODX reference is also returned.
+    let fault2 = faults
+        .iter()
+        .find(|fault| fault.code == "01E246")
+        .expect("Expected ECU-reported DTC 0x01E246 without an ODX reference to be present");
+
+    // Verify fallback fault name and severity.
+    assert_eq!(
+        fault2.fault_name, "DTC description not available",
+        "Expected fallback fault name for DTC without ODX reference"
+    );
+
+    assert_eq!(
+        fault2.severity,
+        Some(0),
+        "Expected default severity 0 for DTC without ODX reference"
+    );
+
+    assert_eq!(
+        fault2
+            .status
+            .as_ref()
+            .and_then(|status| status.mask.clone()),
+        Some("29".to_string()),
+        "Expected DTC 0x01E246 to have status mask 0x29"
+    );
 }

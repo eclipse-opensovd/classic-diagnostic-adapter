@@ -20,8 +20,8 @@ use doip_definitions::header::ProtocolVersion;
 use tokio::sync::RwLock;
 
 use crate::{
-    DiscoveredGateway, DoipTransportConfig, create_discovery_socket, error::DoipGatewaySetupError,
-    vir_vam,
+    DiscoveredGateway, DoipTransportConfig, bind_vir_socket, discovery_target,
+    error::DoipGatewaySetupError, vir_vam,
 };
 
 /// Gateways to connect to directly, and gateways that need a VIR search.
@@ -105,11 +105,14 @@ pub(crate) fn plan_reconnect(
     plan
 }
 
-/// Broadcasts a VIR from a new, ephemeral socket and returns the announced
-/// gateways whose logical address is in `wanted`.
+/// Broadcasts a VIR from a new socket bound as configured by
+/// `doip.vir_source_port` and returns the announced gateways whose logical
+/// address is in `wanted`.
 ///
 /// A separate socket is used because the VAM listener owns the socket bound to the
 /// `DoIP` port; vehicle announcements answering a VIR are sent to its source port.
+/// Only if `vir_source_port` is the `DoIP` port (legacy behavior) the socket shares
+/// that port with the VAM listener.
 pub(crate) async fn fallback_identification<T, F>(
     transport_config: &DoipTransportConfig,
     netmask: Option<u32>,
@@ -121,16 +124,18 @@ where
     T: EcuAddresses,
     F: Future<Output = ()> + Send + 'static,
 {
-    let (mut socket, discovery_target) =
-        create_discovery_socket(transport_config, 0).map_err(|error| match error {
+    let target = discovery_target(transport_config)
+        .map_err(|error| DiagServiceError::ResourceError(error.to_string()))?;
+    let (mut socket, _) = bind_vir_socket(transport_config)
+        .await
+        .map_err(|error| match error {
             DoipGatewaySetupError::InvalidAddress(message) => {
                 DiagServiceError::InvalidAddress(message)
             }
             other => DiagServiceError::ResourceError(other.to_string()),
         })?;
     let gateways =
-        vir_vam::get_vehicle_identification(&mut socket, netmask, discovery_target, ecus, shutdown)
-            .await?;
+        vir_vam::get_vehicle_identification(&mut socket, netmask, target, ecus, shutdown).await?;
     Ok(gateways
         .into_iter()
         .filter(|gateway| wanted.contains(&gateway.logical_address))

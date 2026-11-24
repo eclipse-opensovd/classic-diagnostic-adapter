@@ -73,7 +73,6 @@ axum = { workspace = true, features = [
 ] }
 axum-extra = { workspace = true, features = ["typed-header", "with-rejection"] }
 bytes = { workspace = true }
-chrono = { workspace = true }
 http = { workspace = true }
 indexmap = { workspace = true }
 mime = { workspace = true }
