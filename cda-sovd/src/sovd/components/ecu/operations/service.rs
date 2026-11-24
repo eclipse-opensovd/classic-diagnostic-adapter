@@ -11,11 +11,35 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use aide::UseApi;
-use axum::extract::{Path, Query, State};
+use aide::{
+    UseApi,
+    transform::{TransformOperation, TransformParameter},
+};
+use axum::{
+    Json,
+    extract::{Path, Query, State},
+    http::StatusCode,
+    response::{IntoResponse as _, Response},
+};
 use axum_extra::extract::WithRejection;
+use cda_interfaces::{
+    DiagComm, DiagCommType, DynamicPlugin, HashMap, HashMapExtensions, SchemaProvider, UdsEcu,
+    file_manager::FileManager,
+};
+use cda_plugin_security::Secured;
+use sovd_interfaces::components::{
+    ComponentQuery,
+    ecu::{ServiceSdgs, ServicesSdgs, operations::OperationCollectionItem},
+};
 
-use crate::sovd::locks::require_ecu_access;
+use crate::{
+    openapi,
+    sovd::{
+        IntoSovd, WebserverEcuState, create_schema,
+        error::{ApiError, ErrorWrapper},
+        locks::require_ecu_access,
+    },
+};
 
 /// `GET /operations/{service}/docs` - online capability description
 pub(crate) mod docs_endpoint;
@@ -23,30 +47,19 @@ pub(crate) mod executions;
 
 /// `GET /operations/{service}` - get operation details or SDGs
 // [[ dimpl~sovd-api-component-operations-sdgsd, GET /operations/{service} SDG handler ]]
-pub(crate) async fn get<
-    T: cda_interfaces::UdsEcu + cda_interfaces::SchemaProvider + Clone,
-    U: cda_interfaces::file_manager::FileManager,
->(
-    UseApi(cda_plugin_security::Secured(security_plugin), _): UseApi<
-        cda_plugin_security::Secured,
-        (),
-    >,
+pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+    UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
     Path(docs_endpoint::OperationNamePathParam { service }): Path<
         docs_endpoint::OperationNamePathParam,
     >,
-    WithRejection(Query(query), _): WithRejection<
-        Query<sovd_interfaces::components::ComponentQuery>,
-        crate::sovd::error::ApiError,
-    >,
-    State(crate::sovd::WebserverEcuState {
+    WithRejection(Query(query), _): WithRejection<Query<ComponentQuery>, ApiError>,
+    State(WebserverEcuState {
         ecu_name,
         uds,
         locks,
         ..
-    }): State<crate::sovd::WebserverEcuState<T, U>>,
-) -> axum::response::Response {
-    use axum::response::IntoResponse as _;
-
+    }): State<WebserverEcuState<T, U>>,
+) -> Response {
     let include_schema = query.include_schema;
     require_ecu_access!(read, security_plugin, &ecu_name, &locks, include_schema);
     if query.include_sdgs {
@@ -54,14 +67,14 @@ pub(crate) async fn get<
     }
 
     // Normal response: return operation info for the named service
-    let security_plugin: cda_interfaces::DynamicPlugin = security_plugin;
+    let security_plugin: DynamicPlugin = security_plugin;
     let ops_info = match uds
         .get_components_operations_info(&ecu_name, &security_plugin)
         .await
     {
         Ok(info) => info,
         Err(e) => {
-            return crate::sovd::error::ErrorWrapper {
+            return ErrorWrapper {
                 error: e.into(),
                 include_schema,
             }
@@ -73,48 +86,37 @@ pub(crate) async fn get<
         .iter()
         .find(|o| o.id.eq_ignore_ascii_case(&service))
     else {
-        return crate::sovd::error::ApiError::NotFound(Some(format!(
-            "Operation '{service}' not found"
-        )))
-        .into_response();
+        return ApiError::NotFound(Some(format!("Operation '{service}' not found")))
+            .into_response();
     };
 
     let schema = if include_schema {
-        Some(crate::sovd::create_schema!(
-            sovd_interfaces::components::ecu::operations::OperationCollectionItem
-        ))
+        Some(create_schema!(OperationCollectionItem))
     } else {
         None
     };
 
     (
-        http::StatusCode::OK,
-        axum::Json(sovd_interfaces::Items {
-            items: vec![
-                sovd_interfaces::components::ecu::operations::OperationCollectionItem {
-                    id: op_info.id.clone(),
-                    name: op_info.name.clone(),
-                    proximity_proof_required: false,
-                    asynchronous_execution: op_info.has_stop || op_info.has_request_results,
-                },
-            ],
+        StatusCode::OK,
+        Json(sovd_interfaces::Items {
+            items: vec![OperationCollectionItem {
+                id: op_info.id.clone(),
+                name: op_info.name.clone(),
+                proximity_proof_required: false,
+                asynchronous_execution: op_info.has_stop || op_info.has_request_results,
+            }],
             schema,
         }),
     )
         .into_response()
 }
 
-async fn get_sdgs_handler<T: cda_interfaces::UdsEcu + Clone>(
+async fn get_sdgs_handler<T: UdsEcu + Clone>(
     service: String,
     ecu_name: &str,
     gateway: &T,
     include_schema: bool,
-) -> axum::response::Response {
-    use axum::response::IntoResponse as _;
-    use cda_interfaces::{DiagComm, DiagCommType, HashMap, HashMapExtensions};
-
-    use crate::sovd::IntoSovd;
-
+) -> Response {
     let service_ops = vec![
         DiagComm {
             name: service.clone(),
@@ -136,13 +138,11 @@ async fn get_sdgs_handler<T: cda_interfaces::UdsEcu + Clone>(
         },
     ];
     let schema = if include_schema {
-        Some(crate::sovd::create_schema!(
-            sovd_interfaces::components::ecu::ServicesSdgs
-        ))
+        Some(create_schema!(ServicesSdgs))
     } else {
         None
     };
-    let mut resp = sovd_interfaces::components::ecu::ServicesSdgs {
+    let mut resp = ServicesSdgs {
         items: HashMap::new(),
         schema,
     };
@@ -154,13 +154,13 @@ async fn get_sdgs_handler<T: cda_interfaces::UdsEcu + Clone>(
                 }
                 resp.items.insert(
                     format!("{}_{:?}", service.name, service.action()).to_lowercase(),
-                    sovd_interfaces::components::ecu::ServiceSdgs {
+                    ServiceSdgs {
                         sdgs: sdgs.into_sovd(),
                     },
                 );
             }
             Err(e) => {
-                return crate::sovd::error::ErrorWrapper {
+                return ErrorWrapper {
                     error: e.into(),
                     include_schema,
                 }
@@ -168,22 +168,17 @@ async fn get_sdgs_handler<T: cda_interfaces::UdsEcu + Clone>(
             }
         }
     }
-    (http::StatusCode::OK, axum::Json(resp)).into_response()
+    (StatusCode::OK, Json(resp)).into_response()
 }
 
-pub(crate) fn docs_get(
-    op: aide::transform::TransformOperation,
-) -> aide::transform::TransformOperation {
-    use aide::transform::TransformParameter;
+pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
     op.description("Get a specific operation or its SDG metadata.")
         .parameter("x-sovd2uds-includesdgs", |op: TransformParameter<bool>| {
             op.description("Set to true to include sdgs.")
         })
-        .response_with::<200, axum::Json<
-            sovd_interfaces::Items<
-                sovd_interfaces::components::ecu::operations::OperationCollectionItem,
-            >,
-        >, _>(|res| res.description("Operation details or SDG metadata."))
-        .with(crate::openapi::error_not_found)
-        .with(crate::openapi::error_internal_server)
+        .response_with::<200, Json<sovd_interfaces::Items<OperationCollectionItem>>, _>(|res| {
+            res.description("Operation details or SDG metadata.")
+        })
+        .with(openapi::error_not_found)
+        .with(openapi::error_internal_server)
 }
