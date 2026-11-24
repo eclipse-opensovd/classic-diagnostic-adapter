@@ -34,7 +34,7 @@ endif
 
 .PHONY: build release check test integration-test integration-test-can integration-test-mixed \
 	build-all-features build-mbedtls build-minimal build-minimal-cda \
-	bazel-build bazel-check bazel-update-lockfile actions-update-lockfile \
+	bazel-build bazel-check actions-update-lockfile \
 	lint lint-all-features lint-nightly lint-nightly-all-features fmt fmt-check \
 	precommit precommit-all-features \
 	coverage coverage-can integration-coverage deny \
@@ -92,10 +92,6 @@ bazel-check:
 		printf '%s\n' '::error::mbedTLS target graph contains OpenSSL targets:' "$$openssl_targets"; \
 		exit 1; \
 	fi
-
-bazel-update-lockfile:
-	bazel mod deps --lockfile_mode=update
-	cd bazel/vendor-consumer-test && bazel mod deps --lockfile_mode=update
 
 actions-update-lockfile:
 	# Install with: gh extension install github/gh-actions-lock
@@ -262,7 +258,6 @@ help:
 		'build-minimal-cda            Build CDA without default features' \
 		'bazel-build                  Build platform-supported primary and vendor targets' \
 		'bazel-check                  Validate the Bazel configuration and target graph' \
-		'bazel-update-lockfile        Update root and vendor Bazel lockfiles' \
 		'actions-update-lockfile      Regenerate .github/workflows/actions.lock' \
 		'lint ARGS="..."              Run stable Clippy' \
 		'lint-all-features            Run stable Clippy with all features' \

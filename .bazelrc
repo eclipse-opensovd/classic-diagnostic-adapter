@@ -12,7 +12,6 @@
 common --registry=https://bcr.bazel.build
 
 build --incompatible_strict_action_env
-build --lockfile_mode=error
 build --stamp
 build --workspace_status_command=./bazel/workspace_status.py
 
