@@ -11,8 +11,41 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use super::*;
-use crate::sovd::locks::require_ecu_access;
+use aide::{UseApi, transform::TransformOperation};
+use axum::{
+    Json,
+    extract::{Path, Query, State},
+    http::StatusCode,
+    response::{IntoResponse as _, Response},
+};
+use axum_extra::extract::WithRejection;
+use cda_interfaces::{
+    BinaryEncoding, DiagComm, DiagCommType, DynamicPlugin, SchemaProvider, UdsEcu,
+    diagservices::{DiagServiceResponse, DiagServiceResponseType},
+    file_manager::FileManager,
+    subfunction_ids,
+    util::std_ext::lock_write,
+};
+use cda_plugin_security::Secured;
+use sovd_interfaces::components::ecu::operations::{
+    AsyncGetByIdResponse, ExecutionStatus, OperationDeleteQuery, OperationQuery,
+};
+use uuid::Uuid;
+
+use super::{
+    parse_exec_uuid,
+    response::{get_by_id_response, parse_json_response_params, parse_json_response_params_stored},
+};
+use crate::{
+    openapi,
+    sovd::{
+        ServiceExecution, StoredParameters, WebserverEcuState, api_error_from_diag_response,
+        binary_encoding::BinaryEncodingParam,
+        error::{ApiError, ErrorWrapper, VendorErrorCode},
+        guard_execution,
+        locks::require_ecu_access,
+    },
+};
 
 #[cfg(test)]
 mod tests;
