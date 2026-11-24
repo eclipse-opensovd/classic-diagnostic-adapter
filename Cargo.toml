@@ -150,7 +150,7 @@ openssl = "0.10"
 socket2 = "0.6.1"
 tokio-openssl = { version = "0.6.5" }
 tower = { version = "0.5", default-features = false }
-tower-http = "0.6"
+tower-http = "0.7"
 
 # ---- web/api crates ----
 axum = { version = "0.8", default-features = false }
