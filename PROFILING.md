@@ -29,7 +29,7 @@ sudo apt install heaptrack heaptrack-gui
 Build the `release-with-debug` profile without mimalloc:
 
 ```shell
-make profile
+make heap-profiling
 ```
 
 The resulting binary is `target/release-with-debug/opensovd-cda`.
