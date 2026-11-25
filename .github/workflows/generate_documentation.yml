@@ -131,6 +131,9 @@ jobs:
         uses: actions/upload-pages-artifact@v5.0.0
         with:
           path: pages/
+      # Allow the uploaded artifact to become visible to deploy-pages.
+      - name: Wait for Pages artifact visibility
+        run: sleep 10
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5.0.1
