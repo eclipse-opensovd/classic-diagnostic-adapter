@@ -11,6 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import ecu.configureBroadcastAddress
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
