@@ -11,7 +11,10 @@
 
 # The pinned stable toolchain is the MSRV, declared once as `rust-version` in Cargo.toml.
 # It is also read by cargo's resolver and Dependabot, so it must be a full version.
-CARGO_TOML := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))Cargo.toml
+CARGO_TOML := Cargo.toml
+ifeq ($(shell grep -qx '\[workspace\]' '$(CARGO_TOML)' 2>/dev/null && echo ok),)
+$(error make must be run from the repository root (or with make -C <repo-root>), current dir: $(CURDIR))
+endif
 STABLE := $(shell sed -n 's/^rust-version = "\([^"]*\)"$$/\1/p' '$(CARGO_TOML)')
 ifeq ($(shell printf '%s' '$(STABLE)' | grep -Ex '[0-9]+\.[0-9]+\.[0-9]+'),)
 $(error rust-version in $(CARGO_TOML) must be a full version like 1.88.0, found "$(STABLE)")
