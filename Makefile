@@ -48,7 +48,7 @@ endif
 	precommit precommit-all-features \
 	coverage coverage-can integration-coverage deny deny-unused-ignores \
 	generate-config generate-test-config generate-flatbuffers generate-protos docs rustdoc \
-	tool-versions setup-devenv install-uv install-protoc doctor run profile depgraph clean clean-doc help update
+	tool-versions setup-devenv install-uv install-protoc doctor run heap-profiling depgraph clean clean-doc help update
 
 build:
 	cargo +$(STABLE) build --locked $(ARGS)
@@ -247,7 +247,7 @@ doctor:
 run:
 	cargo +$(STABLE) run --locked --release -- $(ARGS)
 
-profile:
+heap-profiling:
 	RUSTFLAGS="--cfg heap_profiling -C force-frame-pointers=yes" cargo +$(STABLE) build --profile release-with-debug --bin opensovd-cda
 
 depgraph:
@@ -299,6 +299,6 @@ help:
 		'setup-devenv                 Install pinned development tools' \
 		'doctor                       Check development prerequisites' \
 		'run ARGS="..."               Run the release binary' \
-		'profile                      Build the heap-profiling binary' \
+		'heap-profiling               Build the heap-profiling binary' \
 		'depgraph                     Generate depgraph.png' \
 		'clean / clean-doc            Clean all artifacts or Rustdoc artifacts'
