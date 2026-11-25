@@ -13,6 +13,7 @@
 name = "cda-database"
 version = "0.1.0"
 edition.workspace = true
+rust-version.workspace = true
 publish = false
 description = "ECU Database for CDA"
 homepage.workspace = true
