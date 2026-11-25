@@ -164,6 +164,8 @@ pub trait SecurityApi: Send + Sync + 'static {
     ///
     /// # Errors
     /// Returns [`DiagServiceError::RequestNotAllowed`] when the request must not be transmitted.
+    /// Its `parameters` are returned to the client in the `parameters` of the `403` SOVD error
+    /// response, so they must only contain what the caller may know.
     fn validate_request_send(
         &self,
         _context: &cda_interfaces::request_authorization::UdsRequestSendContext<'_>,

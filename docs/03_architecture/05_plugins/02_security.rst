@@ -126,6 +126,9 @@ Plugin Lifecycle
       outcome of :need:`arch~plugin-security-validate-service`, so that callers and vendor
       integrations can distinguish "this operation is not permitted at all" from "this specific
       request cannot be sent right now".
+    - The plugin may attach parameters to the rejection, e.g. why the request was denied. They
+      are returned unchanged in the ``parameters`` of the ``403`` SOVD error response. The plugin
+      decides what to disclose: everything it puts there is visible to the client.
 
     This checkpoint reuses the same security plugin instance and lifecycle described in
     :need:`arch~plugin-security-lifecycle`; it is not a separate plugin type.

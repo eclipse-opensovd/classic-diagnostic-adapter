@@ -90,6 +90,10 @@ Security Plugin
     rejection must be reported as a distinct "request not allowed" outcome, separate from the
     outcome of :need:`req~plugin-security-validate-service`.
 
+    The plugin must be able to return parameters with the rejection (e.g. why the request was
+    denied), which must be reported to the client together with the "request not allowed"
+    outcome.
+
     **Rationale**
 
     Some vendors require diagnostic requests to be gated on state that only the vendor's own systems

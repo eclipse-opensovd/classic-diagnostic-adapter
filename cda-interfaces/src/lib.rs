@@ -467,8 +467,14 @@ pub enum DiagServiceError {
     Timeout,
     #[error("Access denied: {0}")]
     AccessDenied(String),
-    #[error("Request not allowed: {0}")]
-    RequestNotAllowed(String),
+    /// A plugin denied sending the request.
+    #[error("Request not allowed: {message}")]
+    RequestNotAllowed {
+        message: String,
+        /// Returned to the client in the `parameters` of the SOVD error response, e.g. why the
+        /// request was denied.
+        parameters: HashMap<String, serde_json::Value>,
+    },
     /// The request conflicts with the current state, e.g. an ECU is already connected.
     #[error("Conflict: {0}")]
     Conflict(String),
@@ -495,6 +501,15 @@ pub enum DiagServiceError {
 }
 
 impl DiagServiceError {
+    /// A [`Self::RequestNotAllowed`] without parameters.
+    #[must_use]
+    pub fn request_not_allowed(message: impl Into<String>) -> Self {
+        Self::RequestNotAllowed {
+            message: message.into(),
+            parameters: HashMap::default(),
+        }
+    }
+
     /// Whether a failed request shows the ECU is unreachable, so its connectivity is demoted.
     ///
     /// `EcuOffline` is excluded: it means the gateway has no connection (yet), which must
