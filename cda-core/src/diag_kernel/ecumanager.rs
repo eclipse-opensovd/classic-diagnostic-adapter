@@ -98,6 +98,10 @@ pub struct EcuManager<S: SecurityPlugin> {
     /// when `Some`, both IDs are present and range-validated.
     pub(in crate::diag_kernel) can_ids: Option<cda_interfaces::CanIds>,
     pub(in crate::diag_kernel) can_functional_id: Option<cda_interfaces::CanId>,
+    pub(in crate::diag_kernel) kline_physical_address: Option<u8>,
+    pub(in crate::diag_kernel) kline_functional_address: Option<u8>,
+    pub(in crate::diag_kernel) kline_tester_address: Option<u8>,
+    pub(in crate::diag_kernel) kline_baud_rate: Option<u32>,
 
     pub(in crate::diag_kernel) nack_number_of_retries: HashMap<u8, u32>,
     pub(in crate::diag_kernel) diagnostic_ack_timeout: Duration,
@@ -206,6 +210,28 @@ impl<S: SecurityPlugin> cda_interfaces::CanComParamProvider for EcuManager<S> {
 
     fn can_functional_id(&self) -> Option<cda_interfaces::CanId> {
         self.can_functional_id
+    }
+}
+
+/// K-Line addressing extracted from the MDD com-params (`CP_PhysReqTargetAddr`
+/// / `CP_FuncReqTargetAddr` / `CP_TesterSourceAddress` / `CP_Baudrate`).
+/// `None` when neither the database nor the config provides a value; an
+/// explicit `[[kline.ecu_mappings]]` entry takes precedence in the gateway.
+impl<S: SecurityPlugin> cda_interfaces::KLineComParamProvider for EcuManager<S> {
+    fn kline_physical_address(&self) -> Option<u8> {
+        self.kline_physical_address
+    }
+
+    fn kline_functional_address(&self) -> Option<u8> {
+        self.kline_functional_address
+    }
+
+    fn kline_tester_address(&self) -> Option<u8> {
+        self.kline_tester_address
+    }
+
+    fn kline_baud_rate(&self) -> Option<u32> {
+        self.kline_baud_rate
     }
 }
 
@@ -386,6 +412,23 @@ fn can_id_from_table(entries: &ComplexComParamValue, param_name: &str) -> Option
     }
 }
 
+/// Narrows a K-Line address com-param to its byte; out-of-range values are
+/// treated as absent (with a warning) so one bad value cannot fail the ECU
+/// load.
+fn kline_address_byte(value: Option<u32>, param_name: &str) -> Option<u8> {
+    value.and_then(|raw| {
+        u8::try_from(raw)
+            .inspect_err(|_| {
+                tracing::warn!(
+                    param_name,
+                    value = raw,
+                    "K-Line address com-param does not fit in one byte, treating as absent"
+                );
+            })
+            .ok()
+    })
+}
+
 /// A `DoIP` logical address plus the provenance duplicate detection needs.
 struct DoipLogicalAddress {
     /// The address value to use.
@@ -470,6 +513,25 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     param_name = %config.name,
                     error = %e,
                     "Failed to read CAN ID com-param, treating as absent"
+                );
+                None
+            })
+    }
+
+    /// Resolves one optional K-Line com-param: config override
+    /// (`precedence = "Config"`) > database com-param > config value.
+    fn resolve_kline_com_param(
+        database: &datatypes::DiagnosticDatabase,
+        data_protocol: Option<&datatypes::Protocol<'_>>,
+        config: &ComParamConfig<Option<u32>>,
+    ) -> Option<u32> {
+        database
+            .find_com_param(data_protocol, config)
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    param_name = %config.name,
+                    error = %e,
+                    "Failed to read K-Line com-param, treating as absent"
                 );
                 None
             })
@@ -680,6 +742,19 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 .ok()
         });
 
+        let kline = &com_params.kline;
+        let kline_address = |config: &ComParamConfig<Option<u32>>| {
+            kline_address_byte(
+                Self::resolve_kline_com_param(&database, data_protocol_ref, config),
+                &config.name,
+            )
+        };
+        let kline_physical_address = kline_address(&kline.physical_target_address);
+        let kline_functional_address = kline_address(&kline.functional_target_address);
+        let kline_tester_address = kline_address(&kline.tester_source_address);
+        let kline_baud_rate =
+            Self::resolve_kline_com_param(&database, data_protocol_ref, &kline.baud_rate);
+
         let ecu_name = database
             .ecu_data()?
             .ecu_name()
@@ -700,6 +775,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 && !logical_ecu_address.is_comparam_default,
             can_ids,
             can_functional_id,
+            kline_physical_address,
+            kline_functional_address,
+            kline_tester_address,
+            kline_baud_rate,
             nack_number_of_retries,
             diagnostic_ack_timeout: database
                 .find_com_param(data_protocol_ref, &com_params.doip.diagnostic_ack_timeout)?,
@@ -828,6 +907,16 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 .functional_id
                 .value
                 .and_then(|id| cda_interfaces::CanId::try_from(id).ok()),
+            kline_physical_address: None,
+            kline_functional_address: kline_address_byte(
+                com_params.kline.functional_target_address.value,
+                &com_params.kline.functional_target_address.name,
+            ),
+            kline_tester_address: kline_address_byte(
+                com_params.kline.tester_source_address.value,
+                &com_params.kline.tester_source_address.name,
+            ),
+            kline_baud_rate: com_params.kline.baud_rate.value,
             nack_number_of_retries,
             diagnostic_ack_timeout: com_params.doip.diagnostic_ack_timeout.value,
             retry_period: com_params.doip.retry_period.value,
@@ -1334,5 +1423,137 @@ mod tests {
             ComParamValue::Complex(table_with(&[("inner", "0x123")])),
         );
         assert_eq!(can_id_from_table(&nested, "CP_CanPhysReqId"), None);
+    }
+
+    fn ecu_manager_with_com_param_refs(
+        entries: &[(&str, &str)],
+        com_params: &ComParams,
+    ) -> EcuManager<DefaultSecurityPluginData> {
+        ecu_manager_from_com_param_refs(entries, com_params, EcuManagerType::Ecu)
+    }
+
+    fn ecu_manager_from_com_param_refs(
+        entries: &[(&str, &str)],
+        com_params: &ComParams,
+        type_: EcuManagerType,
+    ) -> EcuManager<DefaultSecurityPluginData> {
+        use cda_database::datatypes::database_builder::{
+            DiagLayerParams, EcuDataBuilder, EcuDataParams,
+        };
+
+        let protocol_name = Protocol::default().to_string();
+        let mut builder = EcuDataBuilder::new();
+        let protocol = builder.create_protocol(&protocol_name, None, None, None);
+        let mut cp_refs =
+            vec![builder.create_com_param_ref(None, None, None, Some(protocol), None)];
+        for (name, value) in entries {
+            let com_param = builder.create_com_param(name);
+            let simple_value = builder.create_simple_value(value);
+            cp_refs.push(builder.create_com_param_ref(
+                Some(simple_value),
+                None,
+                Some(com_param),
+                Some(protocol),
+                None,
+            ));
+        }
+        let diag_layer = builder.create_diag_layer(DiagLayerParams {
+            short_name: crate::diag_kernel::test_utils::ecu_manager_builder::TEST_DIAG_LAYER,
+            com_param_refs: Some(cp_refs),
+            ..Default::default()
+        });
+        let variant = builder.create_variant(diag_layer, true, None, None);
+        let db = builder.finish(EcuDataParams {
+            ecu_name: "TestEcu",
+            revision: "1",
+            version: "1.0.0",
+            variants: Some(vec![variant]),
+            ..Default::default()
+        });
+        EcuManager::new(
+            db,
+            Protocol::default(),
+            com_params,
+            DatabaseNamingConvention::default(),
+            EcuManagerConfig {
+                type_,
+                fallback_to_base_variant: true,
+                strict_parameter_validation: false,
+            },
+            &cda_interfaces::FunctionalDescriptionConfig {
+                description_database: "functional_groups".to_owned(),
+                enabled_functional_groups: None,
+                protocol_position:
+                    cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+            },
+        )
+        .expect("EcuManager from the test database")
+    }
+
+    #[test]
+    fn kline_addressing_is_read_from_the_mdd_com_params() {
+        use cda_interfaces::KLineComParamProvider as _;
+
+        let ecu = ecu_manager_with_com_param_refs(
+            &[
+                ("CP_PhysReqTargetAddr", "0x10"),
+                ("CP_FuncReqTargetAddr", "0x33"),
+                ("CP_TesterSourceAddress", "241"),
+                ("CP_Baudrate", "10400"),
+            ],
+            &ComParams::default(),
+        );
+        assert_eq!(ecu.kline_physical_address(), Some(0x10));
+        assert_eq!(ecu.kline_functional_address(), Some(0x33));
+        assert_eq!(ecu.kline_tester_address(), Some(0xF1));
+        assert_eq!(ecu.kline_baud_rate(), Some(10400));
+    }
+
+    #[test]
+    fn kline_addressing_is_absent_without_com_params_or_when_out_of_range() {
+        use cda_interfaces::KLineComParamProvider as _;
+
+        let without = ecu_manager_with_com_param_refs(&[], &ComParams::default());
+        assert_eq!(without.kline_physical_address(), None);
+        assert_eq!(without.kline_functional_address(), None);
+        assert_eq!(without.kline_tester_address(), None);
+        assert_eq!(without.kline_baud_rate(), None);
+
+        let out_of_range = ecu_manager_with_com_param_refs(
+            &[("CP_PhysReqTargetAddr", "0x110")],
+            &ComParams::default(),
+        );
+        assert_eq!(out_of_range.kline_physical_address(), None);
+    }
+
+    #[test]
+    fn kline_config_value_wins_with_config_precedence() {
+        use cda_interfaces::KLineComParamProvider as _;
+
+        let mut com_params = ComParams::default();
+        com_params.kline.physical_target_address.value = Some(0x12);
+        com_params.kline.physical_target_address.precedence = ComParamPrecedence::Config;
+        let ecu = ecu_manager_with_com_param_refs(&[("CP_PhysReqTargetAddr", "0x10")], &com_params);
+        assert_eq!(ecu.kline_physical_address(), Some(0x12));
+    }
+
+    #[test]
+    fn a_functional_description_takes_kline_values_from_the_config() {
+        use cda_interfaces::KLineComParamProvider as _;
+
+        let mut com_params = ComParams::default();
+        com_params.kline.physical_target_address.value = Some(0x10);
+        com_params.kline.functional_target_address.value = Some(0x33);
+        com_params.kline.tester_source_address.value = Some(0xF1);
+        com_params.kline.baud_rate.value = Some(10400);
+        let ecu = ecu_manager_from_com_param_refs(
+            &[],
+            &com_params,
+            EcuManagerType::FunctionalDescription,
+        );
+        assert_eq!(ecu.kline_physical_address(), None);
+        assert_eq!(ecu.kline_functional_address(), Some(0x33));
+        assert_eq!(ecu.kline_tester_address(), Some(0xF1));
+        assert_eq!(ecu.kline_baud_rate(), Some(10400));
     }
 }
