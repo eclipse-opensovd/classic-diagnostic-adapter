@@ -45,10 +45,11 @@ pub enum ApiError {
     BadRequest(String),
     #[error("Forbidden: {}", .0.as_ref().map(|m| format!(": {m}")).unwrap_or_default())]
     Forbidden(Option<String>),
-    /// Forbidden because a plugin denied sending the request; `parameters` tell the client why.
+    /// Forbidden because a plugin denied sending the request.
     #[error("Forbidden: {message}")]
     RequestNotAllowed {
         message: String,
+        /// Returned in the `parameters` of the response, e.g. why the request was denied.
         parameters: HashMap<String, serde_json::Value>,
     },
     #[error("Not Found: {}", .0.as_ref().map(|m| format!(": {m}")).unwrap_or_default())]

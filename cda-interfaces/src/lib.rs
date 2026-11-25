@@ -467,11 +467,12 @@ pub enum DiagServiceError {
     Timeout,
     #[error("Access denied: {0}")]
     AccessDenied(String),
-    /// A plugin denied sending the request. `parameters` are returned to the client in the
-    /// `parameters` of the SOVD error response, e.g. why the request was denied.
+    /// A plugin denied sending the request.
     #[error("Request not allowed: {message}")]
     RequestNotAllowed {
         message: String,
+        /// Returned to the client in the `parameters` of the SOVD error response, e.g. why the
+        /// request was denied.
         parameters: HashMap<String, serde_json::Value>,
     },
     /// The request conflicts with the current state, e.g. an ECU is already connected.
