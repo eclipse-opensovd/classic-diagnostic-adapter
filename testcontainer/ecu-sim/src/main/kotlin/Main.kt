@@ -18,6 +18,10 @@ import ecu.canNetwork
 import library.can.socketcand.SocketcandTransport
 import webserver.startEmbeddedWebserver
 
+internal fun NetworkingData.configureBroadcastAddress(address: String?) {
+    address?.let { broadcastAddress = it }
+}
+
 fun main() {
     println("OpenSOVD CDA ECU-SIM")
 
@@ -35,6 +39,7 @@ fun main() {
         networkInterface = networkInterfaceEnv
         networkMode = NetworkMode.AUTO
         localPort = doipPort
+        configureBroadcastAddress(System.getenv("SIM_BROADCAST_ADDRESS"))
 
         println("DoIP Local Address: $networkInterface:$localPort")
         println("DoIP Broadcast Address: $broadcastAddress")
