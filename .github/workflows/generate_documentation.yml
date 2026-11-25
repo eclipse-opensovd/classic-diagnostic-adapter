@@ -128,9 +128,63 @@ jobs:
           name: rustdoc
           path: pages/rustdoc/
       - name: Upload Pages artifact
+        id: pages-artifact
         uses: actions/upload-pages-artifact@v5.0.0
         with:
           path: pages/
+          name: github-pages-${{ github.run_attempt }}
+      # The Actions artifact listing can lag behind a successful upload. Use the
+      # same listing as deploy-pages, which otherwise fails on its first lookup.
+      - name: Wait for Pages artifact visibility
+        uses: actions/github-script@v7.1.0
+        timeout-minutes: 4
+        env:
+          PAGES_ARTIFACT_NAME: github-pages-${{ github.run_attempt }}
+          PAGES_ARTIFACT_ID: ${{ steps.pages-artifact.outputs.artifact_id }}
+        with:
+          script: |
+            const token = process.env.ACTIONS_RUNTIME_TOKEN;
+            const resultsUrl = process.env.ACTIONS_RESULTS_URL;
+            const artifactId = process.env.PAGES_ARTIFACT_ID;
+            const artifactName = process.env.PAGES_ARTIFACT_NAME;
+            if (!token || !resultsUrl || !artifactId || !artifactName) {
+              throw new Error('Missing Actions runtime or Pages artifact information');
+            }
+            const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+            const scope = claims.scp?.split(' ').find(s => s.startsWith('Actions.Results:'));
+            const parts = scope?.split(':');
+            if (parts?.length !== 3 || !parts[1] || !parts[2]) {
+              throw new Error('Missing Actions.Results scope in runtime token');
+            }
+            const url = new URL('/twirp/github.actions.results.api.v1.ArtifactService/ListArtifacts', resultsUrl);
+            const delays = [2, 4, 8, 16, 30, 30, 30];
+            for (let attempt = 0; attempt <= delays.length; attempt++) {
+              const response = await fetch(url, {
+                method: 'POST',
+                headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+                body: JSON.stringify({ workflowRunBackendId: parts[1], workflowJobRunBackendId: parts[2] }),
+                signal: AbortSignal.timeout(10000),
+              });
+              if (!response.ok) {
+                throw new Error(`Artifact listing failed with HTTP ${response.status}`);
+              }
+              const data = await response.json();
+              const matches = (data.artifacts ?? []).filter(a => a.name === artifactName);
+              if (matches.length > 1) {
+                throw new Error(`Multiple artifacts named ${artifactName} are visible`);
+              }
+              if (matches.length === 1 && String(matches[0].databaseId ?? matches[0].database_id) === artifactId) {
+                core.info(`Pages artifact ${artifactId} is visible`);
+                return;
+              }
+              if (attempt === delays.length) {
+                throw new Error(`Pages artifact ${artifactId} was not visible after 120 seconds`);
+              }
+              core.info(`Pages artifact not visible yet; retrying in ${delays[attempt]} seconds`);
+              await new Promise(resolve => setTimeout(resolve, delays[attempt] * 1000));
+            }
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5.0.1
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
