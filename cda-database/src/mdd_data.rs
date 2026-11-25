@@ -95,15 +95,42 @@ fn decompress_chunk_data(
     }
 }
 
-/// Memory-map an MDD file, validate its magic bytes, and decode the protobuf.
+/// Open an MDD file, validate its magic bytes, and decode the protobuf.
 ///
+/// If the global pager (`cda-pager`) is enabled the file is paged in lazily
+/// under a shared resident-page budget, otherwise it is memory-mapped.
 /// Returns the decoded `MddFile` backed by zero-copy `Bytes` sub-slices of
-/// the memory-mapped region.
+/// the paged or mapped region.
 ///
 /// # Errors
-/// Returns an error if the file cannot be opened, memory-mapped, has invalid
-/// magic bytes, or cannot be parsed as a protobuf.
+/// Returns an error if the file cannot be opened, memory-mapped or paged, has
+/// invalid magic bytes, or cannot be parsed as a protobuf.
 pub fn mmap_and_decode_mdd(mdd_path: &str) -> Result<fileformat::MddFile, MddError> {
+    // Wrap the backing memory as `Bytes` so that prost decoding produces zero-copy
+    // sub-slices for `bytes` fields instead of heap-allocated `Vec<u8>`.
+    // The resulting `Bytes` sub-slices keep the mapping alive via refcount.
+    let backing = match cda_pager::open_file(mdd_path)
+        .map_err(|e| MddError::Io(format!("Failed to page MDD file '{mdd_path}': {e}")))?
+    {
+        Some(paged) => Bytes::from_owner(paged),
+        None => Bytes::from_owner(mmap_mdd(mdd_path)?),
+    };
+
+    let magic_slice = backing
+        .get(..FILE_MAGIC_BYTES_LEN)
+        .ok_or_else(|| MddError::Parsing("Invalid file format: file too small".to_owned()))?;
+    if *magic_slice != file_magic_bytes() {
+        return Err(MddError::Parsing(
+            "Invalid file format: Magic Byte mismatch".to_owned(),
+        ));
+    }
+
+    let payload = backing.slice(FILE_MAGIC_BYTES_LEN..);
+    fileformat::MddFile::decode(payload)
+        .map_err(|e| MddError::Parsing(format!("Failed to parse MDD file: {e}")))
+}
+
+fn mmap_mdd(mdd_path: &str) -> Result<memmap2::Mmap, MddError> {
     let mdd_file = std::fs::File::open(mdd_path)
         .map_err(|e| MddError::Io(format!("Failed to open MDD file '{mdd_path}': {e}")))?;
 
@@ -117,23 +144,7 @@ pub fn mmap_and_decode_mdd(mdd_path: &str) -> Result<fileformat::MddFile, MddErr
     if let Err(e) = mmap.advise(memmap2::Advice::Random) {
         tracing::warn!(error = %e, "Failed to set mmap advice, memory usage might be higher");
     }
-
-    let magic_slice = mmap
-        .get(..FILE_MAGIC_BYTES_LEN)
-        .ok_or_else(|| MddError::Parsing("Invalid file format: file too small".to_owned()))?;
-    if *magic_slice != file_magic_bytes() {
-        return Err(MddError::Parsing(
-            "Invalid file format: Magic Byte mismatch".to_owned(),
-        ));
-    }
-
-    // Wrap the mmap as `Bytes` so that prost decoding produces zero-copy
-    // sub-slices for `bytes` fields instead of heap-allocated `Vec<u8>`.
-    // The resulting `Bytes` sub-slices keep the mmap alive via refcount.
-    let mmap_bytes = Bytes::from_owner(mmap);
-    let payload = mmap_bytes.slice(FILE_MAGIC_BYTES_LEN..);
-    fileformat::MddFile::decode(payload)
-        .map_err(|e| MddError::Parsing(format!("Failed to parse MDD file: {e}")))
+    Ok(mmap)
 }
 
 #[derive(Debug)]

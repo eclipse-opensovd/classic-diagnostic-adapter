@@ -33,6 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     perl \
     make \
+    libclang-dev \
     curl \
     xz-utils \
     && rm -rf /var/lib/apt/lists/*
@@ -81,6 +82,7 @@ COPY cda-comm-uds/Cargo.toml ./cda-comm-uds/Cargo.toml
 COPY cda-comm-can/Cargo.toml ./cda-comm-can/Cargo.toml
 COPY cda-transport-router/Cargo.toml ./cda-transport-router/Cargo.toml
 COPY cda-database/Cargo.toml ./cda-database/Cargo.toml
+COPY cda-pager/Cargo.toml ./cda-pager/Cargo.toml
 COPY cda-plugin-lock-priority/Cargo.toml ./cda-plugin-lock-priority/Cargo.toml
 COPY cda-plugin-security/Cargo.toml ./cda-plugin-security/Cargo.toml
 COPY cda-plugin-runtime-update/Cargo.toml ./cda-plugin-runtime-update/Cargo.toml
@@ -156,6 +158,7 @@ COPY cda-comm-uds ./cda-comm-uds
 COPY cda-comm-can ./cda-comm-can
 COPY cda-transport-router ./cda-transport-router
 COPY cda-database ./cda-database
+COPY cda-pager ./cda-pager
 COPY cda-plugin-lock-priority ./cda-plugin-lock-priority
 COPY cda-plugin-security ./cda-plugin-security
 COPY cda-plugin-runtime-update ./cda-plugin-runtime-update

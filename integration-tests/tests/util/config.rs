@@ -202,6 +202,7 @@ fn base_test_config(
             ..Default::default()
         },
         can: None,
+        pager: Default::default(),
         database: DatabaseConfig {
             dir: mdd_file_path()?,
             naming_convention: DatabaseNamingConvention::default(),

@@ -78,6 +78,8 @@ services:
       - ./${CDA_TEST_CONFIG:-cda-test-config.toml}:/app/cda-test-config.toml:ro
       - ./flash_files:/app/flash:ro
     hostname: cda
+    cap_add:
+      - SYS_PTRACE
     networks:
       - testcontainer-net
     depends_on:

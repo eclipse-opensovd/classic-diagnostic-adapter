@@ -24,7 +24,7 @@ use crate::{
             send_cda_request,
         },
         locks::{COMPONENTS_FLXC1000_LOCKS as ECU_LOCK_ENDPOINT, create_lock, lock_operation},
-        test_env::{TestEnv, wait_for_ecus_online},
+        test_env::{TestEnv, wait_for_ecu_offline, wait_for_ecus_online},
     },
 };
 
@@ -234,6 +234,11 @@ async fn tester_present_sent_after_doip_reconnection() -> Result<(), TestingErro
         reset_result.is_ok(),
         "Hard reset request failed: {reset_result:?}"
     );
+
+    // The ECU sim closes the connection a few ms after answering the reset, so the
+    // ECU can still be reported Online right after the request returns. Wait for the
+    // disconnect first, otherwise the recording below covers the reset window.
+    wait_for_ecu_offline(&test_env.config, "FLXC1000").await?;
 
     // Wait until the hard-reset ECU has reconnected and is online before recording
     // Tester Present traffic.

@@ -37,6 +37,7 @@ pub use cda_interfaces::{
         CommunicationInitMode, CommunicationSettings, PostUpdateCommunicationMode, VamHandlingMode,
     },
 };
+pub use cda_pager::PagerConfig;
 pub use cda_plugin_runtime_update::config::RuntimeUpdateConfig;
 use serde::{Deserialize, Serialize};
 
@@ -95,6 +96,9 @@ pub struct Configuration {
     pub com_params: ComParams,
     /// `FlatBuffers` verification settings for MDD database parsing.
     pub flat_buf: FlatbBufConfig,
+    /// Userfaultfd based paging of MDD files with a global resident-page budget.
+    #[serde(default)]
+    pub pager: PagerConfig,
     /// Functional group description and lookup settings.
     pub functional_description: FunctionalDescriptionConfig,
     /// Component response customization.
@@ -321,6 +325,7 @@ impl Default for Configuration {
             logging: cda_tracing::LoggingConfig::default(),
             com_params: ComParams::default(),
             flat_buf: FlatbBufConfig::default(),
+            pager: PagerConfig::default(),
             functional_description: FunctionalDescriptionConfig::default(),
             components: ComponentsConfig {
                 additional_fields: HashMap::from_iter([

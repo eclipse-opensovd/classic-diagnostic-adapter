@@ -38,6 +38,7 @@ members = [
   "cda-health",
   "cda-extra",
   "cda-storage",
+  "cda-pager",
   "integration-tests",
   "cda-build",
   "override-macros",
@@ -65,6 +66,7 @@ cda-sovd = { path = "cda-sovd" }
 cda-tracing = { path = "cda-tracing" }
 cda-health = { path = "cda-health" }
 cda-storage = { path = "cda-storage" }
+cda-pager = { path = "cda-pager" }
 cda-extra = { path = "cda-extra" }
 sovd-interfaces = { path = "cda-sovd-interfaces" }
 cda-build = { path = "cda-build" }
@@ -115,6 +117,9 @@ crc32fast = "1.4"
 foldhash = "0.2.0"
 kameo = { version = "0.21", default-features = false, features = ["macros"] }
 memmap2 = "0.9"
+nix = { version = "0.27", default-features = false }
+userfaultfd = "0.9"
+userfaultfd-sys = "0.6"
 mockall = "0.14.0"
 tempfile = "3"
 sha2 = "0.10"

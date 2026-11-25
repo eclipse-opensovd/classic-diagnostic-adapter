@@ -37,6 +37,7 @@ cda-comm-doip = { workspace = true }
 cda-transport-router = { workspace = true }
 cda-comm-uds = { workspace = true }
 cda-database = { workspace = true }
+cda-pager = { workspace = true }
 cda-interfaces = { workspace = true }
 cda-sovd = { workspace = true }
 cda-tracing = { workspace = true }
