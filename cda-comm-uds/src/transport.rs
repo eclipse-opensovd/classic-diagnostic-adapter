@@ -3841,7 +3841,7 @@ mod pre_send_authorization_tests {
         let (gateway, sends) = counting_gateway(false);
         let manager = manager(
             gateway,
-            Arc::new(|_| Err(DiagServiceError::RequestNotAllowed("denied".to_owned()))),
+            Arc::new(|_| Err(DiagServiceError::request_not_allowed("denied"))),
             None,
         );
         let plugin = caller_plugin();
@@ -3849,7 +3849,7 @@ mod pre_send_authorization_tests {
         let result = send(&manager, Some(&plugin)).await;
 
         assert!(
-            matches!(result, Err(DiagServiceError::RequestNotAllowed(_))),
+            matches!(result, Err(DiagServiceError::RequestNotAllowed { .. })),
             "unexpected result: {result:?}"
         );
         assert_eq!(sends.load(Ordering::SeqCst), 0, "no bytes may be sent");
@@ -3896,7 +3896,7 @@ mod pre_send_authorization_tests {
                 if counter.fetch_add(1, Ordering::SeqCst) == 0 {
                     Ok(())
                 } else {
-                    Err(DiagServiceError::RequestNotAllowed("revoked".to_owned()))
+                    Err(DiagServiceError::request_not_allowed("revoked"))
                 }
             }),
             None,
@@ -3906,7 +3906,7 @@ mod pre_send_authorization_tests {
         let result = send(&manager, Some(&plugin)).await;
 
         assert!(
-            matches!(result, Err(DiagServiceError::RequestNotAllowed(_))),
+            matches!(result, Err(DiagServiceError::RequestNotAllowed { .. })),
             "{result:?}"
         );
         assert_eq!(
@@ -3924,7 +3924,7 @@ mod pre_send_authorization_tests {
             Arc::new(|context| {
                 // A flash transfer is authorized with its TransferData probe frame.
                 assert_eq!(context.payload.data, [service_ids::TRANSFER_DATA, 1]);
-                Err(DiagServiceError::RequestNotAllowed("no 0x36".to_owned()))
+                Err(DiagServiceError::request_not_allowed("no 0x36"))
             }),
             Some(lock()),
         );
@@ -3944,7 +3944,7 @@ mod pre_send_authorization_tests {
 
         assert!(matches!(
             result,
-            Err(DiagServiceError::RequestNotAllowed(_))
+            Err(DiagServiceError::RequestNotAllowed { .. })
         ));
         assert_eq!(sends.load(Ordering::SeqCst), 0);
     }
@@ -3975,7 +3975,7 @@ mod pre_send_authorization_tests {
             gateway,
             Arc::new(move |_| {
                 counter.fetch_add(1, Ordering::SeqCst);
-                Err(DiagServiceError::RequestNotAllowed("denied".to_owned()))
+                Err(DiagServiceError::request_not_allowed("denied"))
             }),
             None,
         );
@@ -4010,9 +4010,7 @@ mod pre_send_authorization_tests {
             gateway,
             Arc::new(move |_| {
                 counter.fetch_add(1, Ordering::SeqCst);
-                Err(DiagServiceError::RequestNotAllowed(
-                    "must not run".to_owned(),
-                ))
+                Err(DiagServiceError::request_not_allowed("must not run"))
             }),
             None,
         );

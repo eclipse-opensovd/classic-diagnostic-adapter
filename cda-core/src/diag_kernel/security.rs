@@ -500,7 +500,7 @@ mod tests {
             ));
             self.checks.fetch_add(1, Ordering::SeqCst);
             if self.deny {
-                Err(DiagServiceError::RequestNotAllowed("denied".to_owned()))
+                Err(DiagServiceError::request_not_allowed("denied"))
             } else {
                 Ok(())
             }
@@ -669,7 +669,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(DiagServiceError::RequestNotAllowed(_))
+            Err(DiagServiceError::RequestNotAllowed { .. })
         ));
     }
 
@@ -720,7 +720,7 @@ mod tests {
         let (plugin, checks) = recording(true);
         assert!(matches!(
             check(&plugin),
-            Err(DiagServiceError::RequestNotAllowed(_))
+            Err(DiagServiceError::RequestNotAllowed { .. })
         ));
         assert_eq!(checks.load(Ordering::SeqCst), 1);
     }
