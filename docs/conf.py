@@ -121,7 +121,6 @@ needs_types = [
 needs_fields = {
     "rationale": {
         "description": "Rationale for the requirement",
-        "title": "Rationale",
         "schema": {
             "type": "string",
         },
@@ -129,7 +128,6 @@ needs_fields = {
     "reqtype": {
         "description": "Requirement type classification (functional, non-functional, "
         + "interface, constraint)",
-        "title": "Requirement Type",
         "schema": {
             "type": "string",
             "enum": ["functional", "non-functional", "interface", "constraint"],
@@ -137,7 +135,6 @@ needs_fields = {
     },
     "status": {
         "description": "Status of the item",
-        "title": "Status",
         "schema": {
             "type": "string",
             "enum": ["draft", "valid", "approved", "rejected", "obsolete"],
