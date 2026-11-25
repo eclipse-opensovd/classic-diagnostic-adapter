@@ -10,6 +10,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from odxtools.diaglayers.diaglayerraw import DiagLayerRaw
+from odxtools.preconditionstateref import PreConditionStateRef
 from odxtools.specialdatagroup import SpecialDataGroup
 from routines import add_routine, add_time_circuits_routine
 
@@ -17,6 +18,7 @@ from routines import add_routine, add_time_circuits_routine
 def add_routine_control_services(
     dlr: DiagLayerRaw, sdgs_by_service: dict[str, list[SpecialDataGroup]] | None = None
 ):
+    extended_state = dlr.state_charts["Session"].states["Extended"]
     sdgs_map = sdgs_by_service or {}
 
     # 31 01 10 01 - SelfTest Start (synchronous, Start only)
@@ -28,6 +30,12 @@ def add_routine_control_services(
         functional_class="Routines",
         description="Self Test",
         sdgs=sdgs_map.get("SelfTest_Start"),
+        pre_condition_state_refs=[
+            PreConditionStateRef(
+                ref_id=extended_state.odx_id.local_id,
+                ref_docs=extended_state.odx_id.doc_fragments,
+            )
+        ],
     )
 
     # 31 01 10 02 - CalibrateSensors Start (asynchronous)
