@@ -17,7 +17,6 @@ workspace_rust_library(
     crate_deps = [
         "linkme",
         "num-traits",
-        "parking_lot",
         "schemars",
         "serde",
         "serde_json",

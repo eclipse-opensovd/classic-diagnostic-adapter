@@ -13,10 +13,7 @@
 
 use aide::UseApi;
 use axum::{Json, body::Bytes, extract::State, response::Response};
-use cda_interfaces::{
-    BinaryEncoding, UdsEcu, diagservices::UdsPayloadData, file_manager::FileManager,
-    util::HexNotation,
-};
+use cda_interfaces::{BinaryEncoding, UdsEcu, diagservices::UdsPayloadData, util::HexNotation};
 use cda_plugin_security::Secured;
 use http::{HeaderMap, header};
 use sovd_interfaces::components::ecu::genericservice::put as sovd_put;
@@ -122,7 +119,7 @@ fn request_payload(
 }
 
 /// [[ dimpl~sovd-api-generic-service, JSON and octet-stream generic service passthrough ]]
-pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
+pub(crate) async fn put<T: UdsEcu + Clone>(
     headers: HeaderMap,
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
     BinaryEncodingParam(binary_encoding): BinaryEncodingParam,
@@ -131,7 +128,7 @@ pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
         uds,
         locks,
         ..
-    }): State<WebserverEcuState<T, U>>,
+    }): State<WebserverEcuState<T>>,
     body: Bytes,
 ) -> Response {
     require_ecu_access!(write, security_plugin, &ecu_name, &locks, false);

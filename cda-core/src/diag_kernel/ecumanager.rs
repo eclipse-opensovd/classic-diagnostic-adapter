@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use cda_database::datatypes;
 use cda_interfaces::{
@@ -23,6 +23,7 @@ use cda_interfaces::{
         RetryPolicy, SdSdg, TesterPresentSendType,
     },
     dlt_ctx,
+    mdd_chunks::EmbeddedFileAccess,
     topology::PersistedVariant,
     util::std_ext,
 };
@@ -146,6 +147,7 @@ pub struct EcuManager<S: SecurityPlugin> {
     pub(in crate::diag_kernel) rc_94_completion_timeout: Duration,
     pub(in crate::diag_kernel) rc_94_repeat_request_time: Duration,
     pub(in crate::diag_kernel) timeout_default: Duration,
+    pub(in crate::diag_kernel) embedded_files: Arc<cda_database::EmbeddedFileStore>,
 
     security_plugin_phantom: std::marker::PhantomData<S>,
 }
@@ -364,6 +366,14 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     }
 }
 
+impl<S: SecurityPlugin> EmbeddedFileAccess for EcuManager<S> {
+    type Files = cda_database::EmbeddedFileStore;
+
+    fn embedded_files(&self) -> Arc<Self::Files> {
+        Arc::clone(&self.embedded_files)
+    }
+}
+
 /// Reads a CAN arbitration ID sub-parameter out of a resolved
 /// unique-response-ID table. Values appear as decimal or `0x`-prefixed hex
 /// strings depending on the authoring tool; unparseable values are treated
@@ -544,6 +554,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         database_naming_convention: DatabaseNamingConvention,
         config: EcuManagerConfig,
         func_description_config: &cda_interfaces::FunctionalDescriptionConfig,
+        embedded_files: Arc<cda_database::EmbeddedFileStore>,
     ) -> Result<Self, DiagServiceError> {
         match config.type_ {
             EcuManagerType::Ecu => Self::new_ecu_description(
@@ -553,6 +564,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 database_naming_convention,
                 config,
                 func_description_config,
+                embedded_files,
             ),
             EcuManagerType::FunctionalDescription => Self::new_functional_description(
                 database,
@@ -561,6 +573,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 database_naming_convention,
                 config,
                 func_description_config,
+                embedded_files,
             ),
         }
     }
@@ -576,6 +589,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         database_naming_convention: DatabaseNamingConvention,
         config: EcuManagerConfig,
         func_description_config: &cda_interfaces::FunctionalDescriptionConfig,
+        embedded_files: Arc<cda_database::EmbeddedFileStore>,
     ) -> Result<Self, DiagServiceError> {
         let variant_detection =
             variant_detection::prepare_variant_detection(&database, &database_naming_convention)?;
@@ -780,6 +794,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 .find_com_param(data_protocol_ref, &com_params.uds.rc_94_repeat_request_time)?,
             timeout_default: database
                 .find_com_param(data_protocol_ref, &com_params.uds.timeout_default)?,
+            embedded_files,
             security_plugin_phantom: std::marker::PhantomData::<S>,
             diag_database: database, // note: initialize this field last as it moves database
         })
@@ -792,6 +807,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         database_naming_convention: DatabaseNamingConvention,
         config: EcuManagerConfig,
         func_description_config: &cda_interfaces::FunctionalDescriptionConfig,
+        embedded_files: Arc<cda_database::EmbeddedFileStore>,
     ) -> Result<Self, DiagServiceError> {
         // Functional group description: use defaults for all com params
         let logical_ecu_address = com_params.doip.logical_ecu_address.value;
@@ -879,6 +895,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             rc_94_completion_timeout: com_params.uds.rc_94_completion_timeout.value,
             rc_94_repeat_request_time: com_params.uds.rc_94_repeat_request_time.value,
             timeout_default: com_params.uds.timeout_default.value,
+            embedded_files,
             security_plugin_phantom: std::marker::PhantomData::<S>,
         })
     }
