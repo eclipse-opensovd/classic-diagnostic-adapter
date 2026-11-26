@@ -350,7 +350,7 @@ mod tests {
         gateway.probe_timeout = PROBE_TIMEOUT;
 
         let start = Instant::now();
-        assert!(gateway.discover_ecus().await.is_empty());
+        assert_eq!(gateway.discover_ecus().await, [] as [String; 0]);
         assert!(
             start.elapsed() < PROBE_TIMEOUT.saturating_mul(2),
             "three probes should complete near one timeout, not three: {:?}",
