@@ -272,8 +272,8 @@ mod tests {
     use cda_interfaces::TransportProbe;
     use tokio::sync::mpsc;
 
-    use super::{super::test_helpers::ControlledProbe, *};
-    use crate::config::CanProbeConfig;
+    use super::*;
+    use crate::{config::CanProbeConfig, gateway::test_helpers::ControlledProbe};
 
     #[test]
     fn default_probe_sequence_starts_with_tester_present() {

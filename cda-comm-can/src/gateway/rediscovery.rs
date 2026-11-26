@@ -23,8 +23,8 @@
 //! probe in `ecu_online`. The transport is responsible for presenting
 //! settled online/offline states on its own.
 //!
-//! Bus load is bounded: only currently-undiscovered ECUs are probed, one
-//! round per interval, concurrently across ECUs.
+//! Only currently-undiscovered ECUs are probed, once per interval. Probes run
+//! concurrently across ECUs, so peak bus load grows with the number of targets.
 
 use std::{sync::Arc, time::Duration};
 
@@ -48,8 +48,8 @@ enum RediscoveryError {
     ChannelClosed,
 }
 
-// Probes undiscovered ECUs concurrently and collects the names that respond.
-// Waits for the whole batch; cancellation drops pending probes.
+/// Probes undiscovered ECUs concurrently and collects the names that respond.
+/// Waits for the whole batch; cancellation drops pending probes.
 async fn probe_undiscovered<T, F, Fut>(
     undiscovered: Vec<T>,
     probe: F,
@@ -71,9 +71,9 @@ where
     }
 }
 
-// Sends recovered ECU names as a single variant-detection request.
-// Returns an error on cancellation or channel closure.
-// Cancellation also interrupts waiting for channel capacity.
+/// Sends recovered ECU names as a single variant-detection request.
+/// Returns an error on cancellation or channel closure.
+/// Cancellation also interrupts waiting for channel capacity.
 async fn notify_recovered(
     variant_detection: &VariantDetectionSender,
     recovered: Vec<String>,
@@ -265,7 +265,8 @@ mod concurrency_tests {
     use cda_interfaces::TransportProbe;
     use tokio::sync::{mpsc, oneshot};
 
-    use super::{super::test_helpers::ControlledProbe, *};
+    use super::*;
+    use crate::gateway::test_helpers::ControlledProbe;
 
     async fn probe_names<P: TransportProbe>(
         gateway: &P,
